@@ -3,7 +3,16 @@ import { getOrCreateProvider } from "@/lib/db";
 import { createErrorResponse } from "@/lib/api/errors";
 import { resolveConnection } from "@/lib/seed/resolve-connection";
 import { guardRoute } from "@/lib/api/require-session";
-import { containerDepth, declaredKinds, findKind } from "@/lib/db/object-kinds";
+import {
+  SOURCE_PART_LIMIT,
+  applySourceBound,
+  containerDepth,
+  declaredKinds,
+  findKind,
+  isSourcePartUnavailable,
+  kindHasSource,
+  sourceBoundTruncationReason,
+} from "@/lib/db/object-kinds";
 import { INVENTORY_LIMIT, INVENTORY_PAIR_LIMIT, PAIR_TRUNCATION_REASON } from "@/lib/db/inventory-bounds";
 import type {
   DatabaseConnection,
@@ -11,14 +20,18 @@ import type {
   DatabaseProvider,
   ObjectDetail,
   ObjectKindSpec,
+  ObjectSourceDocument,
+  ObjectSourcePart,
 } from "@/lib/db/types";
 
 /**
- * Shared request handling for the six object-tree routes under /api/db/objects (#789).
+ * Shared request handling for the seven object routes under /api/db/objects (#789).
  *
- * One handler rather than six copies, on the precedent of `src/lib/api/schema-route.ts`: the
- * guard-then-parse ordering below is a security property, and six copies of it would be six
- * chances for one of them to drift back to parsing first.
+ * One handler rather than seven copies: the guard-then-parse ordering below is a security
+ * property, and seven copies of it would be seven chances for one of them to drift back to
+ * parsing first. The seventh, the source read, was built on this handler rather than beside it
+ * and inherited auth-before-parse, rate limiting, connection resolution and error mapping with no
+ * new line of any of them.
  *
  * `route` is the same string the caller passes for error-response context, so `POST /${route}`
  * reuses it rather than threading a second, guard-specific string through every call site.
@@ -207,6 +220,140 @@ export function resolveKinds(provider: DatabaseProvider, requested?: readonly st
     }
     return kind;
   });
+}
+
+/**
+ * The provider's source reader for one kind, or a 400 saying it has none (#789 Phase 2).
+ *
+ * ONE branch with TWO conjuncts, on purpose. The first is reachable on every engine: a kind that
+ * declares no `hasSource` is an ordinary thing to ask for, because a caller can hold a stale menu
+ * or a path it built itself. The second is reachable through a provider that declares the kind and
+ * omits the method, which `readObjectSource` being optional makes representable and only this
+ * check makes visible. Folding them into two `if`s would give the second one a line whose only
+ * purpose is a state the first already excluded, which is the shape the deleted 501 arm had.
+ *
+ * It is a helper here rather than a `throw` in the route for the reason every 400 in this module
+ * is: `ObjectRouteError` is module-private, and keeping it private is what keeps the status
+ * vocabulary in one file rather than letting each route mint its own.
+ *
+ * 400 and not 404 or 501, following `resolveKinds`: answering nothing reads as a claim about the
+ * DATA when the truth is a claim about the ENGINE.
+ *
+ * The returned function is BOUND to the provider, because it is read off the instance as a value
+ * and a provider method that reaches its own pool through `this` would otherwise be called with
+ * no receiver.
+ */
+export function requireSourceReader(
+  provider: DatabaseProvider,
+  kind: string,
+): (path: readonly string[], kind: string, limit?: number) => Promise<ObjectSourceDocument> {
+  const read = provider.readObjectSource;
+  if (!kindHasSource(provider.getCapabilities(), kind) || read === undefined) {
+    throw new ObjectRouteError(`${provider.type} declares no readable source for kind "${kind}"`, 400);
+  }
+  return read.bind(provider);
+}
+
+/**
+ * The answered document under the route's OWN bound (#789 Phase 2).
+ *
+ * The route ENFORCES rather than trusts, which is the shipped precedent and not a new rule: the
+ * inventory route applies its own two bounds on top of the bound it hands `describeObjects`. The
+ * callers behind this one are the sixteen providers that implement `readObjectSource`, and the
+ * route materialises the whole answer and serialises it in one `NextResponse.json`, so this is the
+ * one place a memory bound can actually be held. A number merely PASSED to an implementation is a
+ * request, not a bound.
+ *
+ * CORRECTED after review, because the first version of this paragraph named a caller that cannot
+ * reach it. MEASURED: `handleObjectRequest` takes its provider from `getOrCreateProvider`, which
+ * resolves through a closed `switch (connection.type)` in `src/lib/db/factory.ts` with no
+ * registration point for anyone else, and the embedded shell has no API routes at all, so a host
+ * implementing the workspace source seam reads through its own function and never through this
+ * module. The bound is here for a PROVIDER defect, which is enough on its own.
+ *
+ * A provider that bounded correctly is returned unchanged, which is what makes the walk safe to
+ * run on every answer. A provider that bounded at its own SMALLER limit is also unchanged, because
+ * its text already fits. Only a provider that over-answered is sliced, and its own sentence is
+ * KEPT and joined rather than replaced: a second bound is a second fact.
+ *
+ * `parts.length` is bounded too, because the tuple type has no upper bound and the real response
+ * size is `limit` times the part count. `SOURCE_PART_LIMIT` is four times the largest shape any
+ * engine in the fleet produces, so no correct provider can reach it and a provider that does is a
+ * defect rather than a database fact.
+ *
+ * The EMPTY document is refused by name rather than left to the destructuring below. `parts` is a
+ * non-empty tuple in the type and a JavaScript caller is not held to it, and MEASURED before this
+ * guard existed, `parts: []` reached `"unavailable" in part` on `undefined` and raised
+ * `TypeError: part is not an Object`, which `createErrorResponse` reports as an unhandled error
+ * rather than as the caller's mistake it is.
+ */
+export function boundSourceDocument(document: ObjectSourceDocument, limit: number): ObjectSourceDocument {
+  if (document.parts.length === 0) {
+    throw new ObjectRouteError(
+      "the source read answered a document with no parts, and a source document names at least one",
+      400,
+    );
+  }
+  if (document.parts.length > SOURCE_PART_LIMIT) {
+    throw new ObjectRouteError(
+      `the source read answered ${document.parts.length} parts and this route carries at most ${SOURCE_PART_LIMIT}`,
+      400,
+    );
+  }
+  // Destructured rather than mapped, because `parts` is a NON-EMPTY tuple and `Array.prototype.map`
+  // answers a plain array that no longer satisfies it.
+  const [first, ...rest] = document.parts;
+  return { ...document, parts: [boundPart(first, limit), ...rest.map((part) => boundPart(part, limit))] };
+}
+
+/**
+ * One part under the bound, and the one malformed shape the bound cannot hold.
+ *
+ * The hybrid is refused BEFORE the narrowing, and that order is the whole guard. MEASURED against
+ * tsc 6.0.3 and recorded on `ObjectSourcePart` itself: a part carrying `unavailable` BESIDE
+ * `text`, `language`, `form` and `origin` COMPILES with no cast, because the excess-property check
+ * on a union admits any property declared on ANY member of it. `isSourcePartUnavailable` asks
+ * `"unavailable" in part`, so such a part narrows to the refusal arm and the line below would
+ * return it untouched: MEASURED through this function at a 1,000,000 bound, a hybrid carrying
+ * 2,000,000 characters came back with its text whole, 2,000,141 characters of JSON on the wire,
+ * while a client narrowing the same way renders a refusal over the definition the engine really
+ * returned. `assertObjectSurface` refuses the shape for our own providers, and the check runs only
+ * in the provider suites, so this is where the same refusal reaches a running server (#789).
+ *
+ * A 400 in this module's own vocabulary and not a silent repair. Bounding the text would keep the
+ * memory bound and still ship a part that reads as a refusal over a real definition, which is the
+ * exact collapse the union exists to prevent.
+ *
+ * Below it, a refusal carries no text, so there is nothing to bound and nothing to mark. Reading
+ * `.text` on one would be a property access on the arm that does not declare it.
+ */
+function boundPart(part: ObjectSourcePart, limit: number): ObjectSourcePart {
+  if (isSourcePartUnavailable(part) && Object.hasOwn(part, "text")) {
+    throw new ObjectRouteError(
+      "the source read answered a part that carries both a refusal and a text; a refusal and a definition " +
+        "are different facts and a reader must never be shown one over the other",
+      400,
+    );
+  }
+  if (isSourcePartUnavailable(part) || part.text.length <= limit) return part;
+  const reason = sourceBoundTruncationReason(limit);
+  /*
+   * ONE SLICER for the fleet, and the route was the second one (#789). It cut with a bare
+   * `part.text.slice(0, limit)` while all sixteen providers cut through `applySourceBound`,
+   * which drops an orphaned surrogate half: the bound counts UTF-16 CODE UNITS, so it can land
+   * BETWEEN the two halves of an astral character, and MEASURED through this function, a text
+   * holding an emoji at exactly the boundary came back ending in `\ud83d`, which is not a
+   * character and which JSON serialises as a lone escape.
+   *
+   * Only `.text` is taken from it. The MARK is composed here, because this route's second bound
+   * has a fact the helper does not: a provider that already bounded at its own smaller limit
+   * keeps its own sentence and this one is JOINED to it rather than replacing it.
+   */
+  return {
+    ...part,
+    text: applySourceBound(part.text, limit).text,
+    truncated: { limit, reason: part.truncated === undefined ? reason : `${part.truncated.reason}; ${reason}` },
+  };
 }
 
 // The four inventory bounds are `src/lib/db/inventory-bounds.ts`'s, and they are re-exported

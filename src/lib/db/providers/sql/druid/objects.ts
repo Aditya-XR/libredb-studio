@@ -52,6 +52,17 @@
  * answers `Unsupported SQL statement [UPDATE]` - which is the same measurement behind
  * the provider's `supportsInlineRowEdit: false`.
  *
+ * No kind declares `hasSource` and there is no `readObjectSource` here, and the reason
+ * differs per kind rather than being one sentence about the engine (#789). A datasource
+ * and a system table have no definition text ANYWHERE, by the same parser refusal above:
+ * neither was ever written down as a statement, so a refusal part would claim a read
+ * failed where nothing was ever readable. A lookup is different - it really is authored,
+ * as a JSON spec - but that spec lives on the Coordinator REST API, `DruidTransport`
+ * publishes only `query(sql)` and `close()`, and the seam guard fails the build on any
+ * endpoint reached from this directory, so it is a TRANSPORT change and is filed in
+ * `docs/BACKLOG.md` rather than left as an unrecorded gap. What SQL answers for a lookup
+ * is its key/value PAIRS, which are its content and not its definition.
+ *
  * Nothing here reads `sys` and that is deliberate, for the reason `introspect.ts`
  * states about the schema tree: a cluster running `druid-basic-security` grants the
  * `sys` schema separately from the catalogs, so a row count taken from `sys.segments`

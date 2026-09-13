@@ -544,15 +544,104 @@ apart. Both drivers this provider selects between are far above that floor (`bun
 
 #### The fixture, and running it
 
-`tests/integration/db/sqlite-provider.test.ts` builds the fixture by DDL against a real `:memory:`
-database, so every assertion is measured against the engine rather than a mock. It holds one of every
-declared kind, all four `table_list.type` values, a generated column, a composite primary key, an
-`AUTOINCREMENT` table, an expression index, an `INSTEAD OF` trigger on a view, a `sqliteXledger`
-table, and `orders` in all three of `main`, `temp` and an ATTACHed database.
+The DDL is [`docker/sqlite-init/01-object-fixture.sql`](../../docker/sqlite-init/01-object-fixture.sql).
+`tests/integration/db/sqlite-provider.test.ts` reads that file and replays it into a real `:memory:`
+database, so every assertion is measured against the engine rather than a mock, and every object it
+reasons about is created by the file rather than by a literal inside the test.
+It holds one of every declared kind, all four `table_list.type` values, a generated column, a
+composite primary key, an `AUTOINCREMENT` table, an expression index, an `INSTEAD OF` trigger on a
+view, a trigger whose name is also a table's, a `sqliteXledger` table, and `orders` in all three of
+`main`, `temp` and an ATTACHed database.
+Counts in `main`: `table 6, view 1, index 2, trigger 3`.
+
+There is no `docker compose` service for SQLite and there never will be, because the engine is a
+file. The build script is what an init directory is for every other engine: it replays the same
+statements into a database FILE that can be opened in Studio.
 
 ```bash
 bun test tests/integration/db/sqlite-provider.test.ts
+bun docker/sqlite-init/build-fixture.ts                    # ./.sqlite-fixture/object-fixture.sqlite
+bun docker/sqlite-init/build-fixture.ts /tmp/demo.sqlite   # anywhere else
 ```
+
+A `CREATE TRIGGER` body carries its own semicolons, so the file is split by
+`readFixtureStatements()` in [`build-fixture.ts`](../../docker/sqlite-init/build-fixture.ts), which
+ends a trigger statement only at the `;` after its `END`. A `split(";")` hands the engine a truncated
+body and a bare `END`, and it refuses both.
+
+---
+
+### 6.2 Object source (#789)
+
+One statement answers every kind, and it is the simplest source story in the fleet.
+
+```sql
+SELECT s.sql AS sql
+  FROM sqlite_schema AS s
+ WHERE s.type = ?
+   AND s.name = ?
+```
+
+| Kind | `sqlite_schema.type` | `form` | `origin` | Monaco language |
+| --- | --- | --- | --- | --- |
+| `table` | `table` | `complete` | `stored` | `sql` |
+| `view` | `view` | `complete` | `stored` | `sql` |
+| `index` | `index` | `complete` | `stored` | `sql` |
+| `trigger` | `trigger` | `complete` | `stored` | `sql` |
+
+No kind declares nothing: all four have a definition text and all four publish it.
+A `VIRTUAL` table is typed `table` in `sqlite_schema`, so the `table` kind covers the FTS5 object the listing takes from `PRAGMA table_list`.
+
+#### What the text IS, and the one caveat on `stored`
+
+`form` is `complete` on every kind: each of these is a statement that runs as given, never a body or a bare `SELECT`.
+
+`origin` is `stored`, and on this engine that is a real distinction rather than a formality.
+`sqlite_schema.sql` holds the text the AUTHOR submitted, so the newlines and the inner spacing of a multi-line `CREATE TABLE` come back exactly as typed.
+That is what the Source tab's caption exists to say: a reader must never be shown a reconstruction as an original, and if every engine reported `regenerated` the distinction would be decoration.
+
+THE CAVEAT, measured on SQLite 3.53.2 through `bun:sqlite`, and it is why this engine is the one where `stored` needs a sentence of its own:
+
+| What was run | What `sqlite_schema.sql` then holds |
+| --- | --- |
+| `CREATE TABLE   orders  (  id INTEGER PRIMARY KEY , note TEXT ) -- trailing comment` | `CREATE TABLE orders  (  id INTEGER PRIMARY KEY , note TEXT )`. The `CREATE TABLE <name>` prefix is normalized and everything after the closing parenthesis, a trailing comment included, is dropped |
+| `ALTER TABLE orders RENAME TO invoices` | `CREATE TABLE "invoices"  (  id INTEGER PRIMARY KEY , note TEXT )`. The engine REWRITES the stored text and quotes the new name |
+| `ALTER TABLE invoices ADD COLUMN extra TEXT` | `... , note TEXT , extra TEXT)`. The new column is appended to the stored text |
+
+So the bytes are the author's own bytes up to the last schema change.
+That is still a different fact from a statement rebuilt out of a catalog, which is why the arm stays `stored`, and the reader is told which one they are holding.
+
+#### There is no refusal, and that is a CANNOT rather than an omission
+
+`sqlite_schema.sql` is NULL for exactly one shape: an index SQLite created for itself, `sqlite_autoindex_<table>_<n>`.
+Every listing and every count this provider answers carries `name NOT LIKE 'sqlite\_%' ESCAPE '\'` ([§6.1](#names-sqlite-reserves-for-itself)), so no path the object tree can produce addresses such a row.
+There is therefore no privilege refusal, no encryption refusal and no wrapped-text case on this engine: SQLite has no privilege system at all, and a file the process can open is a file the process can read whole.
+
+The provider still turns a NULL, an absent column or a whitespace-only text into a REFUSAL part rather than an empty definition, because an empty editor over a definition is the one failure this surface exists to prevent.
+THOSE ARE THREE DIFFERENT FACTS AND THEY GET THREE DIFFERENT SENTENCES, because a refusal stating a cause that is false for the shape in front of it sends its reader somewhere there is nothing to find.
+A stored NULL says the engine keeps NULL there only for an index it created for itself.
+A whitespace-only text says the column holds no non-whitespace character, and claims no cause at all.
+A reply carrying no `sqlite_schema.sql` column says exactly that, and says it is a fact about the read and not about the object, because that shape is this provider asking for a column the reply does not carry and can be nothing else.
+The sentences are OURS and not the engine's, which is the exception to the rule that a refusal carries the engine's own words: SQLite supplies none for any of the three, it simply stores NULL.
+The MySQL provider writes its own sentence for the same shape and for the same reason.
+
+An object that is not there RAISES, naming the last path segment.
+Absence and unreadability are different facts, and a document is never answered for an object nothing found.
+
+#### No escaper, and no schema bind
+
+Both binds are PARAMETERS, so no identifier is ever interpolated into this statement and this read needs no identifier escaper at all.
+The `type` value comes from the KIND and never from what the name happens to match, and that is behavioural rather than stylistic: measured on SQLite 3.53.2, a TRIGGER may share a name with a TABLE (`CREATE TRIGGER audit_log ... ON audit_log` is accepted) while `CREATE INDEX audit_log` answers `there is already a table named audit_log` and `CREATE VIEW audit_log` answers `table audit_log already exists`.
+`SELECT sql FROM sqlite_schema WHERE name = 'audit_log'` therefore answers TWO rows with the table's first, and a read that resolved the type from the name would hand a reader the table's DDL under the trigger's address.
+[`docker/sqlite-init/01-object-fixture.sql`](../../docker/sqlite-init/01-object-fixture.sql) holds that object so the rule is exercised rather than asserted.
+
+Unqualified `sqlite_schema` resolves to `main.sqlite_schema` even with a database ATTACHed, measured, and `temp` objects live in the separate `sqlite_temp_schema`.
+This provider declares no container level, so `main` is the only database it addresses and the source read needs no schema bind, exactly as the index and trigger listings do not ([§6.1](#main-temp-and-attach-what-is-in-scope-and-why)).
+
+#### One part, always
+
+A SQLite object has exactly one text, so the document carries one part, `Definition`.
+Nothing here has an Oracle package's specification-and-body split.
 
 ---
 

@@ -5,6 +5,7 @@ import type { CsvDelimiter } from "@/lib/export/csv";
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { Sidebar } from "@/components/sidebar";
 import { type TreeRowActionHandlers } from "@/components/object-tree";
+import { ObjectSourceView, type ObjectSourcePatch } from "@/components/object-source";
 import { objectAtPath } from "@/lib/db/detailed-object";
 // MobileNav and mobile tab panels excluded in embedded mode — platform provides its own navigation
 import { QueryEditor, QueryEditorRef } from "@/components/QueryEditor";
@@ -17,7 +18,8 @@ import { SaveQueryModal } from "@/components/SaveQueryModal";
 import { StudioTabBar, QueryToolbar, BottomPanel } from "@/components/studio/index";
 import type { MaskingConfig } from "@/lib/data-masking";
 import type { DatabaseObject } from "@/lib/db/types";
-import { relationKindIds } from "@/lib/db/object-kinds";
+import { findKind, kindHasSource, relationKindIds } from "@/lib/db/object-kinds";
+import { objectPathLabel } from "@/lib/db/object-path";
 import { useToast } from "@/hooks/use-toast";
 import { useTabManager } from "@/hooks/use-tab-manager";
 import { useConnectionAdapter } from "@/workspace/hooks/use-connection-adapter";
@@ -304,10 +306,126 @@ export function StudioWorkspace({
   const onObjectClick = useCallback(
     (object: DatabaseObject) => {
       const capabilities = conn.metadata?.capabilities;
-      if (capabilities === undefined || !relationKindIds(capabilities).includes(object.kind)) return;
-      onTableClick(object.path);
+      if (capabilities === undefined) return;
+      if (relationKindIds(capabilities).includes(object.kind)) {
+        onTableClick(object.path);
+        return;
+      }
+      /*
+       * A NON-RELATION row whose kind declares source opens its Source tab (#789 Phase 2).
+       *
+       * The same two-branch shape `src/components/Studio.tsx` writes, with ONE conjunct this
+       * shell adds: the host must have declared a source read. Without one the viewer would
+       * fall through to its default, which is this application's own route, and this package
+       * ships none - which is B76 exactly, an action that cannot succeed on any connection.
+       * So a host that implements nothing keeps the Phase 1 behaviour, where activating a
+       * routine row does nothing at all.
+       *
+       * The gate is the DECLARATION and never the kind id, exactly as the branch above is.
+       */
+      if (conn.sourceReader !== undefined && kindHasSource(capabilities, object.kind)) {
+        tabMgr.openSourceTab(object);
+      }
     },
-    [conn.metadata, onTableClick],
+    [conn.metadata, conn.sourceReader, onTableClick, tabMgr],
+  );
+
+  /**
+   * The active tab's source address, whether or not this shell can still READ one (#789).
+   *
+   * THIS OVERTURNS THE FIRST ANSWER, which conjoined `conn.sourceReader !== undefined` and read
+   * the tab as an ORDINARY one when the host stopped declaring `readObjectSource`. Half of that
+   * reasoning was right and is kept: the viewer's own default reader posts to
+   * `/api/db/objects/source`, this package ships no routes, so the pane must never fall through
+   * to it. What it got wrong is what a person then SAW. A Source tab's text is never persisted,
+   * only its address, so the tab came back named `Source: app.order_total(integer)` holding an
+   * EMPTY, EDITABLE editor with a live Run button, which is the empty-editor hazard this whole
+   * phase exists to prevent: an empty editor reads as "there is no source", and a user who types
+   * over it deletes the object.
+   *
+   * So the address stands on its own and the pane stays a pane. Every consumer below is still
+   * consistent, because they all read THIS value: no Run button, no toolbar and no statement
+   * loader on a Source tab, whatever the host currently declares. What the host's absence
+   * changes is the one thing it really means, which is that there is nothing to read with, and
+   * `sourceFailure` below says so in the viewer's own grammar.
+   */
+  const sourceTab = tabMgr.currentTab.source;
+
+  /**
+   * What the pane shows when the host has stopped reading definitions (#789).
+   *
+   * The tab's OWN failure first, because it is the engine's or the host's sentence about a read
+   * that really happened, and ours would overwrite a fact with a circumstance.
+   *
+   * Ours only when there is NOTHING TO SHOW, which is also what makes this load-bearing rather
+   * than cosmetic: with no document, no failure and no reader, the viewer would issue its read
+   * through `httpSourceReader` and ask a route that does not exist in this package. A failure
+   * makes `needsRead` false, so no read is issued at all and the pane refuses instead.
+   *
+   * A definition ALREADY IN HAND is left on screen. It was read from the engine a moment ago and
+   * a host handing a new reader object on a render is not a reason to throw a real definition
+   * away; what it must not become is an editor with a Run button, and it does not.
+   *
+   * THE ONE PATH THIS DOES NOT COVER, named here because a later change would open it: a tab
+   * holding a document whose state is CLEARED while the host declares no reader would issue the
+   * read. The only control that clears one is the viewer's stale banner, and this shell passes a
+   * hardcoded `refreshToken={0}` below, so nothing here is ever marked stale and the banner is
+   * never drawn. A shell that starts counting DDL has to hand this conjunction a reader that
+   * refuses, or the read goes to a route this package does not ship.
+   */
+  const sourceFailure =
+    sourceTab?.failure ??
+    (conn.sourceReader === undefined && sourceTab?.document === undefined
+      ? "This host no longer reads object definitions, so this definition cannot be read here."
+      : undefined);
+
+  /**
+   * What every statement entry point OUTSIDE the editor pane is handed while a Source tab is
+   * active (#789 Phase 2).
+   *
+   * The pane below branches around the toolbar AND the editor together, so a Source tab draws
+   * no Run button. That covers the editor and nothing else, and this shell has exactly one
+   * other entry point in the class, which is an entry point that reads or WRITES the active
+   * tab's statement: `BottomPanel`'s `onLoadQuery`, which is rendered outside that branch and
+   * is wired inside the panel to both `QueryHistory`'s and `SavedQueries`' `onSelectQuery`.
+   * Without this, opening History over a Source tab and clicking a past query wrote a statement
+   * onto a tab whose pane shows a read-only definition, and `use-tab-manager` persists it.
+   *
+   * `DataImportModal` and `TestDataGenerator` are deliberately NOT gated, on the same reasoning
+   * the standalone shell states: they call `executeQuery(sql)` with THEIR OWN statement aimed at
+   * an object the reader picked, an override never writes the tab's `query`, and the result
+   * lands in the panel below the definition.
+   */
+  const runsTheActiveTab = sourceTab === undefined;
+
+  const { setTabs, activeTabId } = tabMgr;
+  /**
+   * What the source viewer writes back onto the tab it is mounted in (#789 Phase 2).
+   *
+   * MERGED BY SPREAD, so an explicitly-undefined key in the patch is a CLEAR rather than a
+   * no-op, which is how the stale banner's re-read control puts the tab back into the state the
+   * viewer reads from. STABLE across renders, because the viewer's read effect lists it among
+   * its dependencies. Addressed by tab ID and not by `currentTab`, because an answer can land
+   * after the reader has switched tabs and the patch belongs to the tab that asked for it.
+   *
+   * MEASURED, because a mutation asked the question: the tab this addresses is always the tab
+   * that ASKED, even for an answer that lands after a switch, since the viewer holds the
+   * `onChange` it was handed when it issued the read and that closure captured the then-active
+   * id. So the `tab.source !== undefined` half is a shape guard the shell cannot currently make
+   * false, and deleting it fails no test. It is kept rather than trimmed because it is what
+   * makes the spread safe if a later patch ever reaches a tab that is not a Source tab, and
+   * because `src/components/Studio.tsx` writes this identically: one writer shape across both
+   * shells is worth more than one conjunct removed from one of them (#789).
+   */
+  const onSourceChange = useCallback(
+    (patch: ObjectSourcePatch) => {
+      setTabs((previous) =>
+        previous.map((tab) =>
+          tab.id === activeTabId && tab.source !== undefined ? { ...tab, source: { ...tab.source, ...patch } } : tab,
+        ),
+      );
+    },
+    [setTabs, activeTabId],
   );
 
   /**
@@ -336,6 +454,13 @@ export function StudioWorkspace({
     onProfileObject: features.codeGenerator ? (object) => setProfilerPath(object.path) : undefined,
     onGenerateCode: features.codeGenerator ? (object) => setCodeGenPath(object.path) : undefined,
     onGenerateTestData: features.testDataGenerator ? (object) => setTestDataPath(object.path) : undefined,
+    /*
+     * Passed ONLY where the host declared a source read (#789 Phase 2). An absent handler is an
+     * item the tree does not draw, which is the rule the two handlers above this file already
+     * withholds follow, and here it is what keeps a host that implements nothing from being
+     * offered an action no route in this package can serve.
+     */
+    onViewSource: conn.sourceReader === undefined ? undefined : (object) => tabMgr.openSourceTab(object),
   };
 
   // === No-op callbacks for disabled features ===
@@ -432,47 +557,109 @@ export function StudioWorkspace({
                   <ResizablePanelGroup id="workspace-editor" orientation="vertical">
                     <ResizablePanel id="workspace-editor-top" defaultSize="40" minSize="20">
                       <div className="h-full flex flex-col">
-                        <QueryToolbar
-                          activeConnection={conn.activeConnection}
-                          metadata={conn.metadata}
-                          isExecuting={tabMgr.currentTab.isExecuting}
-                          playgroundMode={false}
-                          transactionActive={false}
-                          editingEnabled={false}
-                          // Withheld, not `noop`: a host that wired no save has
-                          // nowhere to save to, and `noop` put a dead Save button
-                          // on every embedded surface (U7).
-                          onSaveQuery={onSaveQueryProp ? () => setIsSaveQueryModalOpen(true) : undefined}
-                          onExecuteQuery={() => queryExec.executeQuery()}
-                          onCancelQuery={queryExec.cancelQuery}
-                          // Withheld, not `noop`: this shell runs no transaction,
-                          // no sandbox and no inline editing — `transactionActive`
-                          // and `editingEnabled` are hardcoded false above and
-                          // nothing here can change them. While it passed
-                          // `metadata={null}` the group never rendered and `noop`
-                          // was invisible; passing the host's real metadata (#427)
-                          // would have put three dead buttons on any host that
-                          // declares `queryLanguage: "sql"`, with no disabled state
-                          // and no tooltip. A withheld callback hides its control.
-                          onBeginTransaction={undefined}
-                          onCommitTransaction={undefined}
-                          onRollbackTransaction={undefined}
-                          onTogglePlayground={undefined}
-                          onToggleEditing={undefined}
-                          onImport={features.dataImport ? () => setIsImportModalOpen(true) : undefined}
-                        />
+                        {/*
+                          One branch around the toolbar AND the editor together, so a Source tab
+                          shows no Run button rather than a disabled one: there is nothing on a
+                          definition to run, and a control that is present and refuses is a worse
+                          answer than a control that is not there (#789 Phase 2).
 
-                        <div className="flex-1 relative min-h-0">
-                          <QueryEditor
-                            ref={queryEditorRef}
-                            value={tabMgr.currentTab.query}
-                            onContentChange={(val) => tabMgr.updateTabById(tabMgr.currentTab.id, { query: val })}
-                            language={editorLanguageForTabType(tabMgr.currentTab.type)}
-                            databaseType={conn.activeConnection?.type}
-                            schemaContext={conn.schemaContext}
-                            capabilities={conn.metadata?.capabilities}
-                          />
-                        </div>
+                          THE CONNECTION IS NO LONGER PART OF THIS BRANCH, and that conjunct was
+                          the third door onto the same hazard (#789 fix round 1). It read
+                          `|| conn.activeConnection === null`, on a docblock arguing the state
+                          was admitted by the type and not reached by the product. It is
+                          reached: `use-connection-adapter.ts` auto-selects whenever the host's
+                          list is non-empty, so a null active connection is exactly "the host
+                          handed an empty connections array", which a host does when a person
+                          deletes the last connection in its own UI while a Source tab is open.
+                          The tab then came back labelled `Source: <name>` over an EMPTY,
+                          EDITABLE buffer with a live Run button. The viewer now takes a
+                          nullable connection and refuses in its own grammar, so the pane stays
+                          a pane and no read is issued for a connection that is gone.
+                        */}
+                        {sourceTab === undefined ? (
+                          <>
+                            <QueryToolbar
+                              activeConnection={conn.activeConnection}
+                              metadata={conn.metadata}
+                              isExecuting={tabMgr.currentTab.isExecuting}
+                              playgroundMode={false}
+                              transactionActive={false}
+                              editingEnabled={false}
+                              // Withheld, not `noop`: a host that wired no save has
+                              // nowhere to save to, and `noop` put a dead Save button
+                              // on every embedded surface (U7).
+                              onSaveQuery={onSaveQueryProp ? () => setIsSaveQueryModalOpen(true) : undefined}
+                              onExecuteQuery={() => queryExec.executeQuery()}
+                              onCancelQuery={queryExec.cancelQuery}
+                              // Withheld, not `noop`: this shell runs no transaction,
+                              // no sandbox and no inline editing, so `transactionActive`
+                              // and `editingEnabled` are hardcoded false above and
+                              // nothing here can change them. While it passed
+                              // `metadata={null}` the group never rendered and `noop`
+                              // was invisible; passing the host's real metadata (#427)
+                              // would have put three dead buttons on any host that
+                              // declares `queryLanguage: "sql"`, with no disabled state
+                              // and no tooltip. A withheld callback hides its control.
+                              onBeginTransaction={undefined}
+                              onCommitTransaction={undefined}
+                              onRollbackTransaction={undefined}
+                              onTogglePlayground={undefined}
+                              onToggleEditing={undefined}
+                              onImport={features.dataImport ? () => setIsImportModalOpen(true) : undefined}
+                            />
+
+                            <div className="flex-1 relative min-h-0">
+                              <QueryEditor
+                                ref={queryEditorRef}
+                                value={tabMgr.currentTab.query}
+                                onContentChange={(val) => tabMgr.updateTabById(tabMgr.currentTab.id, { query: val })}
+                                language={editorLanguageForTabType(tabMgr.currentTab.type)}
+                                databaseType={conn.activeConnection?.type}
+                                schemaContext={conn.schemaContext}
+                                capabilities={conn.metadata?.capabilities}
+                              />
+                            </div>
+                          </>
+                        ) : (
+                          <div className="flex-1 relative min-h-0">
+                            <ObjectSourceView
+                              connection={conn.activeConnection}
+                              path={sourceTab.path}
+                              kind={sourceTab.kind}
+                              /*
+                                The kind's own word from the DECLARATION, falling back to the id:
+                                the viewer never derives a label from an id, and in this shell the
+                                declaration is the host's, per connection. Both arms are
+                                reachable - a host that declared no capabilities renders no tree
+                                at all but can still restore a Source tab, and a declaration that
+                                does not carry this tab's kind makes `findKind` answer undefined.
+                              */
+                              kindLabel={
+                                (conn.metadata === null
+                                  ? undefined
+                                  : findKind(conn.metadata.capabilities, sourceTab.kind)?.label) ?? sourceTab.kind
+                              }
+                              displayName={objectPathLabel(sourceTab.path)}
+                              document={sourceTab.document}
+                              failure={sourceFailure}
+                              activePartId={sourceTab.activePartId}
+                              /*
+                                A DECISION and not a stub. The standalone shell passes a
+                                catalog-change counter it increments whenever something it ran
+                                changed the catalog; this shell counts no DDL, because every
+                                statement goes out through the host's `onQueryExecute` and nothing
+                                reports back what it changed. Zero is a real token rather than a
+                                missing one: the viewer marks a tab stale when the token has MOVED
+                                since the read, so a constant says "this shell has no such fact"
+                                and a Source tab here is never marked stale.
+                              */
+                              refreshToken={0}
+                              readAtToken={sourceTab.readAtToken}
+                              reader={conn.sourceReader}
+                              onChange={onSourceChange}
+                            />
+                          </div>
+                        )}
                       </div>
                     </ResizablePanel>
                     <ResizableHandle className="h-1 bg-fill hover:bg-brand-tint/20" />
@@ -496,7 +683,10 @@ export function StudioWorkspace({
                         onCellChange={noop as never}
                         onApplyChanges={noop}
                         onDiscardChanges={noop}
-                        onLoadQuery={(q) => tabMgr.updateCurrentTab({ query: q })}
+                        onLoadQuery={(q) => {
+                          if (!runsTheActiveTab) return;
+                          tabMgr.updateCurrentTab({ query: q });
+                        }}
                         onLoadMore={
                           tabMgr.currentTab.result?.pagination?.hasMore ? queryExec.handleLoadMore : undefined
                         }

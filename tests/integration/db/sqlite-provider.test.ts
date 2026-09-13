@@ -19,13 +19,19 @@ import {
   readDbstatSizes,
 } from "@/lib/db/providers/sql/sqlite";
 import { resolveSQLiteDriverName } from "@/lib/db/providers/sql/sqlite-driver";
-import { containerDepth, declaredKinds, isCountUnavailable } from "@/lib/db/object-kinds";
+import {
+  containerDepth,
+  declaredKinds,
+  isCountUnavailable,
+  isSourcePartUnavailable,
+  sourceBoundTruncationReason,
+} from "@/lib/db/object-kinds";
 import { flattenTree } from "@/components/object-tree/flatten";
 import type { SQLiteDatabase, SQLiteStatement } from "@/lib/db/providers/sql/sqlite-driver";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 import { rowBudgetIn } from "@/lib/agent/context-snapshot";
 import type { DatabaseConnection } from "@/lib/types";
-import type { ReadOnlyStatementBudget } from "@/lib/db/types";
+import type { ObjectKindSpec, ReadOnlyStatementBudget } from "@/lib/db/types";
 import {
   ConnectionError,
   DatabaseConfigError,
@@ -35,6 +41,7 @@ import {
 } from "@/lib/db/errors";
 import { CACHE_HIT_RATIO_UNAVAILABLE } from "@/lib/monitoring-cache-ratio";
 import { comparePaths } from "@/lib/db/object-path";
+import { readFixtureStatements } from "../../../docker/sqlite-init/build-fixture";
 
 // ============================================================================
 // Helpers
@@ -998,55 +1005,68 @@ describe("SQLiteProvider", () => {
  * The `temp` and `attached` objects deliberately SHADOW names in `main`: a listing
  * that did not restrict itself to `main` would answer two objects with one path,
  * which is the invariant the conformance helper checks and the tree relies on.
+ *
+ * THE DDL IS NOT HERE ANY MORE and that is standing ruling 5i (#789). It lives in
+ * `docker/sqlite-init/01-object-fixture.sql`, which this reads and which
+ * `bun docker/sqlite-init/build-fixture.ts` replays into a database FILE a person
+ * can open in Studio. A fixture only a test can apply is a measurement nobody else
+ * can re-run; every object asserted below is created by that file.
  */
-const OBJECT_FIXTURE_DDL: readonly string[] = [
-  // A UNIQUE column, so SQLite also creates `sqlite_autoindex_customers_1`.
-  "CREATE TABLE customers (id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL)",
-  // Two foreign keys of the two shapes SQLite publishes differently, and a generated
-  // column, which `PRAGMA table_info` drops and `table_xinfo` publishes.
-  `CREATE TABLE orders (
-     id INTEGER PRIMARY KEY,
-     customer_id INTEGER REFERENCES customers,
-     customer_email TEXT REFERENCES customers(email),
-     total INTEGER NOT NULL DEFAULT 0,
-     total_with_tax INTEGER GENERATED ALWAYS AS (total * 2) VIRTUAL
-   )`,
-  // A composite primary key, so `table_info.pk` carries the ranks 1 and 2.
-  "CREATE TABLE archive (region TEXT, year INTEGER, PRIMARY KEY (region, year)) WITHOUT ROWID",
-  // AUTOINCREMENT, so the engine adds `sqlite_sequence` to `PRAGMA table_list`.
-  "CREATE TABLE audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT)",
-  "INSERT INTO audit_log (note) VALUES ('seed')",
-  // A user table the UNESCAPED `LIKE 'sqlite_%'` would also exclude, because `_` is
-  // LIKE's single-character wildcard. SQLite reserves only the `sqlite_` prefix, so this
-  // name is one a user can really have.
-  "CREATE TABLE sqliteXledger (id INTEGER PRIMARY KEY)",
-  // One `virtual` row and five `shadow` rows in `PRAGMA table_list`.
-  "CREATE VIRTUAL TABLE notes USING fts5(body)",
-  "CREATE VIEW order_summary AS SELECT id, total FROM orders",
-  "CREATE INDEX idx_orders_customer ON orders(customer_id)",
-  // An index on an EXPRESSION, whose key publishes a null column name.
-  "CREATE INDEX idx_orders_doubled ON orders(total * 2)",
-  "CREATE TRIGGER orders_stamp AFTER INSERT ON orders BEGIN UPDATE orders SET total = total; END",
-  // SQLite allows an INSTEAD OF trigger on a VIEW, so a trigger's parent segment is
-  // not always a table even though the kind declares `attachedTo: "table"`.
-  "CREATE TRIGGER order_summary_guard INSTEAD OF INSERT ON order_summary BEGIN SELECT 1; END",
-  // Session scratch that shadows `main`, and must never reach the tree. The temp
-  // `orders` carries ONE column, so a detail read that forgot the schema is visible
-  // as a different column list rather than as an error.
-  "CREATE TEMP TABLE orders (id INTEGER)",
-  "CREATE TEMP VIEW order_summary AS SELECT 1 AS x",
-  "CREATE TEMP TRIGGER orders_stamp_temp AFTER INSERT ON orders BEGIN SELECT 1; END",
-  "CREATE INDEX temp.idx_orders_customer_temp ON orders(id)",
-  // Another database file entirely, which the connection was not configured for.
-  "ATTACH DATABASE ':memory:' AS attached",
-  "CREATE TABLE attached.orders (id INTEGER)",
-  "CREATE VIEW attached.order_summary AS SELECT 1 AS x",
-  "CREATE INDEX attached.idx_orders_customer_attached ON orders(id)",
-  "CREATE TRIGGER attached.orders_stamp_attached AFTER INSERT ON orders BEGIN SELECT 1; END",
-];
+const OBJECT_FIXTURE_DDL: readonly string[] = readFixtureStatements();
+
+/**
+ * What `sqlite_schema.sql` holds for every object of every source-bearing kind (#789).
+ *
+ * Keyed `"<kind>/<name>"`, because `audit_log` is BOTH a table and a trigger and a key of
+ * the name alone could not hold both. Every value is a statement of
+ * `docker/sqlite-init/01-object-fixture.sql`, resolved from the file rather than typed here:
+ * the engine stores the submitted text, so a literal that drifted from the file would be a
+ * definition nobody wrote.
+ *
+ * MEASURED on SQLite 3.53.2 through `bun:sqlite`, and it is why `origin` is `stored`: the
+ * newlines and the five-space indentation of the multi-line `orders` statement come back
+ * exactly as written. The engine does normalize the `CREATE TABLE <name>` prefix and drops
+ * anything after the closing parenthesis, including a trailing comment, which is recorded in
+ * docs/providers/sqlite.md and is why neither fixture writes one.
+ */
+const EXPECTED_DEFINITIONS: Readonly<Record<string, string>> = Object.fromEntries(
+  [
+    "table/customers",
+    "table/orders",
+    "table/archive",
+    "table/audit_log",
+    "table/sqliteXledger",
+    "table/notes",
+    "view/order_summary",
+    "index/idx_orders_customer",
+    "index/idx_orders_doubled",
+    "trigger/orders_stamp",
+    "trigger/order_summary_guard",
+    "trigger/audit_log",
+  ].map((key) => [key, definitionFor(key)]),
+);
+
+/**
+ * The fixture statement that created one object, or a throw naming the key that matched none.
+ *
+ * The match is on the object's NAME as a whole word after its own keyword, so
+ * `trigger/audit_log` cannot pick up `CREATE TABLE audit_log`. A key matching zero statements
+ * or more than one raises rather than answering, because either one would silently pin the
+ * wrong text and a test asserting the wrong value is worse than no test at all.
+ */
+function definitionFor(key: string): string {
+  const [kind, name] = key.split("/");
+  const keyword = kind === "table" ? "(?:VIRTUAL TABLE|TABLE)" : kind.toUpperCase();
+  const pattern = new RegExp(`^CREATE ${keyword} ${name}\\b`);
+  const matched = readFixtureStatements().filter((statement) => pattern.test(statement));
+  if (matched.length !== 1) {
+    throw new Error(`${key} matched ${matched.length} statements of 01-object-fixture.sql, expected exactly 1`);
+  }
+  return matched[0];
+}
 
 /** Every kind, and how many of it `main` holds. Derived nowhere: counted by hand off the DDL. */
-const EXPECTED_COUNTS = { table: 6, view: 1, index: 2, trigger: 2 } as const;
+const EXPECTED_COUNTS = { table: 6, view: 1, index: 2, trigger: 3 } as const;
 
 /**
  * Swaps the provider's own database handle for one that intercepts a named statement.
@@ -1089,6 +1109,34 @@ function answerReadsMatching(provider: SQLiteProvider, match: string, rows: read
     get: () => rows[0] ?? null,
     run: () => ({ changes: 0 }),
   }));
+}
+
+/**
+ * Captures the parameters a named statement is prepared with, and answers rows of the
+ * test's choosing.
+ *
+ * The binds are what a derivation test has to reach: standing ruling 5g says a two-level
+ * test that stops at a refusal proves nothing, so the statement must run and its BOUND
+ * VALUES must be read. Everything not matched still goes to the real database.
+ */
+function captureReadsMatching(
+  provider: SQLiteProvider,
+  match: string,
+  rows: readonly unknown[],
+): { statements: string[]; params: unknown[][] } {
+  const captured = { statements: [] as string[], params: [] as unknown[][] };
+  interceptReads(provider, match, (sql) => {
+    captured.statements.push(sql);
+    return {
+      all: (...params: unknown[]) => {
+        captured.params.push(params);
+        return [...rows];
+      },
+      get: () => rows[0] ?? null,
+      run: () => ({ changes: 0 }),
+    };
+  });
+  return captured;
 }
 
 /** A connected provider holding the fixture above, in memory. */
@@ -1144,6 +1192,9 @@ describe("SQLiteProvider object surface (#789)", () => {
       containers: [],
       kinds: { ...EXPECTED_COUNTS },
       sampleObject: { path: ["orders"], kind: "table" },
+      // No container level, so the authored path is the bare name. `emptyKinds` is absent
+      // because every source-bearing kind this engine declares is counted above zero.
+      absentSource: { path: ["no_such_table"], kind: "table" },
     });
   });
 
@@ -1187,7 +1238,7 @@ describe("SQLiteProvider object surface (#789)", () => {
       { id: "table", label: "Tables", depth: 0, badge: "6" },
       { id: "view", label: "Views", depth: 0, badge: "1" },
       { id: "index", label: "Indexes", depth: 0, badge: "2" },
-      { id: "trigger", label: "Triggers", depth: 0, badge: "2" },
+      { id: "trigger", label: "Triggers", depth: 0, badge: "3" },
     ]);
     // ARIA position is computed per sibling group, and at depth 0 that group is the four
     // folders and nothing else.
@@ -1352,10 +1403,13 @@ describe("SQLiteProvider object surface (#789)", () => {
     // parent is a VIEW, which the `attachedTo: "table"` declaration does not forbid and
     // which the count includes, so the listing has to as well.
     expect(triggers.map((trigger) => trigger.path)).toEqual([
+      // The name collision the source read needs: a trigger may share a name with the table
+      // it fires on, which SQLite accepts and which no other kind here can do.
+      ["audit_log", "audit_log"],
       ["order_summary", "order_summary_guard"],
       ["orders", "orders_stamp"],
     ]);
-    expect(triggers.map((trigger) => trigger.name)).toEqual(["order_summary_guard", "orders_stamp"]);
+    expect(triggers.map((trigger) => trigger.name)).toEqual(["audit_log", "order_summary_guard", "orders_stamp"]);
     expect(triggers.every((trigger) => trigger.kind === "trigger")).toBe(true);
   });
 
@@ -1635,6 +1689,7 @@ describe("SQLiteProvider object surface (#789)", () => {
     expect(tables.map((table) => table.path)).toContainEqual(["cat", "sch", "orders"]);
     const triggers = await objects.listObjects(["cat", "sch"], "trigger");
     expect(triggers.map((trigger) => trigger.path)).toEqual([
+      ["cat", "sch", "audit_log", "audit_log"],
       ["cat", "sch", "order_summary", "order_summary_guard"],
       ["cat", "sch", "orders", "orders_stamp"],
     ]);
@@ -1733,6 +1788,362 @@ describe("SQLiteProvider object surface (#789)", () => {
     // count from the same rows.
     expect(counts.table).toEqual({ count: 3 });
     expect(Object.keys(counts).sort()).toEqual(["index", "table", "trigger", "view"]);
+  });
+});
+
+/**
+ * The Source read, against the real engine plus one intercepted case (#789 Phase 2).
+ *
+ * Everything here runs against a live `:memory:` database built from
+ * `docker/sqlite-init/01-object-fixture.sql`. The single exception is the NULL-definition
+ * case, which is UNREACHABLE through this provider by construction and is driven through the
+ * statement seam for the reason section 6 of the recipe gives: on an engine whose read is
+ * supposed never to refuse, the thing worth knowing is what the suite would do if it started.
+ */
+describe("SQLiteProvider object source (#789)", () => {
+  let objects: SQLiteProvider;
+
+  afterEach(async () => {
+    if (objects?.isConnected()) await objects.disconnect();
+  });
+
+  test("declares source on exactly the kinds that have a definition text", async () => {
+    objects = await connectedWithObjects();
+    const kinds = objects.getCapabilities().objectKinds ?? [];
+    const declared = kinds
+      .filter((kind) => kind.hasSource === true)
+      .map((kind) => [kind.id, kind.sourceLanguage] as const)
+      .sort();
+
+    // All four, because `sqlite_schema.sql` holds the submitted text for every row it has.
+    expect(declared).toEqual([
+      ["index", "sql"],
+      ["table", "sql"],
+      ["trigger", "sql"],
+      ["view", "sql"],
+    ]);
+    // The other direction, so a kind added later cannot quietly gain a Source tab. SQLite is
+    // one of the engines where this list is EMPTY, and the assertion is still the one that
+    // fails the day a fifth kind is declared without a decision about its source.
+    expect(
+      kinds
+        .filter((kind) => kind.hasSource !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual([]);
+  });
+
+  test("reads the definition of a table and says what the text is", async () => {
+    objects = await connectedWithObjects();
+
+    const document = await objects.readObjectSource!(["orders"], "table");
+
+    expect(document.path).toEqual(["orders"]);
+    expect(document.kind).toBe("table");
+    expect(document.parts).toHaveLength(1);
+    const [part] = document.parts;
+    expect(isSourcePartUnavailable(part)).toBe(false);
+    if (isSourcePartUnavailable(part)) throw new Error("narrowing");
+    expect(part.id).toBe("definition");
+    expect(part.label).toBe("Definition");
+    expect(part.text).toContain("total_with_tax INTEGER GENERATED ALWAYS AS (total * 2) VIRTUAL");
+    expect(part.language).toBe("sql");
+    // The caption's whole job: this is the author's own bytes, not a reconstruction. The
+    // newlines and the five-space indentation of the fixture statement survive, which is what
+    // separates SQLite from every engine that rebuilds a statement out of its catalog.
+    expect(part.form).toBe("complete");
+    expect(part.origin).toBe("stored");
+    expect(part.text).toContain("\n     id INTEGER PRIMARY KEY,");
+    expect(part.truncated).toBeUndefined();
+  });
+
+  /**
+   * The per-kind READ-THE-TEXT pin, whose population comes from the DECLARATION (#789).
+   *
+   * Recipe rule 6, measured by Task 8 one wave earlier: a whole-statement pin is necessary
+   * and NOT sufficient. A wrong reply column reads as `undefined`, the provider correctly
+   * turns that into a refusal, and a refusal passes the conformance walk, the statement pin
+   * and every count assertion. On THIS engine the same defect wears a worse disguise:
+   * `sqlite_schema` has four columns and reading `s.name` instead of `s.sql` answers a
+   * non-empty STRING, so the read would not even become a refusal - it would hand a reader
+   * the object's own name as its definition. Only comparing the TEXT can see either.
+   *
+   * Three guards, so no arm of this can go vacuous:
+   *   - a declared source-bearing kind with no expectation THROWS by name;
+   *   - a listed object with no expectation THROWS by name, so the expectation cannot name
+   *     one object of a kind and leave its siblings unread;
+   *   - every expected text is resolved from the fixture FILE, so nothing here can drift
+   *     away from the DDL that created the object.
+   */
+  test("every object of every source-bearing kind reads back the DDL the fixture file wrote", async () => {
+    objects = await connectedWithObjects();
+    const capabilities = objects.getCapabilities();
+    const sourceKinds = (capabilities.objectKinds ?? []).filter((kind) => kind.hasSource === true);
+    if (sourceKinds.length === 0) throw new Error("no kind declares hasSource, so this test reads nothing");
+
+    let read = 0;
+    for (const spec of sourceKinds) {
+      const listed = await objects.listObjects([], spec.id);
+      if (listed.length === 0) throw new Error(`the fixture holds no ${spec.id}, so its source read is unexercised`);
+      const named = Object.keys(EXPECTED_DEFINITIONS).filter((key) => key.startsWith(`${spec.id}/`));
+      if (named.length === 0) throw new Error(`EXPECTED_DEFINITIONS names no ${spec.id}, so that kind is unread`);
+      for (const object of listed) {
+        const key = `${spec.id}/${object.name}`;
+        if (!Object.hasOwn(EXPECTED_DEFINITIONS, key)) {
+          throw new Error(`the fixture holds ${key} and EXPECTED_DEFINITIONS carries no text for it`);
+        }
+        const document = await objects.readObjectSource!(object.path, spec.id);
+        const [part] = document.parts;
+        if (isSourcePartUnavailable(part)) {
+          throw new Error(`${key} answered the refusal "${part.unavailable}" on an engine that has none`);
+        }
+        expect(part.text).toBe(EXPECTED_DEFINITIONS[key]);
+        read += 1;
+      }
+    }
+    // Both sides come from the fixture: the left from the declaration and the listings, the
+    // right from the expectation map. Equal means every named object was reached.
+    expect(read).toBe(Object.keys(EXPECTED_DEFINITIONS).length);
+  });
+
+  test("the statement is one text, with the type BOUND and taken from the KIND", async () => {
+    objects = await connectedWithObjects();
+    const captured = captureReadsMatching(objects, "FROM sqlite_schema AS s", [{ sql: "CREATE TABLE x (a)" }]);
+
+    await objects.readObjectSource!(["orders"], "table");
+
+    // The whole statement as a LITERAL, never the provider's own constant: importing it
+    // would move both sides of the assertion together and pin nothing (recipe rule 6).
+    expect(captured.statements).toEqual([
+      `
+      SELECT s.sql AS sql
+        FROM sqlite_schema AS s
+       WHERE s.type = ?
+         AND s.name = ?
+    `,
+    ]);
+    expect(captured.params).toEqual([["table", "orders"]]);
+  });
+
+  /**
+   * The one object either fixture holds that can tell a KIND-derived type from a name match.
+   *
+   * `audit_log` is a table AND a trigger, which SQLite accepts while it refuses an index or a
+   * view under an existing table's name (measured on SQLite 3.53.2). `SELECT sql FROM
+   * sqlite_schema WHERE name = 'audit_log'` answers two rows and the table's comes first, so
+   * dropping `type = ?` hands a reader the table's DDL under the trigger's address - a defect
+   * no statement-shape assertion can see, which is standing ruling 5a's instruction to build
+   * the fixture that would disprove the claim.
+   */
+  test("a trigger sharing a name with a table reads the TRIGGER, not the table", async () => {
+    objects = await connectedWithObjects();
+
+    const trigger = await objects.readObjectSource!(["audit_log", "audit_log"], "trigger");
+    const table = await objects.readObjectSource!(["audit_log"], "table");
+    const [triggerPart] = trigger.parts;
+    const [tablePart] = table.parts;
+    if (isSourcePartUnavailable(triggerPart) || isSourcePartUnavailable(tablePart)) throw new Error("narrowing");
+
+    expect(triggerPart.text).toBe(EXPECTED_DEFINITIONS["trigger/audit_log"]);
+    expect(tablePart.text).toBe(EXPECTED_DEFINITIONS["table/audit_log"]);
+    expect(triggerPart.text).not.toBe(tablePart.text);
+  });
+
+  test("an object that is not there RAISES, naming the segment, and never answers a refusal", async () => {
+    objects = await connectedWithObjects();
+
+    await expect(objects.readObjectSource!(["no_such_table"], "table")).rejects.toThrow(
+      /No SQLite table named no_such_table/,
+    );
+    // The kind is what decides, so a name that exists under ANOTHER kind raises too rather
+    // than quietly resolving to the row that does exist.
+    await expect(objects.readObjectSource!(["orders", "orders"], "trigger")).rejects.toThrow(
+      /No SQLite trigger named orders/,
+    );
+  });
+
+  test("a kind this engine does not declare, and a path of the wrong shape, both raise", async () => {
+    objects = await connectedWithObjects();
+
+    await expect(objects.readObjectSource!(["x"], "procedure")).rejects.toThrow(
+      /SQLite declares no object kind "procedure"/,
+    );
+    await expect(objects.readObjectSource!(["orders_stamp"], "trigger")).rejects.toThrow(
+      /A SQLite "trigger" path is \[table, name\], received \["orders_stamp"\]/,
+    );
+  });
+
+  /**
+   * The refusal this engine CANNOT produce, driven anyway.
+   *
+   * `sqlite_schema.sql` is NULL for exactly one shape, an index the engine made for itself,
+   * and the provider's `name NOT LIKE 'sqlite\_%' ESCAPE '\'` filter keeps every one of those
+   * out of the listing, so no path the tree offers can reach it. That is why
+   * docs/providers/sqlite.md states the absence of a refusal as a CANNOT rather than leaving a
+   * reader to wonder. The arm still exists, because "unreachable today" is not "cannot be
+   * written", and this is what the suite would say if the read ever started producing one: a
+   * REFUSAL part carrying a sentence, never an empty editor over a definition.
+   */
+  test("a NULL definition becomes a refusal part rather than an empty text", async () => {
+    objects = await connectedWithObjects();
+    captureReadsMatching(objects, "FROM sqlite_schema AS s", [{ sql: null }]);
+
+    const document = await objects.readObjectSource!(["orders"], "table");
+    const [part] = document.parts;
+
+    expect(isSourcePartUnavailable(part)).toBe(true);
+    if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+    expect(part.id).toBe("definition");
+    expect(part.unavailable).toContain("sqlite_schema.sql is NULL");
+    // The CAUSE is asserted, and it is asserted HERE and nowhere else: NULL is the only one of
+    // the three blank shapes for which "an index SQLite created for itself" is a true reason.
+    expect(part.unavailable).toContain("an index it created for itself");
+    // Not an empty string and not whitespace: a refusal that says nothing is not a refusal.
+    expect(part.unavailable.trim().length).toBeGreaterThan(20);
+  });
+
+  test("a whitespace-only definition is refused too, and is NOT reported as the engine's NULL", async () => {
+    objects = await connectedWithObjects();
+    captureReadsMatching(objects, "FROM sqlite_schema AS s", [{ sql: "   \n  " }]);
+
+    const [part] = (await objects.readObjectSource!(["orders"], "table")).parts;
+
+    expect(isSourcePartUnavailable(part)).toBe(true);
+    if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+    expect(part.unavailable).toContain("no non-whitespace character");
+    // The sentence must not carry a cause that is false for this shape: the row is present and
+    // the column is present, so nothing here is an index the engine made for itself.
+    expect(part.unavailable).not.toContain("an index it created for itself");
+    expect(part.unavailable).not.toContain("is NULL");
+  });
+
+  /**
+   * The three guards a correct DECLARATION cannot reach, driven through the declaration.
+   *
+   * Each one is a different way the declaration and this method can disagree, and none is
+   * reachable with the four kinds SQLite really declares: a kind that is declared and not
+   * source-bearing, a kind that declares source and forgets the Monaco id that renders it,
+   * and a kind that declares source and has no catalog type behind it. A `spyOn` on
+   * `getCapabilities` is the only seam that reaches them, and reaching them is what says
+   * the guards are live rather than covered.
+   */
+  test("a declared kind that is not source-bearing, or is under-declared, raises by name", async () => {
+    objects = await connectedWithObjects();
+    const real = objects.getCapabilities();
+    const withKind = (extra: ObjectKindSpec) =>
+      spyOn(objects, "getCapabilities").mockReturnValue({ ...real, objectKinds: [...(real.objectKinds ?? []), extra] });
+
+    const noSource = withKind({ id: "synonym", role: "config", label: "Synonym", labelPlural: "Synonyms" });
+    try {
+      await expect(objects.readObjectSource!(["x"], "synonym")).rejects.toThrow(
+        /SQLite publishes no definition text for the kind "synonym"/,
+      );
+    } finally {
+      noSource.mockRestore();
+    }
+
+    const noLanguage = withKind({
+      id: "synonym",
+      role: "config",
+      label: "Synonym",
+      labelPlural: "Synonyms",
+      hasSource: true,
+    });
+    try {
+      await expect(objects.readObjectSource!(["x"], "synonym")).rejects.toThrow(
+        /declares readable source for the kind "synonym" and no sourceLanguage/,
+      );
+    } finally {
+      noLanguage.mockRestore();
+    }
+
+    const noStatement = withKind({
+      id: "synonym",
+      role: "config",
+      label: "Synonym",
+      labelPlural: "Synonyms",
+      hasSource: true,
+      sourceLanguage: "sql",
+    });
+    try {
+      await expect(objects.readObjectSource!(["x"], "synonym")).rejects.toThrow(
+        /declares readable source for the kind "synonym" but has no catalog type that reads it/,
+      );
+    } finally {
+      noStatement.mockRestore();
+    }
+  });
+
+  /**
+   * Recipe rule 6's own failure mode, driven on the engine that has no refusal.
+   *
+   * A reply whose definition COLUMN is spelled differently reads as `undefined` rather than
+   * as an error, and a document of one refusal part passes every count and length assertion
+   * there is. Here it becomes a refusal rather than an empty text, which is the only correct
+   * answer; the per-kind text pin above is what would notice that the live read had started
+   * doing it.
+   */
+  test("a reply carrying no sql column at all becomes a refusal that names the READ, not the object", async () => {
+    objects = await connectedWithObjects();
+    captureReadsMatching(objects, "FROM sqlite_schema AS s", [{}]);
+
+    const [part] = (await objects.readObjectSource!(["orders"], "table")).parts;
+
+    expect(isSourcePartUnavailable(part)).toBe(true);
+    if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+    // This arm is the defect recipe rule 6 exists for, so its sentence has to send a reader to
+    // the statement rather than to the object. A reason claiming the engine stored NULL for an
+    // index of its own would send them to the listing filter instead, and it would be false:
+    // the row is there and the column this provider asked for is not.
+    expect(part.unavailable).toContain("no sqlite_schema.sql column at all");
+    expect(part.unavailable).not.toContain("an index it created for itself");
+  });
+
+  test("the caller's bound cuts the text and says so, and an exact answer is never marked", async () => {
+    objects = await connectedWithObjects();
+    const [whole] = (await objects.readObjectSource!(["orders"], "table")).parts;
+    if (isSourcePartUnavailable(whole)) throw new Error("narrowing");
+
+    const [cut] = (await objects.readObjectSource!(["orders"], "table", 20)).parts;
+    if (isSourcePartUnavailable(cut)) throw new Error("narrowing");
+
+    expect(whole.text.length).toBeGreaterThan(20);
+    expect(cut.text).toBe(whole.text.slice(0, 20));
+    expect(cut.truncated).toEqual({ limit: 20, reason: sourceBoundTruncationReason(20) });
+
+    const [uncut] = (await objects.readObjectSource!(["orders"], "table", whole.text.length)).parts;
+    if (isSourcePartUnavailable(uncut)) throw new Error("narrowing");
+    expect(uncut.truncated).toBeUndefined();
+  });
+
+  /**
+   * Standing ruling 5g, on a zero-level engine, driven to the BOUND VALUE (#789).
+   *
+   * A zero-level engine's own fixture cannot tell a hardcoded depth from a derived one, so the
+   * declaration is swapped for a two-level one and a three-segment path is driven all the way
+   * to the binds. Two mutations die here and nowhere else in this suite: a shape check written
+   * `path.length !== 1` refuses this path, and a name bind written `path[0]` binds "cat"
+   * instead of "obj".
+   */
+  test("derives the object name and the path shape from the DECLARATION, not from a position", async () => {
+    objects = await connectedWithObjects();
+    const spy = spyOn(objects, "getCapabilities").mockReturnValue({
+      ...objects.getCapabilities(),
+      containerLevels: [
+        { id: "catalog", label: "Database", labelPlural: "Databases" },
+        { id: "schema", label: "Schema", labelPlural: "Schemas" },
+      ],
+    });
+    try {
+      const captured = captureReadsMatching(objects, "FROM sqlite_schema AS s", [{ sql: "CREATE TABLE obj (a)" }]);
+
+      const document = await objects.readObjectSource!(["cat", "sch", "obj"], "table");
+
+      expect(captured.params).toEqual([["table", "obj"]]);
+      expect(document.path).toEqual(["cat", "sch", "obj"]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

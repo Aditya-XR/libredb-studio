@@ -16,7 +16,13 @@
 
 import Redis, { type RedisOptions } from "ioredis";
 import { BaseDatabaseProvider } from "../../base-provider";
-import { callerBoundTruncationReason, containerDepth, declaredKinds, findKind } from "../../object-kinds";
+import {
+  applySourceBound,
+  callerBoundTruncationReason,
+  containerDepth,
+  declaredKinds,
+  findKind,
+} from "../../object-kinds";
 import { comparePaths } from "../../object-path";
 import {
   type DatabaseConnection,
@@ -44,6 +50,7 @@ import {
   type ObjectDetail,
   type ObjectDetailBatch,
   type ObjectKindSpec,
+  type ObjectSourceDocument,
 } from "../../types";
 import { DatabaseConfigError, QueryError, ConnectionError } from "../../errors";
 
@@ -198,6 +205,31 @@ function declaredLevels(capabilities: ProviderCapabilities): readonly ContainerL
 }
 
 /**
+ * The path SHAPE both object reads share, with ONE writer for the rule and its sentence.
+ *
+ * Derived, not counted: the depth comes from `containerDepth()` through `declaredLevels`,
+ * and the names in the message are the declared labels, so the check and its message cannot
+ * disagree. Neither kind declares `attachedTo`, so there is one shape rather than two.
+ *
+ * `describeObject` has checked this since Phase 1 and `readObjectSource` did not, which the
+ * external review of PR #820 found (#789). The HTTP route bounds an empty path, but both
+ * methods are published through `@libredb/studio`, are reached by the embedded host seam and
+ * by the conformance helper, and none of those three sees the route. Measured on the
+ * unchecked method: an empty path made `path[path.length - 1]` `undefined`, and ioredis then
+ * threw `undefined is not an object (evaluating 'arg.toUpperCase')` out of the command
+ * encoder, which is this file's defect arriving as the driver's.
+ */
+function assertObjectPathShape(capabilities: ProviderCapabilities, kind: string, path: readonly string[]): void {
+  const levels = declaredLevels(capabilities);
+  if (path.length === levels.length + 1) return;
+  throw new QueryError(
+    `A Redis "${kind}" path is [${[...levels.map((level) => level.label.toLowerCase()), "name"].join(", ")}], ` +
+      `received ${JSON.stringify(path)}`,
+    "redis",
+  );
+}
+
+/**
  * The segment of `path` belonging to the declared container level `id`.
  *
  * NEVER `path[0]`, which standing ruling 5g forbids as a class rather than as instances: a
@@ -337,6 +369,59 @@ function parseFunctionLibraries(reply: unknown): string[] {
     }
   }
   return names;
+}
+
+/**
+ * One library's `library_code` out of a `FUNCTION LIST ... WITHCODE` reply, selected
+ * BYTE-EQUAL (#789 Phase 2).
+ *
+ * The selection is the whole of this function's reason to exist. MEASURED on redis 8.10.0
+ * against the committed fixture: the library dictionary is CASE-SENSITIVE, so `libredb_probe`
+ * and `LIBREDB_PROBE` coexist, while the `LIBRARYNAME` argument is a CASE-INSENSITIVE glob, so
+ * ONE lookup for either name answers BOTH. `reply[0]` would therefore hand back the other
+ * library's Lua as this object's definition, and `docker/redis-init/01-object-fixture.redis`
+ * holds that pair for exactly this reason. Reply order is not part of the protocol contract:
+ * RESP3 answers a map, where there is no order at all.
+ *
+ * The pairs are walked rather than indexed, the same rule `parseFunctionLibraries` records:
+ * the nested `functions` value is itself a list of key/value lists, so a parser reading
+ * positions takes a field name for a library name the moment the server adds a field.
+ */
+function parseFunctionLibraryCode(reply: unknown, name: string): string | undefined {
+  for (const entry of Array.isArray(reply) ? reply : []) {
+    if (!Array.isArray(entry)) continue;
+    let matched = false;
+    let code: string | undefined;
+    for (let index = 0; index + 1 < entry.length; index += 2) {
+      const key = String(entry[index]);
+      const value = entry[index + 1];
+      if (key === "library_name" && value === name) matched = true;
+      if (key === "library_code" && typeof value === "string") code = value;
+    }
+    if (matched) return code;
+  }
+  return undefined;
+}
+
+/**
+ * Whether a driver rejection is the SERVER's own error reply, rather than a transport
+ * failure (#789 Phase 2).
+ *
+ * MEASURED against ioredis 5.11.1 and redis 8.10.0, from a container created for the
+ * measurement: an ACL denial rejects with a `redis-errors` `ReplyError`
+ * (`constructor.name` and `name` both "ReplyError") carrying "NOPERM User ... has no
+ * permissions to run the 'function|list' command", and so does an unknown command
+ * ("ERR unknown command 'NOSUCHCOMMAND'"). A DROPPED SOCKET rejects with a plain `Error`
+ * named "Error", message "Connection is closed." with the offline queue on and "Stream
+ * isn't writeable and enableOfflineQueue options is false" with it off.
+ *
+ * The NAME and not `instanceof`: ioredis re-exports the class, but the integration suite
+ * replaces the whole module with `mock.module`, so an `instanceof` against the driver's
+ * export would be `instanceof undefined` there. `redis-errors` sets `name` on the
+ * prototype, so the name is the one fact both the real driver and a double can carry.
+ */
+function isServerErrorReply(error: unknown): boolean {
+  return error instanceof Error && error.name === "ReplyError";
 }
 
 // ============================================================================
@@ -1137,18 +1222,8 @@ export class RedisProvider extends BaseDatabaseProvider {
       throw new QueryError(`Redis declares no object kind "${kind}"`, "redis");
     }
 
-    // Derived, not counted: the depth comes from `containerDepth()` through
-    // `declaredLevels`, and the names in the message are the declared labels, so the check
-    // and its message cannot disagree. Neither kind declares `attachedTo`, so there is one
-    // shape rather than two.
+    assertObjectPathShape(capabilities, kind, path);
     const levels = declaredLevels(capabilities);
-    if (path.length !== levels.length + 1) {
-      throw new QueryError(
-        `A Redis "${kind}" path is [${[...levels.map((level) => level.label.toLowerCase()), "name"].join(", ")}], ` +
-          `received ${JSON.stringify(path)}`,
-        "redis",
-      );
-    }
 
     if (kind !== "keyspace") return { path: [...path], columns: [], indexes: [], foreignKeys: [] };
 
@@ -1166,6 +1241,129 @@ export class RedisProvider extends BaseDatabaseProvider {
       }
       return RedisProvider.keyspaceDetail(path, info.types);
     });
+  }
+
+  /**
+   * `FUNCTION LIST LIBRARYNAME <name> WITHCODE`, as its own method (#789 Phase 2).
+   *
+   * A method rather than an inline call so the refusal arm of `readObjectSource` can be
+   * driven without reaching into ioredis, and so the command text has one writer. It is
+   * SERVER-SCOPED and takes no database: measured on redis 8.10.0, one `FUNCTION LOAD` is
+   * visible from every numbered database and `SELECT` does not change what `FUNCTION LIST`
+   * answers, which is the same fact `listObjects` records for the listing.
+   */
+  private async callFunctionList(name: string): Promise<unknown> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return await (this.client as any).call("FUNCTION", "LIST", "LIBRARYNAME", name, "WITHCODE");
+  }
+
+  /**
+   * A function library's Lua source (#789 Phase 2).
+   *
+   * ONE kind can answer here and the DECLARATION says which: `function` declares `hasSource`
+   * and `keyspace` does not, because a key prefix is a grouping this server derived from a
+   * bounded `SCAN` and nobody wrote a definition for it. That is the
+   * `tablesAreDerivedGroupings` refusal carried into the object model rather than left behind
+   * with the flag's old reader. The refusal is read off the declaration and never off the
+   * kind id, so a kind this engine does not declare at all takes the same path.
+   *
+   * A library the server does not hold RAISES. It has to: measured on redis 8.10.0,
+   * `FUNCTION LIST LIBRARYNAME no_such_library WITHCODE` answers an EMPTY ARRAY and not an error, so
+   * emptiness is absence here and a provider that returned a document would invent one. A
+   * matching entry carrying no `library_code` takes the same arm, because an empty text would
+   * put an empty editor over a definition that was never read.
+   *
+   * A refusal is the server's own sentence, unprefixed. KeyDB, DragonflyDB and Garnet have no
+   * `FUNCTION` command at all and each refuses in its own words (all measured 2026-09-11), so
+   * this path is reachable on three of the four Redis-wire relatives this type id serves.
+   *
+   * A refusal is ONLY the server's own error reply. A TRANSPORT failure RAISES, because it is
+   * nobody answering rather than the server answering "no", and a pane reading "Connection is
+   * closed." as this object's refusal would be a symptom presented as a fact about the
+   * object. `isServerErrorReply` carries the measurement that tells the two apart.
+   *
+   * The name is `path[path.length - 1]` and never `path[1]`: standing ruling 5g, and the
+   * integration suite pins it by swapping a two-level declaration in. The path SHAPE that
+   * makes the last segment meaningful is checked by `assertObjectPathShape`, the same
+   * function and the same sentence `describeObject` uses, because the HTTP route is not the
+   * only caller: this method is published through `@libredb/studio` and reached by the
+   * embedded host seam and by the conformance helper, none of which passes through a route.
+   *
+   * A kind that declares source and no `sourceLanguage` RAISES rather than falling back to
+   * a literal "lua", which the external review of PR #820 corrected (#789). An unregistered
+   * Monaco id degrades to plain text with no throw and nothing observable, so the fallback
+   * hid a deleted declaration behind a tab that had quietly stopped highlighting.
+   */
+  public async readObjectSource(path: readonly string[], kind: string, limit?: number): Promise<ObjectSourceDocument> {
+    this.ensureConnected();
+    const capabilities = this.getCapabilities();
+    const spec = findKind(capabilities, kind);
+    if (spec?.hasSource !== true) {
+      throw new QueryError(`Redis declares no readable source for the kind "${kind}"`, "redis");
+    }
+    const language = spec.sourceLanguage;
+    if (language === undefined) {
+      // An unregistered or absent Monaco id degrades to plain text with no throw and nothing
+      // observable, so a kind that declared source and forgot its language would ship a
+      // Source tab that silently stopped highlighting. The declaration is the only source of
+      // the language and there is no literal here to fall back to: the census in
+      // `tests/isolated/object-source-declarations.test.ts` pins every declared language, so
+      // this arm is only ever reached by a declaration somebody deleted.
+      throw new QueryError(
+        `Redis declares readable source for the kind "${kind}" and no sourceLanguage to render it with`,
+        "redis",
+      );
+    }
+    assertObjectPathShape(capabilities, kind, path);
+    const name = path[path.length - 1];
+    let reply: unknown;
+    try {
+      reply = await this.callFunctionList(name);
+    } catch (error) {
+      // ONLY the server's own error reply is a refusal. A transport failure is nobody
+      // answering at all, and answering a document for it would put "Connection is closed."
+      // in the Source pane as this object's own refusal, with no raise, no retry affordance
+      // and nothing in the document telling it apart from a real NOPERM. The two shapes are
+      // measured on `isServerErrorReply`.
+      if (!isServerErrorReply(error)) {
+        throw new ConnectionError(
+          `Failed to read the Redis function library ${JSON.stringify(name)}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          "redis",
+        );
+      }
+      return {
+        path: [...path],
+        kind,
+        parts: [
+          {
+            id: "definition",
+            label: "Definition",
+            unavailable: error instanceof Error ? error.message : String(error),
+          },
+        ],
+      };
+    }
+    const code = parseFunctionLibraryCode(reply, name);
+    if (code === undefined || code.trim() === "") {
+      throw new QueryError(`Redis holds no function library called "${name}"`, "redis");
+    }
+    const bounded = applySourceBound(code, limit);
+    return {
+      path: [...path],
+      kind,
+      parts: [
+        {
+          id: "definition",
+          label: "Definition",
+          text: bounded.text,
+          language,
+          form: "complete",
+          origin: "stored",
+          ...(bounded.truncated === undefined ? {} : { truncated: bounded.truncated }),
+        },
+      ],
+    };
   }
 
   /**

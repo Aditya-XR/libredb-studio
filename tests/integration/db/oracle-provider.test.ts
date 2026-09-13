@@ -1,5 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
-import { callerBoundTruncationReason } from "@/lib/db/object-kinds";
+import {
+  callerBoundTruncationReason,
+  isSourcePartUnavailable,
+  sourceBoundTruncationReason,
+} from "@/lib/db/object-kinds";
 import type oracledb from "oracledb";
 import { ConnectionError, DatabaseConfigError, DatabaseError, QueryError } from "@/lib/db/errors";
 import type { DatabaseConnection } from "@/lib/types";
@@ -2620,6 +2624,36 @@ describe("object surface", () => {
     expect(capabilities.containerLevels).toEqual([{ id: "schema", label: "Schema", labelPlural: "Schemas" }]);
   });
 
+  test("declares source on exactly the kinds that have a definition text", () => {
+    const kinds = makeProvider().getCapabilities().objectKinds ?? [];
+    const declared = kinds
+      .filter((kind) => kind.hasSource === true)
+      .map((kind) => [kind.id, kind.sourceLanguage] as const)
+      .sort();
+    // All nine, because DBMS_METADATA.GET_DDL answers every one of them and the translation
+    // table this provider already ships names a metadata type for each. `sql` and NOT
+    // `plsql`: measured, `plsql` is not among the 89 language ids monaco-editor 0.56.0
+    // registers, and an unregistered id degrades to plain text silently (#789).
+    expect(declared).toEqual([
+      ["function", "sql"],
+      ["materialized_view", "sql"],
+      ["package", "sql"],
+      ["procedure", "sql"],
+      ["sequence", "sql"],
+      ["synonym", "sql"],
+      ["table", "sql"],
+      ["trigger", "sql"],
+      ["view", "sql"],
+    ]);
+    // The other direction, so a kind added later cannot quietly gain a Source tab.
+    expect(
+      kinds
+        .filter((kind) => kind.hasSource !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual([]);
+  });
+
   test("the container is the connecting user, and other owners are reachable", async () => {
     const statements: string[] = [];
     mockExecuteFn = async (sql: string) => {
@@ -2725,14 +2759,72 @@ describe("object surface", () => {
         };
       }
       if (sql.includes("GROUP BY")) {
+        // All NINE declared kinds, because all nine declare `hasSource` and the shared helper
+        // refuses an expectation that names a source-bearing kind at zero without saying which
+        // absence it is. Counting eight truthfully and one at zero would certify the ninth
+        // unread, which is the defect ruling 5b catalogues (#789).
         return {
           rows: [
             { KIND: "TABLE", N: 2 },
             { KIND: "VIEW", N: 1 },
+            { KIND: "MATERIALIZED VIEW", N: 1 },
+            { KIND: "SYNONYM", N: 1 },
+            { KIND: "SEQUENCE", N: 1 },
             { KIND: "PACKAGE", N: 2 },
+            { KIND: "PROCEDURE", N: 1 },
+            { KIND: "FUNCTION", N: 1 },
             { KIND: "TRIGGER", N: 1 },
           ],
         };
+      }
+      // The source read (#789), BEFORE the listing arms: `DBMS_METADATA.GET_DDL` binds the
+      // object name at :2 where a listing binds the dictionary type, so an arm keying on the
+      // second parameter would answer a listing's rows to a source read.
+      //
+      // The header is the real `GET_DDL` shape, quoted owner and quoted name, so the wrapped
+      // predicate is really driven over it here rather than short-circuited: it answers false
+      // for every one of these, which is what a document of readable parts requires.
+      if (sql.includes("DBMS_METADATA.GET_DDL")) {
+        const type = String((params ?? [])[0]);
+        const name = String((params ?? [])[1]);
+        // Keyed on the METADATA TYPE AND the name, the way the `driver()` double in the
+        // source describe below already is. Keying on the NAME ALONE echoed the type back
+        // into the text and answered a wrong type as if it were right, so mutating the
+        // metadata spelling of synonym, sequence, trigger, view or procedure left this whole
+        // file green while every live Source tab on them would raise ORA-31600 (#789).
+        //
+        // The keys are `GET_DDL`'s own argument vocabulary against the names the listing
+        // arms further down publish, one per (metadata type, name) PAIR rather than one per
+        // kind: each of the two packages takes two, a spec and a body. `NO_SUCH_PKG`, which
+        // `absentSource` names, is absent from it by construction, so the absence raise is
+        // driven by the same fall-through the server would take.
+        const ddl: Record<string, string> = {
+          "TABLE APP_ORDERS": "TABLE",
+          "TABLE APP_CUSTOMERS": "TABLE",
+          "VIEW APP_ORDER_SUMMARY": "VIEW",
+          "MATERIALIZED_VIEW APP_REVENUE_MV": "MATERIALIZED VIEW",
+          "SYNONYM APP_ORDERS_SYN": "SYNONYM",
+          "SEQUENCE APP_INVOICE_SEQ": "SEQUENCE",
+          "PACKAGE_SPEC APP_ORDERS_PKG": "PACKAGE",
+          "PACKAGE_BODY APP_ORDERS_PKG": "PACKAGE BODY",
+          "PACKAGE_SPEC APP_BROKEN_PKG": "PACKAGE",
+          "PACKAGE_BODY APP_BROKEN_PKG": "PACKAGE BODY",
+          "PROCEDURE APP_TOUCH_ORDER": "PROCEDURE",
+          "FUNCTION APP_ORDER_TOTAL": "FUNCTION",
+          "TRIGGER APP_ORDERS_TRG": "TRIGGER",
+        };
+        const key = `${type} ${name}`;
+        if (!Object.hasOwn(ddl, key)) {
+          throw new Error(`ORA-31603: object "${name}" of type ${type} not found in schema "APP"`);
+        }
+        return {
+          rows: [{ DDL: `\n  CREATE OR REPLACE EDITIONABLE ${ddl[key]} "APP"."${name}" IS BEGIN NULL; END;` }],
+        };
+      }
+      // The ORA-31603 second question. `absentSource` names an object nothing holds, so this
+      // answers no row and the read RAISES rather than inventing a refusal for it.
+      if (sql.includes("FROM ALL_OBJECTS") && sql.includes("OBJECT_TYPE = :3")) {
+        return { rows: [] };
       }
       if (sql.includes("ALL_TRIGGERS")) {
         return { rows: [{ NAME: "APP_ORDERS_TRG", PARENT: "APP_ORDERS", STATUS: "VALID" }] };
@@ -2741,7 +2833,12 @@ describe("object surface", () => {
       // Before the per-type arms below, which bind the same two parameters.
       if (sql.includes("WITH described AS")) {
         const type = (params ?? [])[1];
-        const names = type === "TABLE" ? ["APP_ORDERS", "APP_CUSTOMERS"] : type === "VIEW" ? ["APP_ORDER_SUMMARY"] : [];
+        const byType: Record<string, string[]> = {
+          TABLE: ["APP_ORDERS", "APP_CUSTOMERS"],
+          VIEW: ["APP_ORDER_SUMMARY"],
+          "MATERIALIZED VIEW": ["APP_REVENUE_MV"],
+        };
+        const names = Object.hasOwn(byType, String(type)) ? byType[String(type)] : [];
         const bound = sql.includes("FETCH FIRST") ? Number((params ?? [])[2]) : undefined;
         const described = bound === undefined ? names : names.slice(0, bound);
         if (sql.includes("SELECT d.NAME FROM described d")) return { rows: described.map((NAME) => ({ NAME })) };
@@ -2839,6 +2936,11 @@ describe("object surface", () => {
         };
       }
       if (type === "VIEW") return { rows: [{ NAME: "APP_ORDER_SUMMARY", STATUS: "VALID" }] };
+      if (type === "MATERIALIZED VIEW") return { rows: [{ NAME: "APP_REVENUE_MV", STATUS: "VALID" }] };
+      if (type === "SYNONYM") return { rows: [{ NAME: "APP_ORDERS_SYN", STATUS: "VALID" }] };
+      if (type === "SEQUENCE") return { rows: [{ NAME: "APP_INVOICE_SEQ", STATUS: "VALID" }] };
+      if (type === "PROCEDURE") return { rows: [{ NAME: "APP_TOUCH_ORDER", STATUS: "VALID" }] };
+      if (type === "FUNCTION") return { rows: [{ NAME: "APP_ORDER_TOTAL", STATUS: "VALID" }] };
       if (type === "PACKAGE") {
         return {
           rows: [
@@ -2856,8 +2958,22 @@ describe("object surface", () => {
 
     await assertObjectSurface(provider, {
       containers: [["APP"], ["REPORTING"]],
-      kinds: { table: 2, view: 1, package: 2, trigger: 1 },
+      kinds: {
+        table: 2,
+        view: 1,
+        materialized_view: 1,
+        synonym: 1,
+        sequence: 1,
+        package: 2,
+        procedure: 1,
+        function: 1,
+        trigger: 1,
+      },
       sampleObject: { path: ["APP", "APP_ORDERS"], kind: "table" },
+      // Authored, because no listing produces a name nothing holds. The kind is `package`
+      // deliberately: it is the one kind whose read sends TWO statements, so the absence raise
+      // is driven through the arm that also has to tell a missing BODY from a missing package.
+      absentSource: { path: ["APP", "NO_SUCH_PKG"], kind: "package" },
     });
     await provider.disconnect();
   });
@@ -3824,6 +3940,683 @@ describe("Oracle bulk column read", () => {
     const batch = await provider.describeObjects(["APP"], "table");
 
     expect(batch.details.map((detail) => detail.path)).toEqual(listed.map((object) => object.path));
+    await provider.disconnect();
+  });
+});
+
+/**
+ * THE WHOLE STATEMENT of each source read, squashed to one line, and why it is the whole one.
+ *
+ * Round 1 pinned the tokens somebody had thought of: `toContain("DBMS_METADATA.GET_DDL")` on
+ * the first read and `toContain("FROM ALL_OBJECTS")` plus `not.toContain("DBA_OBJECTS")` on the
+ * second question. Everything else in both statements was unpinned, and this double does not
+ * execute SQL, so no assertion on `params` and none on the returned document can see a bind
+ * marker move or a predicate leave. Four mutants measured on 2026-09-13 then survived the whole
+ * suite at 202 pass, 0 fail:
+ *
+ * - `GET_DDL(:1, :2, :3)` rewritten to `GET_DDL(:2, :1, :3)`, which sends the object NAME as the
+ *   `object_type` argument. Live that is ORA-31600 on every kind, which is the exact failure the
+ *   metadata-vocabulary test below exists to prevent, reached one position to the left.
+ * - `OWNER = :1 AND OBJECT_NAME = :2` rewritten to `OWNER = :2 AND OBJECT_NAME = :1`, which asks
+ *   ALL_OBJECTS whether a schema called `REPORT_DAILY` holds an object called `REPORTING`. It
+ *   answers NO ROW for everything, so ruling C's refusal arm becomes a false claim of absence.
+ * - ` AND OBJECT_TYPE = :3` deleted, which makes a package that has a spec and no body answer a
+ *   PACKAGE row to a PACKAGE BODY question: the missing body stops being an absence and becomes
+ *   a refusal, which is the one shape standing ruling 4 says it is not.
+ * - `AS DDL` renamed to `AS DDL_TEXT`, while `readDefinition` still reads `rows[0].DDL`. Live
+ *   every one of the nine kinds answers `undefined` and every Source tab raises; the double
+ *   builds its row as `{ DDL: text }` whatever the statement says, so it sees nothing.
+ *
+ * One equality per read closes the class instead of the members of it somebody has thought of.
+ * Whitespace is squashed because indentation is not behaviour; every other byte is pinned.
+ */
+function squashSql(sql: string): string {
+  return sql.trim().replace(/\s+/g, " ");
+}
+
+/** All three values BINDS, so no identifier escaper is involved and no name reaches statement text. */
+const EXPECTED_OBJECT_DDL_SQL = "SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) AS DDL FROM DUAL";
+
+/** Ruling C's second question, spelled out whole: ALL_OBJECTS, three predicates, three binds. */
+const EXPECTED_OBJECT_IS_VISIBLE_SQL =
+  "SELECT 1 AS SEEN FROM ALL_OBJECTS WHERE OWNER = :1 AND OBJECT_NAME = :2 AND OBJECT_TYPE = :3";
+
+/**
+ * The source read (#789 Phase 2).
+ *
+ * Every definition text below is VERBATIM `DBMS_METADATA.GET_DDL` output captured from the
+ * committed fixture running on `gvenzl/oracle-xe` 21.3.0.0.0, so the doubles answer what the
+ * engine answers rather than what this suite finds convenient. The commands that reproduce
+ * every one of them are in `docs/providers/oracle.md`.
+ */
+describe("Oracle object source", () => {
+  beforeEach(() => {
+    mockExecuteFn = async (sql: string) => defaultExecute(sql);
+    mockConnCloseFn = async () => {};
+    mockBreakFn = async () => {};
+    mockPoolCloseFn = async () => {};
+    mockCreatePoolFn = async () => createMockPool();
+  });
+
+  function makeProvider(overrides: Partial<DatabaseConnection> = {}) {
+    return new OracleProvider({ ...baseConfig, ...overrides });
+  }
+
+  /** Every execute the last read sent, in order, so a bind is asserted and not assumed. */
+  let sent: { sql: string; params: unknown[]; opts: Record<string, unknown> }[] = [];
+
+  /**
+   * A driver double that answers GET_DDL from a table of texts and ALL_OBJECTS from a set.
+   *
+   * Keyed on the METADATA TYPE and the object name, which is what the provider binds, so a
+   * read that asked for the wrong type or the wrong name falls through to the ORA-31603 arm
+   * exactly as the server would rather than being quietly answered.
+   */
+  function driver(options: {
+    ddl?: Record<string, string>;
+    visible?: readonly string[];
+    ddlValue?: unknown;
+    /** What GET_DDL rejects with when the fixture holds no text, defaulting to the live sentence. */
+    raise?: () => unknown;
+  }): (sql: string, params?: unknown[], opts?: unknown) => Promise<unknown> {
+    return async (sql: string, params?: unknown[], opts?: unknown) => {
+      sent.push({ sql, params: [...(params ?? [])], opts: (opts ?? {}) as Record<string, unknown> });
+      if (sql.includes("DBMS_METADATA.GET_DDL")) {
+        const key = `${String((params ?? [])[0])} ${String((params ?? [])[1])}`;
+        if (options.ddlValue !== undefined) return { rows: [{ DDL: options.ddlValue }] };
+        const text = (options.ddl ?? {})[key];
+        if (text === undefined) {
+          if (options.raise !== undefined) throw options.raise();
+          throw new Error(ora31603(String((params ?? [])[0]), String((params ?? [])[1]), String((params ?? [])[2])));
+        }
+        return { rows: [{ DDL: text }] };
+      }
+      if (sql.includes("FROM ALL_OBJECTS")) {
+        const key = `${String((params ?? [])[2])} ${String((params ?? [])[1])}`;
+        return { rows: (options.visible ?? []).includes(key) ? [{ SEEN: 1 }] : [] };
+      }
+      return { rows: [] };
+    };
+  }
+
+  const FUNCTION_DDL =
+    '\n  CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_ORDER_TOTAL" (p_id NUMBER) RETURN NUMBER IS ' +
+    "BEGIN RETURN p_id; END;";
+
+  beforeEach(() => {
+    sent = [];
+  });
+
+  test("reads a function definition, as a STRING, and says what the text is", async () => {
+    mockExecuteFn = driver({ ddl: { "FUNCTION APP_ORDER_TOTAL": FUNCTION_DDL } });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const document = await provider.readObjectSource!(["APP", "APP_ORDER_TOTAL"], "function");
+
+    expect(document.path).toEqual(["APP", "APP_ORDER_TOTAL"]);
+    expect(document.kind).toBe("function");
+    expect(document.parts).toHaveLength(1);
+    const [part] = document.parts;
+    expect(isSourcePartUnavailable(part)).toBe(false);
+    if (isSourcePartUnavailable(part)) throw new Error("narrowing");
+    // A STRING and not merely a value. GET_DDL answers a CLOB and oracledb answers a CLOB
+    // with a `Lob` stream by default; serialising one throws "Converting circular structure
+    // to JSON", so `toBeDefined()` here would pass for the shape this assertion exists to
+    // refuse.
+    expect(typeof part.text).toBe("string");
+    expect(part.text).toContain('CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_ORDER_TOTAL"');
+    expect(part.id).toBe("definition");
+    expect(part.label).toBe("Definition");
+    expect(part.language).toBe("sql");
+    expect(part.form).toBe("complete");
+    expect(part.origin).toBe("regenerated");
+    expect(part.truncated).toBeUndefined();
+
+    // The binds, and the fetch handler the object surface's ordinary reader does not pass.
+    expect(sent).toHaveLength(1);
+    expect(sent[0].params).toEqual(["FUNCTION", "APP_ORDER_TOTAL", "APP"]);
+    // THE WHOLE STATEMENT AS TEXT, which is strictly more than the old `not.toContain(name)`:
+    // it says no name reaches statement text AND that the three bind markers sit where the
+    // three bound values mean what they are called AND that the column this read then reads by
+    // name is the column the statement names. See `EXPECTED_OBJECT_DDL_SQL` for the four
+    // mutants a token-by-token pin let through.
+    expect(squashSql(sent[0].sql)).toBe(EXPECTED_OBJECT_DDL_SQL);
+    expect(sent[0].opts.fetchTypeHandler).toBeTypeOf("function");
+    await provider.disconnect();
+  });
+
+  /**
+   * Every text below is VERBATIM `DBMS_METADATA.GET_DDL` output, captured from the committed
+   * fixture on `gvenzl/oracle-xe` 21.3.0.0.0 on 2026-09-12 through this provider's own read.
+   * The wrapped bodies are shortened in the MIDDLE only, at the `abcd` filler lines, and both
+   * ends are the encoder's own bytes: the predicate reads the first two lines and nothing else.
+   */
+  const WRAPPED_FUNCTION_DDL =
+    '\n  CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_WRAPPED_MULTI" wrapped\n' +
+    "a000000\n369\nabcd\nabcd\nabcd\n8\n62 92\n" +
+    "tCU+vKeNeAEILthJFxK0Ffh4lBMwg8eZgcfLCNL+XlpWFuOWluHxJj4IvmOtbFir+54/a7zc\n" +
+    "4jXsnjXiqGs1P2nirBd8nKzmBF8XAQpwkddDXfy5KVuOQOV0aVAJ5wOLwIHHLcmmpg1cqw4=\n\n";
+  const PACKAGE_SPEC_DDL =
+    '\n  CREATE OR REPLACE EDITIONABLE PACKAGE "APP"."APP_ORDERS_PKG" IS\n' +
+    "  FUNCTION total(p NUMBER) RETURN NUMBER;\nEND app_orders_pkg;";
+  const PACKAGE_BODY_DDL =
+    '\n  CREATE OR REPLACE EDITIONABLE PACKAGE BODY "APP"."APP_ORDERS_PKG" IS\n' +
+    "  FUNCTION total(p NUMBER) RETURN NUMBER IS BEGIN RETURN p; END;\nEND app_orders_pkg;";
+  const WRAPPED_PACKAGE_BODY_DDL =
+    '\n  CREATE OR REPLACE EDITIONABLE PACKAGE BODY "APP"."APP_WRAPPED_PKG" wrapped\n' +
+    "a000000\n369\nabcd\nb\n76 ae\nMTbozOETl+017jZgaK07ws10D5Qwg5m49TOf9b9cuJu/9MNaVhbjlpbh8SY+CEQxKZ5Br3Ge\n\n";
+
+  /** ORA-31603 as node-oracledb 6.10.0 composes it, captured whole from the live server. */
+  function ora31603(type: string, name: string, owner: string): string {
+    return (
+      `ORA-31603: object "${name}" of type ${type} not found in schema "${owner}"\n` +
+      'ORA-06512: at "SYS.DBMS_METADATA", line 6781\n' +
+      'ORA-06512: at "SYS.DBMS_SYS_ERROR", line 105\n' +
+      'ORA-06512: at "SYS.DBMS_METADATA", line 9815\n' +
+      "ORA-06512: at line 1\n" +
+      "Help: https://docs.oracle.com/error-help/db/ora-31603/"
+    );
+  }
+
+  test("a package is TWO parts, through PACKAGE_SPEC and PACKAGE_BODY and never the bare type", async () => {
+    mockExecuteFn = driver({
+      ddl: { "PACKAGE_SPEC APP_ORDERS_PKG": PACKAGE_SPEC_DDL, "PACKAGE_BODY APP_ORDERS_PKG": PACKAGE_BODY_DDL },
+    });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const document = await provider.readObjectSource!(["APP", "APP_ORDERS_PKG"], "package");
+
+    expect(document.parts).toHaveLength(2);
+    expect(document.parts.map((part) => [part.id, part.label])).toEqual([
+      ["spec", "Package specification"],
+      ["body", "Package body"],
+    ]);
+    const [spec, body] = document.parts;
+    if (isSourcePartUnavailable(spec) || isSourcePartUnavailable(body)) throw new Error("narrowing");
+    expect(spec.text).toContain("CREATE OR REPLACE EDITIONABLE PACKAGE ");
+    expect(body.text).toContain("CREATE OR REPLACE EDITIONABLE PACKAGE BODY ");
+
+    // The bare PACKAGE metadata type retrieves BOTH halves in one CLOB and is what a single
+    // read would have used; one CLOB cannot say a body is absent, cannot report a wrapped body
+    // beside a readable spec, and cannot carry the two halves' independent STATUS values.
+    expect(sent.map((call) => call.params[0])).toEqual(["PACKAGE_SPEC", "PACKAGE_BODY"]);
+    expect(sent.map((call) => call.params[0])).not.toContain("PACKAGE");
+    await provider.disconnect();
+  });
+
+  test("a package with a specification and no body is ONE part, and that absence is not a refusal", async () => {
+    // The live shape: GET_DDL('PACKAGE_BODY', ...) raises ORA-31603 for a package nobody wrote
+    // a body for, and ALL_OBJECTS holds a PACKAGE row and no PACKAGE BODY row for it.
+    mockExecuteFn = driver({
+      ddl: { "PACKAGE_SPEC APP_SPEC_ONLY_PKG": PACKAGE_SPEC_DDL },
+      visible: ["PACKAGE APP_SPEC_ONLY_PKG"],
+    });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const document = await provider.readObjectSource!(["APP", "APP_SPEC_ONLY_PKG"], "package");
+
+    expect(document.parts).toHaveLength(1);
+    expect(document.parts[0].id).toBe("spec");
+    // Not a refusal and not an error: nobody ever wrote a body, so there is nothing to refuse.
+    expect(isSourcePartUnavailable(document.parts[0])).toBe(false);
+    // And the head part still raises when IT is the thing that is missing, so the optional
+    // second part is optional and the document is not.
+    await expect(provider.readObjectSource!(["APP", "NO_SUCH_PKG"], "package")).rejects.toThrow(/NO_SUCH_PKG/);
+    await provider.disconnect();
+  });
+
+  test("a WRAPPED body is refused BESIDE a readable specification, rather than taking it away", async () => {
+    mockExecuteFn = driver({
+      ddl: {
+        "PACKAGE_SPEC APP_WRAPPED_PKG": PACKAGE_SPEC_DDL.replace("APP_ORDERS_PKG", "APP_WRAPPED_PKG"),
+        "PACKAGE_BODY APP_WRAPPED_PKG": WRAPPED_PACKAGE_BODY_DDL,
+      },
+    });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const document = await provider.readObjectSource!(["APP", "APP_WRAPPED_PKG"], "package");
+
+    expect(document.parts).toHaveLength(2);
+    const [spec, body] = document.parts;
+    expect(isSourcePartUnavailable(spec)).toBe(false);
+    expect(isSourcePartUnavailable(body)).toBe(true);
+    if (!isSourcePartUnavailable(body)) throw new Error("narrowing");
+    // The engine's own two tokens, quoted back rather than described: the keyword and the wrap
+    // FORMAT MARKER the server wrote, which a later Oracle changes.
+    expect(body.unavailable).toContain('"wrapped"');
+    expect(body.unavailable).toContain('"a000000"');
+    // A refusal is a refusal and never a refusal WITH a text: such a part narrows to the
+    // refusal arm and would drop a definition the engine really returned.
+    expect("text" in body).toBe(false);
+    await provider.disconnect();
+  });
+
+  test("the wrapped predicate reads a POSITION and a MARKER, and every unit built to defeat either half is not wrapped", async () => {
+    // Every text here is verbatim GET_DDL output from the committed fixture. The three
+    // defeaters are VALID, COMPILING functions: the first ends its source line with the token
+    // `wrapped`, the second carries exactly the wrap format marker on its second line, and the
+    // third does both at once. APP_ZERO_ARG is the closest PLAIN shape to a wrapped header
+    // there is. A test that reads only a wrapped unit certifies nothing.
+    const cases: readonly (readonly [string, string, boolean])[] = [
+      ["APP_WRAPPED_MULTI", WRAPPED_FUNCTION_DDL, true],
+      [
+        "APP_FIRST_LINE_WRAPPED",
+        '\n  CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_FIRST_LINE_WRAPPED" (p NUMBER) RETURN NUMBER IS -- wrapped\nBEGIN\n  RETURN p;\nEND;',
+        false,
+      ],
+      [
+        "APP_SECOND_LINE_MARKER",
+        '\n  CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_SECOND_LINE_MARKER" (p NUMBER) RETURN NUMBER IS /*\na000000\n*/\nBEGIN\n  RETURN p;\nEND;',
+        false,
+      ],
+      [
+        "APP_CONJ_DEFEATER",
+        '\n  CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_CONJ_DEFEATER" (p NUMBER) RETURN NUMBER IS /* wrapped\na000000\n*/\nBEGIN\n  RETURN p;\nEND;',
+        false,
+      ],
+      [
+        "APP_ZERO_ARG",
+        '\n  CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_ZERO_ARG" RETURN NUMBER IS\nBEGIN\n  RETURN 1;\nEND;',
+        false,
+      ],
+      // The unit that attacks the OTHER conjunct, and the only one here that does not compile.
+      // The four above all defeat the keyword half; the MARKER half was asserted by nothing
+      // until this object existed, because a real wrapped unit always carries its marker.
+      //
+      // This text was SYNTHETIC when the file first shipped and is now a CAPTURE. Measured on
+      // gvenzl/oracle-xe 21.3.0.0.0: `wrapped` after a function name is ACCEPTED, because it
+      // is the wrap keyword, the unit fails to compile with PLS-00753 and is left INVALID, and
+      // GET_DDL answers its source verbatim anyway. `docker/oracle-init/01-object-fixture.sql`
+      // creates it, and the bytes below are byte-identical to what that server returned (the
+      // leading `\n  ` confirmed through DUMP as 10,32,32, because SQL*Plus renders those two
+      // spaces as a tab). The answer it pins is the conservative one: a readable text rather
+      // than a manufactured refusal.
+      [
+        "APP_MARKERLESS_HEADER",
+        '\n  CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_MARKERLESS_HEADER" wrapped\nBEGIN\n  RETURN 1;\nEND;',
+        false,
+      ],
+    ];
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const seen: Record<string, boolean> = {};
+    for (const [name, ddl, wrapped] of cases) {
+      mockExecuteFn = driver({ ddl: { [`FUNCTION ${name}`]: ddl } });
+      const document = await provider.readObjectSource!(["APP", name], "function");
+      seen[name] = isSourcePartUnavailable(document.parts[0]);
+      expect([name, seen[name]]).toEqual([name, wrapped]);
+    }
+    // Non-vacuity, by NAME: a loop over an empty table, or over plain units alone, would pass
+    // every assertion above while certifying nothing at all. Both answers must have occurred.
+    const answers = Object.values(seen);
+    if (answers.length !== cases.length || !answers.includes(true) || !answers.includes(false)) {
+      throw new Error(
+        `the wrapped predicate was driven over ${answers.length} of ${cases.length} units and answered ` +
+          `${JSON.stringify(seen)}; it must see at least one wrapped unit and at least one plain one`,
+      );
+    }
+    await provider.disconnect();
+  });
+
+  test("ORA-31603 over an object ALL_OBJECTS CAN see is a refusal that says which of the two facts it is", async () => {
+    // RULING C, arm one, and the DEFAULT Oracle experience since #765 made the tree list every
+    // owner: APP holds SELECT on REPORTING.REPORT_DAILY, sees it in the tree, and GET_DDL tells
+    // it the object is "not found in schema". Measured verbatim on Oracle XE 21.3.0.0.0.
+    mockExecuteFn = driver({ visible: ["TABLE REPORT_DAILY"] });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const document = await provider.readObjectSource!(["REPORTING", "REPORT_DAILY"], "table");
+
+    const [part] = document.parts;
+    expect(isSourcePartUnavailable(part)).toBe(true);
+    if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+    // Oracle's own sentence, kept whole and FIRST. Not prefixed, not paraphrased.
+    expect(part.unavailable.startsWith('ORA-31603: object "REPORT_DAILY" of type TABLE not found in schema')).toBe(
+      true,
+    );
+    // Then the fact that settles it, which is the whole of ruling C: without this sentence the
+    // product tells a user their object does not exist.
+    expect(part.unavailable).toContain("ALL_OBJECTS shows REPORTING.REPORT_DAILY is there and visible to this session");
+    expect(part.unavailable).toContain("a privilege this session does not hold");
+    // DBMS_METADATA's own PL/SQL backtrace is dropped, and node-oracledb's help link is kept:
+    // nine frames of SYS line numbers between the error and the disambiguation would bury the
+    // one fact a reader needs.
+    expect(part.unavailable).not.toContain("ORA-06512");
+    expect(part.unavailable).toContain("https://docs.oracle.com/error-help/db/ora-31603/");
+
+    // The SECOND QUESTION itself: ALL_OBJECTS and never DBA_OBJECTS, bound with the DICTIONARY
+    // spelling of the type rather than the metadata one, and with no interpolation anywhere.
+    expect(sent).toHaveLength(2);
+    expect(squashSql(sent[0].sql)).toBe(EXPECTED_OBJECT_DDL_SQL);
+    // The WHOLE second question and not the two tokens that name the view it reads. Swapping
+    // the owner and name markers, or dropping the type predicate, leaves all three binds in
+    // place, keeps `FROM ALL_OBJECTS` in the text and survives every assertion on `params`.
+    expect(squashSql(sent[1].sql)).toBe(EXPECTED_OBJECT_IS_VISIBLE_SQL);
+    expect(sent[1].sql).not.toContain("DBA_OBJECTS");
+    expect(sent[1].params).toEqual(["REPORTING", "REPORT_DAILY", "TABLE"]);
+
+    // On a TABLE the two vocabularies spell the type the same way, so that bind cannot tell a
+    // dictionary spelling from a metadata one. A materialized view can: GET_DDL takes
+    // `MATERIALIZED_VIEW` and ALL_OBJECTS publishes `MATERIALIZED VIEW`, and binding the
+    // metadata spelling to the second question would answer NO ROW for every object of the
+    // three kinds whose spellings differ, turning every privilege refusal on them into a
+    // false claim that the object does not exist.
+    sent = [];
+    mockExecuteFn = driver({ visible: ["MATERIALIZED VIEW APP_REVENUE_MV"] });
+    const mview = await provider.readObjectSource!(["APP", "APP_REVENUE_MV"], "materialized_view");
+    expect(isSourcePartUnavailable(mview.parts[0])).toBe(true);
+    expect(sent.map((call) => call.params)).toEqual([
+      ["MATERIALIZED_VIEW", "APP_REVENUE_MV", "APP"],
+      ["APP", "APP_REVENUE_MV", "MATERIALIZED VIEW"],
+    ]);
+    await provider.disconnect();
+  });
+
+  test("ORA-31603 over an object ALL_OBJECTS CANNOT see RAISES, naming the object", async () => {
+    // RULING C, arm two. Same error from the server, opposite answer, and the only thing that
+    // tells them apart is the second question. A document here would invent a refusal for an
+    // object nobody can see, and the design's absence grammar says a dropped object raises.
+    mockExecuteFn = driver({ visible: [] });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    await expect(provider.readObjectSource!(["REPORTING", "NO_SUCH_TABLE"], "table")).rejects.toThrow(
+      /Oracle holds no table called "NO_SUCH_TABLE" in REPORTING/,
+    );
+    await expect(provider.readObjectSource!(["REPORTING", "NO_SUCH_TABLE"], "table")).rejects.toBeInstanceOf(
+      QueryError,
+    );
+    await provider.disconnect();
+  });
+
+  /*
+    ORA-31603 IS READ OFF `errorNum`, NOT OFF THE SENTENCE (#789, the external review of
+    PR #820). node-oracledb carries the Oracle error number as a NUMERIC field on the error it
+    rejects with, in both modes: thin sets it at `lib/thin/protocol/protocol.js:206`
+    (`err.errorNum = message.errorInfo.num`) and the thick binding exports the same property
+    name from every prebuilt addon in `build/Release` (`strings oracledb-6.10.0-linux-x64.node
+    | grep -x errorNum`). Scanning the MESSAGE for "ORA-31603" is the same defect class as
+    keying on a sentence: a backtrace frame, an object name or a quoted nested error carrying
+    that text makes a read that failed for another reason look like a missing object, and the
+    answer to that mistake is a refusal part or a raise about the wrong fact.
+
+    The sentence scan survives as the arm for an error that carries NO numeric `errorNum` at
+    all, which is what a rejection composed outside the driver looks like, and it is checked
+    second rather than first.
+  */
+  test("an ORA-31603 whose errorNum is present is settled by the NUMBER, not by the text", async () => {
+    mockExecuteFn = driver({
+      visible: [],
+      // The message says nothing a scan could match: the number is the only signal.
+      raise: () => Object.assign(new Error("the server declined the metadata read"), { errorNum: 31603 }),
+    });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    await expect(provider.readObjectSource!(["REPORTING", "NO_SUCH_TABLE"], "table")).rejects.toThrow(
+      /Oracle holds no table called "NO_SUCH_TABLE" in REPORTING/,
+    );
+    await provider.disconnect();
+  });
+
+  test("an error whose errorNum is a DIFFERENT number RAISES, even when its text quotes ORA-31603", async () => {
+    // The false positive the scan cannot refuse. This is ORA-01031, and its message quotes the
+    // other code the way a wrapped or logged error does.
+    mockExecuteFn = async (sql: string, params?: unknown[], opts?: unknown) => {
+      sent.push({ sql, params: [...(params ?? [])], opts: (opts ?? {}) as Record<string, unknown> });
+      throw Object.assign(new Error("ORA-01031: insufficient privileges while handling ORA-31603"), {
+        errorNum: 1031,
+      });
+    };
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    await expect(provider.readObjectSource!(["APP", "APP_ORDER_TOTAL"], "function")).rejects.toThrow(
+      /ORA-01031: insufficient privileges/,
+    );
+    // The second question was never asked: nothing ambiguous had to be settled.
+    expect(sent).toHaveLength(1);
+    await provider.disconnect();
+  });
+
+  test("an error carrying NO errorNum still falls to the code scan, so a composed rejection is not lost", async () => {
+    // The arm that keeps the captured live message working: `ora31603(...)` in this file is
+    // the ten-line sentence Oracle XE 21.3.0.0.0 really sends, and a plain `Error` carrying it
+    // and no numeric field is what a rejection composed outside the driver looks like.
+    mockExecuteFn = driver({ visible: [] });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    await expect(provider.readObjectSource!(["REPORTING", "NO_SUCH_TABLE"], "table")).rejects.toThrow(
+      /Oracle holds no table called "NO_SUCH_TABLE" in REPORTING/,
+    );
+    await provider.disconnect();
+  });
+
+  /*
+    A kind declaring source and NO `sourceLanguage` RAISES (#789, the external review of
+    PR #820). The arm used to read `spec.sourceLanguage ?? "sql"`. Counted across the fleet at
+    that point: nine of the eleven providers that read source threw here and exactly two fell
+    back, this one and `redis.ts`. The census in
+    `tests/isolated/object-source-declarations.test.ts` pins all nine Oracle languages, so the
+    only way to reach this arm is a declaration somebody deleted, and an unregistered Monaco id
+    degrades to plain text with nothing observable, so the literal hid the deletion behind a
+    tab that had quietly stopped highlighting.
+  */
+  test("a source-bearing kind that declares no language RAISES rather than falling back to a literal", async () => {
+    mockExecuteFn = driver({ ddl: { "FUNCTION APP_ORDER_TOTAL": FUNCTION_DDL } });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+    const capabilities = provider.getCapabilities();
+    spyOn(provider, "getCapabilities").mockReturnValue({
+      ...capabilities,
+      objectKinds: (capabilities.objectKinds ?? []).map((kind) =>
+        kind.id === "function" ? { ...kind, sourceLanguage: undefined } : kind,
+      ),
+    } as ReturnType<typeof provider.getCapabilities>);
+
+    await expect(provider.readObjectSource!(["APP", "APP_ORDER_TOTAL"], "function")).rejects.toThrow(
+      /Oracle declares readable source for the kind "function" and no sourceLanguage to render it with/,
+    );
+    // Nothing was sent: the declaration is checked before the connection is taken from the
+    // pool, so a lost language cannot cost a round trip either.
+    expect(sent).toHaveLength(0);
+    await provider.disconnect();
+  });
+
+  test("a failure that is not ORA-31603 RAISES, mapped, and never becomes an absence", async () => {
+    // ORA-31603 is the ONE code that is ambiguous between an absence and a refusal, and it is
+    // the only one the second question is asked for. Treating every failure as an absence
+    // would report a dropped connection, a wrong metadata type (ORA-31600) or a privilege
+    // error on DBMS_METADATA itself as "this object does not exist", which is a claim about
+    // the user's database made out of this product's own failure.
+    mockExecuteFn = async (sql: string, params?: unknown[], opts?: unknown) => {
+      sent.push({ sql, params: [...(params ?? [])], opts: (opts ?? {}) as Record<string, unknown> });
+      throw new Error("ORA-01031: insufficient privileges");
+    };
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    await expect(provider.readObjectSource!(["APP", "APP_ORDER_TOTAL"], "function")).rejects.toThrow(
+      /ORA-01031: insufficient privileges/,
+    );
+    // And the second question was never asked, because there was nothing ambiguous to settle.
+    expect(sent).toHaveLength(1);
+    expect(squashSql(sent[0].sql)).toBe(EXPECTED_OBJECT_DDL_SQL);
+    await provider.disconnect();
+  });
+
+  test("derives the object name and the owner from the DECLARATION, not from a position", async () => {
+    // Standing ruling 5g. Oracle declares ONE container level, so its own fixture cannot tell a
+    // derived owner from `path[0]` or a derived name from `path[1]`: both spellings are
+    // behaviour-identical at depth 1. A two-level declaration swapped in is what separates them,
+    // and this test is driven all the way to the BOUND VALUE rather than to a refusal, because a
+    // two-level test that stops at a refusal never reaches the bind it exists to check.
+    mockExecuteFn = driver({ ddl: { "FUNCTION obj": FUNCTION_DDL } });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+    const spy = spyOn(provider, "getCapabilities").mockReturnValue({
+      ...provider.getCapabilities(),
+      containerLevels: [
+        { id: "catalog", label: "Database", labelPlural: "Databases" },
+        { id: "schema", label: "Schema", labelPlural: "Schemas" },
+      ],
+    });
+    try {
+      await provider.readObjectSource!(["cat", "sch", "obj"], "function");
+      // The owner is the segment the DECLARATION assigns to `schema`, which at depth two is the
+      // SECOND one, and the name is the LAST segment. `path[0]` would bind the catalog as the
+      // owner and `path[1]` would bind a container segment as the object.
+      expect(sent).toHaveLength(1);
+      expect(sent[0].params).toEqual(["FUNCTION", "obj", "sch"]);
+    } finally {
+      spy.mockRestore();
+    }
+    await provider.disconnect();
+  });
+
+  test("a kind this engine declares no source for is refused, not answered empty", async () => {
+    mockExecuteFn = driver({});
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    await expect(provider.readObjectSource!(["APP", "X"], "dictionary")).rejects.toThrow(
+      /declares no readable source for the kind "dictionary"/,
+    );
+    // And a path this kind cannot legally take is refused by the SAME rule describeObject uses,
+    // so the two methods cannot come to disagree about one engine's path shapes.
+    await expect(provider.readObjectSource!(["APP", "T", "X"], "table")).rejects.toThrow(
+      /An Oracle "table" path is \[schema, name\]/,
+    );
+    // A trigger takes EITHER depth, because its base object may be a table, a view, or nothing.
+    expect(sent).toHaveLength(0);
+    await provider.disconnect();
+  });
+
+  test("a CLOB that came back as a stream RAISES rather than reaching an editor as a shape", async () => {
+    // The trap this file's `lobFetchTypeHandler` exists for: oracledb answers a CLOB with a Lob
+    // object by default, `runObjectQuery` passes no fetch handler at all, and serialising a Lob
+    // throws "Converting circular structure to JSON". A provider that coerced it would put
+    // "[object Object]" in an editor as this object's definition.
+    mockExecuteFn = driver({ ddlValue: { read: () => undefined } });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    await expect(provider.readObjectSource!(["APP", "APP_ORDER_TOTAL"], "function")).rejects.toThrow(
+      /answered the definition of APP.APP_ORDER_TOTAL as object rather than a string/,
+    );
+    await provider.disconnect();
+  });
+
+  test("an empty definition is a refusal carrying the engine's own fact, never an empty editor", async () => {
+    mockExecuteFn = driver({ ddl: { "FUNCTION APP_ORDER_TOTAL": "   \n  " } });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const [part] = (await provider.readObjectSource!(["APP", "APP_ORDER_TOTAL"], "function")).parts;
+    expect(isSourcePartUnavailable(part)).toBe(true);
+    if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+    expect(part.unavailable).toContain("answered an empty definition for APP.APP_ORDER_TOTAL");
+    await provider.disconnect();
+  });
+
+  test("the caller's bound cuts the text and is reported with the one sentence a bound is reported with", async () => {
+    mockExecuteFn = driver({ ddl: { "FUNCTION APP_ORDER_TOTAL": FUNCTION_DDL } });
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const [part] = (await provider.readObjectSource!(["APP", "APP_ORDER_TOTAL"], "function", 40)).parts;
+    if (isSourcePartUnavailable(part)) throw new Error("narrowing");
+    expect(part.text).toHaveLength(40);
+    expect(part.truncated).toEqual({ limit: 40, reason: sourceBoundTruncationReason(40) });
+    // And an UNBOUNDED read is never marked: marking an exact answer teaches a reader to
+    // discount every mark.
+    const whole = (await provider.readObjectSource!(["APP", "APP_ORDER_TOTAL"], "function")).parts[0];
+    if (isSourcePartUnavailable(whole)) throw new Error("narrowing");
+    expect(whole.truncated).toBeUndefined();
+    expect(whole.text.length).toBeGreaterThan(40);
+    await provider.disconnect();
+  });
+
+  test("sends the WHOLE GET_DDL statement, with the METADATA spelling every one of the nine kinds needs", async () => {
+    // THE FIRST BIND'S VOCABULARY, pinned as a LITERAL and deliberately not derived from the
+    // provider's own translation table. A test that reads `ORACLE_OBJECT_TYPES` to say what
+    // `ORACLE_OBJECT_TYPES` should hold asserts nothing at all.
+    //
+    // WHY IT EXISTS. That table is read by TWO consumers with two vocabularies: Phase 1's
+    // counts and listings take the `dictionary` column, and this read takes the `metadata`
+    // one. When this file first shipped, only `table`, `function`, `package` and
+    // `materialized_view` drove the metadata spelling through a double that keys on it, so
+    // mutating the metadata value of the other five to `BOGUS_TYPE` left the whole suite
+    // green while every live Source tab on them would raise ORA-31600 (#789).
+    //
+    // Every spelling below is `DBMS_METADATA.GET_DDL`'s own argument vocabulary on
+    // gvenzl/oracle-xe 21.3.0.0.0, captured from the committed fixture. Three of the nine
+    // differ from the dictionary spelling: `MATERIALIZED_VIEW` for `MATERIALIZED VIEW`, and
+    // `PACKAGE_SPEC` plus `PACKAGE_BODY` where the dictionary says `PACKAGE` and
+    // `PACKAGE BODY`.
+    const expected: readonly (readonly [string, readonly string[]])[] = [
+      ["function", ["FUNCTION"]],
+      ["materialized_view", ["MATERIALIZED_VIEW"]],
+      ["package", ["PACKAGE_SPEC", "PACKAGE_BODY"]],
+      ["procedure", ["PROCEDURE"]],
+      ["sequence", ["SEQUENCE"]],
+      ["synonym", ["SYNONYM"]],
+      ["table", ["TABLE"]],
+      ["trigger", ["TRIGGER"]],
+      ["view", ["VIEW"]],
+    ];
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    // The POPULATION, so a tenth source-bearing kind cannot be declared without a spelling
+    // here. The VALUES above stay literal; only the set of ids is read from the declaration.
+    expect(expected.map(([kind]) => kind)).toEqual(
+      (provider.getCapabilities().objectKinds ?? [])
+        .filter((kind) => kind.hasSource === true)
+        .map((kind) => kind.id)
+        .sort(),
+    );
+
+    const bound: Record<string, string[]> = {};
+    const issued: Record<string, string[]> = {};
+    for (const [kind] of expected) {
+      sent = [];
+      // `ddlValue` answers ANY type, so the double cannot decide the outcome by the bind
+      // this test is measuring. What comes back is a plain header, so every kind reads.
+      mockExecuteFn = driver({
+        ddlValue: '\n  CREATE OR REPLACE EDITIONABLE THING "APP"."APP_OBJ" IS BEGIN NULL; END;',
+      });
+      await provider.readObjectSource!(["APP", "APP_OBJ"], kind);
+      const reads = sent.filter((execute) => execute.sql.includes("DBMS_METADATA.GET_DDL"));
+      bound[kind] = reads.map((execute) => String(execute.params[0]));
+      issued[kind] = reads.map((execute) => squashSql(execute.sql));
+    }
+
+    // Non-vacuity, by NAME and BEFORE the equality: a kind whose read sent no GET_DDL at all
+    // would compare an empty array against an expectation and fail with a diff that reads
+    // like a wrong spelling rather than like a read that never happened.
+    const silent = expected.filter(([kind]) => bound[kind].length === 0).map(([kind]) => kind);
+    if (silent.length > 0) {
+      throw new Error(
+        `${silent.join(", ")} sent no DBMS_METADATA.GET_DDL at all, so no metadata spelling was measured for them`,
+      );
+    }
+    expect(expected.map(([kind]) => [kind, bound[kind]])).toEqual(expected.map(([kind, types]) => [kind, [...types]]));
+    // And the WHOLE STATEMENT, per kind, not only the first bind of it. The statement is one
+    // constant for all nine, so this is nine assertions about one string on purpose: a kind is
+    // the unit a Source tab breaks in, and a mutant living in the SELECT expression or in the
+    // bind markers is invisible to every assertion this suite makes about `params` or about the
+    // document. The four that survived without it are on `EXPECTED_OBJECT_DDL_SQL`.
+    expect(expected.map(([kind]) => [kind, issued[kind]])).toEqual(
+      expected.map(([kind, types]) => [kind, types.map(() => EXPECTED_OBJECT_DDL_SQL)]),
+    );
     await provider.disconnect();
   });
 });

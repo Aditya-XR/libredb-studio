@@ -578,39 +578,116 @@ product prefix in front of the server's words, and `listObjects()` raises. A fai
 
 #### The fixture, and running it
 
-The object-surface tests answer from the catalog below, captured live in the engine's own order; the fake
-server applies only the predicates each statement actually spells. To rebuild it, start the service and
-send this DDL (the object surface reads it and never writes):
+The DDL is [`docker/sqlite-init/02-libsql-object-fixture.sql`](../../docker/sqlite-init/02-libsql-object-fixture.sql).
+It used to live here as a fenced block and nowhere else, which meant a reader could see the
+measurement and could not re-run it; the file is what replaced that. The object-surface tests answer
+from a catalog captured off a live server started from that file, and the fake applies only the
+predicates each statement actually spells, so dropping a predicate from the provider widens the
+population here the way it would against the real server.
 
-```sql
-CREATE TABLE customers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, country TEXT DEFAULT 'TR');
-CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers,
-                     total REAL NOT NULL, tax REAL GENERATED ALWAYS AS (total * 0.2) VIRTUAL, placed_at TEXT);
-CREATE TABLE regions (region TEXT NOT NULL, year INTEGER NOT NULL, revenue REAL,
-                      PRIMARY KEY (region, year)) WITHOUT ROWID;
-CREATE TABLE archive (id INTEGER PRIMARY KEY, body TEXT) STRICT;
-CREATE TABLE sqliteXledger (id INTEGER PRIMARY KEY, note TEXT);
-CREATE TABLE legacy (note TEXT);
-CREATE TABLE legacy_ref (id INTEGER PRIMARY KEY, note TEXT REFERENCES legacy);
-CREATE TABLE shipments (id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES orders(id), carrier TEXT);
-CREATE TABLE badges (id INTEGER PRIMARY KEY, code TEXT UNIQUE, label TEXT);
-CREATE VIRTUAL TABLE notes USING fts5(title, body);
-CREATE VIEW order_summary AS SELECT c.name, o.total FROM orders o JOIN customers c ON c.id = o.customer_id;
-CREATE INDEX idx_orders_customer ON orders(customer_id);
-CREATE INDEX idx_orders_placed ON orders(date(placed_at));
-CREATE UNIQUE INDEX idx_customers_name ON customers(name);
-CREATE TRIGGER orders_stamp AFTER INSERT ON orders
-  BEGIN UPDATE orders SET placed_at = datetime('now') WHERE id = NEW.id; END;
-CREATE TRIGGER order_summary_guard INSTEAD OF INSERT ON order_summary
-  BEGIN SELECT RAISE(ABORT, 'read only'); END;
+Apply it, and print the catalog it built:
+
+```bash
+docker compose -f database-compose.yml up -d libsql          # sqld on localhost:18080
+bun docker/sqlite-init/apply-to-libsql.ts http://127.0.0.1:18080
+bun docker/sqlite-init/apply-to-libsql.ts http://127.0.0.1:18080 <token>   # Turso Cloud
+```
+
+sqld ships no client: the image carries neither `sqlite3` nor `curl`, so the fixture needs an applier
+of its own and that script is it. It sends one statement per request rather than one batch, because a
+batch stops at the first failure and a half-applied fixture is worse than one that did not apply, and
+it prints each statement's own outcome. The same file also builds a local database FILE:
+
+```bash
+bun docker/sqlite-init/build-fixture.ts /tmp/demo.sqlite 02-libsql-object-fixture.sql
 ```
 
 It holds one of every declared kind, all four `table_list.type` values, a generated column, a composite
-primary key on a `WITHOUT ROWID` table, an `AUTOINCREMENT` table, an expression index, BOTH implicit-index
-shapes (the `WITHOUT ROWID` one that only `pragma_index_list` publishes and the `UNIQUE`-on-a-ROWID-table
-one that is also a `sqlite_schema` row), an `INSTEAD OF` trigger on a view, a `sqliteXledger` table, a
-foreign key that names its column and two that do not, and a foreign-key parent with no primary key.
-Counts: `table 10, view 1, index 3, trigger 2`.
+primary key on a `WITHOUT ROWID` table, an `AUTOINCREMENT` table, an expression index, BOTH
+implicit-index shapes (the `WITHOUT ROWID` one that only `pragma_index_list` publishes and the
+`UNIQUE`-on-a-ROWID-table one that is also a `sqlite_schema` row), an `INSTEAD OF` trigger on a view,
+a trigger whose name is also a table's, a `sqliteXledger` table, a foreign key that names its column
+and two that do not, and a foreign-key parent with no primary key.
+Counts: `table 10, view 1, index 3, trigger 3`.
+
+It is NOT the same DDL as [`01-object-fixture.sql`](../../docker/sqlite-init/01-object-fixture.sql),
+which the SQLite provider's suite replays: that one holds `TEMP` and `ATTACH`ed objects sqld refuses
+outright, and this one holds a `STRICT` table and the second implicit-index shape. One directory, one
+splitter, one build script, one file per engine's own captured catalog.
+
+`ANALYZE` is absent from the file and must stay absent: measured on sqld 0.24.33, it answers
+`SQL string could not be parsed: unsupported statement: ANALYZE`.
+
+### 6.2 Object source (#789)
+
+One statement answers every kind, because libSQL IS SQLite and `sqlite_schema` keeps the text the author submitted.
+
+```sql
+SELECT s.sql AS sql
+  FROM sqlite_schema AS s
+ WHERE s.type = ?
+   AND s.name = ?
+```
+
+| Kind | `sqlite_schema.type` | `form` | `origin` | Monaco language |
+| --- | --- | --- | --- | --- |
+| `table` | `table` | `complete` | `stored` | `sql` |
+| `view` | `view` | `complete` | `stored` | `sql` |
+| `index` | `index` | `complete` | `stored` | `sql` |
+| `trigger` | `trigger` | `complete` | `stored` | `sql` |
+
+No kind declares nothing: all four have a definition text and all four publish it.
+A `VIRTUAL` table is typed `table` in `sqlite_schema`, so the `table` kind covers the FTS5 object the listing takes from `PRAGMA table_list`.
+
+#### What the text IS
+
+`form` is `complete` on every kind: each is a statement that runs as given, never a body or a bare `SELECT`.
+
+`origin` is `stored`, and on this engine family that is a real distinction rather than a formality.
+Measured live against sqld 0.24.33: `orders` comes back carrying the twenty-one-space continuation indent of the fixture statement, exactly as it was sent, where PostgreSQL and MySQL hand back a statement rebuilt out of a catalog.
+The Source tab's caption exists to keep those two apart, and if every engine reported `regenerated` the distinction would be decoration.
+
+The same `ALTER TABLE` caveat SQLite has applies here, and it is recorded in [`sqlite.md`](sqlite.md#what-the-text-is-and-the-one-caveat-on-stored): the engine REWRITES the stored text on a rename or an added column, so the bytes are the author's own up to the last schema change.
+That is still a different fact from a regeneration.
+
+#### There is no refusal, and that is a CANNOT rather than an omission
+
+Three things could have produced one here and none of them does:
+
+| Candidate | Measured |
+| --- | --- |
+| A privilege refusal | There is no privilege system to refuse a read. A token that can query at all can read `sqlite_schema` whole |
+| sqld's statement allowlist | It refuses `VACUUM`, `ANALYZE`, `ATTACH` and `PRAGMA query_only` ([§3.5](#35-the-server-refuses-four-statements-so-four-controls-are-withheld)). A plain `SELECT` from `sqlite_schema` is not in that set: this exact statement answered on sqld 0.24.33 |
+| A NULL definition | `sqlite_schema.sql` is NULL for exactly one shape, an index the engine created for itself. Every listing here carries `name NOT LIKE 'sqlite\_%' ESCAPE '\'`, so no path the object tree produces addresses such a row |
+
+The provider still turns a NULL, an absent column or a whitespace-only text into a REFUSAL part rather than an empty definition, because an empty editor over a definition is the one failure this surface exists to prevent.
+THOSE ARE THREE DIFFERENT FACTS AND THEY GET THREE DIFFERENT SENTENCES, because a refusal stating a cause that is false for the shape in front of it sends its reader somewhere there is nothing to find.
+A stored NULL says the engine keeps NULL there only for an index it created for itself.
+A whitespace-only text says the column holds no non-whitespace character, and claims no cause at all.
+A reply carrying no `sqlite_schema.sql` column says exactly that, and says it is a fact about the read and not about the object: on this transport a wrong alias answers a row built from the column names the reply really carried, so the key is simply absent.
+The sentences for those cases are OURS and not the server's, which is the exception to the rule that a refusal carries the engine's own words: the server supplies none, it simply stores NULL.
+
+NOTHING IN THIS PROVIDER OR ITS SUITE KEYS ON REFUSAL WORDING, and that is deliberate.
+The two deployments word the identical refusal differently ([§3.2](#32-a-failed-statement-answers-http-200)), so a test that pinned either sentence would pass on one and fail on the other.
+
+A statement the server rejected and a credential that expired mid-session both RAISE through the provider's own mapping.
+Neither becomes a refusal part: nobody answered about the object, and rendering a transport symptom as the object's own refusal would state it as a fact about the object.
+
+An object that is not there RAISES too, naming the last path segment.
+Absence and unreadability are different facts.
+
+#### No escaper, no schema bind, one round trip
+
+Both binds are PARAMETERS, so no identifier is interpolated and this read needs no identifier escaper.
+
+The `type` value comes from the KIND and never from what the name happens to match, and that is behavioural rather than stylistic.
+Measured live: a TRIGGER may share a name with a TABLE, so `SELECT sql FROM sqlite_schema WHERE name = 'badges'` answers TWO rows with the table's first, and a read that resolved the type from the name would hand a reader the table's DDL under the trigger's address.
+[`02-libsql-object-fixture.sql`](../../docker/sqlite-init/02-libsql-object-fixture.sql) holds that object so the rule is exercised rather than asserted by statement shape.
+
+Unqualified `sqlite_schema` resolves to `main.sqlite_schema` and this provider declares no container level, so there is no schema bind, exactly as the index and trigger listings have none.
+
+ONE ROUND TRIP and ONE PART.
+A libSQL object has exactly one text, so there is no batch to assemble and no second request to pay for, and nothing here splits into a specification and a body the way an Oracle or a MariaDB package does.
 
 ---
 

@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Sidebar, ConnectionsList } from "@/components/sidebar";
 import { type TreeRowActionHandlers } from "@/components/object-tree";
 import { objectAtPath } from "@/lib/db/detailed-object";
-import { objectPathQuery } from "@/lib/db/object-path";
+import { objectPathLabel, objectPathQuery } from "@/lib/db/object-path";
 import { MobileNav } from "@/components/MobileNav";
 import { SchemaExplorer } from "@/components/schema-explorer";
 import { ConnectionModal } from "@/components/ConnectionModal";
@@ -30,7 +30,8 @@ import {
 import { AgentRail } from "@/components/agent/AgentRail";
 import { DatabaseConnection, SavedQuery } from "@/lib/types";
 import type { DatabaseObject } from "@/lib/db/types";
-import { relationKindIds } from "@/lib/db/object-kinds";
+import { findKind, kindHasSource, relationKindIds } from "@/lib/db/object-kinds";
+import { ObjectSourceView, type ObjectSourcePatch } from "@/components/object-source";
 import { ChunkBoundary, ViewLoading } from "@/components/LazyView";
 import { lazyRetry } from "@/lib/lazy";
 import { editorLanguageForTabType, resolveTabType } from "@/lib/editor/tab-language";
@@ -130,6 +131,97 @@ export default function Studio() {
    */
   const [objectRefreshToken, setObjectRefreshToken] = useState(0);
   const objectsChanged = useCallback(() => setObjectRefreshToken((previous) => previous + 1), []);
+
+  /**
+   * What the source viewer writes back onto the tab it is mounted in (#789 Phase 2).
+   *
+   * MERGED BY SPREAD, and an explicitly-undefined key in the patch is therefore a CLEAR
+   * rather than a no-op: that is how the stale banner's re-read control works, sending
+   * `{ document: undefined, failure: undefined, readAtToken: undefined }` to put the tab back
+   * into the state the viewer reads from.
+   *
+   * STABLE across renders, which is a requirement rather than an optimisation: the viewer's
+   * read effect lists `onChange` among its dependencies, so a fresh identity every render
+   * re-runs it, and while its own address guard would still refuse to re-issue, a shell that
+   * re-rendered on every answer and re-ran the effect on every render is one guard away from
+   * hammering the route. The dependencies are `setTabs`, which `useState` guarantees is
+   * stable, and the active tab id, which changes only when the reader changes tabs.
+   *
+   * Addressed by ID and not by `currentTab`, because an answer can land after the reader has
+   * switched tabs: the patch belongs to the tab that asked for it, so the read a reader
+   * started before switching away is there when they switch back.
+   */
+  /** Present exactly when the active tab is a Source tab, and it is what the pane branches on. */
+  const sourceTab = tabMgr.currentTab.source;
+
+  /**
+   * What every statement entry point OUTSIDE the editor pane is handed while a Source tab is
+   * active (#789 Phase 2, round 1 finding 1, completed in round 2).
+   *
+   * The pane below branches around the toolbar AND the editor together, so a Source tab draws
+   * no Run button. That covers the desktop editor and NOTHING else, and the population is
+   * larger than it looks, because "outside the editor pane" includes two surfaces that are
+   * rendered outside the branch rather than merely mounted elsewhere. Every one of these
+   * addresses `currentTab` and every one was live over a Source tab. The list is exhaustive as
+   * of round 2, taken by reading each `updateCurrentTab` and each execute call in this file
+   * rather than from the five the first round happened to name:
+   *
+   * - the command palette's "Run Query", and its saved-query and history loaders;
+   * - the mobile header's RUN and its EXPLAIN, which is the same execution by another name;
+   * - the BOTTOM PANEL's `onLoadQuery`. `BottomPanel` is rendered below the editor pane and
+   *   outside its branch, and `BottomPanel.tsx` wires that one prop to both `QueryHistory`'s
+   *   and `SavedQueries`' `onSelectQuery`. That makes it the plainest desktop gesture in the
+   *   class: open a Source tab, open History in the bottom panel, click a past query.
+   * - the AGENT RAIL's `onApplyStatement` and its `onRunStatement`. The second is the only
+   *   entry point here that both WRITES and EXECUTES, so over a Source tab it ran a statement
+   *   while the pane showed a read-only definition and nothing on screen said what ran.
+   *
+   * MEASURED before this existed: `updateCurrentTab({ query })` leaves a Source tab a Source
+   * tab, so a statement loaded from the palette landed on a tab whose pane shows a read-only
+   * definition and displays no query at all, and Run then executed it. With nothing loaded the
+   * same Run executed the empty string, because `use-query-execution` has no empty-query guard
+   * and `queryEditorRef.current` is null while `QueryEditor` is unmounted. The write is not
+   * transient either: `use-tab-manager`'s SAVE effect persists `query` per tab, so the
+   * statement outlived the session on a tab that never showed it.
+   *
+   * What this predicate deliberately does NOT gate, so the next reader does not reopen it. The
+   * class is an entry point that addresses the ACTIVE TAB'S STATEMENT: it reads the tab's query
+   * to run it, or writes a statement into the tab. Three groups fall outside that and each stays
+   * live over a Source tab on purpose:
+   *
+   * - `CreateTableModal`, `DataImportModal` and `TestDataGenerator` call `executeQuery(sql)` with
+   *   THEIR OWN statement, aimed at an object the reader picked in the tree, and the tab is only
+   *   where the answer lands. `executeQuery` with an override never writes `query`, so nothing is
+   *   put on the tab, and `BottomPanel` draws the result below the definition. Gating these would
+   *   take away a working action because an unrelated tab happens to be open.
+   * - `QuerySafetyDialog`'s Proceed and the unlimited-rows dialog's Load All continue an execution
+   *   that is already under way, so they are reachable only through something already allowed.
+   * - the mobile header's `onClearQuery` writes the EMPTY string, which is the value a Source tab
+   *   already holds: `openSourceTab` appends with `query: ""` and, with the entry points above
+   *   closed, nothing can put a statement there. A gate here would be a line no mutation could
+   *   kill, and on a workspace persisted by an older build it would preserve the stale statement
+   *   this predicate exists to keep out.
+   *
+   * A no-op rather than an absent control, because every component that draws these takes them
+   * as REQUIRED props and none of those files is this task's to change. That is the smaller
+   * half of the answer: the item should not be drawn at all, on the same argument the pane
+   * already makes, and hiding it is filed for the shells that own those files (#789). What is
+   * closed here is the half that matters, which is that nothing runs and nothing is written
+   * onto a tab that cannot show it.
+   */
+  const runsTheActiveTab = sourceTab === undefined;
+
+  const { setTabs, activeTabId } = tabMgr;
+  const onSourceChange = useCallback(
+    (patch: ObjectSourcePatch) => {
+      setTabs((previous) =>
+        previous.map((tab) =>
+          tab.id === activeTabId && tab.source !== undefined ? { ...tab, source: { ...tab.source, ...patch } } : tab,
+        ),
+      );
+    },
+    [setTabs, activeTabId],
+  );
 
   // 5. Query Execution
   const queryExec = useQueryExecution({
@@ -460,8 +552,24 @@ export default function Studio() {
    * server cannot resolve.
    */
   const onObjectClick = (object: DatabaseObject) => {
-    if (metadata === null || !relationKindIds(metadata.capabilities).includes(object.kind)) return;
-    onTableClick(object.path);
+    if (metadata === null) return;
+    if (relationKindIds(metadata.capabilities).includes(object.kind)) {
+      onTableClick(object.path);
+      return;
+    }
+    /*
+     * A NON-RELATION row whose kind declares source opens its Source tab (#789 Phase 2).
+     *
+     * One gesture, one behaviour per row, never two on one row. A relation that ALSO has
+     * source, a PostgreSQL view or a SQLite table, took the branch above and keeps its data
+     * preview; its definition is one menu item away. The alternative, activating both, would
+     * open two tabs from one press, and the alternative to THIS arm is the state Phase 1 left
+     * every routine, trigger and package in: a row that does nothing at all on click, on
+     * Enter and on Space.
+     *
+     * The gate is the DECLARATION and never the kind id, exactly as the branch above is.
+     */
+    if (kindHasSource(metadata.capabilities, object.kind)) tabMgr.openSourceTab(object);
   };
 
   /**
@@ -489,6 +597,7 @@ export default function Studio() {
     onGenerateTestData: (object) => setTestDataPath(object.path),
     onOpenMaintenance: isAdmin ? (object) => openMaintenance("tables", object.path) : undefined,
     onCreateObject: () => setIsCreateTableModalOpen(true),
+    onViewSource: (object) => tabMgr.openSourceTab(object),
   };
 
   const requestDeleteConnection = (id: string) => {
@@ -532,7 +641,10 @@ export default function Studio() {
       onSheetOpenChange={setIsAgentSheetOpen}
       prefill={agentPrefill.request}
       connectionType={conn.activeConnection?.type ?? null}
-      onApplyStatement={(sql) => tabMgr.updateCurrentTab({ query: sql })}
+      onApplyStatement={(sql) => {
+        if (!runsTheActiveTab) return;
+        tabMgr.updateCurrentTab({ query: sql });
+      }}
       /*
           The handover a run's answer can record (§2.1): the statement goes
           into the editor AND is run there. Through the hook's own entry point
@@ -549,6 +661,7 @@ export default function Studio() {
           server executes is the ledger's, not this component's copy of it.
         */
       onRunStatement={(sql, runId) => {
+        if (!runsTheActiveTab) return;
         tabMgr.updateCurrentTab({ query: sql });
         void queryExec.executeHandedOverStatement(runId, sql);
       }}
@@ -619,14 +732,20 @@ export default function Studio() {
               onLogout={handleLogout}
               onSaveQuery={() => setIsSaveQueryModalOpen(true)}
               onClearQuery={() => tabMgr.updateCurrentTab({ query: "" })}
-              onExecuteQuery={() => queryExec.executeQuery()}
+              onExecuteQuery={() => {
+                if (!runsTheActiveTab) return;
+                queryExec.executeQuery();
+              }}
               onCancelQuery={() => queryExec.cancelQuery()}
               {...transactionHandlers}
               onToggleEditing={onToggleEditing}
               onImport={() => setIsImportModalOpen(true)}
               onExplain={
                 metadata?.capabilities.supportsExplain
-                  ? () => queryExec.executeQuery(undefined, undefined, true)
+                  ? () => {
+                      if (!runsTheActiveTab) return;
+                      queryExec.executeQuery(undefined, undefined, true);
+                    }
                   : undefined
               }
               // Absent while the runtime is off, so the header carries no control
@@ -746,37 +865,94 @@ export default function Studio() {
                   <ResizablePanelGroup id="studio-editor" orientation="vertical">
                     <ResizablePanel id="studio-editor-top" defaultSize="40" minSize="20">
                       <div className="h-full flex flex-col">
-                        <QueryToolbar
-                          activeConnection={conn.activeConnection}
-                          metadata={metadata}
-                          isExecuting={tabMgr.currentTab.isExecuting}
-                          playgroundMode={txn.playgroundMode}
-                          transactionActive={txn.transactionActive}
-                          editingEnabled={editingEnabled}
-                          onSaveQuery={() => setIsSaveQueryModalOpen(true)}
-                          onExecuteQuery={() => queryExec.executeQuery()}
-                          onCancelQuery={() => queryExec.cancelQuery()}
-                          {...transactionHandlers}
-                          onToggleEditing={onToggleEditing}
-                          onImport={() => setIsImportModalOpen(true)}
-                        />
+                        {/*
+                          One branch around the toolbar AND the editor together, so a Source
+                          tab shows no Run button rather than a disabled one: there is nothing
+                          on a definition to run, and a control that is present and refuses is
+                          a worse answer than a control that is not there (#789 Phase 2).
 
-                        <div className="flex-1 relative min-h-0">
-                          <QueryEditor
-                            ref={queryEditorRef}
-                            value={tabMgr.currentTab.query}
-                            onContentChange={(val) => tabMgr.updateTabById(tabMgr.currentTab.id, { query: val })}
-                            onExplain={
-                              metadata?.capabilities.supportsExplain
-                                ? () => queryExec.executeQuery(undefined, undefined, true)
-                                : undefined
-                            }
-                            language={editorLanguageForTabType(tabMgr.currentTab.type)}
-                            databaseType={conn.activeConnection?.type}
-                            schemaContext={conn.schemaContext}
-                            capabilities={metadata?.capabilities}
-                          />
-                        </div>
+                          THE CONNECTION IS NO LONGER PART OF THIS BRANCH, and that conjunct
+                          was the third door onto the same hazard (#789 fix round 1). It read
+                          `|| conn.activeConnection === null` on a docblock arguing the state
+                          was admitted by the type and not reached by the product. It is
+                          reached: a Source tab outlives the connection that opened it, so a
+                          person who deletes the active connection with one open got a tab
+                          labelled `Source: <name>` over an EMPTY, EDITABLE buffer with a live
+                          Run button, which is the composition this whole surface exists to
+                          prevent. The viewer takes a nullable connection and refuses in its
+                          own grammar, so the pane stays a pane and asks the route nothing.
+                        */}
+                        {sourceTab === undefined ? (
+                          <>
+                            <QueryToolbar
+                              activeConnection={conn.activeConnection}
+                              metadata={metadata}
+                              isExecuting={tabMgr.currentTab.isExecuting}
+                              playgroundMode={txn.playgroundMode}
+                              transactionActive={txn.transactionActive}
+                              editingEnabled={editingEnabled}
+                              onSaveQuery={() => setIsSaveQueryModalOpen(true)}
+                              onExecuteQuery={() => queryExec.executeQuery()}
+                              onCancelQuery={() => queryExec.cancelQuery()}
+                              {...transactionHandlers}
+                              onToggleEditing={onToggleEditing}
+                              onImport={() => setIsImportModalOpen(true)}
+                            />
+
+                            <div className="flex-1 relative min-h-0">
+                              <QueryEditor
+                                ref={queryEditorRef}
+                                value={tabMgr.currentTab.query}
+                                onContentChange={(val) => tabMgr.updateTabById(tabMgr.currentTab.id, { query: val })}
+                                onExplain={
+                                  metadata?.capabilities.supportsExplain
+                                    ? () => queryExec.executeQuery(undefined, undefined, true)
+                                    : undefined
+                                }
+                                language={editorLanguageForTabType(tabMgr.currentTab.type)}
+                                databaseType={conn.activeConnection?.type}
+                                schemaContext={conn.schemaContext}
+                                capabilities={metadata?.capabilities}
+                              />
+                            </div>
+                          </>
+                        ) : (
+                          <div className="flex-1 relative min-h-0">
+                            <ObjectSourceView
+                              connection={conn.activeConnection}
+                              path={sourceTab.path}
+                              kind={sourceTab.kind}
+                              /*
+                                The kind's own word from the DECLARATION, falling back to the
+                                id: the viewer never derives a label from an id, and this shell
+                                is where the declaration is held.
+
+                                Both arms of the fallback are reachable and each has its own
+                                test. `metadata` is null until the provider answers, and a
+                                restored Source tab mounts this pane before then; and a
+                                declaration that does not carry the tab's kind, which a
+                                workspace restored against an edited connection produces,
+                                makes `findKind` answer undefined. A blank caption over a
+                                definition is the one thing this line refuses to draw. The
+                                dead `metadata === undefined` half that stood here in round 1
+                                is gone: `useProviderMetadata` answers `ProviderMetadata |
+                                null`, so that arm narrowed nothing (#789 round 1 finding 4).
+                              */
+                              kindLabel={
+                                (metadata === null
+                                  ? undefined
+                                  : findKind(metadata.capabilities, sourceTab.kind)?.label) ?? sourceTab.kind
+                              }
+                              displayName={objectPathLabel(sourceTab.path)}
+                              document={sourceTab.document}
+                              failure={sourceTab.failure}
+                              activePartId={sourceTab.activePartId}
+                              refreshToken={objectRefreshToken}
+                              readAtToken={sourceTab.readAtToken}
+                              onChange={onSourceChange}
+                            />
+                          </div>
+                        )}
                       </div>
                     </ResizablePanel>
                     <ResizableHandle className="h-1 bg-fill hover:bg-brand-tint/20" />
@@ -810,7 +986,10 @@ export default function Studio() {
                         onCellChange={editing.handleCellChange}
                         onApplyChanges={editing.handleApplyChanges}
                         onDiscardChanges={editing.handleDiscardChanges}
-                        onLoadQuery={(q) => tabMgr.updateCurrentTab({ query: q })}
+                        onLoadQuery={(q) => {
+                          if (!runsTheActiveTab) return;
+                          tabMgr.updateCurrentTab({ query: q });
+                        }}
                         onLoadMore={
                           tabMgr.currentTab.result?.pagination?.hasMore ? queryExec.handleLoadMore : undefined
                         }
@@ -1020,12 +1199,17 @@ export default function Studio() {
         onSelectConnection={conn.setActiveConnection}
         onTableClick={onTableClick}
         onAddConnection={() => setIsConnectionModalOpen(true)}
-        onExecuteQuery={() => queryExec.executeQuery()}
+        onExecuteQuery={() => {
+          if (!runsTheActiveTab) return;
+          queryExec.executeQuery();
+        }}
         onLoadSavedQuery={(q) => {
+          if (!runsTheActiveTab) return;
           tabMgr.updateCurrentTab({ query: q });
           queryExec.setBottomPanelMode("results");
         }}
         onLoadHistoryQuery={(q) => {
+          if (!runsTheActiveTab) return;
           tabMgr.updateCurrentTab({ query: q });
           queryExec.setBottomPanelMode("results");
         }}

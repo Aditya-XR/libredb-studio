@@ -329,6 +329,8 @@ knows about it:
 | `procedure` | `routine` | `pg_proc.prokind = 'p'` | |
 | `trigger` | `attached` | `pg_trigger` where `NOT tgisinternal` | `attachedTo: 'table'` |
 
+Five of the seven also declare `hasSource` and a `sourceLanguage`, which is what gives a row a Source tab; [§3.1.5](#315-object-source-789) says which, what each definition text IS, and why `table` and `sequence` declare nothing.
+
 `containerLevels` is one level, `schema`. A `catalog` level is not declared: a `pg` pool is opened
 against one database and nothing in the product can switch it on a live connection, so the level
 would draw a folder with exactly one child forever.
@@ -555,6 +557,107 @@ describeObjects(app, table, limit 10):   10 details, truncated=undefined
 
 Every detail path was found in that kind's own `listObjects()` answer, and every column list matched
 `describeObject()` for the same table column for column.
+
+### 3.1.5 Object source (#789)
+
+`readObjectSource(path, kind, limit?)` answers one object's definition text.
+Five of the seven declared kinds have one, and each declares `hasSource: true` with `sourceLanguage: "pgsql"`.
+
+| Kind | Statement | What the text is | `form` | `origin` |
+|---|---|---|---|---|
+| `view` | `pg_get_viewdef(c.oid, false)` over `pg_class` joined to `pg_namespace`, `relkind = 'v'` | the bare `SELECT`, with no `CREATE` around it | `partial` | `regenerated` |
+| `materialized_view` | the same statement with `relkind = 'm'` | the bare `SELECT` | `partial` | `regenerated` |
+| `function` | `pg_get_functiondef(p.oid)` over `pg_proc`, `prokind = 'f'` | a runnable `CREATE OR REPLACE FUNCTION` | `complete` | `regenerated` |
+| `procedure` | the same statement with `prokind = 'p'` | a runnable `CREATE OR REPLACE PROCEDURE` | `complete` | `regenerated` |
+| `trigger` | `pg_get_triggerdef(t.oid, false)` over `pg_trigger` joined to `pg_class` and `pg_namespace`, `NOT tgisinternal` | a runnable `CREATE TRIGGER` | `complete` | `regenerated` |
+
+**`table` and `sequence` declare nothing, and it is the first of the two absences: the engine publishes no such text at all.**
+There is no `pg_get_tabledef` and no `pg_get_sequencedef`, and `pg_catalog.pg_sequences` publishes a sequence's properties (`start_value`, `increment_by`, `cache_size`) rather than any statement.
+A kind an engine cannot answer for is absent from the declaration and is never declared and then refused, so those two rows offer no Source action at all.
+
+**`origin` is `regenerated` on all five, in PostgreSQL's own words.**
+The documentation calls this family's output "a decompiled reconstruction, not the original text of the command", so none of these five is the text anybody typed: a comment, the original whitespace and the original casing are all gone.
+`view` and `materialized_view` are additionally `partial` because `pg_get_viewdef` answers the `SELECT` and nothing else, which is what the reader is told rather than left to discover.
+
+**The pretty flag is `false` on every call.** PostgreSQL documents that "the default format is more likely to be interpreted the same way by future versions of PostgreSQL; so avoid using pretty-printed output for dump purposes", and this text may be submitted back.
+
+**PostgreSQL has NO privilege-driven refusal for object source. This is MEASURED and it is a CANNOT, not an omission.**
+On PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1), a role holding no `USAGE` on schema `app`, no `EXECUTE` and no `SELECT` read the COMPLETE text of `app.order_total(integer)`, `app.order_summary` and `orders_stamp_updated_at`, in the same session where `SELECT app.order_total(1)` was refused with `permission denied for schema app`.
+The `pg_get_*` family applies no privilege check at all.
+That role is `src_probe` in `docker/postgres-init/03-object-fixture.sql` and it is there so the measurement can be re-run rather than believed.
+
+**The consequence is an implementation rule, and it is the reason these statements pass an oid.**
+The two failures that DO exist are name RESOLUTION and ABSENCE.
+`pg_get_viewdef('app.order_summary'::regclass, false)` raises `ERROR: 42501: permission denied for schema app` for that same role, because the `regclass` and `regprocedure` casts resolve the NAME and name resolution needs `USAGE` on the schema.
+So a provider that casts manufactures a refusal the engine never made, on an object the tree has already listed.
+Every statement above joins `pg_namespace` on the schema NAME, which any caller may read, and hands the catalog's own `oid` to the function.
+
+**Absence RAISES; it is never a refusal part.**
+No row, a NULL definition and a whitespace-only definition are one fact here: the catalog holds no such object at that address.
+Measured: `pg_get_viewdef` answers NULL for an oid that is not a view.
+PostgreSQL utters no sentence for that, so a refusal part would carry OUR silence dressed as the server's answer, and an empty part would put an empty editor over a definition nobody read.
+The raise is a `QueryError` naming the object's own segment.
+
+**Two refusal arms exist for a wire-compatible FORK missing a catalog surface, and NEITHER FORK REACHES THEM.**
+This was measured on both forks on 2026-09-13 and the earlier wording here, "so both arms are reachable", was wrong. The arms fire on SQLSTATE `42883` (the function is absent) and `42703` (`pg_proc.prokind` is absent), which are the codes PostgreSQL 18.4 answers and the shapes the suite pins.
+
+| Fork | `pg_get_viewdef` | `pg_get_functiondef` | `pg_proc.prokind` | `pg_get_triggerdef` | What the provider does |
+|---|---|---|---|---|---|
+| CockroachDB v26.2.5 | works | works | present | works | reads the source. Neither refusal arm is needed |
+| Materialize v26.40.0 | works on a plain view, **NULL on a materialized view** | `XX000` | `XX000` | `XX000` | RAISES on all four, because `XX000` is neither of the two codes and a NULL definition is read as an absence |
+
+Re-run it, one container at a time, with the exact statements this file ships:
+
+```
+docker run -d --name <yours> -p <yours>:26257 cockroachdb/cockroach:v26.2.5 start-single-node --insecure --accept-sql-without-tls
+docker run -d --name <yours> -p <yours>:6875 materialize/materialized:v26.40.0
+psql "postgresql://root@127.0.0.1:<yours>/defaultdb?sslmode=disable"     # CockroachDB
+psql "postgresql://materialize@127.0.0.1:<yours>/materialize?sslmode=disable"   # Materialize
+```
+
+then `\set VERBOSITY verbose` and run each statement from `viewSourceSql()`, `SOURCE_ROUTINE_SQL` and `SOURCE_TRIGGER_SQL`.
+
+CockroachDB v26.2.5 answers every one of them, including `pg_get_functiondef` on a `CREATE FUNCTION` and `p.prokind = 'f'`, so nothing there is refused and nothing there is missing.
+
+Materialize v26.40.0 answers `XX000` for each absent surface, verbatim
+`function "pg_catalog.pg_get_functiondef" does not exist` and `column "p.prokind" does not exist`. `XX000` is `internal_error`, not `undefined_function` or `undefined_column`, so `isMissingCatalogSurface()` does not match and the read RAISES rather than answering a refusal part. The SQLSTATE is the server's and not the harness's: in the same session `SELECT 1/0` answers `22012` and `SELEC 1` answers `42601`, while an unknown table answers `XX000` too.
+
+A third Materialize fact, and it is the sharper one: `pg_get_viewdef` returns **NULL** for a `MATERIALIZED VIEW` (`relkind = 'm'`) while returning the definition for a plain view in the same schema. A NULL definition is read here as an absence, so a materialized view that exists is reported as an object the catalog does not hold.
+
+Widening the arms to `XX000` is NOT an obvious fix and is deliberately not done here: `XX000` is Materialize's generic internal error, so keying on it would turn a real internal failure into this object's refusal, which is the exact confusion the refusal-versus-absence rule exists to prevent. That is a code decision, recorded here rather than taken, and this section is the record: the measurement above is the whole of it, re-runnable with the commands beside it.
+Each is reported as the part's `unavailable`, the server's own sentence unprefixed and NOT passed through `mapDatabaseError()`, for the reason the count refusal gives one section up: the mapper's prefix would put this product's words in front of the server's.
+Measured, and it is why the plain spelling is load-bearing rather than cosmetic: `mapDatabaseError()` returns both sentences above unchanged, and rewrites a message containing "permission denied" into `Authentication failed: ...`.
+Everything else RAISES, including a transport failure, because nobody answering is not the server answering "no", and "Connection terminated unexpectedly" rendered as this object's own refusal is a symptom presented as a fact about the object.
+
+**No identifier escaper, and that is a property of the statements rather than a decision.**
+All five are fully parameterised: the schema, the object's own segment and, for a trigger, its table are binds, and `prokind` is a bind too.
+No caller-supplied name ever reaches statement text on this engine, which is the reason these are preferred over any `SHOW`-shaped alternative.
+
+**Verified end to end against the seeded `postgres:18`**, through the provider itself, connected as `src_probe`, which holds nothing:
+
+```
+view              app.order_summary                   1 part  partial   regenerated  pgsql  606 chars
+materialized_view app.revenue_by_month                1 part  partial   regenerated  pgsql  161 chars
+function          app.order_total(integer)            1 part  complete  regenerated  pgsql  228 chars
+procedure         app.touch_order(integer)            1 part  complete  regenerated  pgsql  185 chars
+trigger           app.orders.orders_stamp_updated_at  1 part  complete  regenerated  pgsql  119 chars
+limit 30 on the function:  30 chars, truncated={"limit":30,
+                           "reason":"the source read was bounded at 30 characters by its caller"}
+app.no_such_view (view):            raises  PostgreSQL holds no view called "no_such_view" in schema "app"
+app.invoice_number_seq (sequence):  raises  PostgreSQL publishes no definition text for the kind "sequence"
+```
+
+Every object `listObjects()` named under each of the five kinds was then read: 4/4 views, 1/1 materialized view, 2/2 functions, 1/1 procedure, 1/1 trigger, nine of nine, all readable text and no refusal.
+A role holding no privilege of any kind read all nine.
+
+**A routine is read by the identity its own listing wrote.**
+The last path segment of a routine is `proname` plus the argument TYPE list, and the source statement compares the SAME expression, `ROUTINE_IDENTITY_EXPR`, which the listing builds the segment with.
+One writer for both, because two copies are two chances for the read to answer "no such routine" for an object the tree had just listed.
+`pg_get_function_identity_arguments()` is not used, for the reason [§3.1.4](#314-what-the-object-surface-declares-and-which-catalog-answers-for-it) gives: it renders parameter names.
+
+**`pgsql` is a real Monaco language id and is no compromise here.**
+It is among the ids the installed `monaco-editor` 0.56.0 registers, unlike `plsql` and `tsql`, which Oracle and SQL Server have to render under `sql`.
+A PL/pgSQL body inside a `$function$` dollar-quoted string is highlighted as PostgreSQL SQL rather than as a procedural language, which is the closest this bundle can come.
 
 ### 3.2 Schema SQL hoisted to module scope
 

@@ -5,7 +5,11 @@
  * before importing the RedisProvider class.
  */
 import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import ts from "typescript";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
+import { isSourcePartUnavailable, sourceBoundTruncationReason } from "@/lib/db/object-kinds";
 import type { DatabaseConnection } from "@/lib/types";
 import { generateTableQuery, generateSelectQuery } from "@/lib/query-generators";
 
@@ -127,6 +131,17 @@ const MOCK_FUNCTION_LIST: unknown[] = [
       ["name", "libredb_echo_key", "description", null, "flags", []],
     ],
   ],
+  // The case-variant sibling `docker/redis-init/01-object-fixture.redis` now loads. The
+  // library dictionary is CASE-SENSITIVE: measured on redis 8.10.0, `libredb_probe` and
+  // `LIBREDB_PROBE` coexist and `FUNCTION LIST` answers both, in this order.
+  [
+    "library_name",
+    "LIBREDB_PROBE",
+    "engine",
+    "LUA",
+    "functions",
+    [["name", "LIBREDB_UPPER_PING", "description", null, "flags", []]],
+  ],
 ];
 
 /**
@@ -138,6 +153,79 @@ const MOCK_FUNCTION_LIST: unknown[] = [
 let functionListReply: unknown[] = MOCK_FUNCTION_LIST;
 
 /**
+ * The library's Lua source, byte for byte what `docker/redis-init/01-object-fixture.redis`
+ * loads. MEASURED on redis 8.10.0: `FUNCTION LIST ... WITHCODE` answers the shebang line and
+ * the body exactly as they were given to `FUNCTION LOAD`, with no reformatting.
+ */
+const FIXTURE_LIBRARY_CODE = [
+  "#!lua name=libredb_probe",
+  "local function echo_key(keys, args)",
+  "  return redis.call('GET', keys[1])",
+  "end",
+  "local function ping(keys, args)",
+  "  return 'pong'",
+  "end",
+  "redis.register_function('libredb_echo_key', echo_key)",
+  "redis.register_function('libredb_ping', ping)",
+].join("\n");
+
+/** The SECOND library, differing from the first ONLY in case. See the reply below. */
+const FIXTURE_UPPER_LIBRARY_CODE = [
+  "#!lua name=LIBREDB_PROBE",
+  "local function upper_ping(keys, args)",
+  "  return 'PONG'",
+  "end",
+  "redis.register_function('LIBREDB_UPPER_PING', upper_ping)",
+].join("\n");
+
+/**
+ * What `FUNCTION LIST LIBRARYNAME libredb_probe WITHCODE` answers, and the reason the reply
+ * carries TWO libraries.
+ *
+ * MEASURED on redis 8.10.0 against the committed fixture: the library dictionary is
+ * CASE-SENSITIVE, so `libredb_probe` and `LIBREDB_PROBE` coexist, while `LIBRARYNAME` is a
+ * CASE-INSENSITIVE glob, so ONE lookup for either name answers BOTH. A reader taking
+ * `reply[0]` would hand back the other library's Lua as this object's definition.
+ *
+ * The wrong library is FIRST here and the live server happened to answer the exact match
+ * first. That is deliberate: reply order is not part of the protocol contract, RESP3 answers
+ * a map with no order at all, and a mock that reproduced the lucky order would certify a
+ * parser that indexes.
+ */
+const MOCK_FUNCTION_WITHCODE: unknown[] = [
+  [
+    "library_name",
+    "LIBREDB_PROBE",
+    "engine",
+    "LUA",
+    "functions",
+    [["name", "LIBREDB_UPPER_PING", "description", null, "flags", []]],
+    "library_code",
+    FIXTURE_UPPER_LIBRARY_CODE,
+  ],
+  [
+    "library_name",
+    "libredb_probe",
+    "engine",
+    "LUA",
+    "functions",
+    [
+      ["name", "libredb_ping", "description", null, "flags", []],
+      ["name", "libredb_echo_key", "description", null, "flags", []],
+    ],
+    "library_code",
+    FIXTURE_LIBRARY_CODE,
+  ],
+];
+
+/**
+ * What a `WITHCODE` read answers, reset before each object-surface test. A test empties it to
+ * stand for a library the server does not hold: measured on redis 8.10.0,
+ * `FUNCTION LIST LIBRARYNAME no_such_library` answers an EMPTY ARRAY rather than an error.
+ */
+let functionWithCodeReply: unknown[] = MOCK_FUNCTION_WITHCODE;
+
+/**
  * When set, `FUNCTION LIST` rejects with this sentence. Three of the four Redis-wire
  * relatives do exactly that and each says it differently (all measured 2026-09-11):
  * KeyDB 6.3.4 "ERR unknown command `FUNCTION`, with args beginning with: `LIST`, ",
@@ -145,6 +233,32 @@ let functionListReply: unknown[] = MOCK_FUNCTION_LIST;
  * Try FUNCTION HELP." and Garnet 2.1.5 "ERR unknown command".
  */
 let functionRefusal: string | null = null;
+
+/**
+ * When set, the `FUNCTION` command rejects the way a TRANSPORT failure does rather than the
+ * way a server refusal does.
+ *
+ * MEASURED against ioredis 5.11.1 and redis 8.10.0 from a container created for this
+ * measurement: a server ERROR REPLY arrives as a `redis-errors` `ReplyError`
+ * (`name === "ReplyError"`), while a dropped socket arrives as a PLAIN `Error` named `Error`,
+ * message "Connection is closed." with the offline queue on and "Stream isn't writeable and
+ * enableOfflineQueue options is false" with it off. The two are different facts and the
+ * provider must not present the second as the server refusing this object (#789).
+ */
+let functionTransportFailure: unknown = null;
+
+/**
+ * A server error reply, shaped as ioredis 5.11.1 delivers one.
+ *
+ * `redis-errors` sets `name` to "ReplyError" on the prototype and ioredis re-exports the
+ * class, so the name is what the provider reads: an `instanceof` against the driver's export
+ * would be `instanceof undefined` here, where `mock.module` replaces the whole module.
+ */
+function replyError(message: string): Error {
+  const error = new Error(message);
+  error.name = "ReplyError";
+  return error;
+}
 
 /** When set, `SCAN` rejects with this sentence, whatever database it was opened on. */
 let scanRefusal: string | null = null;
@@ -254,7 +368,12 @@ mock.module("ioredis", () => {
       }
       if (cmd === "CONFIG") return databasesReply;
       if (cmd === "FUNCTION") {
-        if (functionRefusal !== null) throw new Error(functionRefusal);
+        if (functionTransportFailure !== null) throw functionTransportFailure;
+        if (functionRefusal !== null) throw replyError(functionRefusal);
+        // WITHCODE is the source read and LIST without it is the listing. The two answer
+        // different shapes on a real server and the mock has to as well, or a provider
+        // reading `library_code` off the listing reply would pass.
+        if (args.some((arg) => arg.toUpperCase() === "WITHCODE")) return functionWithCodeReply;
         return functionListReply;
       }
       if (cmd in mockCallResults) {
@@ -1226,7 +1345,9 @@ describe("RedisProvider", () => {
     beforeEach(async () => {
       databasesReply = ["databases", "16"];
       functionListReply = MOCK_FUNCTION_LIST;
+      functionWithCodeReply = MOCK_FUNCTION_WITHCODE;
       functionRefusal = null;
+      functionTransportFailure = null;
       scanRefusal = null;
       scanOverflows = false;
       scanCalls = 0;
@@ -1259,9 +1380,242 @@ describe("RedisProvider", () => {
     test("satisfies the object-surface contract", async () => {
       await assertObjectSurface(provider, {
         containers: Array.from({ length: 16 }, (_, index) => [String(index)]),
-        kinds: { keyspace: 2, function: 1 },
+        kinds: { keyspace: 2, function: 2 },
         sampleObject: { path: ["0", "user:*"], kind: "keyspace" },
+        absentSource: { path: ["0", "no_such_library"], kind: "function" },
       });
+    });
+
+    test("reads a function library's Lua source, selecting the byte-equal name", async () => {
+      const document = await provider.readObjectSource!(["0", "libredb_probe"], "function");
+
+      expect(document.path).toEqual(["0", "libredb_probe"]);
+      expect(document.kind).toBe("function");
+      expect(document.parts).toHaveLength(1);
+      const [part] = document.parts;
+      if (isSourcePartUnavailable(part)) throw new Error("the fixture library is readable");
+      expect(part.id).toBe("definition");
+      expect(part.label).toBe("Definition");
+      expect(part.language).toBe("lua");
+      expect(part.form).toBe("complete");
+      expect(part.origin).toBe("stored");
+      expect(part.truncated).toBeUndefined();
+      expect(part.text).toBe(FIXTURE_LIBRARY_CODE);
+      // The case pair is why the selection is byte-equal: FUNCTION LIST LIBRARYNAME
+      // glob-matches case-INSENSITIVELY over a case-SENSITIVE dictionary, so this reply
+      // carries two libraries and the FIRST of them is the wrong one.
+      expect(part.text).not.toContain("LIBREDB_UPPER_PING");
+      expect(commandsSent()).toContain("FUNCTION LIST LIBRARYNAME libredb_probe WITHCODE");
+    });
+
+    test("bounds one part at the caller's limit and reports the one shared sentence", async () => {
+      const document = await provider.readObjectSource!(["0", "libredb_probe"], "function", 24);
+      const [part] = document.parts;
+      if (isSourcePartUnavailable(part)) throw new Error("the fixture library is readable");
+
+      expect(part.text).toBe(FIXTURE_LIBRARY_CODE.slice(0, 24));
+      expect(part.truncated).toEqual({ limit: 24, reason: sourceBoundTruncationReason(24) });
+    });
+
+    test("raises for a library the server does not hold, because an empty reply is absence", async () => {
+      // Measured on redis 8.10.0: FUNCTION LIST LIBRARYNAME no_such_library WITHCODE answers
+      // an EMPTY ARRAY rather than an error, so emptiness is absence to whatever asks.
+      functionWithCodeReply = [];
+      await expect(provider.readObjectSource!(["0", "no_such_library"], "function")).rejects.toThrow(/no_such_library/);
+    });
+
+    test("raises for a kind that declares no source, so keyspace never reaches an editor", async () => {
+      // The `tablesAreDerivedGroupings` refusal carried into the object model: a key prefix
+      // is a grouping this server derived from a bounded SCAN and nobody wrote a definition
+      // for it. The refusal is driven off the DECLARATION and never off the kind id.
+      await expect(provider.readObjectSource!(["0", "user:*"], "keyspace")).rejects.toThrow(
+        /no readable source for the kind "keyspace"/,
+      );
+    });
+
+    test("raises for a kind this engine does not declare at all", async () => {
+      await expect(provider.readObjectSource!(["0", "x"], "procedure")).rejects.toThrow(
+        /no readable source for the kind "procedure"/,
+      );
+    });
+
+    test("carries the server's own refusal when the ACL denies FUNCTION", async () => {
+      // MEASURED on redis 8.10.0 as the ACL user `libredb_nofunction` the fixture creates.
+      functionRefusal = "NOPERM User libredb_nofunction has no permissions to run the 'function|list' command";
+      const document = await provider.readObjectSource!(["0", "libredb_probe"], "function");
+      const [part] = document.parts;
+
+      if (!isSourcePartUnavailable(part)) throw new Error("a denied read is a refusal");
+      expect(part.unavailable).toBe(
+        "NOPERM User libredb_nofunction has no permissions to run the 'function|list' command",
+      );
+      expect("text" in part).toBe(false);
+    });
+
+    /*
+      A REFUSAL is the server answering "no". A TRANSPORT failure is nobody answering at all,
+      and the two must not arrive at the same pane. MEASURED against ioredis 5.11.1 and redis
+      8.10.0: a dropped socket rejects with a PLAIN Error reading "Connection is closed.",
+      while an ACL denial rejects with a `ReplyError`. A bare `catch` around the command turns
+      the first into a Source pane reading "Connection is closed." presented as this object's
+      own refusal, with no raise, no retry affordance and nothing in the document telling it
+      apart from a real NOPERM. It raises instead, and the fifteen providers copying this arm
+      copy the distinction with it.
+    */
+    test("a dropped connection RAISES rather than being presented as the server's refusal", async () => {
+      functionTransportFailure = new Error("Connection is closed.");
+
+      await expect(provider.readObjectSource!(["0", "libredb_probe"], "function")).rejects.toThrow(
+        /Failed to read the Redis function library "libredb_probe": Connection is closed\./,
+      );
+    });
+
+    test("a rejection that is not an Error at all raises too, rather than becoming a refusal sentence", async () => {
+      // A driver is free to reject with something that is not an `Error`, and the class check
+      // must not read that as a server reply by omission.
+      functionTransportFailure = "socket hang up";
+
+      await expect(provider.readObjectSource!(["0", "libredb_probe"], "function")).rejects.toThrow(
+        /Failed to read the Redis function library "libredb_probe": socket hang up/,
+      );
+    });
+
+    test("a library whose code the server withheld is absence rather than an empty definition", async () => {
+      // The entry matches by name and carries no `library_code`. Answering a part with an
+      // empty text would put an empty editor over a definition that was never read, which is
+      // the DBeaver shape this contract exists to make unrepresentable.
+      functionWithCodeReply = [["library_name", "libredb_probe", "engine", "LUA"]];
+      await expect(provider.readObjectSource!(["0", "libredb_probe"], "function")).rejects.toThrow(/libredb_probe/);
+    });
+
+    test("a library the server answers with an EMPTY code is absence, not an empty definition", async () => {
+      // Distinct from the entry that carries no `library_code` at all: this one carries the
+      // key with nothing in it, which is the shape a reader would most easily hand to an
+      // editor as a blank buffer.
+      functionWithCodeReply = [["library_name", "libredb_probe", "engine", "LUA", "library_code", "   "]];
+      await expect(provider.readObjectSource!(["0", "libredb_probe"], "function")).rejects.toThrow(
+        /Redis holds no function library called "libredb_probe"/,
+      );
+    });
+
+    test("the part's language is the kind's DECLARED sourceLanguage, not a literal", async () => {
+      spyOn(provider, "getCapabilities").mockReturnValue({
+        ...provider.getCapabilities(),
+        objectKinds: [
+          { id: "keyspace", role: "relation", label: "Key Pattern", labelPlural: "Key Patterns" },
+          {
+            id: "function",
+            role: "routine",
+            label: "Function Library",
+            labelPlural: "Function Libraries",
+            hasSource: true,
+            sourceLanguage: "luau",
+          },
+        ],
+      } as ReturnType<typeof provider.getCapabilities>);
+
+      const document = await provider.readObjectSource!(["0", "libredb_probe"], "function");
+      const [part] = document.parts;
+      if (isSourcePartUnavailable(part)) throw new Error("the fixture library is readable");
+      expect(part.language).toBe("luau");
+    });
+
+    /*
+      A source-bearing kind that declares no `sourceLanguage` RAISES, and this test replaces
+      one that asserted the opposite (#789, the external review of PR #820). The old arm read
+      `spec.sourceLanguage ?? "lua"`. Counted across the fleet at that point: nine of the
+      eleven providers that read source threw here and exactly two fell back, this one and
+      `oracle.ts`. A fallback in two of eleven is not a safety net, because the census in
+      `tests/isolated/object-source-declarations.test.ts` pins every declared language, so the
+      only way to reach the arm is a declaration somebody deleted - and the literal then hides
+      that deletion behind a Source tab that still highlights.
+    */
+    test("a source-bearing kind that declares no language RAISES rather than falling back to a literal", async () => {
+      spyOn(provider, "getCapabilities").mockReturnValue({
+        ...provider.getCapabilities(),
+        objectKinds: [
+          { id: "keyspace", role: "relation", label: "Key Pattern", labelPlural: "Key Patterns" },
+          {
+            id: "function",
+            role: "routine",
+            label: "Function Library",
+            labelPlural: "Function Libraries",
+            hasSource: true,
+          },
+        ],
+      } as ReturnType<typeof provider.getCapabilities>);
+
+      await expect(provider.readObjectSource!(["0", "libredb_probe"], "function")).rejects.toThrow(
+        /Redis declares readable source for the kind "function" and no sourceLanguage to render it with/,
+      );
+      // Nothing was sent: the declaration is checked before the round trip, so a lost
+      // language cannot cost a command either.
+      expect(commandsSent()).not.toContain("FUNCTION LIST LIBRARYNAME libredb_probe WITHCODE");
+    });
+
+    /*
+      THE PATH SHAPE, which `describeObject` has checked since Phase 1 and this method did
+      not (#789, the external review of PR #820). The HTTP route bounds an empty path, but
+      this METHOD is published through `@libredb/studio`, is reached by the embedded host
+      seam and by the conformance helper, and none of those three sees the route. Without the
+      check, `path[path.length - 1]` on an empty path is `undefined` and the provider sends
+      `FUNCTION LIST LIBRARYNAME undefined`.
+
+      Both directions are driven, because a length check written as `<` or as `>` passes one
+      of them: a path SHORTER than the declaration allows and a path LONGER than it allows.
+    */
+    test("a path that is not [database, name] is refused, in describeObject's own words", async () => {
+      await expect(provider.readObjectSource!([], "function")).rejects.toThrow(
+        'A Redis "function" path is [database, name], received []',
+      );
+      await expect(provider.readObjectSource!(["libredb_probe"], "function")).rejects.toThrow(
+        'A Redis "function" path is [database, name], received ["libredb_probe"]',
+      );
+      await expect(provider.readObjectSource!(["0", "sub", "libredb_probe"], "function")).rejects.toThrow(
+        'A Redis "function" path is [database, name], received ["0","sub","libredb_probe"]',
+      );
+      // Vacuity control: the same method on a WELL-SHAPED path still reads the library, so
+      // the three refusals above are the shape check and not a broken fixture.
+      expect((await provider.readObjectSource!(["0", "libredb_probe"], "function")).parts).toHaveLength(1);
+    });
+
+    test("the refused shape follows the DECLARED levels, so a two-level declaration accepts three segments", async () => {
+      // The message and the bound both come from `declaredLevels`, never from a literal 2.
+      spyOn(provider, "getCapabilities").mockReturnValue({
+        ...provider.getCapabilities(),
+        containerLevels: [
+          { id: "catalog", label: "Catalog", labelPlural: "Catalogs" },
+          { id: "schema", label: "Database", labelPlural: "Databases" },
+        ],
+      } as ReturnType<typeof provider.getCapabilities>);
+
+      await expect(provider.readObjectSource!(["0", "libredb_probe"], "function")).rejects.toThrow(
+        'A Redis "function" path is [catalog, database, name], received ["0","libredb_probe"]',
+      );
+      expect((await provider.readObjectSource!(["main", "0", "libredb_probe"], "function")).parts).toHaveLength(1);
+    });
+
+    /**
+     * Standing ruling 5g, pinned on a one-level engine (#789).
+     *
+     * The declaration is swapped for a two-level one and the read is driven all the way to
+     * the NAME it selects by. A provider taking `path[1]` is behaviour-identical at depth 1
+     * and silently wrong here, and a provider hardcoding the depth would refuse a path it
+     * must accept.
+     */
+    test("the library name comes from the declared depth, not from a fixed position", async () => {
+      spyOn(provider, "getCapabilities").mockReturnValue({
+        ...provider.getCapabilities(),
+        containerLevels: [
+          { id: "catalog", label: "Catalog", labelPlural: "Catalogs" },
+          { id: "schema", label: "Database", labelPlural: "Databases" },
+        ],
+      } as ReturnType<typeof provider.getCapabilities>);
+
+      const document = await provider.readObjectSource!(["main", "0", "libredb_probe"], "function");
+
+      expect(document.path).toEqual(["main", "0", "libredb_probe"]);
+      expect(commandsSent()).toContain("FUNCTION LIST LIBRARYNAME libredb_probe WITHCODE");
     });
 
     test("the container list is the deployment's own database count, not a constant 16", async () => {
@@ -1293,13 +1647,13 @@ describe("RedisProvider", () => {
     test("counts both kinds, seeded at zero before either read answers", async () => {
       const counts = await provider.countObjects(["0"]);
 
-      expect(counts).toEqual({ keyspace: { count: 2 }, function: { count: 1 } });
+      expect(counts).toEqual({ keyspace: { count: 2 }, function: { count: 2 } });
       expect(commandsSent()).toContain("FUNCTION LIST");
     });
 
     test("an empty database counts zero rather than losing its folders", async () => {
       const counts = await provider.countObjects(["7"]);
-      expect(counts).toEqual({ keyspace: { count: 0 }, function: { count: 1 } });
+      expect(counts).toEqual({ keyspace: { count: 0 }, function: { count: 2 } });
     });
 
     // Measured on three of the four Redis-wire relatives, each with its own sentence.
@@ -1324,7 +1678,7 @@ describe("RedisProvider", () => {
 
       expect(counts).toEqual({
         keyspace: { count: 3, sampledFrom: "the first 1,000 keys of one SCAN walk" },
-        function: { count: 1 },
+        function: { count: 2 },
       });
     });
 
@@ -1345,7 +1699,7 @@ describe("RedisProvider", () => {
 
       expect(counts).toEqual({
         keyspace: { unavailable: "NOPERM this user has no permissions to run the 'scan' command" },
-        function: { count: 1 },
+        function: { count: 2 },
       });
     });
 
@@ -1370,7 +1724,12 @@ describe("RedisProvider", () => {
     test("lists function libraries by their library_name, not by position", async () => {
       const objects = await provider.listObjects(["0"], "function");
 
-      expect(objects).toEqual([{ path: ["0", "libredb_probe"], name: "libredb_probe", kind: "function" }]);
+      // Sorted by `comparePaths`, which orders the segments: "LIBREDB_PROBE" precedes
+      // "libredb_probe" because the code units do.
+      expect(objects).toEqual([
+        { path: ["0", "LIBREDB_PROBE"], name: "LIBREDB_PROBE", kind: "function" },
+        { path: ["0", "libredb_probe"], name: "libredb_probe", kind: "function" },
+      ]);
       expect(commandsSent()).toContain("FUNCTION LIST");
     });
 
@@ -1721,5 +2080,60 @@ describe("RedisProvider", () => {
       expect(batch.details[0].columns.map((column) => column.name)).toEqual(["key", "value", "type"]);
       expect(capturedRedisOptions[capturedRedisOptions.length - 1].db).toBe(3);
     });
+  });
+});
+
+/**
+ * Every module-private function in this provider carries its OWN doc comment (#789).
+ *
+ * A guard and not a review note, because the defect it catches is invisible to both linters
+ * this repository runs. A new function inserted BETWEEN an existing docblock and the function
+ * that block documents leaves the original function undocumented and silently re-attributes
+ * the measurement to a different function. Neither Biome nor oxlint nor ESLint reads comment
+ * adjacency at all, and it happened here: `isServerErrorReply` landed between
+ * `parseFunctionLibraryCode`'s block and `parseFunctionLibraryCode`.
+ *
+ * Measured with the TypeScript compiler API rather than by reading the text, because the
+ * compiler resolves a block to the declaration it ACTUALLY attaches to, which is the whole
+ * question. `ts.getJSDocCommentsAndTags` over the real file on disk, the same mechanism the
+ * seven provider seam guards under `tests/unit/db` use.
+ *
+ * The blocks in this file are the only record of why the library selection is byte-equal and
+ * why a reply's pairs are walked rather than indexed, and this is the reference implementation
+ * fifteen provider tasks copy.
+ */
+describe("the Redis provider's own doc comments", () => {
+  const FILE = join(import.meta.dir, "..", "..", "..", "src", "lib", "db", "providers", "keyvalue", "redis.ts");
+  const source = ts.createSourceFile(FILE, readFileSync(FILE, "utf8"), ts.ScriptTarget.Latest, true);
+  const functions = source.statements.filter(ts.isFunctionDeclaration);
+  const blocksOf = (declaration: ts.FunctionDeclaration) => ts.getJSDocCommentsAndTags(declaration).filter(ts.isJSDoc);
+
+  test("no module-private function is left undocumented by a block that moved on to another", () => {
+    // Non-vacuity first: a guard over an empty enumeration passes forever, and this one reads
+    // a file it does not own the shape of.
+    const names = functions.map((declaration) => declaration.name?.text);
+    expect(names).toContain("parseFunctionLibraryCode");
+    expect(names).toContain("isServerErrorReply");
+    expect(functions.length).toBeGreaterThan(5);
+
+    const undocumented = functions
+      .filter((declaration) => blocksOf(declaration).length === 0)
+      .map((declaration) => declaration.name?.text ?? "<anonymous>");
+    expect(undocumented).toEqual([]);
+  });
+
+  test("the byte-equal selection rule is attached to the function that implements it", () => {
+    // The block names a rule about ONE function's behaviour, so it is worth nothing on any
+    // other: a reader asking why `reply[0]` is wrong for a WITHCODE reply finds it here or
+    // nowhere.
+    const declaration = functions.find((entry) => entry.name?.text === "parseFunctionLibraryCode");
+    if (declaration === undefined) throw new Error("parseFunctionLibraryCode is gone from the provider");
+
+    const documented = blocksOf(declaration)
+      .map((block) => block.getText(source))
+      .join("\n");
+
+    expect(documented).toContain("BYTE-EQUAL");
+    expect(documented).toContain("01-object-fixture.redis");
   });
 });

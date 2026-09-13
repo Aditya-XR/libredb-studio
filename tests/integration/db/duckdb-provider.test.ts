@@ -20,12 +20,12 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DuckDBProvider, assertReadOnlyStatementIsBounded } from "@/lib/db/providers/sql/duckdb";
 import type { DatabaseConnection } from "@/lib/types";
-import type { ProviderCapabilities, ReadOnlyStatementBudget } from "@/lib/db/types";
+import type { ObjectKindSpec, ObjectSourceForm, ProviderCapabilities, ReadOnlyStatementBudget } from "@/lib/db/types";
 import {
   FUNCTION_TYPE_RULES,
   OBJECT_COLUMNS_SQL,
@@ -33,12 +33,22 @@ import {
   bulkTargetSql,
   countsSql,
   listObjectsSql,
+  objectSourceForm,
+  objectSourceOrigin,
+  objectSourceSql,
   seedZeroCounts,
 } from "@/lib/db/providers/sql/duckdb/objects";
 import { ConnectionError, DatabaseConfigError, ExecutionProfileError, QueryError } from "@/lib/db/errors";
+import { isSourcePartUnavailable, sourceBoundTruncationReason } from "@/lib/db/object-kinds";
 import { CACHE_HIT_RATIO_UNAVAILABLE } from "@/lib/monitoring-cache-ratio";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 import { comparePaths } from "@/lib/db/object-path";
+import {
+  WAREHOUSE_PLACEHOLDER,
+  readFixtureStatements,
+  removeDatabaseFile,
+  warehouseSibling,
+} from "../../../docker/duckdb-init/build-fixture";
 
 // ============================================================================
 // Helpers
@@ -1093,6 +1103,12 @@ describe("the read-only denylist against duckdb_functions()", () => {
 /**
  * The object-surface fixture, built in a real engine rather than mocked.
  *
+ * THE DDL IS `docker/duckdb-init/01-object-fixture.sql` and is replayed from there (#789).
+ * It used to be written inline here, which made every measurement in this file
+ * un-reproducible outside a test run - the shape standing ruling 5i forbids. The same file
+ * builds a database FILE a person can point Studio at:
+ * `bun docker/duckdb-init/build-fixture.ts`.
+ *
  * DuckDB is embedded, so every row below is the ENGINE's answer and not a canned
  * recordset: `ATTACH ':memory:' AS warehouse` gives a second real catalog in the same
  * process, which is what makes this the only provider in #789 whose two container levels
@@ -1109,49 +1125,82 @@ describe("the read-only denylist against duckdb_functions()", () => {
 async function seededObjectProvider(): Promise<DuckDBProvider> {
   const provider = new DuckDBProvider(makeConfig());
   await provider.connect();
-
-  await provider.query("CREATE SCHEMA analytics");
-  await provider.query(
-    "CREATE TABLE main.customers (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, note VARCHAR DEFAULT 'none')",
-  );
-  await provider.query(
-    "CREATE TABLE main.orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES main.customers(id), total DECIMAL(12,2))",
-  );
-  await provider.query("CREATE INDEX ix_orders_customer ON main.orders(customer_id)");
-  await provider.query("CREATE TABLE analytics.events (id BIGINT, payload VARCHAR)");
-  // Two SAME-NAMED tables in two schemas, with different columns and an index each. This
-  // is what a detail read's schema filter is for: without it `main.customers` and
-  // `analytics.customers` merge, and the merged answer is a table with columns it does
-  // not have rather than an error anybody would notice.
-  await provider.query("CREATE TABLE analytics.customers (event_id BIGINT)");
-  await provider.query("CREATE TABLE analytics.orders (id INTEGER)");
-  await provider.query("CREATE INDEX ix_orders_customer ON analytics.orders(id)");
-  await provider.query("CREATE VIEW main.customer_names AS SELECT name FROM main.customers");
-  await provider.query("CREATE VIEW analytics.event_days AS SELECT id FROM analytics.events");
-  await provider.query("CREATE MACRO main.add_one(x) AS x + 1");
-  await provider.query("CREATE MACRO analytics.recent_events(n) AS TABLE SELECT * FROM analytics.events LIMIT n");
-  await provider.query("CREATE SEQUENCE main.customer_seq START 1");
-  await provider.query("CREATE SEQUENCE analytics.event_seq START 100");
-
-  // One name, three kinds, in one schema. Measured, not assumed - see the docblock.
-  await provider.query("CREATE TABLE main.overlap (id INTEGER)");
-  await provider.query("CREATE SEQUENCE main.overlap");
-  await provider.query("CREATE MACRO main.overlap(x) AS x");
-
-  // A second real catalog, with a schema set of its own and no routine or sequence, so a
-  // declared-and-empty folder has somewhere to be measured.
-  await provider.query("ATTACH ':memory:' AS warehouse");
-  await provider.query("CREATE SCHEMA warehouse.stock");
-  await provider.query("CREATE TABLE warehouse.main.ledger (id INTEGER)");
-  // Same SCHEMA name, same TABLE name, different CATALOG. This is the two-level engine's
-  // characteristic case and the only thing that can show the catalog filter working: a
-  // detail read that dropped `database_name = $1` would merge `memory.main.customers`
-  // with this one and report a table with columns from both.
-  await provider.query("CREATE TABLE warehouse.main.customers (sku VARCHAR)");
-  await provider.query("CREATE TABLE warehouse.stock.items (sku VARCHAR)");
-
+  // Replayed from the committed fixture rather than written here, which is standing ruling
+  // 5i (#789): the DDL these assertions reason about has to be something a person outside
+  // this test run can apply. `:memory:` for the second catalog, because this provider's own
+  // database is in-process too and a file would outlive the test.
+  for (const statement of readFixtureStatements(":memory:")) await provider.query(statement);
   return provider;
 }
+
+/**
+ * The fixture READER's own guards, which every assertion in this file rests on (#789).
+ *
+ * `readFixtureStatements` is the only thing standing between this suite and a silently
+ * empty database, and each of its three throws guards a ZERO that would otherwise pass:
+ * zero statements builds an empty database and every count below then reads zero against
+ * zero; zero substitutions sends DuckDB the literal string `{{warehouse}}` as a file PATH,
+ * which v1.5.5 accepts, creating a file of that name in the working directory while the
+ * suite still sees two catalogs; and a blank target is the same shape one step further
+ * along. None of the three is an error the engine reports, which is why they are asserted
+ * here rather than left to a failing read.
+ */
+describe("the committed DuckDB fixture", () => {
+  test("reads as statements, substitutes the second catalog, and names it in the ATTACH", () => {
+    const statements = readFixtureStatements("/tmp/warehouse-under-test.duckdb");
+
+    expect(statements.length).toBeGreaterThan(15);
+    // No statement carries a trailing semicolon and none is blank: the reader strips the
+    // terminator, and a blank statement is what a stray `;` line would produce.
+    expect(statements.filter((statement) => statement.endsWith(";") || statement.trim() === "")).toEqual([]);
+    // No comment line survives, in either position.
+    expect(statements.filter((statement) => statement.includes("--"))).toEqual([]);
+    expect(statements.filter((statement) => statement.includes(WAREHOUSE_PLACEHOLDER))).toEqual([]);
+    expect(statements).toContain("ATTACH '/tmp/warehouse-under-test.duckdb' AS warehouse");
+  });
+
+  test("a fixture file carrying no placeholder, a blank target and an empty file each raise by name", () => {
+    const empty = join(workDir, "empty-fixture-task11.sql");
+    writeFileSync(empty, "-- nothing but a comment\n");
+    const placeholderless = join(workDir, "placeholderless-fixture-task11.sql");
+    writeFileSync(placeholderless, "CREATE TABLE t (id INTEGER);\n");
+
+    expect(() => readFixtureStatements("")).toThrow(/the warehouse target is blank/);
+    expect(() => readFixtureStatements("   ")).toThrow(/the warehouse target is blank/);
+    expect(() => readFixtureStatements(":memory:", empty)).toThrow(/yielded no statement/);
+    expect(() => readFixtureStatements(":memory:", placeholderless)).toThrow(
+      /carries no \{\{warehouse\}\} to substitute/,
+    );
+  });
+
+  test("the warehouse sibling is derived from the target, so a file build holds both catalogs", () => {
+    expect(warehouseSibling("/tmp/demo.duckdb")).toBe("/tmp/demo.duckdb.warehouse.duckdb");
+  });
+
+  /**
+   * The builder's delete swallows ABSENCE and nothing else (#789).
+   *
+   * `removeDatabaseFile` exists so a second run produces a database identical to the first,
+   * and the only failure it is entitled to ignore is the file already not being there. A
+   * catch with no condition also ignores a refused unlink, and then `buildObjectFixture`
+   * opens the STALE database, replays the fixture DDL on top of it and fails with a catalog
+   * error naming an object rather than the file it could not delete. The house rule is that
+   * an error is raised explicitly and a fallback is asked for rather than assumed.
+   *
+   * A directory is the cheapest real non-ENOENT unlink failure: measured on this machine,
+   * `unlinkSync` on one raises `EISDIR`. The `.wal` and warehouse siblings of that path do
+   * not exist, so the same call also proves the ENOENT arm stays silent.
+   */
+  test("a delete refused for a reason other than absence raises rather than reporting success", () => {
+    const undeletable = join(workDir, "undeletable-task11");
+    mkdirSync(undeletable, { recursive: true });
+
+    expect(() => removeDatabaseFile(undeletable)).toThrow(/EISDIR|EPERM|EACCES/);
+    // The control: the same function over a path where NOTHING exists is silent, so the
+    // raise above is the refusal and not merely "unlink threw".
+    expect(() => removeDatabaseFile(join(workDir, "nothing-of-this-name-task11.duckdb"))).not.toThrow();
+  });
+});
 
 /** Every catalog the fixture above answers `listContainers()` with, in order. */
 const FIXTURE_CATALOGS = [["memory"], ["warehouse"]];
@@ -1186,6 +1235,44 @@ describe("object surface", () => {
     ]);
   });
 
+  /**
+   * Every kind DuckDB declares has a definition text, so the second expectation is empty
+   * (#789).
+   *
+   * BOTH DIRECTIONS, because one of them is the only thing stopping a kind added later
+   * from quietly gaining a Source tab it has no read behind. The empty half is a real
+   * assertion here rather than a formality: DuckDB is one of the engines where every
+   * declared kind is source-bearing, and the day somebody declares a `secret` kind
+   * (`duckdb_secrets()` is real and deliberately not declared - see the capabilities
+   * docblock) this test is what refuses it until a read exists.
+   *
+   * All four are `sql` and not a dialect id. `plsql`, `tsql` and `cql` are not registrable
+   * ids in the installed monaco-editor 0.56.0 bundle and DuckDB has no id of its own
+   * either, so `sql` is the honest choice rather than a compromise here: DuckDB's dialect
+   * is PostgreSQL-shaped and the text the engine publishes is ordinary SQL.
+   */
+  test("declares source on exactly the kinds that have a definition text", () => {
+    const kinds = new DuckDBProvider(makeConfig()).getCapabilities().objectKinds ?? [];
+    const declared = kinds
+      .filter((kind) => kind.hasSource === true)
+      .map((kind) => [kind.id, kind.sourceLanguage] as const)
+      .sort();
+
+    expect(declared).toEqual([
+      ["macro", "sql"],
+      ["sequence", "sql"],
+      ["table", "sql"],
+      ["view", "sql"],
+    ]);
+    // The other direction, so a kind added later cannot quietly gain a Source tab.
+    expect(
+      kinds
+        .filter((kind) => kind.hasSource !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual([]);
+  });
+
   test("satisfies the shared object surface contract", async () => {
     const provider = await seededObjectProvider();
     try {
@@ -1193,6 +1280,12 @@ describe("object surface", () => {
         containers: FIXTURE_CATALOGS,
         kinds: FIXTURE_CATALOG_COUNTS,
         sampleObject: { path: ["memory", "main", "orders"], kind: "table" },
+        // A name no object of any kind carries, under a kind the loop above really read,
+        // so the raise it drives has a positive control (#789). `macro` deliberately:
+        // it is the one kind whose catalog function carries a predicate of its own, so a
+        // read that dropped `function_type IN (...)` would answer a built-in scalar
+        // function's row here rather than nothing.
+        absentSource: { path: ["memory", "main", "no_such_macro"], kind: "macro" },
       });
     } finally {
       await provider.disconnect();
@@ -2191,6 +2284,76 @@ describe("DuckDB object paths are derived from the declaration, never from a pos
     }
   });
 
+  /**
+   * The SOURCE read's own derivation pin (recipe rule 9, #789).
+   *
+   * A declaration that is ALREADY two-level makes the standing-ruling-5g `spyOn` pass for an
+   * implementation hardcoding `catalog = path[0]` and `schema = path[1]`, because the
+   * swapped-in declaration matches the real one. Task 9 (mssql) named the answer: a SECOND
+   * declaration that swaps the two levels OVER and feeds a path in the swapped order, where
+   * the same three values must still reach the server. Both are written here, and both are
+   * driven to a BOUND VALUE against a real engine rather than to a refusal.
+   *
+   * The crossed fixture is what makes the bound value visible: `alpha.beta.pin` and
+   * `beta.alpha.pin` are two different real tables, so a positional read answers the WRONG
+   * DEFINITION rather than nothing, and the column name inside the text tells them apart.
+   */
+  test("the SOURCE read binds the container by level, under the real declaration and under a swapped one", async () => {
+    const provider = await crossedProvider();
+    try {
+      const definition = async (target: readonly string[]): Promise<string> => {
+        const [part] = (await provider.readObjectSource!(target, "table")).parts;
+        if (isSourcePartUnavailable(part)) throw new Error("narrowing");
+        return part.text;
+      };
+
+      // The control, under the declaration DuckDB really ships. Without it a positional read
+      // and a derived one could agree by accident and the pin would certify nothing.
+      expect(await definition(["alpha", "beta", "pin"])).toContain("from_alpha_beta");
+      expect(await definition(["beta", "alpha", "pin"])).toContain("from_beta_alpha");
+
+      withLevels(provider, [
+        { id: "schema", label: "Schema", labelPlural: "Schemas" },
+        { id: "catalog", label: "Database", labelPlural: "Databases" },
+      ]);
+
+      // `["beta", "alpha", "pin"]` now means schema `beta` in catalog `alpha`, so the object
+      // it addresses is `alpha.beta.pin`. A provider binding `path[0]` as the catalog answers
+      // `from_beta_alpha` here, which is a different real table rather than an error.
+      expect(await definition(["beta", "alpha", "pin"])).toContain("from_alpha_beta");
+      expect(await definition(["alpha", "beta", "pin"])).toContain("from_beta_alpha");
+      // The absence message names the container in the DECLARED order too, so a reader is
+      // told which object was looked for rather than which position was read.
+      await expect(provider.readObjectSource!(["beta", "alpha", "gone"], "table")).rejects.toThrow(
+        "No DuckDB table named gone in alpha.beta",
+      );
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  test("a ONE-level declaration leaves the SOURCE read no schema to bind, and it says so", async () => {
+    const provider = await crossedProvider();
+    try {
+      withLevels(provider, [{ id: "catalog", label: "Database", labelPlural: "Databases" }]);
+
+      // Two segments is the whole path shape at one level, so the shape check passes and the
+      // read reaches the segment lookup, which raises NAMING the level rather than binding
+      // `undefined` - which this driver answers with "Cannot create values of type ANY", a
+      // sentence about neither the level nor the path.
+      await expect(provider.readObjectSource!(["alpha", "pin"], "table")).rejects.toThrow(
+        "DuckDB declares no schema level to read this path's segment from",
+      );
+      // And a three-segment path is now one segment too long, refused in the declaration's
+      // own words.
+      await expect(provider.readObjectSource!(["alpha", "beta", "pin"], "table")).rejects.toThrow(
+        'A DuckDB "table" path is [database, name], received ["alpha","beta","pin"]',
+      );
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
   test("a kind declaring attachedTo is refused, because DuckDB holds no attached object", async () => {
     const provider = await crossedProvider();
     try {
@@ -2223,6 +2386,452 @@ describe("DuckDB object paths are derived from the declaration, never from a pos
         "A DuckDB container path is nothing: this declaration carries no container level, received []",
       );
       expect(await provider.listContainers(["alpha"])).toEqual([]);
+    } finally {
+      await provider.disconnect();
+    }
+  });
+});
+
+/**
+ * The object SOURCE read (#789), against the real embedded engine.
+ *
+ * Every text asserted below is DuckDB v1.5.5's own answer over
+ * `docker/duckdb-init/01-object-fixture.sql`, so a reader can rebuild the database these
+ * assertions were taken from with one command.
+ */
+describe("DuckDB object source", () => {
+  /**
+   * One entry per source-bearing kind, and the POPULATION is checked against the
+   * DECLARATION rather than trusted (recipe rule 6, #789).
+   *
+   * Task 8 measured the failure this shape exists for: a wrong reply COLUMN reads as
+   * `undefined`, the provider correctly turns that into a REFUSAL, and a refusal passes the
+   * conformance walk, passes a whole-statement pin and passes every count and length
+   * assertion. Only reading the TEXT per kind notices. So the text is pinned whole, and the
+   * kinds are taken from `getCapabilities()` so a kind that gains `hasSource` without an
+   * entry here fails by name instead of going unread.
+   */
+  const EXPECTED_SOURCE: Readonly<
+    Record<string, { readonly path: readonly string[]; readonly text: string; readonly form: ObjectSourceForm }>
+  > = {
+    table: {
+      path: ["memory", "main", "orders"],
+      text:
+        "CREATE TABLE orders(id INTEGER PRIMARY KEY, customer_id INTEGER, total DECIMAL(12,2), " +
+        "FOREIGN KEY (customer_id) REFERENCES customers(id));",
+      form: "complete",
+    },
+    view: {
+      path: ["memory", "main", "customer_names"],
+      text: 'CREATE VIEW customer_names AS SELECT "name" FROM main.customers;',
+      form: "complete",
+    },
+    sequence: {
+      path: ["memory", "main", "customer_seq"],
+      text: "CREATE SEQUENCE customer_seq INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START 1 NO CYCLE;",
+      form: "complete",
+    },
+    macro: {
+      path: ["memory", "analytics", "recent_events"],
+      text: "SELECT * FROM analytics.events LIMIT n",
+      form: "partial",
+    },
+  };
+
+  /** Replace the reply to the SOURCE statement only, leaving every other read real. */
+  function answerSourceReadWith(provider: DuckDBProvider, rows: Record<string, unknown>[]): void {
+    const client = (
+      provider as unknown as {
+        client: { run: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> };
+      }
+    ).client;
+    const real = client.run.bind(client);
+    spyOn(client, "run").mockImplementation(async (sql: string, params?: unknown[]) =>
+      sql.includes("AS definition")
+        ? { columnNames: ["definition"], columnTypes: ["VARCHAR"], rows, rowsChanged: 0 }
+        : real(sql, params),
+    );
+  }
+
+  test("reads the definition of every source-bearing kind and says what each text is", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      const kinds = (provider.getCapabilities().objectKinds ?? []).filter((kind) => kind.hasSource === true);
+      // The population, not a number typed into this test. Zero source-bearing kinds would
+      // otherwise make the loop below certify nothing at all.
+      expect(kinds.map((kind) => kind.id).sort()).toEqual(Object.keys(EXPECTED_SOURCE).sort());
+
+      for (const kind of kinds) {
+        const expectation = EXPECTED_SOURCE[kind.id];
+        const document = await provider.readObjectSource!(expectation.path, kind.id);
+
+        expect(document.path).toEqual(expectation.path);
+        expect(document.kind).toBe(kind.id);
+        expect(document.parts).toHaveLength(1);
+        const [part] = document.parts;
+        expect(isSourcePartUnavailable(part)).toBe(false);
+        if (isSourcePartUnavailable(part)) throw new Error("narrowing");
+        // WHOLE, not a substring. A refusal, a truncation and a neighbouring object's text
+        // all satisfy `toContain`, and two of the three are exactly what a wrong bind
+        // produces here.
+        expect(part.text).toBe(expectation.text);
+        expect(part.id).toBe("definition");
+        expect(part.label).toBe("Definition");
+        expect(part.language).toBe("sql");
+        expect(part.form).toBe(expectation.form);
+        // Every kind, including the three that look like the author's own statement.
+        // Measured: `CREATE TABLE main.customers (... note VARCHAR DEFAULT 'none')` comes
+        // back as `note VARCHAR DEFAULT('none')` with `name` quoted and the inline
+        // REFERENCES rewritten into a table-level FOREIGN KEY, so none of this is stored
+        // bytes.
+        expect(part.origin).toBe("regenerated");
+        // And it came off the per-kind RECORD rather than out of a literal in the read.
+        // `form` and `origin` are the same shape of fact, so a fifth kind whose text really
+        // were stored bytes has one place to say so. With all four kinds sharing one origin
+        // today, this equality is what makes a record change visible in the read at all.
+        expect(part.origin).toBe(objectSourceOrigin(kind.id));
+        expect(part.truncated).toBeUndefined();
+      }
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  /**
+   * The macro is this ENGINE's one `partial` kind, so the arm has a test of its own.
+   *
+   * Not the fleet's: the #789 design names PostgreSQL `view` and `materialized_view` and
+   * Couchbase `function` as producers of the same arm, and `postgres.ts` already answers it.
+   * What this test guards is local and worth guarding anyway: if the macro answered
+   * `complete` like the other three kinds, nothing in this suite would distinguish a body
+   * from a statement and the Source caption's distinction would be decoration HERE. Both
+   * macro FORMS are read, because `macro_definition` is a body in two different shapes.
+   */
+  test("a macro publishes a BODY and never a CREATE MACRO statement, in both macro forms", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      const [scalar] = (await provider.readObjectSource!(["memory", "main", "add_one"], "macro")).parts;
+      const [table] = (await provider.readObjectSource!(["memory", "analytics", "recent_events"], "macro")).parts;
+      if (isSourcePartUnavailable(scalar) || isSourcePartUnavailable(table)) throw new Error("narrowing");
+
+      expect(scalar.text).toBe("(x + 1)");
+      expect(table.text).toBe("SELECT * FROM analytics.events LIMIT n");
+      expect(scalar.form).toBe("partial");
+      expect(table.form).toBe("partial");
+      // The negative that makes `partial` mean something: neither carries the statement a
+      // user could copy and run.
+      expect(scalar.text).not.toContain("CREATE MACRO");
+      expect(table.text).not.toContain("CREATE MACRO");
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  /**
+   * The KIND argument is load-bearing, and this fixture is what proves it.
+   *
+   * Measured on v1.5.5: a table, a sequence and a macro can all be called `overlap` in one
+   * schema. A read keyed on the path alone answers one of the three at random, which is one
+   * of the three engines that made `kind` a required argument of `readObjectSource`.
+   */
+  test("one name addresses three different definitions, and the kind picks which", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      const texts = await Promise.all(
+        (["table", "sequence", "macro"] as const).map(async (kind) => {
+          const [part] = (await provider.readObjectSource!(["memory", "main", "overlap"], kind)).parts;
+          if (isSourcePartUnavailable(part)) throw new Error("narrowing");
+          return part.text;
+        }),
+      );
+
+      expect(texts).toEqual([
+        "CREATE TABLE overlap(id INTEGER);",
+        "CREATE SEQUENCE overlap INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START 1 NO CYCLE;",
+        "x",
+      ]);
+      expect(new Set(texts).size).toBe(3);
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  /**
+   * The statement per kind, pinned WHOLE (recipe rule 6 and the Task 6 measurement, #789).
+   *
+   * Enumerating tokens closes the members somebody thought of; one whole-statement equality
+   * per kind closes the class. The catalog function, both container binds, the macro
+   * predicate and the name bind are all inside one string here.
+   */
+  test("the source statement per kind is the shared container filter plus the name bind", () => {
+    expect(objectSourceSql("table")).toBe(
+      "SELECT sql AS definition\n" +
+        "      FROM duckdb_tables()\n" +
+        "      WHERE database_name = $1 AND schema_name = $2 AND table_name = $3",
+    );
+    expect(objectSourceSql("view")).toBe(
+      "SELECT sql AS definition\n" +
+        "      FROM duckdb_views()\n" +
+        "      WHERE database_name = $1 AND schema_name = $2 AND view_name = $3",
+    );
+    expect(objectSourceSql("sequence")).toBe(
+      "SELECT sql AS definition\n" +
+        "      FROM duckdb_sequences()\n" +
+        "      WHERE database_name = $1 AND schema_name = $2 AND sequence_name = $3",
+    );
+    expect(objectSourceSql("macro")).toBe(
+      "SELECT macro_definition AS definition\n" +
+        "      FROM duckdb_functions()\n" +
+        "      WHERE database_name = $1 AND schema_name = $2 AND function_type IN ('macro', 'table_macro') " +
+        "AND function_name = $3",
+    );
+    // A kind DuckDB does not have has no catalog function, and the builder says so rather
+    // than interpolating an undefined relation into a statement.
+    expect(() => objectSourceSql("procedure")).toThrow(
+      'DuckDB declares the kind "procedure" but has no catalog function that answers for it',
+    );
+  });
+
+  /**
+   * `form` and `origin` per kind, both read off the record the statement is built from.
+   *
+   * They are the same shape of fact: a per-kind statement about the text that kind's
+   * catalog column publishes. `origin` was a bare literal in the read until this round, and
+   * the failure that invites is a fifth kind whose text really is stored bytes, added with
+   * a `definitionColumn` and a `definitionForm` because that is where the pattern points,
+   * and nothing in the record able to correct the origin the read hardcodes.
+   */
+  test("form and origin are per-kind facts, declared beside the statement", () => {
+    expect(objectSourceForm("table")).toBe("complete");
+    expect(objectSourceForm("view")).toBe("complete");
+    expect(objectSourceForm("sequence")).toBe("complete");
+    expect(objectSourceForm("macro")).toBe("partial");
+    // Measured on v1.5.5, all four: DuckDB rebuilds every one of these texts from its own
+    // catalog. There is no kind here whose stored bytes survive.
+    expect(objectSourceOrigin("table")).toBe("regenerated");
+    expect(objectSourceOrigin("view")).toBe("regenerated");
+    expect(objectSourceOrigin("sequence")).toBe("regenerated");
+    expect(objectSourceOrigin("macro")).toBe("regenerated");
+    expect(() => objectSourceOrigin("procedure")).toThrow(
+      'DuckDB declares the kind "procedure" but has no catalog function that answers for it',
+    );
+  });
+
+  test("a missing name is ABSENCE and raises naming the object, in every source-bearing kind", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      const kinds = (provider.getCapabilities().objectKinds ?? []).filter((kind) => kind.hasSource === true);
+      expect(kinds.length).toBeGreaterThan(0);
+
+      for (const kind of kinds) {
+        await expect(provider.readObjectSource!(["memory", "main", "no_such_object"], kind.id)).rejects.toThrow(
+          new RegExp(`No DuckDB ${kind.id} named no_such_object in memory\\.main`),
+        );
+      }
+      // The other half of absence on a two-level engine: the object exists, in another
+      // CATALOG. A read that dropped `database_name = $1` would answer the neighbour's
+      // definition rather than raising.
+      await expect(provider.readObjectSource!(["warehouse", "main", "orders"], "table")).rejects.toThrow(
+        /No DuckDB table named orders in warehouse\.main/,
+      );
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  test("the caller's bound cuts the text and says so, and an exact answer is never marked", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      const path = EXPECTED_SOURCE.sequence.path;
+      const [whole] = (await provider.readObjectSource!(path, "sequence")).parts;
+      if (isSourcePartUnavailable(whole)) throw new Error("narrowing");
+
+      const [cut] = (await provider.readObjectSource!(path, "sequence", 20)).parts;
+      if (isSourcePartUnavailable(cut)) throw new Error("narrowing");
+      expect(cut.text).toBe(whole.text.slice(0, 20));
+      expect(cut.truncated).toEqual({
+        limit: 20,
+        reason: sourceBoundTruncationReason(20),
+      });
+
+      const exact = (await provider.readObjectSource!(path, "sequence", whole.text.length)).parts[0];
+      if (isSourcePartUnavailable(exact)) throw new Error("narrowing");
+      expect(exact.text).toBe(whole.text);
+      expect(exact.truncated).toBeUndefined();
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  /**
+   * Every refusal shape this read can build, driven anyway, one test each below.
+   *
+   * No count is written here: the tests below ARE the inventory, one per arm of
+   * `blankDefinitionShape()`, so a numeral beside them could only agree or go stale.
+   *
+   * NONE OF THEM WAS OBSERVED ON A LIVE ENGINE, and the measurement reaches only the two
+   * shapes that are facts about the ROW. Measured on v1.5.5: zero `duckdb_tables()` rows,
+   * zero of 47 `duckdb_views()` rows, zero `duckdb_sequences()` rows and zero of 136 macros
+   * carry a NULL or whitespace-only text, and even `CREATE MACRO no_body() AS NULL` publishes
+   * the four characters `NULL`. So `docs/providers/duckdb.md` states the absence of a refusal
+   * as a CANNOT. The remaining shapes are facts about the READ, a reply carrying no definition
+   * column at all and the driver handing that column back as something other than a text, and
+   * no scan of the engine's own rows could have observed either of those. The arms exist
+   * anyway, because an empty definition must never reach an editor as a definition.
+   *
+   * EVERY ONE ASSERTS `Object.hasOwn(part, "text") === false`, which is recipe rule 8
+   * (#789): a part carrying BOTH keys narrows to the refusal arm and carries the sentence
+   * too, so a test that only asserts `part.unavailable` is satisfied by a hybrid that would
+   * put a refusal over a definition the engine really returned.
+   */
+  test("a NULL definition becomes a refusal part rather than an empty text", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      answerSourceReadWith(provider, [{ definition: null }]);
+      const [part] = (await provider.readObjectSource!(["memory", "main", "orders"], "table")).parts;
+
+      expect(isSourcePartUnavailable(part)).toBe(true);
+      if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+      expect(Object.hasOwn(part, "text")).toBe(false);
+      expect(part.unavailable).toContain("whose sql is NULL");
+      expect(part.unavailable).toContain('for the table "orders"');
+      expect(part.unavailable).toContain("nothing here was observed to produce a NULL");
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  test("a whitespace-only definition is refused too, and is NOT reported as a NULL", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      answerSourceReadWith(provider, [{ definition: "  \n \t " }]);
+      const [part] = (await provider.readObjectSource!(["memory", "main", "add_one"], "macro")).parts;
+
+      expect(isSourcePartUnavailable(part)).toBe(true);
+      if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+      expect(Object.hasOwn(part, "text")).toBe(false);
+      // The COLUMN named is the macro's own, not the `sql` the other three kinds read.
+      expect(part.unavailable).toContain("whose macro_definition holds no non-whitespace character");
+      expect(part.unavailable).not.toContain("is NULL");
+      expect(part.unavailable).not.toContain("no macro_definition column at all");
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  /**
+   * A definition the driver did not map to a text is its OWN shape, not a NULL (#789).
+   *
+   * `ObjectSourceRow.definition` is typed `unknown` precisely because this reply is not
+   * trusted to be a string or a null: `@duckdb/node-api` already hands a BIGINT `COUNT(*)`
+   * back as a decimal STRING, so its JS mapping is not stable across column types, and a
+   * future mapping change on a catalog column would put a number, a Date or an object here.
+   * Folding that into the NULL arm produces a sentence that is FALSE for the shape in front
+   * of it and then goes on to assert that the engine was measured never to produce a NULL,
+   * which teaches the reader the provider is confused rather than that the driver changed.
+   */
+  test("a definition that is neither a text nor NULL is refused as its own shape", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      answerSourceReadWith(provider, [{ definition: 42 }]);
+      const [part] = (await provider.readObjectSource!(["memory", "main", "orders"], "table")).parts;
+
+      expect(isSourcePartUnavailable(part)).toBe(true);
+      if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+      expect(Object.hasOwn(part, "text")).toBe(false);
+      expect(part.unavailable).toContain('for the table "orders"');
+      // The driver's own mapping is named, because that is the only thing that can be
+      // acted on: the column IS there and it does hold a value.
+      expect(part.unavailable).toContain('whose sql came back as the JavaScript type "number" rather than a text');
+      expect(part.unavailable).toContain("a fact about this read and not about the object");
+      // The two sentences this shape must NOT borrow.
+      expect(part.unavailable).not.toContain("is NULL");
+      expect(part.unavailable).not.toContain("no sql column at all");
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  test("a reply carrying no definition column at all becomes a refusal that names the READ", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      answerSourceReadWith(provider, [{}]);
+      const [part] = (await provider.readObjectSource!(["memory", "main", "customer_names"], "view")).parts;
+
+      expect(isSourcePartUnavailable(part)).toBe(true);
+      if (!isSourcePartUnavailable(part)) throw new Error("narrowing");
+      expect(Object.hasOwn(part, "text")).toBe(false);
+      // This arm is the defect recipe rule 6 exists for, so its sentence sends a reader to
+      // the statement rather than to the object.
+      expect(part.unavailable).toContain("with no sql column at all");
+      expect(part.unavailable).toContain("a fact about this read and not about the object");
+      expect(part.unavailable).not.toContain("is NULL");
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  /**
+   * The three guards a correct DECLARATION cannot reach, driven through the declaration.
+   *
+   * None is reachable with the four kinds DuckDB really declares, and a `spyOn` on
+   * `getCapabilities` is the only seam that reaches them. Reaching them is what says the
+   * guards are live rather than merely covered.
+   */
+  test("a kind that is not source-bearing, or is under-declared, raises by name", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      const real = provider.getCapabilities();
+      const withKind = (extra: ObjectKindSpec) =>
+        spyOn(provider, "getCapabilities").mockReturnValue({
+          ...real,
+          objectKinds: [...(real.objectKinds ?? []), extra],
+        });
+
+      const noSource = withKind({ id: "secret", role: "config", label: "Secret", labelPlural: "Secrets" });
+      try {
+        await expect(provider.readObjectSource!(["memory", "main", "x"], "secret")).rejects.toThrow(
+          /DuckDB publishes no definition text for the kind "secret"/,
+        );
+      } finally {
+        noSource.mockRestore();
+      }
+
+      const noLanguage = withKind({
+        id: "secret",
+        role: "config",
+        label: "Secret",
+        labelPlural: "Secrets",
+        hasSource: true,
+      });
+      try {
+        await expect(provider.readObjectSource!(["memory", "main", "x"], "secret")).rejects.toThrow(
+          /declares readable source for the kind "secret" and no sourceLanguage/,
+        );
+      } finally {
+        noLanguage.mockRestore();
+      }
+
+      const noStatement = withKind({
+        id: "secret",
+        role: "config",
+        label: "Secret",
+        labelPlural: "Secrets",
+        hasSource: true,
+        sourceLanguage: "sql",
+      });
+      try {
+        await expect(provider.readObjectSource!(["memory", "main", "x"], "secret")).rejects.toThrow(
+          /DuckDB declares the kind "secret" but has no catalog function that answers for it/,
+        );
+      } finally {
+        noStatement.mockRestore();
+      }
+
+      // And a kind the declaration does not carry at all.
+      await expect(provider.readObjectSource!(["memory", "main", "x"], "procedure")).rejects.toThrow(
+        /DuckDB declares no object kind "procedure"/,
+      );
     } finally {
       await provider.disconnect();
     }
