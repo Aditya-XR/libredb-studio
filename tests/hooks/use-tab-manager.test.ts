@@ -4,7 +4,7 @@ import { describe, test, expect, mock, beforeEach } from "bun:test";
 import { renderHook, act, waitFor } from "@testing-library/react";
 
 // Shared mocks — process-wide singletons (no contamination)
-import "../helpers/mock-sonner";
+import { mockToastDefault, mockToastDismiss } from "../helpers/mock-sonner";
 import "../helpers/mock-navigation";
 
 import { useTabManager } from "@/hooks/use-tab-manager";
@@ -74,9 +74,18 @@ const testSchema: DetailedObject[] = [
   },
 ];
 
+type ToastOptions = { action: { label: string; onClick: () => void } };
+
+function lastToastCall() {
+  const call = mockToastDefault.mock.calls.at(-1) as unknown as [string, ToastOptions];
+  return { message: call[0], options: call[1] };
+}
+
 describe("useTabManager", () => {
   beforeEach(() => {
     localStorage.clear();
+    mockToastDefault.mockClear();
+    mockToastDismiss.mockClear();
   });
 
   test("starts with one default tab", () => {
@@ -206,6 +215,268 @@ describe("useTabManager", () => {
     // Still one tab, nothing changed
     expect(result.current.tabs).toHaveLength(1);
     expect(result.current.tabs[0].id).toBe("default");
+  });
+
+  test("closeTab does not toast when it can't close the only remaining tab", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+
+    expect(mockToastDefault).not.toHaveBeenCalled();
+  });
+
+  test("closeTab offers an Undo toast naming the closed tab", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+    });
+
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+
+    const { message, options } = lastToastCall();
+    expect(message).toContain("Query 1");
+    expect(options.action.label).toBe("Undo");
+  });
+
+  test("Undo restores the closed tab's query, name and original position", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.updateTabById("default", { query: "SELECT 1;" });
+      result.current.addTab();
+    });
+    const secondTabId = result.current.tabs[1].id;
+
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    expect(result.current.tabs).toHaveLength(1);
+
+    act(() => {
+      lastToastCall().options.action.onClick();
+    });
+
+    expect(result.current.tabs).toHaveLength(2);
+    expect(result.current.tabs[0].id).toBe("default");
+    expect(result.current.tabs[0].query).toBe("SELECT 1;");
+    expect(result.current.tabs[1].id).toBe(secondTabId);
+    expect(result.current.activeTabId).toBe("default");
+  });
+
+  test("Undo re-activates the closed tab even if another tab is active by then", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+    });
+    const secondTabId = result.current.tabs[1].id;
+
+    act(() => {
+      result.current.closeTab(secondTabId, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    // closeTab fell back to the only remaining tab.
+    expect(result.current.activeTabId).toBe("default");
+
+    act(() => {
+      lastToastCall().options.action.onClick();
+    });
+
+    expect(result.current.activeTabId).toBe(secondTabId);
+  });
+
+  test("each Undo restores the tab its own toast names, whichever is clicked first", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.updateTabById("default", { query: "SELECT 1;" });
+      result.current.addTab();
+      result.current.addTab();
+    });
+    const [first, second, third] = result.current.tabs.map((t) => t.id);
+
+    act(() => {
+      result.current.closeTab(first, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    const firstToast = lastToastCall();
+    act(() => {
+      result.current.closeTab(second, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    const secondToast = lastToastCall();
+    expect(firstToast.message).toContain("Query 1");
+    expect(secondToast.message).toContain("Query 2");
+
+    // The OLDER toast, clicked while the newer one is still on screen, brings back Query 1.
+    act(() => {
+      firstToast.options.action.onClick();
+    });
+    expect(result.current.tabs.map((t) => t.id)).toEqual([first, third]);
+    expect(result.current.tabs[0].query).toBe("SELECT 1;");
+    expect(result.current.activeTabId).toBe(first);
+
+    act(() => {
+      secondToast.options.action.onClick();
+    });
+    expect(result.current.tabs.map((t) => t.id)).toEqual([first, second, third]);
+    expect(result.current.activeTabId).toBe(second);
+  });
+
+  test("Undo clicked twice restores the tab once", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+    });
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    const { options } = lastToastCall();
+
+    act(() => {
+      options.action.onClick();
+    });
+    act(() => {
+      options.action.onClick();
+    });
+
+    expect(result.current.tabs.map((t) => t.id).filter((id) => id === "default")).toHaveLength(1);
+    expect(result.current.tabs).toHaveLength(2);
+  });
+
+  test("Undo focuses a Source tab reopened since, rather than adding a second with its id", () => {
+    const routine: DatabaseObject = { path: ["app", "order_total(integer)"], name: "order_total", kind: "function" };
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection(), metadata: defaultMetadata, schema: [] }),
+    );
+
+    act(() => {
+      result.current.openSourceTab(routine);
+    });
+    const sourceId = result.current.activeTabId;
+    act(() => {
+      result.current.closeTab(sourceId, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    const { options } = lastToastCall();
+    // A Source tab's id is derived from its address, so opening the object again mints the same id.
+    act(() => {
+      result.current.openSourceTab(routine);
+    });
+    act(() => {
+      result.current.setActiveTabId("default");
+    });
+
+    act(() => {
+      options.action.onClick();
+    });
+
+    expect(result.current.tabs.filter((t) => t.id === sourceId)).toHaveLength(1);
+    expect(result.current.activeTabId).toBe(sourceId);
+  });
+
+  test("a connection switch dismisses outstanding Undo toasts, and a late click cannot cross", async () => {
+    localStorage.setItem(
+      "libredb_workspace_tabs_v1:conn-a",
+      JSON.stringify({
+        activeTabId: "a-1",
+        tabs: [
+          { id: "a-1", name: "A One", query: "SELECT alpha_only_secret;", type: "sql" },
+          { id: "a-2", name: "A Two", query: "SELECT 2;", type: "sql" },
+        ],
+      }),
+    );
+    const connA = makeConnection({ id: "conn-a" });
+    const connB = makeConnection({ id: "conn-b" });
+    const { result, rerender } = renderHook(
+      ({ conn }) => useTabManager({ activeConnection: conn, metadata: null, schema: [], persistWorkspace: true }),
+      { initialProps: { conn: connA } },
+    );
+    await waitFor(() => {
+      expect(result.current.tabs).toHaveLength(2);
+    });
+
+    mockToastDefault.mockImplementationOnce((() => "closed-a-1") as unknown as () => void);
+    act(() => {
+      result.current.closeTab("a-1", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    const { options } = lastToastCall();
+
+    rerender({ conn: connB });
+    await waitFor(() => {
+      expect(result.current.tabs.map((t) => t.id)).toEqual(["default"]);
+    });
+    expect(mockToastDismiss).toHaveBeenCalledWith("closed-a-1");
+
+    act(() => {
+      options.action.onClick();
+    });
+    expect(result.current.tabs.map((t) => t.id)).toEqual(["default"]);
+
+    await new Promise((r) => setTimeout(r, 700));
+    const parsedB = JSON.parse(localStorage.getItem("libredb_workspace_tabs_v1:conn-b")!) as { tabs: unknown[] };
+    expect(parsedB.tabs).toEqual([{ id: "default", name: "Query 1", query: "", type: "sql" }]);
+  });
+
+  test("two closes batched into one commit still leave the last tab open", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+    });
+    const secondTabId = result.current.tabs[1].id;
+
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+      result.current.closeTab(secondTabId, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+
+    expect(result.current.tabs).toHaveLength(1);
+    expect(result.current.currentTab).toBeDefined();
   });
 
   test("updateCurrentTab updates the active tab properties", () => {

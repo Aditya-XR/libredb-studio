@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { toast } from "sonner";
 import type { DatabaseConnection, QueryTab } from "@/lib/types";
 import type { DatabaseObject } from "@/lib/db/types";
 import type { DetailedObject } from "@/lib/db/detailed-object";
@@ -10,6 +11,15 @@ import { objectPathLabel, pathKey } from "@/lib/db/object-path";
 import { resolveTabType } from "@/lib/editor/tab-language";
 import { logger } from "@/lib/logger";
 import { newLocalId } from "@/lib/ids";
+
+/** A tab `closeTab` removed, where it sat, and the workspace it sat in, so its Undo can put it back (#747). */
+interface ClosedTab {
+  tab: QueryTab;
+  index: number;
+  /** The tab to its right when it closed, or null when it was last: the anchor that survives other closes. */
+  nextTabId: string | null;
+  workspaceKey: string;
+}
 
 const DEFAULT_TAB: QueryTab = {
   id: "default",
@@ -243,19 +253,62 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
     setActiveTabId(newId);
   }, [metadata]);
 
+  /*
+   * The Undo toasts still on screen, and the workspace the hook is showing (#747).
+   *
+   * Each toast closes over the tab it names rather than sharing one "last closed" slot: sonner
+   * keeps several toasts up at once, so a shared slot let the Undo under `Closed "Query 1"`
+   * restore Query 2. A closed tab belongs to the workspace it was closed in, so a connection
+   * switch dismisses the outstanding toasts, and a click that lands during the dismissal is
+   * checked against the workspace key: restoring it into another connection duplicated the
+   * `default` id there and the SAVE EFFECT persisted the duplicate.
+   */
+  const undoToastIdsRef = useRef<Array<string | number>>([]);
+  const workspaceKeyRef = useRef(workspaceKey);
+  useEffect(() => {
+    workspaceKeyRef.current = workspaceKey;
+    for (const id of undoToastIdsRef.current) toast.dismiss(id);
+    undoToastIdsRef.current = [];
+  }, [workspaceKey]);
+
+  const reopenClosedTab = useCallback((closed: ClosedTab) => {
+    if (closed.workspaceKey !== workspaceKeyRef.current) return;
+    setTabs((prev) => {
+      // A tab id is unique in a workspace. It is already present when this Undo was clicked
+      // before, or when a Source tab, whose id is derived from its address, was opened again.
+      if (prev.some((t) => t.id === closed.tab.id)) return prev;
+      // Back before its right-hand neighbour when that tab is still open. The index alone is
+      // stale as soon as another tab to its left closes too, which is the ordinary way to tidy up.
+      const anchor = closed.nextTabId === null ? -1 : prev.findIndex((t) => t.id === closed.nextTabId);
+      const next = [...prev];
+      next.splice(anchor === -1 ? Math.min(closed.index, next.length) : anchor, 0, closed.tab);
+      return next;
+    });
+    setActiveTabId(closed.tab.id);
+  }, []);
+
   const closeTab = useCallback(
     (id: string, e: React.MouseEvent) => {
       e.stopPropagation();
-      setTabs((prev) => {
-        if (prev.length === 1) return prev;
-        const newTabs = prev.filter((t) => t.id !== id);
-        if (activeTabId === id && newTabs.length > 0) {
-          setActiveTabId(newTabs[newTabs.length - 1].id);
-        }
-        return newTabs;
+      if (tabs.length === 1) return;
+      const index = tabs.findIndex((t) => t.id === id);
+      if (index === -1) return;
+      const closed: ClosedTab = { tab: tabs[index], index, nextTabId: tabs[index + 1]?.id ?? null, workspaceKey };
+
+      // The last-tab guard is evaluated again inside the updater, against the state actually
+      // being written: two closes batched into one commit both pass the check above.
+      setTabs((prev) => (prev.length === 1 ? prev : prev.filter((t) => t.id !== id)));
+      if (activeTabId === id) {
+        const remaining = tabs.filter((t) => t.id !== id);
+        setActiveTabId(remaining[remaining.length - 1].id);
+      }
+
+      const toastId = toast(`Closed "${closed.tab.name}"`, {
+        action: { label: "Undo", onClick: () => reopenClosedTab(closed) },
       });
+      undoToastIdsRef.current.push(toastId);
     },
-    [activeTabId],
+    [tabs, activeTabId, workspaceKey, reopenClosedTab],
   );
 
   /**
