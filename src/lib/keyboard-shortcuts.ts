@@ -1,5 +1,5 @@
 interface Shortcut {
-  code: "Enter" | "KeyF" | "KeyX" | "KeyK" | "KeyB";
+  code: "Enter" | "KeyF" | "KeyX" | "KeyK";
   primary: boolean;
   alt: boolean;
   shift: boolean;
@@ -32,21 +32,19 @@ export const SHORTCUTS = {
     description: "open a new query tab (except while renaming a tab)",
   },
   commandPalette: { code: "KeyK", primary: true, alt: false, shift: false, description: "toggle the command palette" },
-  toggleSidebar: {
-    code: "KeyB",
-    primary: true,
-    alt: false,
-    shift: false,
-    description: "toggle the sidebar (when a SidebarProvider is mounted)",
-  },
 } as const satisfies Record<string, Shortcut>;
 
 export function matchesShortcut(
-  event: Pick<KeyboardEvent, "code" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">,
+  event: Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">,
   shortcut: Shortcut,
 ): boolean {
+  const expectedLetter = shortcut.code.startsWith("Key") ? shortcut.code.slice(3) : null;
+  const keyMatches =
+    expectedLetter !== null && /^[A-Za-z]$/.test(event.key)
+      ? event.key.toLowerCase() === expectedLetter.toLowerCase()
+      : event.code === shortcut.code;
   return (
-    event.code === shortcut.code &&
+    keyMatches &&
     (event.ctrlKey || event.metaKey) === shortcut.primary &&
     event.altKey === shortcut.alt &&
     event.shiftKey === shortcut.shift

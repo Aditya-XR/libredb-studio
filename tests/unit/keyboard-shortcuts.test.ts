@@ -4,13 +4,25 @@ import { SHORTCUTS, matchesShortcut, shortcutLabel, monacoKeybinding } from "@/l
 import { shortcutDocumentation, updateShortcutDocumentation } from "../../scripts/sync-shortcuts.mjs";
 
 describe("shared keyboard shortcuts", () => {
-  test("matches physical keys, including shifted and non-Latin characters", () => {
+  test("matches Latin key values and falls back to physical codes for non-Latin layouts", () => {
     for (const key of ["X", "ч"]) {
       for (const modifier of ["ctrlKey", "metaKey"]) {
         const event = new KeyboardEvent("keydown", { key, code: "KeyX", shiftKey: true, [modifier]: true });
         expect(matchesShortcut(event, SHORTCUTS.newTab)).toBe(true);
       }
     }
+    expect(
+      matchesShortcut(
+        new KeyboardEvent("keydown", { key: "k", code: "KeyV", ctrlKey: true }),
+        SHORTCUTS.commandPalette,
+      ),
+    ).toBe(true);
+    expect(
+      matchesShortcut(
+        new KeyboardEvent("keydown", { key: "m", code: "KeyK", ctrlKey: true }),
+        SHORTCUTS.commandPalette,
+      ),
+    ).toBe(false);
   });
 
   test("does not confuse missing modifiers, extra modifiers or a different physical key", () => {
@@ -28,9 +40,6 @@ describe("shared keyboard shortcuts", () => {
       ),
     ).toBe(false);
     expect(
-      matchesShortcut(new KeyboardEvent("keydown", { code: "KeyB", metaKey: true }), SHORTCUTS.toggleSidebar),
-    ).toBe(true);
-    expect(
       matchesShortcut(
         new KeyboardEvent("keydown", { code: "KeyF", altKey: true, shiftKey: true }),
         SHORTCUTS.formatQuery,
@@ -47,7 +56,7 @@ describe("shared keyboard shortcuts", () => {
   test("labels and Monaco bindings describe the same registered chords", () => {
     const monaco = {
       KeyMod: { CtrlCmd: 2048, Alt: 512, Shift: 1024 },
-      KeyCode: { Enter: 3, KeyF: 36, KeyK: 41, KeyX: 54, KeyB: 32 },
+      KeyCode: { Enter: 3, KeyF: 36, KeyK: 41, KeyX: 54 },
     };
     expect(shortcutLabel(SHORTCUTS.executeQuery)).toBe("Cmd/Ctrl+Enter");
     expect(shortcutLabel(SHORTCUTS.formatQuery)).toBe("Alt+Shift+F");

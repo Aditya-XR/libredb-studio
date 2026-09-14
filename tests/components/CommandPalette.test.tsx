@@ -246,7 +246,7 @@ describe("CommandPalette", () => {
     expect(queryByText("Run Query")).not.toBeNull();
   });
 
-  test("uses the physical key with Caps Lock or another keyboard layout", () => {
+  test("uses the Latin key value and falls back to the physical code for non-Latin layouts", () => {
     const { queryByText } = render(<CommandPalette {...createDefaultProps()} />);
     for (const key of ["K", "л"]) {
       fireEvent.keyDown(document, { key, code: "KeyK", ctrlKey: true });
@@ -256,9 +256,14 @@ describe("CommandPalette", () => {
     }
   });
 
-  test("does not claim a different physical key or extra modifiers", () => {
+  test("does not claim a different Latin key or extra modifiers", () => {
     const { queryByText } = render(<CommandPalette {...createDefaultProps()} />);
-    for (const change of [{ code: "KeyJ" }, { altKey: true }, { shiftKey: true }]) {
+    for (const change of [
+      { key: "j", code: "KeyJ" },
+      { key: "m", code: "KeyK" },
+      { altKey: true },
+      { shiftKey: true },
+    ]) {
       const event = new KeyboardEvent("keydown", {
         key: "k",
         code: "KeyK",
