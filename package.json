@@ -133,6 +133,7 @@
     "tedious": "^20.0.5"
   },
   "scripts": {
+    "shortcuts:sync": "bun scripts/sync-shortcuts.mjs",
     "dev": "node scripts/copy-monaco.mjs && next dev",
     "build": "node scripts/copy-monaco.mjs && next build",
     "build:lib": "tsup && node scripts/copy-theme.mjs",

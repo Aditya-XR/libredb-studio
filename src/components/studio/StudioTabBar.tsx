@@ -2,14 +2,9 @@
 
 import React, { useEffect, type Dispatch, type SetStateAction } from "react";
 import type { QueryTab } from "@/lib/types";
+import { SHORTCUTS, matchesShortcut, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { cn } from "@/lib/utils";
 import { FileBraces, FileCode, Hash, Plus, X } from "lucide-react";
-
-// Cmd/Ctrl+T and Cmd/Ctrl+N belong to the browser, so no page can bind them;
-// Cmd/Ctrl+Shift+X is unclaimed by Chrome, Firefox and Safari (checked against
-// their published shortcut lists) and stays reachable on every platform.
-const NEW_TAB_SHORTCUT_CODE = "KeyX";
-const NEW_TAB_SHORTCUT_LABEL = "Ctrl+Shift+X";
 
 /**
  * Which icon a tab draws, in ONE place because the bar draws it in TWO (#789 Phase 2).
@@ -83,7 +78,7 @@ export function StudioTabBar({
   // tab rename input is excluded so the shortcut does not interrupt renaming.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== NEW_TAB_SHORTCUT_CODE || !(event.metaKey || event.ctrlKey) || !event.shiftKey) return;
+      if (!matchesShortcut(event, SHORTCUTS.newTab)) return;
       const target = event.target;
       if (target instanceof HTMLInputElement && target.getAttribute("aria-label")?.startsWith("Rename ")) return;
       event.preventDefault();
@@ -186,7 +181,7 @@ export function StudioTabBar({
       <button
         type="button"
         aria-label="New tab"
-        title={`New Query Tab (${NEW_TAB_SHORTCUT_LABEL})`}
+        title={`New Query Tab (${shortcutLabel(SHORTCUTS.newTab)})`}
         className="text-fg-muted cursor-pointer hover:text-fg-bright mx-2"
         onClick={onAddTab}
       >
