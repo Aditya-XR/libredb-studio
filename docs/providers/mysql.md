@@ -687,8 +687,8 @@ non-zero NAMING any value outside modelled-plus-excluded.
 **Where it runs.** It is a live check, so it is not in `bun run test`: the runner collects every
 `*.test.ts` / `*.test.tsx` file under `tests/` except the ones in `tests/live/`, which it excludes by
 name (`EXCLUDED` in `tests/runner/discover.ts`). This file is outside that set twice over, by its
-directory and by its name, the same arrangement `tests/live/schema-diff-dialects.ts` has. It runs by hand against a disposable server, and belongs
-permanently in #789's live acceptance run:
+directory and by its name, the same arrangement `tests/live/schema-diff-dialects.ts` has. It runs
+by hand against a disposable server, and belongs permanently in #789's live acceptance run:
 
 ```bash
 LIBREDB_LIVE_MYSQL_URLS="mysql://root:root@127.0.0.1:3306/app,mysql://root:root@127.0.0.1:3307/app" \
