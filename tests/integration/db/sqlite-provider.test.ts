@@ -9,7 +9,17 @@
 
 import { describe, test, expect, afterEach, beforeAll, afterAll, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -936,24 +946,48 @@ describe("SQLiteProvider", () => {
     // (2026-09), and a user could not delete or move a database Studio had
     // disconnected from.
     //
-    // The sidecars are the portable reading of it. SQLite checkpoints the WAL and
-    // removes `-wal` and `-shm` when the connection REALLY closes, and leaves both
-    // behind when the close was only scheduled, so the same assertion measures the
-    // same fact on every platform.
-    test("disconnect releases the file rather than scheduling it: the WAL sidecars are gone", async () => {
+    // Each platform is asked the strongest question it can answer. The WAL sidecars
+    // are NOT that question, though they look like it: measured on 2026-09-15 with
+    // the same probe on all three runners, `close(true)` removes `-wal` and `-shm`
+    // on Linux and on Windows, and leaves both in place on macOS, where bun:sqlite
+    // links Apple's system libsqlite3. That is the library keeping the WAL, not a
+    // handle keeping the file: opening the same database with node:sqlite and
+    // closing it removed both sidecars on that same macOS run, and removing a WAL
+    // takes the exclusive lock a surviving handle would have denied.
+    test("disconnect releases the file rather than scheduling it", async () => {
       const dbPath = join(fileTmpDir, "release.db");
       provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
       await provider.connect();
       await provider.query("CREATE TABLE r (id INTEGER PRIMARY KEY, v TEXT)");
       await provider.query("INSERT INTO r VALUES (1, 'held')");
       expect(existsSync(`${dbPath}-wal`)).toBe(true);
-      expect(existsSync(`${dbPath}-shm`)).toBe(true);
 
       await provider.disconnect();
 
-      expect(existsSync(`${dbPath}-wal`)).toBe(false);
-      expect(existsSync(`${dbPath}-shm`)).toBe(false);
-      // The data survived the checkpoint the real close performs.
+      // Windows answers by refusing: a file with a live handle cannot be renamed,
+      // and renaming is exactly what a user does to a database they think they have
+      // closed. POSIX renames an open file, so this cannot fail there.
+      const moved = `${dbPath}.moved`;
+      renameSync(dbPath, moved);
+      renameSync(moved, dbPath);
+
+      // Linux answers precisely: this is the measurement the defect was found with.
+      // /proc/self/fd is the process's own open files, so a scheduled close shows up
+      // as a descriptor still pointing into this directory.
+      if (existsSync("/proc/self/fd")) {
+        const held = readdirSync("/proc/self/fd").flatMap((fd) => {
+          try {
+            return [readlinkSync(join("/proc/self/fd", fd))];
+          } catch {
+            // The descriptor closed between the listing and the read, which is this
+            // process's own bookkeeping rather than anything about the database.
+            return [];
+          }
+        });
+        expect(held.filter((target) => target.startsWith(fileTmpDir))).toEqual([]);
+      }
+
+      // And the data survived whatever the close had to checkpoint.
       const reader = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
       await reader.connect();
       try {

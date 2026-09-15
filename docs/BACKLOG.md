@@ -40,7 +40,7 @@ None of it is a GitHub issue.
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A5 · 4
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B80 · 24
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 25
 
 ---
 
@@ -3014,3 +3014,43 @@ capability object cost nothing, and now the request SHAPE is derived from it.
 
 **Done when:** no read is issued for a connection whose declaration has not arrived, proven by a test
 that switches between two engines of different depth and asserts what was posted.
+
+### B81. A failure nobody attributed leaves the browser asserting that the server serves no seeds
+
+B37 landed and left this file; its id survives in the comments on `src/hooks/use-connection-payload.ts`
+and `src/hooks/use-connection-manager.ts`, which is where the reasoning below can be read against the
+code. It gave `ServedSeeds` a way to say "I do not have the seed list", and then gave the state an
+initial value of `{loaded: true, seeds: []}` under the name `NO_SERVED_SEEDS`, commented as
+"loaded, and genuinely empty". Before the first answer arrives nothing has been measured, so that
+value is a claim the browser is not entitled to, and it is the claim B37 was filed about.
+
+Measured on 2026-09-15 by driving the whole path with a gateway error page, the shape
+`tests/hooks/use-connection-manager.test.ts` already pins as intended:
+`GET /api/connections/managed` answers 502 with `text/html`, no `reason` is read from the body, so
+`setServedSeeds` is never called and the state is still the module constant by identity.
+`initializeConnections` then falls back to `storage.getConnections()`, the user's editable seed copy
+renders, and `resolveAgentRunConnectionId` answers `{id: null, reason: "browser-only"}`. The rail
+says, of a connection this application seeds itself:
+
+> Sample (Employees) cannot be rebuilt on the server: its settings live in this browser.
+
+That is B37's sentence, false in both halves, reached through a proxy instead of a malformed
+`seed-connections.yaml`. The hook's own comment says such a failure "says nothing" about the seed
+configuration; leaving the state at `{loaded: true, seeds: []}` is not saying nothing, it is saying
+the list is empty.
+
+The 404 arm is right by accident rather than by design: where the route does not exist at all, as in
+the platform embed, there is no seed service and no seeds, so "loaded, empty" is the true answer.
+Only a third state can hold both that and "asked, and the answer told me nothing".
+
+Two tests on the same subject cannot see this, and one of them is the reason it reads as deliberate.
+`tests/hooks/use-connection-manager.test.ts` waits on `connections` reaching `[]` and then asserts
+`servedSeeds` equals `{loaded: true, seeds: []}`, for the 404 arm and for the 502 arm. Both are the
+initial values, and with an empty `localStorage` neither moves on either path, so both tests pass
+against a hook that never issues the request. They pin the initial state under the name of a
+measured one. There is no honest barrier to wait on there while the settled value and the unasked
+value are the same object shape, which is the same defect one level up.
+
+**Done when:** an unasked seed list is distinguishable from a measured empty one, a non-OK the
+server did not attribute leaves the browser in the unasked state rather than the empty one, and the
+two tests above wait on a fact that a hook which never fetched cannot satisfy.

@@ -1474,10 +1474,16 @@ describe("single-writer file reuse", () => {
 
     // Deliberately not built with path.join, which would normalise it before the
     // factory ever saw it: the lock is per inode, so the lookup has to resolve.
+    // The file name comes from basename rather than from splitting on "/": on
+    // Windows `dir` is a backslash path, so the split returned the whole path and
+    // the spelling became `C:\...\dir/./C:\...\held.libredb`, which resolves to
+    // nothing and matched nothing. Measured on windows-latest, 2026-09-15. A
+    // forward slash inside the spelling is fine there: Win32 accepts it, and
+    // path.resolve, which is what the factory uses, normalises it away.
     const spelled: DatabaseConnection = {
       ...held,
       id: "spelled",
-      database: `${dir}/./${held.database!.split("/").pop()!}`,
+      database: `${dir}/./${basename(held.database!)}`,
     };
 
     expect(findOpenSingleWriterProvider(spelled)).toBe(writable);
