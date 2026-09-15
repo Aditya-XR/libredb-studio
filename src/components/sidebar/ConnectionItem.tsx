@@ -72,7 +72,9 @@ export const ConnectionItem = React.memo(function ConnectionItem({
           <button
             className={cn(
               "p-1 rounded transition-opacity hover:bg-warning/10 hover:text-warning",
-              isFavorite ? "text-warning opacity-100" : "text-muted-foreground opacity-0 group-hover:opacity-100",
+              isFavorite
+                ? "text-warning opacity-100"
+                : "text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
             )}
             aria-label={isFavorite ? "Remove from favorites" : "Add to favorites"}
             aria-pressed={isFavorite}

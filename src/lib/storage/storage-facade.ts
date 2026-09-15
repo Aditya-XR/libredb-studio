@@ -81,6 +81,13 @@ export const storage = {
     const filtered = connections.filter((c) => c.id !== id);
     writeJSON("connections", filtered);
     dispatchChange("connections", filtered);
+
+    const favorites = storage.getFavoriteConnectionIds();
+    if (favorites.includes(id)) {
+      const nextFavorites = favorites.filter((favId) => favId !== id);
+      writeJSON("favorite_connections", nextFavorites);
+      dispatchChange("favorite_connections", nextFavorites);
+    }
   },
 
   getFavoriteConnectionIds: (): string[] => {

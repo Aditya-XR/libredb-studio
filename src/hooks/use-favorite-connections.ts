@@ -40,9 +40,12 @@ function getServerSnapshot(): string {
  *
  * Built on `useSyncExternalStore` (favorite_connections is exactly that: state that lives
  * outside React, in localStorage, mutated by the storage facade) rather than an effect that
- * reads storage and calls setState, so a favorite pulled down from the server, or toggled
- * from another mounted instance of this hook, is reflected here without a synchronous
- * setState-in-effect render cascade.
+ * reads storage and calls setState, so a favorite toggled from another mounted instance of
+ * this hook is reflected here without a synchronous setState-in-effect render cascade. A
+ * favorite pulled down from the server takes a different path to the same result: the pull
+ * writes localStorage directly and dispatches no change event, but `useSyncExternalStore`
+ * re-reads `getSnapshot` on every render regardless of cause, and the pull's own
+ * `storageReady` flip is what supplies that render.
  */
 export function useFavoriteConnections(storageReady: boolean) {
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);

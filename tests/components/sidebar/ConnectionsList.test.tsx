@@ -431,5 +431,38 @@ describe("ConnectionsList", () => {
 
       expect(queryByText("No database connections established yet.")).toBeNull();
     });
+
+    test("hides the Connections section entirely when every connection is favorited", () => {
+      const { queryByText } = render(
+        <ConnectionsList
+          connections={[mockPostgresConnection, mockMySQLConnection]}
+          activeConnection={null}
+          onSelectConnection={defaultOnSelect}
+          onDeleteConnection={defaultOnDelete}
+          onAddConnection={defaultOnAdd}
+          favoriteConnectionIds={new Set([mockPostgresConnection.id, mockMySQLConnection.id])}
+          onToggleFavoriteConnection={defaultOnToggleFavorite}
+        />,
+      );
+
+      // Both are under Favorites; the "Connections" header has nothing left to sit above.
+      expect(queryByText("Connections")).toBeNull();
+    });
+
+    test("keeps the Connections section when at least one connection is not favorited", () => {
+      const { queryByText } = render(
+        <ConnectionsList
+          connections={[mockPostgresConnection, mockMySQLConnection]}
+          activeConnection={null}
+          onSelectConnection={defaultOnSelect}
+          onDeleteConnection={defaultOnDelete}
+          onAddConnection={defaultOnAdd}
+          favoriteConnectionIds={new Set([mockPostgresConnection.id])}
+          onToggleFavoriteConnection={defaultOnToggleFavorite}
+        />,
+      );
+
+      expect(queryByText("Connections")).not.toBeNull();
+    });
   });
 });

@@ -232,4 +232,38 @@ describe("storage facade: favorite connections", () => {
     expect((captured as unknown as CustomEvent).detail.collection).toBe("favorite_connections");
     expect((captured as unknown as CustomEvent).detail.data).toEqual(["conn-1"]);
   });
+
+  test("deleteConnection prunes the deleted id out of favorite_connections", () => {
+    storage.saveConnection(makeConnection({ id: "conn-1" }));
+    storage.toggleFavoriteConnection("conn-1");
+    storage.toggleFavoriteConnection("conn-2"); // a favorite for a connection that isn't this one
+
+    storage.deleteConnection("conn-1");
+
+    expect(storage.getFavoriteConnectionIds()).toEqual(["conn-2"]);
+  });
+
+  test("deleteConnection does not touch favorite_connections when the deleted id wasn't favorited", () => {
+    storage.saveConnection(makeConnection({ id: "conn-1" }));
+    storage.toggleFavoriteConnection("conn-2");
+
+    storage.deleteConnection("conn-1");
+
+    expect(storage.getFavoriteConnectionIds()).toEqual(["conn-2"]);
+  });
+
+  test("deleteConnection dispatches a favorite_connections change only when the deleted id was favorited", () => {
+    storage.saveConnection(makeConnection({ id: "conn-1" }));
+    storage.toggleFavoriteConnection("conn-1");
+    const collections: string[] = [];
+    const handler = (e: Event) => {
+      collections.push((e as CustomEvent).detail.collection);
+    };
+    window.addEventListener("libredb-storage-change", handler);
+
+    storage.deleteConnection("conn-1");
+
+    expect(collections).toContain("favorite_connections");
+    window.removeEventListener("libredb-storage-change", handler);
+  });
 });

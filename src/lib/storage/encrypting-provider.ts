@@ -14,7 +14,7 @@ import type { DatabaseConnection } from "@/lib/types";
  *
  * Only `connections` is touched. No other collection carries a credential field: history and
  * saved_queries hold SQL text (the product's data, not its secrets), audit_log is already
- * sanitized by src/lib/audit.ts, and the remaining six hold metadata.
+ * sanitized by src/lib/audit.ts, and the remaining seven hold metadata.
  */
 
 const CONNECTIONS: StorageCollection = "connections";

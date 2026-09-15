@@ -68,24 +68,26 @@ export function ConnectionsList({
         </section>
       )}
 
-      <section>
-        <SectionHeader label="Connections" />
+      {(rest.length > 0 || connections.length === 0) && (
+        <section>
+          <SectionHeader label="Connections" />
 
-        <div className="space-y-0.5">
-          {rest.length === 0 && connections.length === 0 ? (
-            <div className="px-3 py-6 text-center border border-dashed border-border/50 rounded-lg mx-2">
-              <p className="text-xs text-muted-foreground mb-3 leading-relaxed">
-                No database connections established yet.
-              </p>
-              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onAddConnection}>
-                Add Connection
-              </Button>
-            </div>
-          ) : (
-            rest.map(renderItem)
-          )}
-        </div>
-      </section>
+          <div className="space-y-0.5">
+            {connections.length === 0 ? (
+              <div className="px-3 py-6 text-center border border-dashed border-border/50 rounded-lg mx-2">
+                <p className="text-xs text-muted-foreground mb-3 leading-relaxed">
+                  No database connections established yet.
+                </p>
+                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onAddConnection}>
+                  Add Connection
+                </Button>
+              </div>
+            ) : (
+              rest.map(renderItem)
+            )}
+          </div>
+        </section>
+      )}
     </>
   );
 }
