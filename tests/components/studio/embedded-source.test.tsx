@@ -1162,12 +1162,20 @@ async function previewThrough(objectEditor: HostEditor): Promise<void> {
   await click("object-source-preview");
 }
 
-/** The whole reader-visible round trip: Edit, Preview, Confirm, and the dialog gone. */
+/**
+ * The whole reader-visible round trip: Edit, Preview, Confirm, and the dialog gone.
+ *
+ * The closing poll compares with `=== null` rather than asserting `toBeNull()` on the node, and
+ * so does every other absence poll in this file. A FAILING poll would hand bun the live happy-dom
+ * node, and bun walks that node's whole object graph to build the diff: 301 ms for a 260-node
+ * subtree, measured, which burns waitFor's 5 s budget in a few polls and turns a healthy test red
+ * on a machine that is briefly busy. The boolean costs 0 ms and asserts the same removal.
+ */
 async function applySuccessfullyThroughTheHost(objectEditor: HostEditor): Promise<void> {
   await previewThrough(objectEditor);
   await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
   await click("object-source-apply-confirm");
-  await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
 }
 
 function refreshTokenPassedToTheViewer(): unknown {
@@ -1226,7 +1234,7 @@ describe("the embedded workspace applies an object edit through the host", () =>
     await click("object-source-preview");
     await waitFor(() => expect(screen.getByTestId("object-source-apply-dialog")).toBeTruthy());
     await click("object-source-apply-confirm");
-    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
 
     // The connection ID, the address, the kind and the part: the whole surface, on both methods.
     expect(asked).toEqual([
@@ -1414,7 +1422,7 @@ describe("the embedded workspace applies an object edit through the host", () =>
     seen.push(refreshTokenPassedToTheViewer());
     await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
     await click("object-source-apply-confirm");
-    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
     seen.push(refreshTokenPassedToTheViewer());
 
     expect(seen).toEqual([0, 1]);
@@ -1793,7 +1801,7 @@ describe("the embedded workspace applies an object edit through the host", () =>
       editorProbe.change?.(DEFINITION);
       await Promise.resolve();
     });
-    await waitFor(() => expect(screen.queryByTestId("tab-dirty-dot")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("tab-dirty-dot") === null).toBe(true));
   });
   /**
    * WHAT THE READER IS LOOKING AT ONE RENDER AFTER A SUCCESSFUL APPLY (X25, #789).
@@ -1834,7 +1842,7 @@ describe("the embedded workspace applies an object edit through the host", () =>
     await click("object-source-preview");
     await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
     await click("object-source-apply-confirm");
-    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
 
     // The pane asked the host again, which is the only way new text can reach the screen here.
     await waitFor(() => expect(read).toBe(2));

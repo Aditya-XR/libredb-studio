@@ -29,11 +29,12 @@
  *   listed, measured by tracing the console output, so which file wins is not something the
  *   other file can arrange.
  *
- * `tests/isolated/exports-shim.test.ts`'s group comment in `tests/run-components.sh` already
- * named this hazard from the other side, and the fix there was to move the OTHER file out.
- * That stopped working when #789 added two `tests/unit` files that construct every provider
- * through the real factory: a fleet census cannot do its job without importing it. So the
- * isolation now sits on the file that needs it, and `bun test tests/unit` is clean again.
+ * The old component runner named this hazard from the other side and fixed it by moving the
+ * OTHER file out of the group. That stopped working when #789 added two `tests/unit` files that
+ * construct every provider through the real factory: a fleet census cannot do its job without
+ * importing it. So the requirement sits on the file that needs it, which is this paragraph, and
+ * the runner is what enforces it: one bun process per test file, no directory and no
+ * registration, and `bun test tests/unit` is clean again.
  */
 import { describe, test, expect, mock, beforeEach, beforeAll, afterAll } from "bun:test";
 import { open as libreOpen, kv as libreKv } from "@libredb/libredb";

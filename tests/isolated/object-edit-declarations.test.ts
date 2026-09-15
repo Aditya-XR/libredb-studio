@@ -10,13 +10,13 @@
  * two disagree, exactly one of them is wrong, and the repair is to the DECLARATION or to the
  * design, never to the expectation.
  *
- * WHY IT LIVES UNDER `tests/isolated/`, which is the same reason the Phase 2 source census does
+ * WHAT IT CANNOT SHARE A PROCESS WITH, which is the same thing the Phase 2 source census cannot
  * and is measured rather than inherited: it builds every provider through the REAL
  * `createDatabaseProvider`, and every file under `tests/api/` mocks `@/lib/db` with a
  * `createDatabaseProvider: mock()` answering undefined, which reaches `@/lib/db/factory` through
  * the index re-export. In a shared process this file would read `provider.getCapabilities` off
- * undefined. `tests/run-components.sh` gives Group 0b3 to both censuses so they share one
- * process and one population.
+ * undefined. The runner gives every test file a bun process of its own, so that isolation is
+ * already in force and this paragraph is where the requirement is written down.
  *
  * `CENSUS_CONNECTION` is IMPORTED from the source census beside it rather than copied. A second
  * seventeen-row `Record<DatabaseType, DatabaseConnection>` is a map that goes stale the first

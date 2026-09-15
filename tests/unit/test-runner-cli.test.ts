@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -67,27 +67,24 @@ describe("the test runner, end to end", () => {
   });
 
   test("a failing test file makes the runner exit 1 and prints the child's own failure output", () => {
-    // A throwaway test file outside tests/ so discovery never picks it up: the
-    // runner is pointed at it with an explicit selector.
-    const workDir = mkdtempSync(path.join(tmpdir(), "runner-failing-"));
+    const failing = path.join(root, "tests/unit/runner-failure-fixture.test.ts");
+    // writeFileSync, not Bun.write: Bun.write returns a promise, and leaving it
+    // unawaited let the runner start against a file that was still empty. bun then
+    // ran 0 tests and exited 0, so this case passed on Linux, where the write
+    // happened to land first, and failed on windows-latest (measured 2026-09-15).
+    writeFileSync(
+      failing,
+      'import { expect, test } from "bun:test";\ntest("deliberately failing fixture", () => {\n  expect(1).toBe(2);\n});\n',
+    );
     try {
-      const failing = path.join(root, "tests/unit/runner-failure-fixture.test.ts");
-      Bun.write(
-        failing,
-        'import { expect, test } from "bun:test";\ntest("deliberately failing fixture", () => {\n  expect(1).toBe(2);\n});\n',
-      );
-      try {
-        const { exitCode, stdout } = runRunner(["tests/unit/runner-failure-fixture.test.ts"]);
+      const { exitCode, stdout } = runRunner(["tests/unit/runner-failure-fixture.test.ts"]);
 
-        expect(exitCode).toBe(1);
-        expect(stdout).toContain("FAIL");
-        expect(stdout).toContain("deliberately failing fixture");
-        expect(stdout).toContain("re-run alone with: bun test ./tests/unit/runner-failure-fixture.test.ts");
-      } finally {
-        rmSync(failing, { force: true });
-      }
+      expect(exitCode).toBe(1);
+      expect(stdout).toContain("FAIL");
+      expect(stdout).toContain("deliberately failing fixture");
+      expect(stdout).toContain("re-run alone with: bun test ./tests/unit/runner-failure-fixture.test.ts");
     } finally {
-      rmSync(workDir, { recursive: true, force: true });
+      rmSync(failing, { force: true });
     }
   });
 

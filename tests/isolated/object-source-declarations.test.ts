@@ -53,15 +53,16 @@
  * sees every provider's declarations at once, so the half-declaration guard lives here, and it is
  * not a duplicate of anything: deleting it makes the class invisible again.
  *
- * WHY THIS FILE LIVES UNDER `tests/isolated/` (#789). It builds providers through the REAL
+ * WHAT THIS FILE CANNOT SHARE A PROCESS WITH (#789). It builds providers through the REAL
  * `createDatabaseProvider`, which is the whole point: a declaration census that read a double
  * would certify the double. Every file under `tests/api/` mocks `@/lib/db` with a
  * `createDatabaseProvider: mock()` answering undefined, and that mock reaches
  * `@/lib/db/factory` through the index re-export, so in a shared process this file reads
  * `provider.getCapabilities` off undefined. Measured 2026-09-13: alone it is green; beside
  * `tests/api/db-objects.test.ts` it is not. Nothing this file can do prevents it, because
- * mocking the factory is what the api layer is for, so the isolation sits here and
- * `tests/run-components.sh` gives it a group of its own.
+ * mocking the factory is what the api layer is for. The runner gives every test file a bun
+ * process of its own, so that isolation is already in force and this paragraph, rather than a
+ * directory or an entry in a runner script, is where the requirement is written down.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";

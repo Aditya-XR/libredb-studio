@@ -5106,8 +5106,12 @@ describe("AgentRail", () => {
         // The same answer every other classification failure reaches, and the rail is
         // idle again rather than stuck behind a request nobody will answer.
         expect(openRequests(fetchMock)[0]).toMatchObject({ workflowType: "investigation" });
+        // `=== null` rather than `toBeNull()` on the node: a FAILING poll would hand bun the live
+        // happy-dom element, and bun walks its whole object graph to build the diff, measured at
+        // 301 ms for a 260-node subtree. A few of those spend waitFor's 5 s budget and a briefly
+        // busy machine reds a healthy test. The boolean costs 0 ms and asserts the same absence.
         await waitFor(() => {
-          expect(view.queryByTestId("agent-classifying")).toBeNull();
+          expect(view.queryByTestId("agent-classifying") === null).toBe(true);
         });
       } finally {
         AbortSignal.timeout = realTimeout;
