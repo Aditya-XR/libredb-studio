@@ -33,10 +33,13 @@ const sourceFiles = (dir: string): string[] =>
 /** `<target>.addEventListener("keydown", …)`, with the target as written. */
 const REGISTRATION = /(\w+)\s*\.addEventListener\(\s*"keydown"/g;
 
+/** Repository-relative and POSIX-spelled, so the sites read the same on Windows as on Linux. */
+const repoRelative = (file: string): string => path.relative(ROOT, file).split(path.sep).join("/");
+
 const registrations = sourceFiles(SRC)
   .flatMap((file) =>
     [...readFileSync(file, "utf8").matchAll(REGISTRATION)].map((match) => ({
-      file: path.relative(ROOT, file),
+      file: repoRelative(file),
       target: match[1],
     })),
   )
