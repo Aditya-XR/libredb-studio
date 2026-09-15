@@ -1298,7 +1298,7 @@ mocks, `@/lib/db` in fifteen files and `@/lib/audit` in four.
 
 ### D86. `bun test --isolate` has not been re-probed, and the runner pays a process per test file
 
-`tests/run-tests.ts` spawns one bun process per test file, 540 of them on 2026-09-15, because
+`tests/run-tests.ts` spawns one bun process per test file, 542 of them on 2026-09-15, because
 `mock.module()` is process-wide with no undo and whole-module mocks are a whole layer's standard
 pattern. That is what it costs, measured on Linux with 20 cores and bun 1.4.2: 211 seconds one file
 at a time, 61 seconds 4 at a time, 36 seconds 20 at a time, and about 60 seconds at 8 with coverage

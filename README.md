@@ -540,7 +540,7 @@ Sample tables: `app.customers`, `app.products`, `app.orders`, `app.order_items`,
 
 ## Testing
 
-LibreDB Studio has a comprehensive test suite: 540 test files and 17,435 tests across seven layers, plus 79 browser tests, with **100% line coverage** enforced by CI (`bun run coverage:check`).
+LibreDB Studio has a comprehensive test suite: 542 test files and 17,477 tests across seven layers, plus 79 browser tests, with **100% line coverage** enforced by CI (`bun run coverage:check`).
 
 ### Quick Commands
 
@@ -549,10 +549,10 @@ LibreDB Studio has a comprehensive test suite: 540 test files and 17,435 tests a
 bun run test
 
 # Run by layer
-bun run test:unit          # Pure function tests (320 files)
+bun run test:unit          # Pure function tests (321 files)
 bun run test:api           # API route handler tests (35 files)
 bun run test:integration   # Database provider tests (24 files)
-bun run test:hooks         # React hook tests (20 files)
+bun run test:hooks         # React hook tests (21 files)
 bun run test:security      # Security posture tests (21 files)
 bun run test:evals         # LLM prompt evaluation tests (13 files)
 bun run test:components    # Component tests (107 files: tests/components and tests/isolated)
@@ -573,13 +573,13 @@ bun run test:coverage
 
 | Layer | Directory | Files | Tests | What it covers |
 |-------|-----------|-------|-------|----------------|
-| **Unit** | `tests/unit/` | 320 | 9,632 | Pure functions: SQL parser, connection strings, data masking, query limiter, schema diff, error classes, DB icons, showcase queries, and the packaging and chart manifests |
+| **Unit** | `tests/unit/` | 321 | 9,645 | Pure functions: SQL parser, connection strings, data masking, query limiter, schema diff, error classes, DB icons, showcase queries, and the packaging and chart manifests |
 | **API** | `tests/api/` | 35 | 602 | Route handlers: auth, query, transaction, maintenance, AI endpoints, middleware |
 | **Integration** | `tests/integration/` | 24 | 2,768 | Database providers: PG, MySQL, SQLite, MongoDB, Couchbase, Redis, Oracle, MSSQL, ClickHouse, Druid, Elasticsearch, OpenSearch, Trino |
-| **Hooks** | `tests/hooks/` | 20 | 558 | React hooks: auth, connections, tabs, query execution, transactions, inline editing, monitoring |
+| **Hooks** | `tests/hooks/` | 21 | 566 | React hooks: auth, connections, tabs, query execution, transactions, inline editing, monitoring |
 | **Security** | `tests/security/` | 21 | 322 | The posture `docs/SECURITY.md` claims: route exposure, headers, audit channels, credential handling |
 | **Evals** | `tests/evals/` | 13 | 198 | LLM prompt behaviour against recorded models |
-| **Components** | `tests/components/`, `tests/isolated/` | 107 | 3,355 | UI components with `happy-dom`: Studio, Sidebar, QueryEditor, ResultsGrid, Admin Dashboard, Charts, ERD |
+| **Components** | `tests/components/`, `tests/isolated/` | 107 | 3,376 | UI components with `happy-dom`: Studio, Sidebar, QueryEditor, ResultsGrid, Admin Dashboard, Charts, ERD |
 | **E2E** | `e2e/` | 18 | 79 | Full browser flows: login, connections, query execution, tabs, export, admin |
 
 Counted on 2026-09-15, the first seven rows with `bun tests/run-tests.ts` and the last with
