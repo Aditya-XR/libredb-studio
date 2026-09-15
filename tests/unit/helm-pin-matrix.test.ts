@@ -264,12 +264,20 @@ describe("the eight setup-helm sites", () => {
   });
 });
 
-describe("#434 regression: the two suite-running jobs cannot drift apart", () => {
-  test("ci.yml:test and npm-publish.yml:validate pin the identical Helm version", () => {
+describe("#434 regression: the suite-running jobs cannot drift apart", () => {
+  test("every job that runs the helm-touching suite pins the identical Helm version", () => {
     // Asserted against each other, not against a literal: the defect in #434 was
     // one helm here and another there, whatever the versions happened to be.
-    const [ci, npm] = SUITE_SITES.map((site) => BY_SITE.get(site)?.version);
-    expect(ci).toBe(npm as string);
+    //
+    // Every site against the first, not the first two against each other. This used
+    // to destructure `const [ci, npm]`, which was right while there were exactly two
+    // sites and silently stopped comparing npm-publish.yml:validate the moment a third
+    // was inserted between them: ci.yml:test was then compared with its own
+    // cross-platform twin and the release validation job with nothing.
+    const pins = SUITE_SITES.map((site) => [site, BY_SITE.get(site)?.version] as const);
+    expect(pins.every(([, version]) => version !== undefined)).toBe(true);
+    const [, first] = pins[0]!;
+    expect(pins.filter(([, version]) => version !== first)).toEqual([]);
   });
 
   test("reintroducing `helm install --dry-run=client` requires a Helm 4 suite pin", () => {
