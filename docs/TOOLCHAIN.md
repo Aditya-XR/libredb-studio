@@ -29,7 +29,7 @@ license, etc.):
 | Linting today | oxlint + type-aware-only ESLint | `eslint-config-next` (core-web-vitals + typescript + react-hooks) |
 | Formatter today | Biome (present) | None (no prettier) |
 | knip | present | present (in CI gate) |
-| Tests | single `bun test` | process-isolated (`run-core.sh` / `run-components.sh`) to avoid `mock.module()` cross-contamination |
+| Tests | single `bun test` | `tests/run-tests.ts`: one bun process per test file, several at a time, to avoid `mock.module()` cross-contamination |
 
 Consequences:
 
@@ -227,18 +227,35 @@ and the type-aware layer via `bun run lint`.
 
 ### `bun run test` and the process-wide `mock.module()`, and where isolation has to sit
 
-`bun test` runs many files in ONE process and `mock.module()` is process-wide, which is why
-`tests/run-core.sh` gives every core file its own process and `tests/run-components.sh` groups the
-component files. CI runs both, so CI is structurally blind to a file that only passes when it loads
-a module first. `bun run test` is not: it is the command CLAUDE.md documents for pre-commit, it runs
-`bun test tests/unit tests/api tests/integration` in one process, and a contributor reads its
-failures as their own.
+`mock.module()` is process-wide with no undo, so a mock one layer installs reaches every file that
+shares its process. `bun run test` is `bun tests/run-tests.ts`, which discovers every test file under
+`tests/` except `tests/live/` and runs EACH ONE in its own bun process, several at a time, so no
+file is ever reached by another file's mock. That is the whole reason the runner spawns a process
+per file instead of handing a directory to `bun test`; the decision is argued in
+`tests/runner/execute.ts`.
 
-That is not a reason to accept a red developer command. A test file that breaks it is a defect
-whether or not a gate notices, and the repair is to move the file whose assumption is unshareable
-rather than to bend the files around it.
+It used to be the other way round, and the cost was paid by contributors rather than by a gate.
+`bun run test` ran `bun test tests/unit tests/api tests/integration` in ONE process while CI ran
+the now-deleted `tests/run-core.sh`, one process per file, so the command CLAUDE.md documents for
+pre-commit was red on a clean checkout and no gate could see it: 12849 pass, 42 fail, exit 1 on the
+tree this change was written against, all of it one layer's mocks reaching a sibling that wanted the
+real module. Those 42 are gone because the documented command and the gate now run the same way, not
+because any mock was repaired. What the mocks are still wrong ABOUT is `docs/BACKLOG.md` D85.
 
-Two instances measured in #789, and the rule they establish.
+Two bun options were measured on this suite and are NOT used. `bun test --isolate` (1.4.2) resets
+the module registry per file inside one process, which would let the runner start far fewer
+processes, and it does contain `mock.module` - but it is the subject of
+[oven-sh/bun#41655](https://github.com/oven-sh/bun/issues/41655), a NAPI finalizer SIGSEGV that
+reproduces serially on 1.4.2, and this suite loads three NAPI addons (`better-sqlite3`, `oracledb`,
+`@duckdb/node-api`). `bun test --parallel` gave 0 fail in seven runs, then one run that hung for 17
+minutes inside a synchronous helm spawn and one that failed 7 tests of
+`tests/unit/docker-bind-address.test.ts` on 5000 ms timeouts; and
+[oven-sh/bun PR 41467](https://github.com/oven-sh/bun/pull/41467), which stops a crashed worker
+leaking its subprocesses, is merged but in no release, so 1.4.2 leaks them. A process boundary needs
+no upstream fix. Re-probing `--isolate` when 41655 closes is `docs/BACKLOG.md` D86.
+
+The process boundary is now structural, but the two cases it was first built by hand for are still
+the clearest statement of what it buys, so both measurements stay here.
 
 The first is a file that must load a module before anything else does:
 
@@ -256,13 +273,9 @@ The first is a file that must load a module before anything else does:
   empty probe reproduces nothing. Both CLI orders give the same 56, because bun does not run test
   files in the order they are listed.
 - It used to hold by accident: nothing else under `tests/unit` imported the factory.
-  `tests/isolated/exports-shim.test.ts` had already been moved out for the same reason, and its
-  group comment names this file by name. #789 added two `tests/unit` files that construct all
-  seventeen providers through the real factory, and a fleet census cannot do its job without
-  importing it, so the accident ran out.
-- The file therefore moved from `tests/unit/db/factory.test.ts` to `tests/isolated/factory.test.ts`
-  with its own group in `tests/run-components.sh`. `tests/unit/component-runner-coverage.test.ts`
-  makes an unregistered file in `tests/isolated/` a red test, so the isolation cannot be forgotten.
+  `tests/isolated/exports-shim.test.ts` had already been moved out for the same reason. #789 added
+  two `tests/unit` files that construct all seventeen providers through the real factory, and a
+  fleet census cannot do its job without importing it, so the accident ran out.
 
 The second is the mirror image: a file that must read a module the rest of a layer replaces.
 
@@ -276,17 +289,19 @@ The second is the mirror image: a file that must read a module the rest of a lay
   `@/lib/db/factory` through the index re-export. Measured 2026-09-13: the census beside
   `tests/api/db-objects.test.ts` is 3 fail, the language guard beside it is 1 fail, and each of
   them alone is 0 fail.
-- Nothing either file can do prevents that, so both moved to `tests/isolated/` with a shared group.
 
-A pre-existing instance of the same class is NOT fixed and is filed as `docs/BACKLOG.md` D68: the
-same `tests/api/` mocks of `@/lib/auth` take `tests/unit/lib/auth.test.ts`,
-`tests/unit/lib/auth-jwt-config.test.ts` and `tests/unit/seed/resolve-connection.test.ts` from 0 to
-31 failures in a shared process. Measured identical at `acf50738` and on the #789 branch, so it
-predates the epic.
+Moving those files into `tests/isolated/` was the only way to get each a process of its own while a
+runner named its groups by hand. It is no longer what protects them, and no new file needs
+that treatment: the directory keeps its name and its files because `docs/SECURITY.md`,
+`sonar-project.properties` and several source comments cite the paths, not because the runner treats
+it specially.
 
-The rule: when a test file can only pass while it is the first to load some module, it belongs in
-`tests/isolated/` with a group of its own and a docblock saying which module and what the failure
-looks like. Do not push the constraint outward onto every file that might legitimately import it.
+The rule the two cases leave: a test file whose assumption is unshareable - it has to be the first to
+evaluate some module, or it has to read a module a whole layer replaces - says so in its own
+docblock, naming the module and what the failure looks like. It needs no directory and no
+registration, because the runner already gives it a process. What is still not allowed is the
+reverse repair: pushing one file's constraint outward onto every file that might legitimately import
+the module.
 
 ### Dependency installation in CI
 
@@ -365,6 +380,15 @@ The merged `coverage/lcov.info` sits at 100% lines (#192/#195/#196) and CI enfor
 `scripts/check-coverage.mjs` fails the `Unit & Integration Tests` job on any zero-hit DA record,
 printing the uncovered file:line ranges. Local check: `bun run test:coverage && bun run coverage:check`.
 
+`bun run test:coverage` is the same runner as `bun run test` with `--coverage
+--merge-into=coverage/lcov.info`: one lcov per TEST FILE under `coverage/raw/`, merged by
+`scripts/merge-lcov.mjs` at the end. Measured 2026-09-15 on Linux, 8 files at a time: about 60
+seconds, and the merged report is 100% of 56687 lines. Two mechanics of that merge exist for
+Windows: the report list is handed over as a manifest (`--inputs-from=<file>`) because 500-odd paths
+do not fit in a Windows command line, and `merge-lcov.mjs` normalises a backslash `SF:` path, so
+coverage produced on Windows merges as the same file as coverage produced on Linux instead of as a
+second file the `src/` filter then drops.
+
 Holding 100% honestly requires knowing how bun measures:
 
 1. **Per-function granularity (V8 semantics).** Functions that executed in a process get a precise
@@ -374,17 +398,25 @@ Holding 100% honestly requires knowing how bun measures:
    process does.
 2. **Authority-universe merge** (`scripts/merge-lcov.mjs`, tested in `tests/unit/merge-lcov.test.ts`):
    per file, the record with the most executed lines decides which lines are coverable; per-line hit
-   counts still take the max across all records, so secondary groups (e.g. the mobile-drawer group of
-   a desktop-rendered component) keep contributing. Without this rule, load-only records surface
-   phantom uncovered lines that no test can ever close.
-3. **`run_group --nocov`** (`tests/run-components.sh`): groups that import without exercising (the
-   exports CJS shim pulls the whole component chain) run without coverage collection entirely.
+   counts still take the max across all records, so a secondary record (e.g. the mobile-drawer test
+   of a desktop-rendered component) keeps contributing. Without this rule, load-only records surface
+   phantom uncovered lines that no test can ever close. Per-file processes made this rule carry MORE
+   than it used to: a run merges one report per test file rather than one per hand-written group, so
+   a source file is now described by every test file that so much as imports it, and the load-only
+   records among them outnumber what a grouped run produced. The max-hit record is what keeps those
+   extra descriptions from adding uncoverable lines.
+3. **`COVERAGE_EXEMPT_FILES`** (`tests/runner/discover.ts`): the two files that pull in a module
+   chain without exercising it - the exports CJS shim loads every component, and the Monaco loader
+   file imports the editor to observe a call it makes at module scope - run without coverage
+   collection entirely. The docblock beside the list is where the reason lives, with what the shim
+   alone would otherwise contribute (31 phantom uncovered lines in `src/lib/llm/factory.ts`).
 4. **Non-executable-line strip** (`merge-lcov.mjs`): bun emits DA records for blanks, comments, and
    bare punctuation; these are removed against the actual source before SonarCloud reads the report.
 5. **Diagnosis recipe:** when a file shows stubborn uncovered lines, compare its records across
-   `coverage/components/group-*/lcov.info` and `coverage/core/file-*/lcov.info`. If the zero lines
-   are absent from the record with the most hits, they are measurement phantoms (fix the merge
-   inputs), not test gaps.
+   `coverage/raw/file-*/lcov.info` - one directory per test file, numbered by that file's position
+   in the sorted selection, so line N of `bun tests/run-tests.ts --list` is what wrote `file-N`. If
+   the zero lines are absent from the record with the most hits, they are measurement phantoms (fix
+   the merge inputs), not test gaps.
 6. **Mock fidelity over stubs:** hover/portal-dependent branches are closed by making test mocks
    honor the real library contract (recharts `Tooltip` renders its `content` element with an active
    payload; the select mock drives `onValueChange` through clickable items; dropdown items honor

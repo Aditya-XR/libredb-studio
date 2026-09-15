@@ -978,11 +978,9 @@ mock collection/cursor/admin returns canned documents and stats, exercising ever
 serialization, schema inference, monitoring, and maintenance.
 
 > ⚠️ **Mock isolation:** `bun`'s `mock.module()` is process-wide; files mocking different drivers
-> cross-contaminate in a shared process. CI runs the full suite via **`bun run test:ci`** (per-file
-> process isolation via `tests/run-core.sh`) and **`bun run test:coverage`** for determinism. The
-> `bun run test` pre-commit gate (per [`CLAUDE.md`](../../CLAUDE.md)) also works — it isolates the
-> component group — but runs the core group in a single process, so prefer `test:ci` when isolation
-> matters. Running a single file alone is always safe.
+> would cross-contaminate if they shared one. They never do: `bun run test` gives every test file its
+> own bun process, so a single file is safe and so is the whole suite, which is the same command CI
+> runs. `bun run test:coverage` is that runner with coverage on. See [`CLAUDE.md`](../../CLAUDE.md).
 
 ### Coverage
 
@@ -1026,7 +1024,7 @@ the engine re-measurable; [§6](#the-object-surface-789) says which claim each o
 
 ```bash
 bun test tests/integration/db/mongodb-provider.test.ts   # just this file
-bun run test:ci                                           # CI publish gate
+bun run test                                              # the whole suite, one process per file
 bun run test:coverage                                     # CI coverage workflow
 ```
 

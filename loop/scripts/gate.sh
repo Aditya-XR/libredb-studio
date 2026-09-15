@@ -26,7 +26,7 @@ echo "=== gate: test ==="
 bun run test
 
 # The required "Unit & Integration Tests" job runs these two, not `bun run test`:
-# coverage goes through tests/run-core.sh per-file process isolation, and
+# test:coverage is the same runner with --coverage, one lcov per test file, and
 # scripts/check-coverage.mjs enforces 100% lines on the merged lcov.
 echo "=== gate: coverage ==="
 bun run test:coverage

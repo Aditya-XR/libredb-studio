@@ -23,8 +23,17 @@ import {
   resolveLedgerDir,
   sha256File,
 } from "../../bin/lib/launcher-utils.mjs";
+import { describeIf, missingUnixTool, resolveUnixTool } from "../helpers/posix-tools";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-utils-test-"));
+/*
+  Resolved rather than spawned by bare name: `Bun.spawnSync` THROWS ("Executable not found in
+  $PATH", measured in this worktree) when a name does not resolve, which would take the whole file
+  down instead of failing one assertion. tar is not POSIX-only here - Windows 11 ships bsdtar as
+  System32\tar.exe, which both writes the fixture .tar.gz and honours the --strip-components the
+  launcher passes - so the archive case runs everywhere a tar exists.
+*/
+const TAR = resolveUnixTool("tar");
 
 afterAll(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
@@ -388,7 +397,7 @@ describe("preservePayloadData", () => {
   });
 });
 
-describe("extractArchive", () => {
+describeIf(missingUnixTool("tar"), "extractArchive", () => {
   // Release tarballs are packed with a top-level libredb-studio-<version>/
   // root (issue #133, scripts/lib/pack-standalone-tarball.sh) instead of a
   // tarbomb; extractArchive must strip that one path component so the
@@ -404,7 +413,7 @@ describe("extractArchive", () => {
     fs.writeFileSync(path.join(versionedRoot, "nested", "file.txt"), "nested contents");
 
     const tarballPath = path.join(sourceDir, "fixture.tar.gz");
-    const result = Bun.spawnSync(["tar", "-czf", tarballPath, "-C", sourceDir, rootName], {
+    const result = Bun.spawnSync([TAR!, "-czf", tarballPath, "-C", sourceDir, rootName], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -622,8 +631,21 @@ describe("launcher startup URL", () => {
       'import os from "node:os"; import { syncBuiltinESMExports } from "node:module"; ' +
         `os.homedir = () => ${JSON.stringify(home)}; syncBuiltinESMExports();`,
     );
+    /*
+      The environment is kept and only what would change the answer is removed. The launcher reads
+      PORT for the URL it prints and LIBREDB_STUDIO_ARCHIVE to skip the download, so a contributor
+      who exports either would see this fail for a reason that is not the test's.
+
+      It used to pass `{ PATH: process.env.PATH }`, which drops SystemRoot, windir, TEMP and TMP: a
+      node child started without SystemRoot can fail to initialise on Windows, and the failure
+      arrives as a bare non-zero exit code - exactly the opaque shape the assertion above tries to
+      avoid.
+    */
+    const env = { ...process.env };
+    delete env.PORT;
+    delete env.LIBREDB_STUDIO_ARCHIVE;
     const run = Bun.spawnSync([node!, "--import", preload, path.join(root, "bin/studio.js"), "--host", host], {
-      env: { PATH: process.env.PATH },
+      env,
       stdout: "pipe",
       stderr: "pipe",
     });

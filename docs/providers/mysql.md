@@ -684,10 +684,10 @@ exclusion cannot be added without saying why. `tests/live/mysql-object-vocabular
 real server for its own `SELECT DISTINCT TABLE_TYPE` and `SELECT DISTINCT ROUTINE_TYPE` and exits
 non-zero NAMING any value outside modelled-plus-excluded.
 
-**Where it runs.** It is a live check, so it is not in `bun run test` or `bun run test:ci`:
-`tests/run-core.sh` globs `tests/unit tests/api tests/integration tests/hooks tests/security
-tests/evals`, and nothing under `tests/live/` is collected, the same arrangement
-`tests/live/schema-diff-dialects.ts` has. It runs by hand against a disposable server, and belongs
+**Where it runs.** It is a live check, so it is not in `bun run test`: the runner collects every
+`*.test.ts` / `*.test.tsx` file under `tests/` except the ones in `tests/live/`, which it excludes by
+name (`EXCLUDED` in `tests/runner/discover.ts`). This file is outside that set twice over, by its
+directory and by its name, the same arrangement `tests/live/schema-diff-dialects.ts` has. It runs by hand against a disposable server, and belongs
 permanently in #789's live acceptance run:
 
 ```bash
@@ -1575,10 +1575,9 @@ pins the method for `getHealth`, `getOverview`, `getPerformanceMetrics`, the obj
 parameters), the Explain statement `mysqlJsonStrategy` builds, and the transaction path.
 
 > ⚠️ **Mock isolation:** `bun`'s `mock.module()` is process-wide, so files mocking different drivers
-> cross-contaminate when they share a process. A **single file** is safe (one file = one process).
-> The full `bun run test` script runs the core group in **one** process and is load-order flaky, so
-> **CI does not use it** — the deterministic runner is **`bun run test:ci`** (per-file isolation via
-> `tests/run-core.sh`); the coverage workflow uses `bun run test:coverage`. See [`CLAUDE.md`](../../CLAUDE.md).
+> would cross-contaminate if they shared one. They never do: `bun run test` gives every test file its
+> own bun process, so a single file is safe and so is the whole suite, which is the same command CI
+> runs. `bun run test:coverage` is that runner with coverage on. See [`CLAUDE.md`](../../CLAUDE.md).
 
 ### 12.2 Coverage
 
@@ -1609,8 +1608,8 @@ declarations were then re-measured end to end against live containers, `mysql:la
 
 ```bash
 bun test tests/integration/db/mysql-provider.test.ts   # just this file (single process — safe)
-bun run test:ci                                         # CI publish gate — per-file isolation (tests/run-core.sh)
-bun run test:coverage                                   # CI coverage workflow — per-file core + components
+bun run test                                            # the whole suite, one process per file, what CI runs
+bun run test:coverage                                   # CI coverage workflow: the same runner, with coverage
 ```
 
 ### 12.4 Optional: verifying against a live MySQL, and a live MariaDB

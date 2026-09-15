@@ -6,15 +6,28 @@
  * as a subprocess against a small fixture payload dir - no full `bun run
  * build` needed, since that script only wraps an already-assembled payload.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describeIf, missingPosixShell, missingUnixTool, posixShell, resolveUnixTool } from "../helpers/posix-tools";
 
 const SCRIPT = join(import.meta.dir, "../../scripts/lib/pack-standalone-tarball.sh");
 const VERSION = "9.9.9";
 
-describe("scripts/lib/pack-standalone-tarball.sh (#133)", () => {
+/*
+  Both tools are resolved rather than spawned by bare name: `Bun.spawnSync` THROWS ("Executable not
+  found in $PATH", measured in this worktree) when a name does not resolve, and in a PowerShell
+  session `bash` either is absent or is WSL's Linux shell, which cannot stat the Win32 temp path
+  this hands it. The script itself packs with tar, so listing with tar adds no dependency the
+  artifact does not already have; Windows 11 ships bsdtar in System32 and Git for Windows ships GNU
+  tar, and both read the .tar.gz this produces.
+*/
+const SHELL = posixShell("bash");
+const TAR = resolveUnixTool("tar");
+const CANNOT_PACK = missingPosixShell("bash") ?? missingUnixTool("tar");
+
+describeIf(CANNOT_PACK, "scripts/lib/pack-standalone-tarball.sh (#133)", () => {
   const fixtureRoots: string[] = [];
 
   afterEach(() => {
@@ -34,10 +47,10 @@ describe("scripts/lib/pack-standalone-tarball.sh (#133)", () => {
   test("packs the payload under a top-level libredb-studio-<version>/ root", () => {
     const { payloadDir, tarball } = makeFixturePayload();
 
-    const run = Bun.spawnSync(["bash", SCRIPT, payloadDir, VERSION, tarball], { stdout: "pipe", stderr: "pipe" });
+    const run = Bun.spawnSync([SHELL!, SCRIPT, payloadDir, VERSION, tarball], { stdout: "pipe", stderr: "pipe" });
     expect(run.exitCode).toBe(0);
 
-    const list = Bun.spawnSync(["tar", "tzf", tarball], { stdout: "pipe", stderr: "pipe" });
+    const list = Bun.spawnSync([TAR!, "tzf", tarball], { stdout: "pipe", stderr: "pipe" });
     expect(list.exitCode).toBe(0);
     const entries = list.stdout
       .toString()
@@ -54,7 +67,7 @@ describe("scripts/lib/pack-standalone-tarball.sh (#133)", () => {
   });
 
   test("rejects a wrong number of arguments", () => {
-    const run = Bun.spawnSync(["bash", SCRIPT, "/tmp/x"], { stdout: "pipe", stderr: "pipe" });
+    const run = Bun.spawnSync([SHELL!, SCRIPT, join(tmpdir(), "x")], { stdout: "pipe", stderr: "pipe" });
     expect(run.exitCode).not.toBe(0);
     expect(run.stderr.toString()).toContain("Usage:");
   });

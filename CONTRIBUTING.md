@@ -62,9 +62,10 @@ Feature suggestions are welcome! Please provide:
    Helm is only needed for the chart tests in the test suite, not for editing the app or running
    typecheck. The [devcontainer setup](#devcontainer--codespaces) below provides both tools.
 
-   Always `bun run test`, never bare `bun test`: component tests need the isolated execution groups
-   the script sets up. `bun run test:coverage && bun run coverage:check` prints the exact uncovered
-   `file:line` ranges.
+   Always `bun run test`, never bare `bun test` over a directory: the runner gives each test file its
+   own bun process, and `bun test tests/api` puts them all in one, where one file's `mock.module()`
+   becomes every file's. To run a single file, name it: `bun tests/run-tests.ts tests/unit/x.test.ts`.
+   `bun run test:coverage && bun run coverage:check` prints the exact uncovered `file:line` ranges.
 5. **Keep the provider triad in lockstep.** Anything under `src/lib/db/providers/**` has a matching
    `docs/providers/<type-id>.md` and `tests/integration/db/<type-id>-provider.test.ts`; a change to
    one moves the other two in the same PR.
@@ -211,16 +212,36 @@ started by this setup.
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) (recommended) or Node.js 24+
-- Git
-- [Helm](https://helm.sh/) 4.1.3 (the version CI runs). Ten of the eleven `helm-chart-*.test.ts` files under `tests/unit/` spawn the `helm` binary - all but `helm-chart-readme-recipes.test.ts`, which is a static lint over the chart README. Without `helm` on `PATH`, `bun run test` fails with 166 `error: Executable not found in $PATH: "helm"` errors. The PostgreSQL subchart tarball is gitignored (`*.tgz`), so a fresh clone also needs:
+The suite runs on Linux, macOS and Windows, from whichever shell the platform gives you.
+`bun run test` is `bun tests/run-tests.ts`, a TypeScript runner rather than a shell script, and CI runs it on ubuntu-latest, macos-latest and windows-latest.
 
-  ```bash
-  helm repo add bitnami https://charts.bitnami.com/bitnami
-  helm dependency build charts/libredb-studio --skip-refresh
-  ```
+| Tool | Version | Needed for |
+| --- | --- | --- |
+| [Bun](https://bun.sh/) | 1.4.2, the `packageManager` pin | Installing, the dev server, the build, and the test runner itself |
+| [Node.js](https://nodejs.org/) | 24+, the `engines` floor | The `scripts/*.mjs` gates, including `merge-lcov.mjs` and `check-coverage.mjs` |
+| Git | any | Cloning, and on Windows it is also where the POSIX tools below come from |
+| [Helm](https://helm.sh/) | 4.1.3, the version CI runs | The chart tests, see below |
+| A POSIX shell plus `tar`, `unzip` and `7z` | any | The packaging tests, which run the `packaging/` shell scripts and unpack what they produce |
 
-  Trap: a stale `docker login` can make that build fail with `401 Unauthorized` from `registry-1.docker.io` even though the chart is anonymously pullable. `docker logout` fixes it.
+Twelve of the thirteen `helm-chart-*.test.ts` files under `tests/unit/` spawn the `helm` binary; the exception is `helm-chart-readme-recipes.test.ts`, a static lint over the chart README.
+Without `helm` on `PATH` those files fail with `Executable not found in $PATH: "helm"`.
+The PostgreSQL subchart tarball is gitignored (`*.tgz`), so a fresh clone also needs:
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm dependency build charts/libredb-studio --skip-refresh
+```
+
+Trap: a stale `docker login` can make that build fail with `401 Unauthorized` from `registry-1.docker.io` even though the chart is anonymously pullable. `docker logout` fixes it.
+
+On Windows the POSIX tools come from the Git for Windows installation the clone already needed, and the tests locate them through git itself rather than through `PATH`.
+PowerShell's `PATH` carries `git.exe` but not the `bin` and `usr\bin` directories beside it that hold `bash.exe`, `grep.exe` and `unzip.exe`, and where WSL is installed a bare `bash` does resolve, to `C:\Windows\System32\bash.exe`, a Linux shell that cannot read the Windows temp paths the fixtures hand it.
+So `tests/helpers/posix-tools.ts` asks the git binary for its exec path, derives the installation root from it, falls back to `%LOCALAPPDATA%\Programs\Git` and the two `Program Files` defaults, and spawns each tool by absolute path; 7-Zip is looked for at `C:\Program Files\7-Zip\7z.exe` as well as on `PATH`.
+A tool it cannot find turns the tests that need it into skips whose titles carry the reason, instead of a spawn that throws and takes the rest of the file with it.
+Assertions about POSIX file modes skip on Windows in every case: NTFS has no exec bit, and Windows cannot exec an extension-less `#!` script.
+
+You do not need a `.env` file or a `data/` directory to run the tests.
+`tests/setup.ts`, which `bunfig.toml` preloads into every test process, pins the credentials and settings the suite runs under, so a local `.env` cannot decide a test's outcome.
 
 ### Getting Started
 
@@ -306,8 +327,8 @@ bun run format           # Biome formatter check (format:fix to write)
 bun run lint             # oxlint, then ESLint 9
 bun run typecheck        # TypeScript strict
 bun run knip             # unused files, exports and dependencies
-bun run test             # every test layer; never bare `bun test`. Needs Helm and the built subchart, see Prerequisites
-bun run test:ci          # the same layers with one process per file, which is what CI runs; use it to verify
+bun run test             # every test file, one bun process each; never bare `bun test`. Needs Helm and the built subchart, see Prerequisites
+bun run test:unit        # one layer; also test:api, test:integration, test:hooks, test:security, test:evals, test:components
 bun run test:coverage    # coverage report (merged lcov)
 bun run coverage:check   # enforce 100% line coverage on the merged lcov
 bun run readme:check     # localized README drift guard

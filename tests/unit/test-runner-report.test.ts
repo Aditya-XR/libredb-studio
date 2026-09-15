@@ -111,4 +111,29 @@ describe("what the runner prints", () => {
 
     expect(text).toMatch(/2 files? printed no summary/);
   });
+
+  test("every file that skipped a test is named, so a skip is never only a number", () => {
+    // A test skipped because the artifact it drives cannot exist on this platform
+    // (a deb postinstall, a snap launcher) says so in its own title, but bun prints
+    // a skipped title only to a terminal, never into a piped CI log. The file and
+    // its count are what stay visible there.
+    const skipping = outcome({
+      file: "tests/unit/snap-launcher.test.ts",
+      counts: { pass: 4, fail: 0, skip: 9, todo: 0 },
+    });
+    const text = formatSummary(
+      summary({
+        outcomes: [outcome(), skipping],
+        totals: { ...summary().totals, tests: { pass: 13_960, fail: 0, skip: 9, todo: 0 } },
+      }),
+    );
+
+    expect(text).toContain("Files with skipped tests:");
+    expect(text).toContain("tests/unit/snap-launcher.test.ts (9 skipped)");
+    expect(text).not.toContain("tests/unit/a.test.ts (");
+  });
+
+  test("a run with no skips says nothing about skips", () => {
+    expect(formatSummary(summary())).not.toContain("Files with skipped tests");
+  });
 });

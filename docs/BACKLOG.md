@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1–D84, U17 · 42
+- [Drivers and connections](#drivers-and-connections) — D1–D87, U17 · 44
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X25, U2–U21 · 18
@@ -876,41 +876,6 @@ collides with every one of them.
 **Done when:** one definition of each replaces the copies, with the sqlite and libsql source read
 sharing its statement.
 
-### D68. `bun run test` is red on a shared process, and only CI's per-file isolation hides it
-
-`bun run test` is the pre-commit command CLAUDE.md documents, and it runs
-`bun test tests/unit tests/api tests/integration` in ONE bun process. `mock.module()` is
-process-wide, so a mock one layer needs reaches every file in that process. CI runs
-`tests/run-core.sh` instead, one process per file, and is blind to the whole class by
-construction.
-
-Measured 2026-09-13, and the same numbers at `acf50738` and on the #789 branch, so it predates
-that epic: every file under `tests/api/` mocks `@/lib/auth` with stubbed `signJWT`, `verifyJWT`,
-`getSession`, `login` and `logout`, which is that layer's standard pattern. Run
-`tests/unit/lib/auth.test.ts`, `tests/unit/lib/auth-jwt-config.test.ts` and
-`tests/unit/seed/resolve-connection.test.ts` beside `tests/api/db-objects.test.ts` and the four
-files together are 31 fail; each of them alone is 0 fail.
-
-**It is not one module.** RE-MEASURED 2026-09-14 (#789 Phase 3): `tests/api/admin/audit.test.ts`
-mocks `@/lib/audit` the same way, and `tests/api/db/objects/edit-apply.test.ts` reads the audit ring
-to assert what an apply logs. Run those two files together and it is 20 pass 11 fail; each alone is
-0 fail, and `bun run test:ci` runs all 424 core files and exits 0. So the pattern is a LAYER mocking
-a module a sibling in the same layer legitimately needs, and `@/lib/auth` against three unit files is
-one instance of it rather than the whole of it. The full `bun run test` at that commit is 42 fail,
-all of them in these two groups.
-
-The cost is not a red gate, because no gate runs that shape. It is that a contributor following
-CLAUDE.md sees dozens of failures on a clean checkout and cannot tell them from their own.
-
-#789 removed its own three instances by moving the files with the unshareable assumption into
-`tests/isolated/`, where `tests/run-components.sh` gives each a process and
-`tests/unit/component-runner-coverage.test.ts` makes an unregistered one a red test. The same
-remedy does not fit here: it is not three files but a whole layer's mocking pattern against three
-unit files that legitimately want the real module. `docs/TOOLCHAIN.md` carries the diagnosis.
-
-**Done when:** `bun run test` on a clean checkout is green, either because the auth mocking pattern
-stops reaching `tests/unit`, or because the documented command runs the same isolation CI does.
-
 ### D69. Six type-ids still open `readObjectSource` with their own entry guard, and one of its sentences is less true
 
 `requireSourceKind` in `src/lib/db/object-kinds.ts` is the one entry guard for `readObjectSource`:
@@ -1296,6 +1261,85 @@ names the single registered function as a consequence, which makes the warning h
 reader one tick on every single-function edit, or the apply's arm stops reporting a loss the build
 promised could not happen, which is the answer only if some check proves the registration cannot move.
 The first is the safe direction and the second needs evidence this entry does not have.
+
+### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses two exports
+
+`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 36 hits, measured 2026-09-15. Five of
+them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`,
+the agent routes' pattern). Twenty-nine write out the same five-key object - `getSession`, `signJWT`,
+`verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token
+nothing reads, and one of those twenty-nine is `tests/helpers/object-edit-route-harness.ts`, a shared
+harness that could have been the factory and copied the stub instead. The remaining two write a
+shorter stub of their own, one with two keys and one with a single `getSession`.
+
+`src/lib/auth.ts` exports seven names. The two no hand-written stub carries are
+`shouldMarkCookieSecure` and `resetCookieSecurityWarning`:
+`grep -rn 'shouldMarkCookieSecure' tests/` returns exactly one hit, and it is a sentence in a comment
+rather than a stub key, while `resetCookieSecurityWarning` appears only in
+`tests/unit/lib/auth.test.ts`, which imports the real module.
+`src/app/api/auth/oidc/login/route.ts` imports `shouldMarkCookieSecure` and awaits it to decide the
+auth cookie's `secure` flag, so every one of those stubs is already an export short of the module it
+replaces. Nothing has hit that yet only because `tests/api/auth/oidc-login.test.ts` is one of the
+route tests that does NOT mock `@/lib/auth`.
+
+Nothing can catch it either. `mock.module` is declared `module(id: string, factory: () => any)` in
+`node_modules/bun-types/test.d.ts`, so a stub that has drifted from the module it stands in for is
+invisible to `bun run typecheck`, and the drift can only show up as a `TypeError` in whichever route
+reaches the missing export first.
+
+Per-file process isolation does nothing about this and was never meant to. The runner gives each
+file its own process, so a stub can no longer reach a sibling that wants the real module. What a
+process boundary cannot do is make the stub the right SHAPE.
+
+**Done when:** one factory in `tests/helpers/`, typed `(): typeof import("@/lib/auth")`, replaces the
+hand-written stubs, so adding an export to `src/lib/auth.ts` fails `typecheck` in every file that
+mocks it instead of at run time in one of them. The same shape then covers the other layer-wide
+mocks, `@/lib/db` in fifteen files and `@/lib/audit` in four.
+
+### D86. `bun test --isolate` has not been re-probed, and the runner pays a process per test file
+
+`tests/run-tests.ts` spawns one bun process per test file, 539 of them on 2026-09-15, because
+`mock.module()` is process-wide with no undo and whole-module mocks are a whole layer's standard
+pattern. That is what it costs, measured on Linux with 20 cores and bun 1.4.2: about 370 seconds one
+file at a time, about 77 seconds at 8 at a time, about 35 seconds at 24, and about 60 seconds at 8
+with coverage on.
+
+bun 1.4.2 has `--isolate`, which resets the module registry per file inside ONE process and does
+contain `mock.module`. If it were reliable here, the runner could start a handful of processes
+rather than one per file. It is not adopted because of oven-sh/bun#41655, a NAPI finalizer SIGSEGV
+that reproduces serially on 1.4.2, and this suite loads three NAPI addons: `better-sqlite3`,
+`oracledb` and `@duckdb/node-api`. `docs/TOOLCHAIN.md` records the same refusal, beside the one for
+`--parallel`.
+
+**Done when:** #41655 is closed and a probe has run the whole suite under `--isolate` twenty
+consecutive times on each of Linux, macOS and Windows with no crash, no leaked subprocess and the
+same per-file pass counts as the process-per-file runner, after which the runner may take it - or
+the probe reproduced a failure and this entry is replaced by what it reproduced. A mode that is
+flaky at this size is worse than a slow one, because its failures arrive wearing the tests' own
+clothes.
+
+### D87. Two packaging tests cannot run on Windows because the scripts they drive shell out
+
+Measured 2026-09-15, while making `bun run test` green on all three platforms. Two tests now declare
+a platform or tool requirement and say so in their own title, and in both cases the requirement comes
+from the script under test rather than from the test:
+
+- `scripts/build-azure-package.mjs:273` builds the marketplace archive with `execFileSync("zip", ...)`.
+  A stock Windows 11 machine has neither `zip` nor `unzip`, so `tests/unit/build-azure-package.test.ts`
+  gates its build cases on both binaries. Writing the two-file archive with a pure JavaScript zip
+  writer would make the Azure package reproducible everywhere and let the test read the archive back
+  in process, which is what it already does for the standalone zip since this change.
+- `scripts/ci-install.sh` is the bun install retry policy used by every workflow, and
+  `tests/unit/ci-install.test.ts` drives it with a fixture PATH holding two `chmod 0755` stubs.
+  Windows has no exec bit and no shebang dispatch, so the whole file is skipped there. The policy is
+  twenty lines of arithmetic and `bun install`; as `scripts/ci-install.mjs` it would run under the
+  same `shell: bash` steps and be testable on every platform.
+
+Neither is a correctness defect today: CI runs both on Linux, and the skips are declared rather than
+silent. What they cost is that a Windows contributor cannot verify a change to either script.
+
+**Done when:** the Azure package is written without an external archiver, `ci-install` is a script bun
+or node can run, and both test files run unconditionally on all three platforms.
 
 
 ## Value interpolation

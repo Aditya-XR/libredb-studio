@@ -9,9 +9,12 @@
 
 import { describe, test, expect, afterEach, beforeAll, afterAll, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
+
+/** The repository root, anchored to this file so nothing here depends on the launcher's cwd. */
+const REPO_ROOT = resolve(import.meta.dir, "../../..");
 import {
   SQLiteProvider,
   assertQueryOnlyEnabled,
@@ -143,13 +146,23 @@ describe("SQLiteProvider", () => {
 
   describe("getDatabasePath() via connect()", () => {
     let pathTmpDir: string;
+    let sameVolumeTmpDir: string;
 
     beforeAll(() => {
       pathTmpDir = mkdtempSync(join(tmpdir(), "libredb-sqlite-path-"));
+      // A second fixture directory, deliberately on the same volume as the process cwd: the
+      // relative-path test below needs path.relative(cwd, target) to BE relative, and on Windows a
+      // clone on D: with %TEMP% on C: makes that impossible to express, so path.relative hands
+      // back the absolute target and the test fails on that machine only. node_modules/.cache is
+      // ignored by the VCS, so nothing here is visible to a working-tree drift guard.
+      const cache = join(REPO_ROOT, "node_modules", ".cache");
+      mkdirSync(cache, { recursive: true });
+      sameVolumeTmpDir = mkdtempSync(join(cache, "libredb-sqlite-path-"));
     });
 
     afterAll(() => {
       rmSync(pathTmpDir, { recursive: true, force: true });
+      rmSync(sameVolumeTmpDir, { recursive: true, force: true });
     });
 
     test("a path containing a NUL byte throws DatabaseConfigError without claiming traversal protection", async () => {
@@ -169,15 +182,24 @@ describe("SQLiteProvider", () => {
     test("a relative path with '..' segments is accepted and resolves to an absolute location", async () => {
       // Pins intended behavior: sqlite paths are trusted server-side paths, so
       // ".." segments are legal and simply resolve against the process cwd.
-      const relPath = relative(process.cwd(), join(pathTmpDir, "dotdot-ok.db"));
+      // The ".." is built explicitly, by leaving the working directory and coming straight back
+      // into it, rather than by pointing at a directory outside the tree and letting
+      // path.relative produce the hops. That used to be a path under the system temp directory:
+      // on Windows a clone on D: with %TEMP% on C: has no relative spelling at all, so
+      // path.relative returns the absolute target and the assertion below fails on that machine
+      // only. This form carries the same ".." segments on every platform.
+      const target = join(sameVolumeTmpDir, "dotdot-ok.db");
+      const cwd = process.cwd();
+      const relPath = join("..", basename(cwd), relative(cwd, target));
       expect(isAbsolute(relPath)).toBe(false);
       expect(relPath).toContain("..");
+      expect(resolve(relPath)).toBe(target);
 
       provider = new SQLiteProvider(makeSQLiteConfig({ database: relPath }));
       await provider.connect();
       expect(provider.isConnected()).toBe(true);
       // The database file materializes at the resolved absolute location.
-      expect(existsSync(join(pathTmpDir, "dotdot-ok.db"))).toBe(true);
+      expect(existsSync(join(sameVolumeTmpDir, "dotdot-ok.db"))).toBe(true);
     });
 
     test("a connectionString with a file: prefix is accepted and the prefix is stripped", async () => {
@@ -2775,7 +2797,9 @@ describe("SQLiteProvider agent read-only execution profile (#328)", () => {
       live arm above — it proves the template still reads that way, not that a running
       engine produces it — and still red on a reword, which is the property that matters.
     */
-    const postgresSource = await Bun.file("src/lib/db/providers/sql/postgres.ts").text();
+    // Anchored to this file, like every other source read in the suite: a cwd-relative read
+    // would fail here naming a path rather than the rule it is checking.
+    const postgresSource = readFileSync(join(REPO_ROOT, "src/lib/db/providers/sql/postgres.ts"), "utf8");
     expect(postgresSource).toContain(
       "Read-only execution exceeded the row budget: ${result.rows.length} rows > ${budget.maxResultRows} allowed",
     );
@@ -2955,6 +2979,13 @@ describe.skipIf(!nodeDriverTestable)("SQLiteProvider with LIBREDB_SQLITE_DRIVER=
       ["build", harnessEntry, "--target=node", "--format=esm", "--external", "bun:sqlite", "--outfile", bundlePath],
       { timeout: 60_000 },
     );
+    // `build.error` first: on a timeout spawnSync returns status null with error set, and
+    // `status !== 0` is true for null, so checking status alone raises "bun build failed:" with an
+    // empty stderr, a message that names nothing. Under a concurrent runner a timeout is the
+    // likely failure, so it has to say so.
+    if (build.error) {
+      throw new Error(`bun build could not run: ${build.error.message}`);
+    }
     if (build.status !== 0) {
       throw new Error(`bun build failed: ${build.stderr?.toString()}`);
     }
@@ -2964,6 +2995,9 @@ describe.skipIf(!nodeDriverTestable)("SQLiteProvider with LIBREDB_SQLITE_DRIVER=
       env: { ...process.env, LIBREDB_SQLITE_DRIVER: "node" },
       timeout: 60_000,
     });
+    if (run.error) {
+      throw new Error(`node harness could not run: ${run.error.message}`);
+    }
     if (run.status !== 0) {
       throw new Error(`node harness failed: ${run.stderr?.toString()}`);
     }

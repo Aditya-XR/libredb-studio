@@ -927,9 +927,9 @@ SQLite is the **only** provider whose integration tests run against a **real eng
 Embedded + in-memory/tempfile means there is no server to provision, so the tests exercise actual
 SQL execution, schema PRAGMAs, maintenance, and monitoring end-to-end.
 
-> Mock-isolation still applies to the *suite* (other files mock their drivers process-wide), so run
-> with `bun run test:ci` / `bun run test:coverage`, not the single-process `bun run test`. See
-> [`CLAUDE.md`](../../CLAUDE.md).
+> Other files in the suite mock their drivers process-wide, and `bun run test` keeps them apart by
+> giving every test file its own bun process, so neither this file nor the whole suite is exposed to
+> another file's mocks. See [`CLAUDE.md`](../../CLAUDE.md).
 
 ### 11.2 Coverage
 
@@ -951,7 +951,7 @@ since bun and node report read-only violations differently.
 
 ```bash
 bun test tests/integration/db/sqlite-provider.test.ts   # real :memory: engine
-bun run test:ci                                          # CI publish gate (per-file isolation)
+bun run test                                             # the whole suite, one process per file
 bun run test:coverage                                    # CI coverage workflow
 ```
 

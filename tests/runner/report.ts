@@ -84,6 +84,18 @@ export function formatSummary(summary: RunSummary): string {
     );
   }
 
+  // A skipped test is not a passing test. bun prints a skipped title only to a
+  // terminal, so in a CI log or a piped run the file and its count are the only
+  // trace that something did not run; each such test carries its reason in its own
+  // title (a platform that cannot host the artifact, a tool that is not installed).
+  const skipping = summary.outcomes.filter((outcome) => (outcome.counts?.skip ?? 0) > 0);
+  if (skipping.length > 0) {
+    lines.push("", "Files with skipped tests:");
+    for (const outcome of skipping.sort((a, b) => a.file.localeCompare(b.file))) {
+      lines.push(`  ${outcome.file} (${outcome.counts?.skip} skipped)`);
+    }
+  }
+
   if (summary.failures.length > 0) {
     lines.push("", "Failed files:");
     for (const outcome of summary.failures) {

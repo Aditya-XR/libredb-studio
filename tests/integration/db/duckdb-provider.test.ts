@@ -22,7 +22,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { DuckDBProvider, assertReadOnlyStatementIsBounded } from "@/lib/db/providers/sql/duckdb";
 import type { DatabaseConnection } from "@/lib/types";
 import type { ObjectKindSpec, ObjectSourceForm, ProviderCapabilities, ReadOnlyStatementBudget } from "@/lib/db/types";
@@ -70,6 +70,20 @@ const PINNED_VERSION = "v1.5.5";
  * did NOT appear.
  */
 const workDir = mkdtempSync(join(tmpdir(), "libredb-duckdb-test-"));
+
+/**
+ * A second scratch directory, for the one test that needs a RELATIVE database path.
+ *
+ * It has to sit under the process directory: `path.relative` can only answer a relative path
+ * when both sides share a root, and on Windows a clone on D: with %TEMP% on C: has no relative
+ * spelling of `workDir` at all. It used to be a fixed `tests-tmp-duckdb/` in the repository
+ * working tree, which two concurrent test processes would share (DuckDB's single-writer file
+ * lock then fails the second one) and which a drift guard running beside the suite would see.
+ * `node_modules/.cache` is ignored by the VCS, and `mkdtempSync` makes the name per-process.
+ */
+const RELATIVE_WORK_PARENT = resolve(import.meta.dir, "../../../node_modules/.cache");
+mkdirSync(RELATIVE_WORK_PARENT, { recursive: true });
+const relativeWorkDir = mkdtempSync(join(RELATIVE_WORK_PARENT, "libredb-duckdb-rel-"));
 
 /**
  * A CSV outside every database, for the bare-path form: DuckDB's replacement scan turns
@@ -135,6 +149,7 @@ beforeAll(() => {
 afterAll(() => {
   // One removal, not two: the CSV lives inside the scratch directory now.
   rmSync(workDir, { recursive: true, force: true });
+  rmSync(relativeWorkDir, { recursive: true, force: true });
 });
 
 // ============================================================================
@@ -267,18 +282,20 @@ describe("connect / disconnect", () => {
   test("a relative path is resolved against the process directory, matching factory.ts's fileIdentity", async () => {
     // `findOpenSingleWriterProvider` keys off `path.resolve(connection.database)`, so a
     // provider that resolved differently would silently stop matching its own handle.
-    const relative = `./${join("tests-tmp-duckdb", "relative.duckdb")}`;
-    provider = new DuckDBProvider(makeConfig({ database: relative }));
+    const absolute = join(relativeWorkDir, "relative.duckdb");
+    const relPath = `./${relative(process.cwd(), absolute)}`;
+    provider = new DuckDBProvider(makeConfig({ database: relPath }));
 
     await provider.connect();
     await provider.query("CREATE TABLE t (a INTEGER)");
     await provider.query("CHECKPOINT");
 
     const [storage] = await provider.getStorageStats();
-    expect(storage.location).toBe(join(process.cwd(), "tests-tmp-duckdb", "relative.duckdb"));
+    expect(storage.location).toBe(absolute);
 
+    // The file itself is removed by the module afterAll with the rest of relativeWorkDir, so a
+    // failed assertion above no longer leaves a database behind.
     await provider.disconnect();
-    rmSync(join(process.cwd(), "tests-tmp-duckdb"), { recursive: true, force: true });
   });
 
   test("a path carrying a NUL byte is refused as a configuration error", async () => {

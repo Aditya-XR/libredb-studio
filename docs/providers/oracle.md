@@ -1864,10 +1864,9 @@ package, and no `@types/oracledb` dependency here), so a driver upgrade that cha
 caught by a live probe, not by `tsc`.
 
 > ⚠️ **Mock isolation:** `bun`'s `mock.module()` is process-wide; files mocking different drivers
-> cross-contaminate in a shared process. A **single file** is safe (one file = one process). The
-> full `bun run test` script runs the core group in **one** process and is load-order flaky, so
-> **CI does not use it** — the deterministic runner is **`bun run test:ci`** (per-file isolation via
-> `tests/run-core.sh`); the coverage workflow uses `bun run test:coverage`. See [`CLAUDE.md`](../../CLAUDE.md).
+> would cross-contaminate if they shared one. They never do: `bun run test` gives every test file its
+> own bun process, so a single file is safe and so is the whole suite, which is the same command CI
+> runs. `bun run test:coverage` is that runner with coverage on. See [`CLAUDE.md`](../../CLAUDE.md).
 
 ### 12.2 Coverage
 
@@ -1895,8 +1894,8 @@ go red, which caught two assertions that were passing vacuously.
 
 ```bash
 bun test tests/integration/db/oracle-provider.test.ts   # just this file (single process — safe)
-bun run test:ci                                          # CI publish gate — per-file isolation (tests/run-core.sh)
-bun run test:coverage                                    # CI coverage workflow — per-file core + components
+bun run test                                             # the whole suite, one process per file, what CI runs
+bun run test:coverage                                    # CI coverage workflow: the same runner, with coverage
 ```
 
 ### 12.4 Optional: verifying against a live Oracle

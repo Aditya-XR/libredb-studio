@@ -1,6 +1,6 @@
 /**
  * Unit tests for the Helm CLI version matrix pinned across the five workflows
- * that run `azure/setup-helm` (seven sites in total).
+ * that run `azure/setup-helm` (eight sites in total).
  *
  * This exists because of #434. Its NOTES.txt assertions used
  * `helm install --dry-run=client`, which is green on Helm 4 (the maintainer's
@@ -64,8 +64,14 @@ const HELM_3 = "v3.16.0";
  */
 const EXPECTED_PINS: Record<string, string> = {
   // Required "Unit & Integration Tests" check: spawns `helm template` from the
-  // ten helm-chart-*.test.ts files. Produces no published byte.
+  // helm-chart-*.test.ts files. Produces no published byte.
   "ci.yml:test": HELM_4,
+  // The same suite on windows-latest and macos-latest, not a required check.
+  // Same pin as ci.yml:test for the same reason the two suite sites below share
+  // one: the helm-chart tests assert on what `helm template` renders, so a
+  // platform leg on a different client would report a difference that is the
+  // client's, not the platform's.
+  "ci.yml:test-cross-platform": HELM_4,
   // Advisory chart lint + a conditional kind `ct install`. Raised on purpose so
   // chart-testing under Helm 4 is exercised somewhere non-blocking.
   "ci.yml:helm-lint": HELM_4,
@@ -84,8 +90,8 @@ const EXPECTED_PINS: Record<string, string> = {
 /** The site whose Helm 3 pin is load-bearing evidence, not an oversight. */
 const HELM3_PINNED_SITE = "helm-release.yml:lint-test";
 
-/** The two jobs that run the helm-touching test suite; #434 was their drift. */
-const SUITE_SITES = ["ci.yml:test", "npm-publish.yml:validate"];
+/** The jobs that run the helm-touching test suite; #434 was their drift. */
+const SUITE_SITES = ["ci.yml:test", "ci.yml:test-cross-platform", "npm-publish.yml:validate"];
 
 interface HelmPin {
   site: string;
@@ -230,9 +236,9 @@ describe("jobCommandLines", () => {
   });
 });
 
-describe("the seven setup-helm sites", () => {
-  test("there are exactly seven, and every one is classified", () => {
-    expect(ALL_PINS).toHaveLength(7);
+describe("the eight setup-helm sites", () => {
+  test("there are exactly eight, and every one is classified", () => {
+    expect(ALL_PINS).toHaveLength(8);
     expect([...BY_SITE.keys()].sort()).toEqual(Object.keys(EXPECTED_PINS).sort());
   });
 
@@ -357,7 +363,7 @@ describe("`helm registry login` targets a bare domain", () => {
 
 describe("the release runbook records the split", () => {
   test("cut-release SKILL.md points at this test as the matrix's enforcement", () => {
-    // SKILL.md is the single written inventory of the seven sites; without this
+    // SKILL.md is the single written inventory of the sites; without this
     // pointer the next reader re-unifies them from the runbook.
     const skill = readFileSync(join(REPO_ROOT, ".claude/skills/cut-release/SKILL.md"), "utf8");
     const mentions = skill.split("\n").filter((line) => line.includes("helm-pin-matrix.test.ts"));
