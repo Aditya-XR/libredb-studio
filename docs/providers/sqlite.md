@@ -76,8 +76,9 @@ SQLite driver by runtime:
   sqlite connection is actually used.
 - **Identical behaviour:** the adapter exposes the exact `bun:sqlite`-shaped surface the provider
   uses (`exec` / `prepare().all/get/run` / `close`) and bridges the small `node:sqlite` deltas
-  (`get()` miss returns `null` not `undefined`; `run().changes` normalized to `number`), so results
-  and error mapping are the same under both runtimes.
+  (`get()` miss returns `null` not `undefined`; `run().changes` normalized to `number`;
+  `close(throwOnError)` is bun's flag for "release the file now" and node:sqlite needs none), so
+  results and error mapping are the same under both runtimes.
 - **Why not `better-sqlite3`?** Bun refuses to load it outright, and its native binding must match
   the installing runtime's ABI (a bun-installed binding fails under Node). The built-in drivers
   need no native dependency at all. (`better-sqlite3` remains the *storage-layer* driver.)
@@ -169,6 +170,19 @@ directories are created on connect.
 concurrency, NORMAL sync for a speed/durability balance. The agent read-only profile runs a
 different open sequence entirely — `journal_mode = WAL` is itself a write and fails on a read-only
 handle ([§12.1](#121-where-the-boundary-is)).
+
+`disconnect()` closes with `close(true)`, and the argument is load-bearing. Bare `close()` on
+`bun:sqlite` is `sqlite3_close_v2`: with any statement still unfinalized the connection becomes a
+zombie and the database, its `-wal` and its `-shm` stay **open** until the last statement is
+finalized or garbage collected. This provider prepares a statement per query and drops the
+reference, so that used to be whenever the collector got to it — measured through `/proc/self/fd`,
+three descriptors survived a `disconnect()` that reported `isConnected() === false`. POSIX hides
+that, because it unlinks a file that is still open; Windows does not, and a user could not delete or
+move a database Studio had disconnected from. `close(true)` finalizes and closes for real, and
+raises if SQLite cannot. `node:sqlite` needs no flag — its own `close()` finalizes the statements it
+tracks (measured on Node 24.14.0). The portable reading either way is the sidecars: SQLite
+checkpoints the WAL and removes `-wal` and `-shm` only when the connection really closes, which is
+what `tests/integration/db/sqlite-provider.test.ts` asserts on both adapters.
 
 ### 3.3 Read vs write dispatch
 

@@ -148,8 +148,8 @@ beforeAll(() => {
 
 afterAll(() => {
   // One removal, not two: the CSV lives inside the scratch directory now.
-  rmSync(workDir, { recursive: true, force: true });
-  rmSync(relativeWorkDir, { recursive: true, force: true });
+  rmSync(workDir, { recursive: true });
+  rmSync(relativeWorkDir, { recursive: true });
 });
 
 // ============================================================================
@@ -305,20 +305,55 @@ describe("connect / disconnect", () => {
     expect(provider.isConnected()).toBe(false);
   });
 
-  test("two handles on the same file inside ONE process are both allowed", async () => {
-    // This is the measurement that makes the agent's read-only handle possible: the
-    // lock is per operating-system process, so a second in-process handle is fine.
+  test("a second handle on the same file inside ONE process is admitted on POSIX and refused on Windows", async () => {
+    // DuckDB takes an exclusive hold on the database file at open, and how far that hold
+    // reaches is a property of the operating system rather than of the engine.
+    //
+    // On POSIX it is a per-PROCESS lock, so a second handle from the same process is
+    // admitted. On Windows there is no such allowance: measured on windows-latest
+    // (2026-09, DuckDB v1.5.5 through @duckdb/node-api 1.5.5-r.4), the second open fails
+    // with "The process cannot access the file because it is being used by another
+    // process" and DuckDB names THIS process as the holder.
+    //
+    // Both arms are asserted positively, and the Windows arm ends by opening the second
+    // handle once the first has let go: a refusal that survived closing the first handle
+    // would be about something other than the hold, and the assertion would mean nothing.
+    //
+    // Browsing does not lean on the allowance either way - the editor is handed the open
+    // handle rather than a second one (`findOpenSingleWriterProvider`, BACKLOG D3). The one
+    // path that really wants two at once is an agent run reaching a connection the editor
+    // already holds; what Windows does to that is recorded in docs/providers/duckdb.md
+    // §3.8 and is not fixed here.
     const dbPath = await seededFile("shared.duckdb");
     const first = new DuckDBProvider(makeConfig({ database: dbPath }));
     const second = new DuckDBProvider(makeConfig({ id: "second", database: dbPath }));
+    const rowCount = async (provider: DuckDBProvider): Promise<unknown> =>
+      (await provider.query("SELECT count(*) AS n FROM users")).rows[0].n;
 
     await first.connect();
-    await second.connect();
+    try {
+      if (process.platform === "win32") {
+        const refusal = await second.connect().then(
+          () => null,
+          (error: unknown) => error,
+        );
+        expect(refusal).toBeInstanceOf(ConnectionError);
+        expect((refusal as Error).message).toContain(dbPath);
+        expect(await rowCount(first)).toBe("2");
 
-    expect((await second.query("SELECT count(*) AS n FROM users")).rows[0].n).toBe("2");
+        await first.disconnect();
+        await second.connect();
+      } else {
+        await second.connect();
+      }
 
-    await first.disconnect();
-    await second.disconnect();
+      expect(await rowCount(second)).toBe("2");
+    } finally {
+      // Whatever happened above: a handle left open is a file the module teardown cannot
+      // remove on Windows, which is how this test used to poison the rest of the file.
+      if (second.isConnected()) await second.disconnect();
+      if (first.isConnected()) await first.disconnect();
+    }
   });
 });
 
@@ -700,13 +735,19 @@ describe("monitoring", () => {
     const [main] = await provider.getStorageStats();
 
     expect(main.name).toBe("Main Database");
-    // Both sides through `realpathSync`, because the location is DUCKDB's answer and DuckDB
-    // canonicalises it. A no-op wherever the temp directory is a real directory, which is why
-    // this read as portable: on macOS `os.tmpdir()` is `/var/folders/...`, a symlink to
-    // `/private/var/folders/...`, so the engine returns a path that names the same file by a
-    // different route and a string comparison fails on a correct answer.
+    // Both sides through `realpathSync.native`, because the location is DUCKDB's answer and
+    // DuckDB canonicalises it, so the two sides can name the same file by different routes:
+    // on macOS `os.tmpdir()` is `/var/folders/...`, a symlink to `/private/var/folders/...`,
+    // and on Windows it is the 8.3 SHORT form of whatever %TEMP% holds - on windows-latest
+    // `os.tmpdir()` answers `C:\Users\RUNNER~1\AppData\Local\Temp` while DuckDB reports
+    // `C:\Users\runneradmin\...` for the same file (measured 2026-09).
+    //
+    // `.native` and not the JS `realpathSync`: the JS one resolves symlinks, which covers
+    // macOS, but it leaves a short 8.3 component exactly as it found it. The native one is
+    // libuv's `uv_fs_realpath`, which on Windows goes through `GetFinalPathNameByHandle` and
+    // answers the long form, and on POSIX is plain `realpath(3)`.
     expect(main.location).toBeDefined();
-    expect(realpathSync(main.location!)).toBe(realpathSync(dbPath));
+    expect(realpathSync.native(main.location!)).toBe(realpathSync.native(dbPath));
     expect(main.sizeBytes).toBeGreaterThan(0);
   });
 
@@ -1019,6 +1060,14 @@ describe("queryReadOnly()", () => {
     // The control that makes the assertion above mean something: the ordinary editor
     // handle on the SAME file keeps its filesystem reach, because COPY and read_csv are
     // features there rather than escapes.
+    //
+    // One at a time, and the read-only handle goes first: Windows admits a single handle
+    // per DuckDB file per process (see the connect/disconnect block), so holding both
+    // open would make the control unopenable there. Sequential proves the same thing -
+    // the setting belongs to the HANDLE, not to the file, or the same path could not
+    // answer both ways.
+    await provider.disconnect();
+
     const writable = new DuckDBProvider(makeConfig({ database: dbPath }));
     await writable.connect();
     try {

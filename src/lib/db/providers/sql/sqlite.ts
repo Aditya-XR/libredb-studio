@@ -1162,7 +1162,9 @@ export class SQLiteProvider extends SQLBaseProvider {
     try {
       this.enforceQueryOnly();
     } catch (error) {
-      this.db.close();
+      // Released now, for the same reason disconnect() does it: a refused profile that
+      // left the file held open would be a lock on a database nobody is using.
+      this.db.close(true);
       this.db = null;
       throw error;
     }
@@ -1178,7 +1180,11 @@ export class SQLiteProvider extends SQLBaseProvider {
 
   public async disconnect(): Promise<void> {
     if (this.db) {
-      this.db.close();
+      // `true` means "release the file now" rather than "once the last statement is
+      // collected" - see the measurement on `SQLiteDatabase.close`. A caller that has
+      // disconnected is entitled to delete, move or reopen the database, and on Windows
+      // a deferred close makes all three impossible.
+      this.db.close(true);
       this.db = null;
       this.setConnected(false);
     }

@@ -305,9 +305,9 @@ rather than a gap.
 
 | Scenario | Measured |
 |---|---|
-| Second read-write `DuckDBInstance.create` on the same file, **same process** | ALLOWED |
+| Second read-write `DuckDBInstance.create` on the same file, **same process** | ALLOWED on Linux and macOS, REFUSED on Windows (see below) |
 | `DuckDBInstance.fromCache` on the same file, same process | ALLOWED |
-| Second `access_mode: 'READ_ONLY'` instance, same process, while a writer is open | ALLOWED, and genuinely read-only — `current_setting('access_mode')` is `read_only`, `duckdb_databases().readonly` is true, `INSERT` is refused |
+| Second `access_mode: 'READ_ONLY'` instance, same process, while a writer is open | ALLOWED on Linux and macOS, and genuinely read-only — `current_setting('access_mode')` is `read_only`, `duckdb_databases().readonly` is true, `INSERT` is refused |
 | Second read-write **process** while a writer holds the file | `IO Error: Could not set lock on file …: Conflicting lock is held in … (PID nnn)` |
 | Second **READ_ONLY process** while a writer holds the file | **ALSO refused**, with the same lock error |
 | `READ_ONLY` open of a file that does not exist | `IO Error: Cannot open database … in read-only mode: database does not exist` — the engine does not create it |
@@ -317,8 +317,24 @@ is stricter than the usual one-writer-many-readers summary, so `singleWriterFile
 conservative default here — it is the measurement. Two Studio replicas sharing a file is not a
 supported deployment.
 
-The same table is why the agent's read-only handle works at all: it is a second handle **in the same
-process** as the writer, and same-process handles are permitted.
+The same-process rows are why the agent's read-only handle can sit beside an editor handle at all:
+it is a second handle **in the same process** as the writer.
+
+**That allowance is POSIX's, not the engine's.** Measured on windows-latest (2026-09, the same
+DuckDB v1.5.5 / `@duckdb/node-api` 1.5.5-r.4): a second handle on a file this process already holds
+is refused at the operating system, `IO Error: Cannot open file "…": The process cannot access the
+file because it is being used by another process`, with DuckDB naming this very process as the
+holder. Windows arbitrates the share mode per HANDLE, so "the lock is per process" simply does not
+apply there. `tests/integration/db/duckdb-provider.test.ts` asserts both answers, each positively,
+rather than the POSIX one twice.
+
+The consequence for the product is bounded but real, and it is not fixed here: the editor borrows
+the open handle rather than opening a second one (`findOpenSingleWriterProvider`), so ordinary
+browsing is unaffected on every platform. The one path that really does want two handles at once is
+an agent run reaching a connection the editor already has open — `acquireExecutionProfileProvider`
+opens the file under the profiled key while the writable handle is live. On Windows that open is
+refused, and the run fails with the engine's sentence instead of reading. Not yet measured against a
+running Studio on Windows, only against the engine.
 
 ### 3.9 `interrupt()` exists, so `cancelQuery` is real
 

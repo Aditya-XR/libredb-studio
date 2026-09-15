@@ -161,8 +161,8 @@ describe("SQLiteProvider", () => {
     });
 
     afterAll(() => {
-      rmSync(pathTmpDir, { recursive: true, force: true });
-      rmSync(sameVolumeTmpDir, { recursive: true, force: true });
+      rmSync(pathTmpDir, { recursive: true });
+      rmSync(sameVolumeTmpDir, { recursive: true });
     });
 
     test("a path containing a NUL byte throws DatabaseConfigError without claiming traversal protection", async () => {
@@ -870,7 +870,7 @@ describe("SQLiteProvider", () => {
     });
 
     afterAll(() => {
-      rmSync(fileTmpDir, { recursive: true, force: true });
+      rmSync(fileTmpDir, { recursive: true });
     });
 
     test("getHealth reports the on-disk file size and passes the integrity check", async () => {
@@ -917,6 +917,50 @@ describe("SQLiteProvider", () => {
       const wal = stats.find((s) => s.name === "WAL")!;
       expect(wal.location).toBe("storage.db-wal");
       expect(typeof wal.walSizeBytes).toBe("number");
+    });
+
+    // ── disconnect() has to RELEASE the file, not schedule its release ────────
+    //
+    // bun:sqlite's `close()` is `sqlite3_close_v2`: the connection becomes a zombie
+    // and the operating-system handle is released only once the last statement
+    // prepared from it is finalized or garbage collected. The provider prepares a
+    // statement per query and drops the reference, so on a collector's schedule that
+    // is "eventually", and `disconnect()` used to resolve with the database, its WAL
+    // and its shared-memory file still open (measured on Linux through
+    // /proc/self/fd: three descriptors survived a disconnect that reported
+    // isConnected() === false).
+    //
+    // Nothing on POSIX notices, because POSIX unlinks a file that is still open. On
+    // Windows it is the whole difference: every one of these directories failed its
+    // own teardown with `EBUSY: resource busy or locked` on windows-latest
+    // (2026-09), and a user could not delete or move a database Studio had
+    // disconnected from.
+    //
+    // The sidecars are the portable reading of it. SQLite checkpoints the WAL and
+    // removes `-wal` and `-shm` when the connection REALLY closes, and leaves both
+    // behind when the close was only scheduled, so the same assertion measures the
+    // same fact on every platform.
+    test("disconnect releases the file rather than scheduling it: the WAL sidecars are gone", async () => {
+      const dbPath = join(fileTmpDir, "release.db");
+      provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
+      await provider.connect();
+      await provider.query("CREATE TABLE r (id INTEGER PRIMARY KEY, v TEXT)");
+      await provider.query("INSERT INTO r VALUES (1, 'held')");
+      expect(existsSync(`${dbPath}-wal`)).toBe(true);
+      expect(existsSync(`${dbPath}-shm`)).toBe(true);
+
+      await provider.disconnect();
+
+      expect(existsSync(`${dbPath}-wal`)).toBe(false);
+      expect(existsSync(`${dbPath}-shm`)).toBe(false);
+      // The data survived the checkpoint the real close performs.
+      const reader = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
+      await reader.connect();
+      try {
+        expect((await reader.query("SELECT v FROM r")).rows).toEqual([{ v: "held" }]);
+      } finally {
+        await reader.disconnect();
+      }
     });
   });
 
@@ -1153,7 +1197,7 @@ function interceptReads(provider: SQLiteProvider, match: string, intercept: (sql
   const real = holder.db;
   holder.db = {
     exec: (sql: string) => real.exec(sql),
-    close: () => real.close(),
+    close: (throwOnError?: boolean) => real.close(throwOnError),
     get inTransaction() {
       return real.inTransaction;
     },
@@ -2242,7 +2286,7 @@ describe("SQLiteProvider bulk column read (#789)", () => {
     const seen: string[] = [];
     holder.db = {
       exec: (sql: string) => real.exec(sql),
-      close: () => real.close(),
+      close: (throwOnError?: boolean) => real.close(throwOnError),
       get inTransaction() {
         return real.inTransaction;
       },
@@ -2549,7 +2593,7 @@ describe("SQLiteProvider agent read-only execution profile (#328)", () => {
   });
 
   afterAll(() => {
-    rmSync(agentTmpDir, { recursive: true, force: true });
+    rmSync(agentTmpDir, { recursive: true });
   });
 
   afterEach(async () => {
@@ -2965,7 +3009,7 @@ describe.skipIf(!nodeDriverTestable)("SQLiteProvider with LIBREDB_SQLITE_DRIVER=
   });
 
   afterAll(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true });
   });
 
   test("core CRUD, schema, maintenance, and error mapping work under Node", () => {
@@ -3009,6 +3053,9 @@ describe.skipIf(!nodeDriverTestable)("SQLiteProvider with LIBREDB_SQLITE_DRIVER=
     expect(report.driverEnv).toBe("node");
     expect(report.connected).toBe(true);
     expect(report.disconnected).toBe(true);
+    // And the disconnect released the file, as the bun adapter's does: no WAL sidecar
+    // survived it. See "disconnect releases the file rather than scheduling it" above.
+    expect(report.sidecarsAfterDisconnect).toEqual([]);
     expect(existsSync(dbPath)).toBe(true); // real file-backed database
 
     // CRUD (same results as the bun driver)

@@ -6,6 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { pathToFileURL } from "url";
 import {
   artifactName,
   startupUrl,
@@ -644,12 +645,22 @@ describe("launcher startup URL", () => {
     const env = { ...process.env };
     delete env.PORT;
     delete env.LIBREDB_STUDIO_ARCHIVE;
-    const run = Bun.spawnSync([node!, "--import", preload, path.join(root, "bin/studio.js"), "--host", host], {
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    expect(run.exitCode).toBe(0);
+    /*
+      The preload goes to `--import` as a file: URL, not as the path it is. `--import` resolves its
+      value by ESM rules, where an absolute Windows path is not a path at all: it parses as a URL
+      whose scheme is the drive letter. Measured with node 24.14.0, `--import 'C:\tmp\fixture.mjs'`
+      dies at startup with ERR_UNSUPPORTED_ESM_URL_SCHEME ("Received protocol 'c:'") before reading
+      a line of bin/studio.js, while the same argument on Linux fails to parse as a URL and falls
+      back to a path - which is why this spawned fine everywhere but Windows.
+    */
+    const run = Bun.spawnSync(
+      [node!, "--import", pathToFileURL(preload).href, path.join(root, "bin/studio.js"), "--host", host],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    // The launcher's own stderr rides on the exit code: node reports a startup failure there and
+    // nowhere else, and "Received: 1" on its own sends the next reader back to a machine they may
+    // not have.
+    expect(run.exitCode, `launcher stderr: ${run.stderr.toString()}`).toBe(0);
     const output = run.stdout.toString();
     expect(output).toContain(`Starting LibreDB Studio ${version} on ${url}\n`);
     expect(output).toContain(`BIND=${host}\n`);
