@@ -144,6 +144,126 @@ GRANT ADMINISTER DATABASE TRIGGER TO app;
 CREATE OR REPLACE TRIGGER app.app_logon_trg AFTER LOGON ON app.SCHEMA BEGIN NULL; END;
 /
 
+-- ---------------------------------------------------------------------------
+-- Wrapped PL/SQL, and the units built to defeat each half of the rule (#789).
+-- ---------------------------------------------------------------------------
+--
+-- Measured on Oracle XE 21.3.0.0.0 (gvenzl/oracle-xe): EXECUTE ON DBMS_DDL is already
+-- granted to PUBLIC on this image, so APP needs no extra grant to run CREATE_WRAPPED.
+--
+-- WHY THESE OBJECTS EXIST. DBMS_METADATA.GET_DDL answers a wrapped unit with the
+-- encoder's obfuscated bytes and raises nothing, so a provider that hands that text to an
+-- editor shows something that is not a definition and cannot say so. The detection rule is
+-- the header POSITION: the token immediately after the closing double quote of the object's
+-- quoted name is the bare keyword `wrapped`, and the next physical line is the wrap format
+-- marker matching ^[a-z][0-9]{6}$ (`a000000` on 21.3.0.0.0).
+--
+-- The four plain units below are the point of this block and must not be "tidied". Three of
+-- them are VALID, COMPILING functions built to defeat the naive TEXTUAL rule: one ends its
+-- first source line with the token `wrapped`, one carries the wrap format marker on its
+-- second line, and APP_CONJ_DEFEATER does both at once. The fourth, APP_ZERO_ARG, is the
+-- control for the header position itself and the paragraph below says why. What none of the
+-- four can imitate is the header position, because GET_DDL writes the object name inside
+-- double quotes and what follows it is decided by the PARSER: a plain unit admits only `(`,
+-- RETURN, IS or AS there. A test that reads only a wrapped unit certifies nothing; these
+-- four are what make the predicate non-vacuous, and if a future Oracle ever admits
+-- `wrapped` in that position for a plain unit, the assertion over them fails by name.
+--
+-- APP_ZERO_ARG is the closest PLAIN shape to a wrapped header there is, a zero-argument
+-- function whose header carries no parameter list at all, so the token after the quoted
+-- name is the bare word `return`. It is the control for the position itself.
+--
+-- APP_MARKERLESS_HEADER, at the end of this block, attacks the OTHER conjunct and is the one
+-- unit here that does not compile. Its own comment carries the measurement.
+
+BEGIN
+  DBMS_DDL.CREATE_WRAPPED(
+    'CREATE OR REPLACE FUNCTION app.app_wrapped_multi(p NUMBER) RETURN NUMBER IS' || CHR(10) ||
+    '  v NUMBER := 2;' || CHR(10) ||
+    'BEGIN' || CHR(10) ||
+    '  RETURN p * v;' || CHR(10) ||
+    'END;');
+END;
+/
+
+CREATE OR REPLACE FUNCTION app.app_first_line_wrapped(p NUMBER) RETURN NUMBER IS -- wrapped
+BEGIN
+  RETURN p;
+END;
+/
+
+CREATE OR REPLACE FUNCTION app.app_second_line_marker(p NUMBER) RETURN NUMBER IS /*
+a000000
+*/
+BEGIN
+  RETURN p;
+END;
+/
+
+CREATE OR REPLACE FUNCTION app.app_conj_defeater(p NUMBER) RETURN NUMBER IS /* wrapped
+a000000
+*/
+BEGIN
+  RETURN p;
+END;
+/
+
+CREATE OR REPLACE FUNCTION app.app_zero_arg RETURN NUMBER IS
+BEGIN
+  RETURN 1;
+END;
+/
+
+-- The unit that defeats the OTHER half of the conjunction, and the one object in this block
+-- that does NOT compile. The detection rule is `wrapped` in the header position AND the wrap
+-- format marker on the next line; the four units above all attack the first conjunct, and
+-- until this object existed the SECOND conjunct was asserted by nothing at all, because a
+-- real wrapped unit always carries its marker.
+--
+-- MEASURED on Oracle XE 21.3.0.0.0 (gvenzl/oracle-xe), and it is not what the header
+-- position's parser rule would lead you to expect: `wrapped` after the function name is
+-- ACCEPTED, because it is the wrap keyword. The unit then fails to compile with
+-- `PLS-00753: malformed or corrupted wrapped unit` (one row in `USER_ERRORS`, line 0), the
+-- object is created FUNCTION / INVALID, and `DBMS_METADATA.GET_DDL` answers its source
+-- verbatim anyway: the header carries the keyword and the next line is `BEGIN`, so the
+-- predicate must answer NOT WRAPPED and the reader gets a readable text rather than a
+-- manufactured refusal. Do not "fix" the missing marker: the missing marker is the point.
+--
+-- A `CREATE OR REPLACE` on an object left INVALID is harmless here and is the same state
+-- APP_BROKEN_PKG is committed in.
+CREATE OR REPLACE FUNCTION app.app_markerless_header wrapped
+BEGIN
+  RETURN 1;
+END;
+/
+
+-- A package whose SPEC is plain and whose BODY is wrapped, which is the whole argument for
+-- reading PACKAGE_SPEC and PACKAGE_BODY as two parts instead of the bare PACKAGE type. One
+-- concatenated CLOB would give a reader neither half honestly: the spec is readable and the
+-- body is not, and only two parts can say so.
+CREATE OR REPLACE PACKAGE app.app_wrapped_pkg IS
+  FUNCTION total(p NUMBER) RETURN NUMBER;
+END app_wrapped_pkg;
+/
+
+BEGIN
+  DBMS_DDL.CREATE_WRAPPED(
+    'CREATE OR REPLACE PACKAGE BODY app.app_wrapped_pkg IS' || CHR(10) ||
+    '  FUNCTION total(p NUMBER) RETURN NUMBER IS BEGIN RETURN p; END;' || CHR(10) ||
+    'END app_wrapped_pkg;');
+END;
+/
+
+-- A package with a SPECIFICATION AND NO BODY, which is legal on Oracle and is the shape
+-- that decides how many parts a package emits. Its missing body is an ABSENCE and not a
+-- refusal: there is nothing to refuse, because nobody ever wrote one. The provider emits
+-- ONE part for it, and the ALL_OBJECTS second question is what tells that absence apart
+-- from a body ORA-31603 refuses to hand over.
+CREATE OR REPLACE PACKAGE app.app_spec_only_pkg IS
+  FUNCTION total(p NUMBER) RETURN NUMBER;
+END app_spec_only_pkg;
+/
+
 -- Explicit, rather than relying on SQL*Plus committing on EXIT. Measured on gvenzl/oracle-xe
 -- 21.3.0: EXIT does commit, so this line changes nothing today, and it is here because the
 -- INSERTs above are the only DML in the file and a fixture whose data survives on a client

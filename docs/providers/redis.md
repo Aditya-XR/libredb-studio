@@ -837,6 +837,321 @@ The UTF-8-byte versus UTF-16-code-unit divergence Task 26a-2 measured on five SQ
 has nothing to bite on here for the same reason: there is no server-side sort to disagree
 with.
 
+#### Object source (#789)
+
+`readObjectSource(path, kind, limit?)` answers ONE kind and the **declaration** says which. `function`
+declares `hasSource` and `sourceLanguage: "lua"`; `keyspace` declares neither, because a key prefix is
+a grouping this server derived from a bounded `SCAN` and nobody wrote a definition for it. That is the
+`tablesAreDerivedGroupings` refusal carried into the object model rather than left behind with the
+flag's old reader. The refusal is read off the declaration and never off the kind id, so a kind this
+engine does not declare at all takes the same path and raises with the same sentence.
+
+The command is `FUNCTION LIST LIBRARYNAME <name> WITHCODE`, sent once. It is server-scoped and takes
+no database: measured, one `FUNCTION LOAD` is visible from every numbered database and `SELECT` does
+not change what it answers.
+
+**The path SHAPE is checked here, by the same function and the same sentence `describeObject` uses.**
+`assertObjectPathShape` derives the accepted length and the labels in its message from
+`declaredLevels`, so a path is refused with `A Redis "function" path is [database, name], received []`
+rather than reaching the command. Both methods need it because neither is reached only through the
+HTTP route: they are published through `@libredb/studio` and called by the embedded host seam and by
+the conformance helper, and none of those sees the route's own bound. Measured before the check
+existed: an empty path made the name `undefined` and ioredis threw
+`undefined is not an object (evaluating 'arg.toUpperCase')` out of its command encoder, which is this
+provider's defect arriving as the driver's.
+
+**A kind declaring `hasSource` and no `sourceLanguage` RAISES** with
+`Redis declares readable source for the kind "function" and no sourceLanguage to render it with`,
+before the round trip. There is no fallback to a literal `lua`: an unregistered or absent Monaco id
+degrades to plain text with no throw and nothing observable, so a fallback would hide a deleted
+declaration behind a Source tab that had quietly stopped highlighting. The isolated census
+(`tests/isolated/object-source-declarations.test.ts`) pins every declared language, so the only way to
+reach this arm is a declaration somebody removed.
+
+| Field | Value | Why |
+|---|---|---|
+| `id` | `definition` | one part, always: a library has one Lua text |
+| `label` | `Definition` | rendered as-is |
+| `language` | the kind's declared `sourceLanguage`, which is `lua` | `lua` IS a Monaco language id the installed 0.56.0 bundle registers, unlike `plsql`, `tsql` and `cql` |
+| `form` | `complete` | the text runs as given: it is what `FUNCTION LOAD` was handed |
+| `origin` | `stored` | the author's own bytes. Measured on Redis 8.10.0: `WITHCODE` answers the shebang line and the body exactly as they were loaded, with no reformatting |
+
+**The selection is BYTE-EQUAL, and that is the whole of the parser's reason to exist.** Measured on
+Redis 8.10.0 against the committed fixture:
+
+```
+$ redis-cli FUNCTION LIST                              # the dictionary is CASE-SENSITIVE
+library_name
+libredb_probe
+library_name
+LIBREDB_PROBE
+$ redis-cli FUNCTION LIST LIBRARYNAME libredb_probe    # the argument is a CASE-INSENSITIVE glob
+library_name
+libredb_probe
+library_name
+LIBREDB_PROBE
+```
+
+One lookup for either name answers BOTH, so a reader taking `reply[0]` would hand back the other
+library's Lua as this object's definition. The entry whose `library_name` is byte-equal to the last
+path segment is the one read, and its `library_code` is found by walking the key/value pairs rather
+than by position, the same rule the listing's parser records: the nested `functions` value is itself a
+list of key/value lists, and RESP3 answers a map where there is no order at all.
+
+**An absent library RAISES.** Measured on Redis 8.10.0,
+`FUNCTION LIST LIBRARYNAME no_such_library WITHCODE` answers an **empty array** and not an error, so
+emptiness is absence here and a provider that returned a document would invent one. An entry that
+matches by name and carries no `library_code`, or an empty one, takes the same arm: an empty text
+would put an empty editor over a definition that was never read.
+
+**A refused read is the server's own sentence, unprefixed**, carried as the part's `unavailable` and
+never as a text. Measured as the ACL user the fixture creates:
+
+```
+$ redis-cli --user libredb_nofunction --pass nofunction FUNCTION LIST LIBRARYNAME libredb_probe WITHCODE
+NOPERM User libredb_nofunction has no permissions to run the 'function|list' command
+```
+
+KeyDB, DragonflyDB and Garnet have no `FUNCTION` command at all and each refuses in its own words (the
+table in [§6.1](#61-the-object-surface-789) has them), so this path is reachable on three of the four
+Redis-wire relatives this type id serves.
+
+**Only the server's own error reply is a refusal. A transport failure RAISES.**
+Measured against ioredis 5.11.1 and Redis 8.10.0: an ACL denial and an unknown command both reject with
+a `redis-errors` `ReplyError`, whose `name` is `ReplyError`, while a dropped socket rejects with a plain
+`Error` named `Error`, reading `Connection is closed.` with the offline queue on and
+`Stream isn't writeable and enableOfflineQueue options is false` with it off.
+A read that catches both would show `Connection is closed.` in the Source pane as this object's own
+refusal, with no raise, no retry affordance and nothing in the document telling it apart from a real
+`NOPERM`, so the provider raises a `ConnectionError` naming the library instead.
+
+**A caller's bound** cuts one part's text and reports itself through the one sentence every engine
+uses, `the source read was bounded at <n> characters by its caller`. An exact answer is never marked.
+The bound counts UTF-16 code units, so a bound landing between the two halves of a surrogate pair drops
+the pair rather than emitting a lone surrogate; the mark still names the number the caller asked for.
+
+#### Object edit (#789)
+
+`buildObjectEdit(request)` and `applyObjectEdit(plan)` write an edited definition back. Every claim in
+this section was measured on Redis 8.10.0 in a container created for it, holding
+[the committed fixture](#115-the-object-surface-fixture) applied the way §11.5 says.
+
+**ONE kind is editable and the declaration says which.** `function` declares
+`acceptsSourceEdits: true`; `keyspace` declares nothing, which is the same refusal it already makes
+for `hasSource` and for the same reason: a key prefix is a grouping this server derived from a
+bounded `SCAN`, nobody wrote a definition for it, so there is nothing to edit and no folder that
+could offer one. Every readable `function` part therefore carries `edit: { offered: true }` and a
+`keyspace` part carries no `edit` field at all, which is a different fact from an `offered: false`.
+
+**The editable unit is the LIBRARY and never one registered function.** Redis publishes no surface
+that writes one function of a library, and the Phase 2 declaration already says so: the kind's
+objects are libraries and `FUNCTION LIST WITHCODE` answers a library's whole Lua source.
+
+**The strategy is `replace-in-place-command`, and the previewable unit is a COMMAND.** It is the only
+day-one producer of that arm of `ObjectEditUnit`, and the arm exists because of it:
+
+| Field | Value |
+|---|---|
+| `medium` | `command` |
+| `name` | `FUNCTION` |
+| `arguments` | `["LOAD", "REPLACE"]` |
+| `payload` | the reader's own bytes, one `user` segment covering all of them |
+
+Rendering that as pseudo-SQL would be a lie about what runs. There is no splice anywhere: the payload
+is the submitted text verbatim, so the coordinate arithmetic between the sent text and the reader's
+text is the identity.
+
+**Ruling 1b, both axes, measured.** A FAILURE cannot lose the object: four refusal shapes were
+measured and after every one of them `FCALL libredb_ping 0` still answered `pong`.
+
+| Submitted | The server's answer |
+|---|---|
+| a syntax error | `ERR Error compiling function: user_function:5: '=' expected near 'local'` |
+| a body registering nothing | `ERR No functions registered` |
+| no shebang | `ERR Missing library metadata` |
+| `#!moon` | `ERR Engine 'moon' not found` |
+
+A SUCCESS can destroy something, which is the second axis: `REPLACE` replaces the WHOLE LIBRARY. A
+body carrying only `libredb_ping` loaded successfully, answered `"libredb_probe"`, and
+`FCALL libredb_echo_key` then answered `ERR Function not found`. The sibling was deleted and success
+was reported.
+
+**THE SHEBANG IS THE IDENTITY, and the build refuses an edited one.** `FUNCTION LOAD` takes no name
+argument: the name comes out of the `#!lua name=<library>` line and the command's reply IS that name.
+Three measured consequences follow from one line of text, and only the third is harmless:
+
+- A CONSISTENT rename of the library and its functions SUCCEEDS, answers the NEW name, creates a
+  SECOND library and leaves the original answering. Without the refusal the reader sees a success,
+  the pane re-reads the original address and shows the original text, and their edit has vanished.
+- A shebang naming a DIFFERENT library that ALREADY EXISTS replaces THAT library, wholesale. Measured
+  by doing it: a body whose shebang said `name=LIBREDB_PROBE`, submitted while addressed at
+  `libredb_probe`, replaced `LIBREDB_PROBE` (`FCALL LIBREDB_UPPER_PING` then answered the new body's
+  value) and left `libredb_probe` answering `pong`. So this check also protects an object the reader
+  was never shown. The two libraries differ only in case, which is the same fixture pair the source
+  read's byte-equal selection needs.
+- A ONE-CHARACTER typo in the name alone is refused loudly by the engine,
+  `ERR Function libredb_ping already exists`, because function names are GLOBAL to the server rather
+  than scoped to their library.
+
+A first line this provider cannot parse as a shebang is refused the same way, with `identity`. That
+is the safe direction: the cost is a false refusal, and measured, a body with no shebang is refused
+by the server too. The ENGINE token is deliberately not checked, because an unknown one is refused
+loudly and harmlessly and Redis is free to add a second engine.
+
+**The library is selected BYTE-EQUAL, for the reason the source read gives**: `LIBRARYNAME` is a
+case-INSENSITIVE glob over a case-SENSITIVE dictionary, so one lookup answers both fixture libraries
+and a build taking `reply[0]` would show one library's Lua and plan a write against the other's name.
+
+**The revision is a content hash, and it is SOUND on this engine and only on this engine.** Measured:
+`FUNCTION LIST WITHCODE` answers the bytes AS LOADED, with no reformatting of any kind, so two reads
+of an unchanged library are byte-identical and a SHA-256 over them is a usable token. On an engine
+that renders a definition from a parse tree, as Trino's `SHOW CREATE FUNCTION` does, the same hash
+would move on a server upgrade and refuse every edit. The check is `compared` and not `guarded`:
+the apply re-reads and compares in its OWN round trip, which NARROWS the window and does not close
+it, because Redis has no transaction spanning the read and the write. `basis` is
+`FUNCTION LIST LIBRARYNAME <name> WITHCODE`.
+
+**The collateral warning is a catalog fact and it names EVERY function the library registers.** The
+build reads the library's registered functions out of the SAME reply that carried the code,
+unconditionally, and any library plans with one consequence:
+
+```
+loses:  replaces-whole-container
+fact:   { source: "FUNCTION LIST LIBRARYNAME libredb_probe",
+          observed: "libredb_echo_key, libredb_ping" }
+```
+
+A library registering exactly ONE function is warned about too, and this is a CORRECTION of an
+earlier claim in this file that it planned `consequences: []`.
+That claim rested on the premise "a library IS its one function, so re-registering it loses
+nothing", and the premise is about the SUBMITTED text, which nothing on this path reads: the only
+identity check is the shebang library name and no Lua parser is involved anywhere.
+MEASURED on a Redis 8.10.0 container on 2026-09-14: `libredb_probe` registering only `libredb_ping`,
+loaded again with `FUNCTION LOAD REPLACE` over a body registering `libredb_other` under the same
+shebang, answered `libredb_probe`, `FUNCTION LIST LIBRARYNAME libredb_probe` then answered
+`libredb_other` alone, and `FCALL libredb_ping 0` answered `ERR Function not found`.
+Through this provider that edit built `consequences: []` and applied `applied-with-collateral`
+naming `libredb_ping`, so the build promised a loss could not happen while the apply reported one
+that had, which is a success destroying something the reader was never shown.
+The cost of the correction is one warning and one acknowledgement tick on every single-function
+edit, including the ones that re-register the same name.
+
+`consequences: []` survives for one population and it is not a library shape: a `FUNCTION LIST`
+reply the provider can read a library out of and no function names out of.
+MEASURED on 8.10.0, `FUNCTION LOAD` over a body registering nothing answers
+`ERR No functions registered`, so no live library reaches it.
+The names are SORTED, because `FUNCTION LIST` answers them in an internal order and a
+warning that reworded itself between two identical reads would show a reader a difference that is not
+one. No Lua parser is involved anywhere: the fact is what the library registers TODAY, never a
+prediction about what the submitted text will register.
+
+**Three build refusals, in this order**: the read bound (`guard`), byte-identical text
+(`definition`), then the shebang (`identity`). The read bound has a live population, which is what
+`libredb_bulk` is in the fixture for: measured, `FUNCTION LOAD` ACCEPTS a library over the 1,000,000
+character source bound and `FUNCTION LIST LIBRARYNAME libredb_bulk WITHCODE` reports a `library_code`
+of **1,000,243** characters for the one the fixture loads. Submitting the pane's bounded text back
+would delete the 243 characters past the bound and report success.
+
+**The apply sends the PLAN'S OWN unit**, verb, literal arguments and payload, and never rebuilds the
+command from constants of its own: the dialog renders `plan.unit` and the apply sends `plan.unit`, so
+byte-identity between the preview and the write is structural. Three round trips at most:
+
+1. `FUNCTION LIST LIBRARYNAME <name> WITHCODE`, the re-read, FIRST, so nothing sits between the
+   comparison and the write. A library whose bytes moved is `conflict` / `object-changed` carrying the
+   server's current text for the diff, and NOTHING is executed. A library that was deleted answers the
+   empty string, which is what is there.
+2. `FUNCTION LOAD REPLACE <the payload>`.
+3. the same re-read again, which supplies the NEW revision token and answers the collateral question.
+   `lost` is what disappeared between round trip 1 and round trip 3, a fact read AFTER the write: the
+   plan said what WOULD be lost, this says what WAS.
+
+**The reply is checked against the addressed name.** The reply of `FUNCTION LOAD REPLACE` IS the
+library name the server read from the shebang, so a reply naming another library is
+`applied-elsewhere`, carrying the server's own reply in `wrote` and `undone: false`, because Redis
+offers this design nothing to take it back with and it will not issue a `FUNCTION DELETE` of its own.
+It is a CONTROL rather than the primary guard: the build's shebang check already refused that text, so
+what this catches is a shebang-extraction bug in the provider. Round trip 3 is skipped on that arm,
+because the addressed library was not written.
+The comparison is BYTE-EQUAL and case-sensitive, for the same reason the library selection is: a reply
+differing from the addressed name only in case names a DIFFERENT library on this engine, and measured
+on 8.10.0 a load addressed at `libredb_probe` whose shebang said `name=LIBREDB_PROBE` replaced
+`LIBREDB_PROBE` wholesale and left `libredb_probe` untouched. A case-folding comparison would report
+that write as `applied` against an object the reader was never shown.
+
+**A plan whose revision is not `compared` RAISES**, and it does so before the first round trip. This
+provider issues `compared` on every plan it builds, so any other revision arrived from somewhere else,
+and reporting "no revision was available" as `conflict` / `object-changed` would assert that the object
+moved when nothing observed it moving. A statement unit and an undeclared kind raise for the same
+reason and in the same place.
+
+**Refusal classes, from the server's own first word, which on Redis is the error code:**
+
+| Reply | Class | `at` |
+|---|---|---|
+| `READONLY You can't write against a read only replica.` | `privilege` | `none` |
+| `NOPERM User libredb_nofunction has no permissions to run the 'function\|load' command` | `privilege` | `none` |
+| `ERR Error compiling function: user_function:4: ...` | `definition` | `user`, line 4, column 1 |
+| every other `ERR` | `definition` | `none` |
+
+A replica refusal is `privilege` although it is not about permissions, because the refusal class is a
+statement about what the reader does next and "use a different connection" is the same answer. The
+compile error's line number needs no correction: measured with two points, a `@@@` on physical line 2
+answered `user_function:2` and the same error on physical line 4 answered `user_function:4`, so the
+count is 1-based, includes the shebang and is already the reader's own line. It is still converted
+through core's coordinate map rather than returned as a number, so a line the reader's text does not
+have answers `outside` instead of a coordinate Monaco would silently clamp.
+
+**A transport failure is `interrupted`, never a refusal**, with `committed: "unknown"`. The
+distinction is `isServerErrorReply`'s, the same one the source read makes, and it carries the same
+measurement: nobody answering is not the server answering no. `rolled-back` is never claimed here,
+because no transaction was opened.
+
+**A read the server REFUSES raises rather than becoming a refusal**, which is the one asymmetry with
+`readObjectSource`. A `NOPERM` on `FUNCTION LIST` leaves the build knowing nothing about the object,
+so there is no plan to issue and no fact a refusal could carry; the pane's own read has already shown
+that sentence.
+
+**No session state is pinned.** `FUNCTION LOAD` is server-scoped: measured, one load is visible from
+every numbered database and `SELECT` does not change what `FUNCTION LIST` answers, so nothing this
+apply does depends on a session another borrower of the connection can move. `plan.session` is `[]`.
+
+##### The measured acceptance run (#789)
+
+Driven through `POST /api/db/objects/source`, `POST /api/db/objects/edit-plan` and `POST /api/db/objects/edit-apply` against a running Studio, on a container created for the run.
+`INFO server` answered `redis_version:8.10.0`.
+The fixture was applied by hand, because this image has no init-script directory: `docker exec -i <container> redis-cli --no-raw < docker/redis-init/01-object-fixture.redis`, one connection for the whole file.
+`FUNCTION LIST` afterwards answered three libraries, `libredb_probe` registering `libredb_echo_key` and `libredb_ping`, `LIBREDB_PROBE` registering `LIBREDB_UPPER_PING`, and `libredb_bulk` registering `libredb_bulk_ping`.
+
+**THE COLLATERAL RUNS IN BOTH DIRECTIONS.**
+`libredb_probe` registers two functions, so a body registering only `libredb_echo_key` builds a plan carrying one consequence, `replaces-whole-container`, whose fact is `{ source: "FUNCTION LIST LIBRARYNAME libredb_probe", observed: "libredb_echo_key, libredb_ping" }`.
+Applying it answers `applied-with-collateral` whose `lost` entry names `libredb_ping` alone, which is the function that actually went, and `FUNCTION LIST` afterwards shows `libredb_probe` registering `libredb_echo_key` only.
+`LIBREDB_PROBE` registers one, so an edit that keeps that one built `consequences: []` and the apply answered plain `applied` ON THE RUN RECORDED HERE.
+That build answer is no longer what this provider gives: a single-function library now carries the same warning, for the measured reason recorded above, and the apply's answer for that edit is unchanged.
+The acknowledgement is enforced by the SERVER and not by the dialog: the identical collateral apply with an empty `acknowledged` answers HTTP 400, `this apply destroys something the plan warned about and the request did not acknowledge: replaces-whole-container`, and the library is untouched.
+
+**A FAILED APPLY LEAVES THE LIBRARY BYTE IDENTICAL.**
+This engine has no transaction, so the assertion is that `FUNCTION LIST WITHCODE` is byte identical across the apply and that the library-to-function map is unchanged.
+Five failures were driven against `libredb_probe` and all five left both readings identical.
+
+| What was sent | Where it was refused, and what it answered |
+| --- | --- |
+| A Lua compile error | the engine: `refused`, `definition`, `ERR Error compiling function: user_function:6: unexpected symbol near '='`, at line 6 of the reader's own text |
+| A body registering nothing | the engine: `refused`, `definition`, `ERR No functions registered` |
+| A shebang naming `LIBREDB_PROBE`, which EXISTS | the build: `built: false`, `identity`, before anything is sent |
+| No shebang at all | the build: `built: false`, `identity` |
+| A second writer replaced the library between the build and the apply | the apply's re-read: `conflict`, `object-changed`, carrying the server's CURRENT text |
+
+The third row is the one the shebang check exists for.
+`FUNCTION LOAD` takes no name argument, so the shebang IS the address: sending that body would have replaced `LIBREDB_PROBE` wholesale and left `libredb_probe` untouched, and the reader would have destroyed an object they were not looking at.
+
+**A TRUNCATED PART CANNOT BE EDITED, and this engine HAS the population.**
+`libredb_bulk` reads as `truncated: { limit: 1000000, ... }` with NO `edit` key and 1,000,000 characters of text, and an edit of it inside the route's bound is refused by the build with the `guard` class naming the server's own 1,000,243 characters.
+The CONTROL, `libredb_probe` at 252 characters, carries no `truncated`, carries `edit: { offered: true }`, and builds.
+
+**THE AUDIT.**
+One successful apply added exactly two `object_edit` events under one `correlationId`: an `action: "PLAN"` decision event and an `action: "replace-in-place-command"` outcome event, both `result: "success"`.
+A sentinel planted in the submitted Lua appears in neither event and nowhere in the process's stdout.
+
 #### Reads go to the CONTAINER's database, never the session's
 
 Every object read opens its own short-lived connection with `db` set, rather than issuing `SELECT` on
@@ -933,7 +1248,7 @@ no control offers it.
 | `declaresForeignKeys` | `false` — Redis has no constraints at all, and the "tables" here are key prefixes this provider grouped rather than objects anyone declared |
 | `tablesAreDerivedGroupings` | `true` — the object surface SCANs a bounded slice of the keyspace and groups the real key names it found by their prefix, so a `user:*` row is this server's own summary and not a key any command can be given. The agent layer states this to a plan run, in one sentence, so a grounded run does not draft a command against a grouping. In the object tree it is what withholds Profile from a `keyspace` row ([§6.1](#61-the-object-surface-789)) |
 | `containerLevels` | one level, `schema`, labelled Database ([§6.1](#61-the-object-surface-789)) |
-| `objectKinds` | `keyspace` (relation) and `function` (routine, `hasSource`, Lua). Three further candidates are absent rather than declared and zero ([§6.1](#61-the-object-surface-789)) |
+| `objectKinds` | `keyspace` (relation) and `function` (routine, `hasSource`, `sourceLanguage: "lua"`). `function` is the only kind in this engine with a definition text, read through `FUNCTION LIST ... WITHCODE` ([§6.1](#61-the-object-surface-789)). Three further candidates are absent rather than declared and zero |
 | `supportsMaintenance` | `true` |
 | `maintenanceOperations` | `['analyze']` |
 | `supportsConnectionString` | `false` |
@@ -1083,7 +1398,12 @@ docker exec -i libredb-redis redis-cli --no-raw < docker/redis-init/01-object-fi
 `redis-cli` reading from stdin uses ONE connection for the whole file, which is what makes the
 `SELECT 3` in the middle of it work; a per-line `redis-cli` loop would silently write every key into
 database 0. The file is idempotent: it `DEL`s the keys it is about to write and loads the function
-library with `FUNCTION LOAD REPLACE`.
+libraries with `FUNCTION LOAD REPLACE`.
+
+**The file carries no comments, and that is a constraint rather than a style.** Measured on
+Redis 8.10.0: `redis-cli` reading from stdin does NOT skip a `#` line, it sends it as a command, and
+the server answers ``ERR unknown command '#'``. Every explanation of what the fixture holds therefore
+lives in the table below rather than beside the line.
 
 What it builds, and why each part is there:
 
@@ -1093,6 +1413,25 @@ What it builds, and why each part is there:
 | db 0 | mixed value types under one prefix (string, hash, list) | the sampled `type` column is `string/hash`-shaped rather than uniform |
 | db 3 | `report:daily` | a key that exists in ONE database and nowhere else, so a provider reading the SESSION's database instead of the CONTAINER's is distinguishable from a correct one |
 | db 0 | function library `libredb_probe`, two registered functions | the `function` kind has an object, and `FUNCTION LIST WITHCODE` has source to answer |
+| db 0 | a SECOND library `LIBREDB_PROBE`, differing from the first ONLY in case | `LIBRARYNAME` is a case-INSENSITIVE glob over a case-SENSITIVE dictionary, so one lookup answers both and a source read taking `reply[0]` shows the wrong library ([§6.1](#61-the-object-surface-789)); the same pair is what makes the edit path's shebang check testable, since a rename onto the other name would REPLACE it |
+| db 0 | a THIRD library `libredb_bulk`, whose `library_code` is 1,000,243 characters | the only object in this fixture OVER the 1,000,000-character source bound, so "a truncated part is never editable" has a population here rather than an argument (#789 Phase 3) |
+| server | ACL user `libredb_nofunction`, password `nofunction`, `-function` | a live principal for the source read's refusal pane |
+
+**`libredb_bulk` is one line of about 1,000,270 bytes, and it cannot be generated on the server.**
+Measured on Redis 8.10.0: `EVAL` running `FUNCTION LOAD` answers
+`ERR This Redis command is not allowed from script`, and so does `FUNCTION LIST`, so there is no
+server-side way to build a large library out of a short fixture line. The literal is committed, the
+same disposition the equally large Trino fixture blob has. Regenerate it with:
+
+```bash
+python3 - <<'PY' >> docker/redis-init/01-object-fixture.redis
+pad = "-" * 1_000_100
+print('FUNCTION LOAD REPLACE "#!lua name=libredb_bulk\\n'
+      "--[[" + pad + "]]\\n"
+      "local function bulk_ping(keys, args)\\n  return 'bulk'\\nend\\n"
+      "redis.register_function('libredb_bulk_ping', bulk_ping)\"")
+PY
+```
 
 To measure a cluster-mode container, which is the only deployment where the database count is not 16:
 

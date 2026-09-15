@@ -1228,12 +1228,271 @@ END;
 /
 ```
 
+### Object source (#789)
+
+`readObjectSource(path, kind, limit?)` answers ONE object's definition text as a document of named
+parts, each part either readable text or Oracle's own reason there is none.
+All NINE declared kinds have one, so this provider has no "declares nothing" list.
+
+| Kind | Statement | What the text IS | Parts |
+|---|---|---|---|
+| `table` | `DBMS_METADATA.GET_DDL('TABLE', :name, :owner)` | complete, regenerated | 1, `definition` |
+| `view` | `GET_DDL('VIEW', ...)` | complete, regenerated | 1, `definition` |
+| `materialized_view` | `GET_DDL('MATERIALIZED_VIEW', ...)` | complete, regenerated | 1, `definition` |
+| `synonym` | `GET_DDL('SYNONYM', ...)` | complete, regenerated | 1, `definition` |
+| `sequence` | `GET_DDL('SEQUENCE', ...)` | complete, regenerated | 1, `definition` |
+| `package` | `GET_DDL('PACKAGE_SPEC', ...)` then `GET_DDL('PACKAGE_BODY', ...)` | complete, regenerated | 1 or 2, `spec` then `body` |
+| `procedure` | `GET_DDL('PROCEDURE', ...)` | complete, regenerated | 1, `definition` |
+| `function` | `GET_DDL('FUNCTION', ...)` | complete, regenerated | 1, `definition` |
+| `trigger` | `GET_DDL('TRIGGER', ...)` | complete, regenerated | 1, `definition` |
+
+The metadata type comes from the translation table the provider already ships for the count and the
+listings, so the two vocabularies cannot drift: `ALL_OBJECTS.OBJECT_TYPE` writes them with spaces
+(`MATERIALIZED VIEW`, `PACKAGE BODY`) and `GET_DDL` takes them with underscores
+(`MATERIALIZED_VIEW`, `PACKAGE_BODY`).
+
+That shared table is what makes the two vocabularies drift-proof, and it is also what makes ONE
+edit able to break nine reads at once, so the nine spellings above are pinned in
+`tests/integration/db/oracle-provider.test.ts` as a LITERAL list captured from the live server
+rather than read back out of the provider's own table.
+A wrong spelling is not a soft failure: `GET_DDL` answers an unknown `object_type` with
+`ORA-31600: invalid input value BOGUS_TYPE for parameter OBJECT_TYPE in function GET_DDL`, so the
+Source tab for every object of that kind fails.
+
+**`form` is `complete` and `origin` is `regenerated`, on every kind, and both are measurements.**
+`GET_DDL` answers a statement that runs as given, never a body or a bare SELECT.
+It is not the author's bytes either: the fixture's
+`CREATE OR REPLACE FUNCTION app.app_order_total(p_id NUMBER)` comes back as
+`CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_ORDER_TOTAL" (p_id NUMBER)`, with a keyword the
+author never typed and a qualification the author never wrote, so a reader is never shown a
+reconstruction as an original.
+
+**Nothing is interpolated and no identifier escaper is involved.**
+The metadata type, the object name and the owner are all three BINDS (`:1`, `:2`, `:3`), so a
+caller-supplied name never reaches statement text on this path.
+The owner is the segment the DECLARATION assigns to the `schema` container level and the object name
+is the LAST path segment; neither is read by a literal index.
+
+**The Monaco language id is `sql`, and that is a compromise this provider states rather than hides.**
+MEASURED on the installed monaco-editor 0.56.0: `plsql` is not among the 89 language ids the bundle
+registers, and an unregistered id degrades to plain text SILENTLY, with no throw and nothing
+observable. A PL/SQL body therefore renders under the SQL grammar, which highlights the DML and
+misses `IS`, `BEGIN`, `EXCEPTION` and the block structure.
+
+#### A package is TWO parts, and a package with no body is ONE
+
+`GET_DDL('PACKAGE', ...)` retrieves the specification AND the body together in one CLOB, and this
+provider deliberately does not use it. Two round trips are paid instead, for three reasons that one
+concatenated CLOB cannot express:
+
+- a body may be ABSENT, and a concatenation cannot say so. `APP_SPEC_ONLY_PKG` in the fixture is that
+  state, and it emits ONE part. The missing body is neither a refusal nor an error: nobody ever wrote
+  it, so there is nothing to refuse.
+- a body may be WRAPPED while the specification is not, and one CLOB gives the reader neither
+  honestly. `APP_WRAPPED_PKG` in the fixture is that state: a readable `spec` part beside a refused
+  `body` part.
+- the two halves carry independent `STATUS` values, which `APP_BROKEN_PKG` exhibits.
+
+#### A kind declaring source and no `sourceLanguage` RAISES
+
+`readObjectSource` refuses with
+`Oracle declares readable source for the kind "<kind>" and no sourceLanguage to render it with`, before
+a connection is taken from the pool. There is no fallback to a literal `sql`: an unregistered or absent
+Monaco id degrades to plain text with no throw and nothing observable, so a fallback would hide a
+deleted declaration behind a Source tab that had quietly stopped highlighting. All nine declared
+languages are pinned by the isolated census
+(`tests/isolated/object-source-declarations.test.ts`), so the only way to reach this arm is a
+declaration somebody removed.
+
+#### ORA-31603 says "not found in schema" for an object you merely cannot read
+
+This is the single most important thing to know about this surface, because since #765 the tree lists
+EVERY owner, so opening another schema's object is the ordinary path rather than an edge case.
+
+MEASURED on Oracle XE 21.3.0.0.0 as `APP`, which holds `SELECT` on `REPORTING.REPORT_DAILY` and no
+catalog role:
+
+```
+SQL> SELECT DBMS_METADATA.GET_DDL('TABLE','REPORT_DAILY','REPORTING') FROM DUAL;
+ORA-31603: object "REPORT_DAILY" of type TABLE not found in schema "REPORTING"
+```
+
+The identical error, word for word, comes back for `REPORTING.NO_SUCH_TABLE`, which really does not
+exist. Oracle's own message cannot tell the two apart, and shipping it unqualified tells a user their
+objects are gone.
+
+**The code is read off `errorNum`, not off the message.** node-oracledb carries the Oracle error
+number as a numeric `errorNum` on the error it rejects with, in both modes: thin assigns it in
+`lib/thin/protocol/protocol.js` (`err.errorNum = message.errorInfo.num`) and every prebuilt thick addon
+under `build/Release` exports the same property name
+(`strings oracledb-6.10.0-linux-x64.node | grep -x errorNum`), both checked against oracledb 6.10.0.
+Scanning the MESSAGE for `ORA-31603` would make a failure that merely quotes that text, a wrapped
+error or a logged one, look like a missing object, and the second question would then be asked about
+the wrong fact. An error carrying a different `errorNum` raises even when its text quotes this code.
+An error carrying no numeric `errorNum` at all, which is what a rejection composed outside the driver
+looks like, still falls to the text scan, and that arm is asked second.
+
+So on ORA-31603 the provider asks a SECOND question:
+
+```sql
+SELECT 1 FROM ALL_OBJECTS WHERE OWNER = :1 AND OBJECT_NAME = :2 AND OBJECT_TYPE = :3
+```
+
+- a row EXISTS: the object is there and the READ was refused. The part carries an `unavailable`
+  holding Oracle's own ORA-31603 sentence whole and first, then the fact that settles which of the
+  two it is.
+- no row: the object is genuinely absent to this session, and the read RAISES a `QueryError` naming
+  the object. It never answers a document and never answers a refusal.
+
+**`ALL_OBJECTS` by name, and never `DBA_OBJECTS`.** `ALL_OBJECTS` is privilege-filtered, so it answers
+"can THIS caller see it", which is the question being asked. `DBA_OBJECTS` would answer "does it exist
+anywhere", turning the disambiguation into a cross-schema existence oracle over objects the caller has
+no grant on at all, and it needs a catalog role most callers do not hold, so it would also fail for the
+very sessions this path exists to serve.
+
+The type is bound in the DICTIONARY spelling, which is the column `ALL_OBJECTS` publishes. Binding the
+metadata spelling would answer NO ROW for every object of the three kinds whose two spellings differ,
+turning every privilege refusal on a materialized view or a package body into a false claim of absence.
+
+**What the refusal drops, and why that is a selection rather than a rewrite.** node-oracledb composes
+that error as ten lines: the `ORA-31603` line, then nine `ORA-06512: at "SYS.DBMS_METADATA", line 6781`
+frames, then a `Help:` link. The frames are a PL/SQL backtrace of line numbers inside Oracle's own
+package and say nothing about the object, and the refusal pane renders the engine's sentence in full,
+so leaving them in would bury the disambiguation under nine lines of `SYS` internals. Not one word of
+Oracle's is changed, reordered or paraphrased; the `ORA-06512` frames are dropped and everything else,
+the help link included, is kept. Only the ORA-31603 path is filtered: every other failure raises
+through `mapDatabaseError` with its message untouched.
+
+#### Wrapped PL/SQL: the detection rule, and why it is a POSITION
+
+A unit created through `DBMS_DDL.CREATE_WRAPPED` is stored as the encoder's output, and `GET_DDL`
+hands that output over with no error at all. A provider that passed it to an editor would show
+something that is not a definition and could not say so.
+
+**THE RULE**, established by probe 7 on Oracle XE 21.3.0.0.0 and documented nowhere Oracle publishes:
+a unit's definition text is WRAPPED if and only if the token immediately following the CLOSING DOUBLE
+QUOTE of its quoted name in the `DBMS_METADATA` header is the bare keyword `wrapped`,
+case-insensitive, AND the next physical line is the wrap format marker, matching `^[a-z][0-9]{6}$`
+(`a000000` on 21.3.0.0.0). The pattern is wider than the one literal on purpose: the marker names the
+encoder's format version, and pinning `a000000` would report a later Oracle's wrapped unit as plain
+text.
+
+```
+  CREATE OR REPLACE EDITIONABLE FUNCTION "APP"."APP_WRAPPED_MULTI" wrapped
+a000000
+369
+...
+```
+
+**The rule was mutation-tested rather than asserted.** The fixture commits four plain, VALID,
+COMPILING functions, three of them built to defeat the naive TEXTUAL rule and the fourth the control
+for the header position itself, and none of the four may be tidied away:
+
+| Fixture unit | Built to defeat | First source line |
+|---|---|---|
+| `APP_FIRST_LINE_WRAPPED` | "the line ends with `wrapped`" | `... RETURN NUMBER IS -- wrapped` |
+| `APP_SECOND_LINE_MARKER` | "line 2 is the format marker" | `... RETURN NUMBER IS /*`, then `a000000` |
+| `APP_CONJ_DEFEATER` | both halves at once | `... RETURN NUMBER IS /* wrapped`, then `a000000` |
+| `APP_ZERO_ARG` | the control: the closest PLAIN shape to a wrapped header | `... "APP_ZERO_ARG" RETURN NUMBER IS` |
+
+All four fail the predicate, because `GET_DDL` writes the object name inside double quotes and what
+follows it is decided by the PARSER: a plain unit admits only `(`, a RETURN clause, `IS` or `AS` in
+that position. If a future Oracle ever admits `wrapped` there for a plain unit, the assertion over
+these units fails by name.
+
+**The fifth unit attacks the OTHER conjunct, and it is the one that does not compile.**
+All four above defeat the keyword half of the rule; until `APP_MARKERLESS_HEADER` was added, the
+MARKER half was asserted by nothing at all, because a real wrapped unit always carries its marker.
+MEASURED on Oracle XE 21.3.0.0.0, and it is not what the parser rule above would lead you to expect:
+`wrapped` after a function name is ACCEPTED, because it is the wrap keyword.
+
+```sql
+CREATE OR REPLACE FUNCTION app.app_markerless_header wrapped
+BEGIN
+  RETURN 1;
+END;
+```
+
+That leaves one row in `USER_ERRORS`, `PLS-00753: malformed or corrupted wrapped unit`, the object is
+created `FUNCTION` / `INVALID`, and `DBMS_METADATA.GET_DDL` answers its source verbatim anyway: the
+header carries the keyword and the next line is `BEGIN`.
+So the predicate must answer NOT WRAPPED for it, and a reader gets a readable text rather than a
+manufactured refusal.
+Deleting the marker conjunct from the rule fails exactly the test over this unit.
+
+**A second, independent signal exists and is deliberately not used.** `ALL_SOURCE` holds a whole
+wrapped unit in ONE row with embedded newlines, where a plain unit is one row per line, and that shape
+is not forgeable from source text at all. It is not used because it costs a second round trip on every
+PL/SQL read and answers nothing for the five kinds that are not PL/SQL. It is written down here so a
+future defect in the header predicate has a measured alternative rather than a research problem.
+
+`EXECUTE ON DBMS_DDL` is already granted to `PUBLIC` on `gvenzl/oracle-xe`, so the fixture needs no
+grant to create a wrapped unit.
+
+#### Other refusals, and what raises instead
+
+- an EMPTY or whitespace-only definition is a REFUSAL carrying that fact, never a readable part. An
+  empty definition is not a definition, and an empty editor over one is the hazard this whole surface
+  exists to remove.
+- a CLOB that arrives as something other than a string RAISES. `GET_DDL` answers a CLOB, oracledb
+  answers a CLOB with a `Lob` stream by default, and serialising one throws
+  `TypeError: Converting circular structure to JSON`. The fix, `lobFetchTypeHandler`, is a PER-CALL
+  option and the object surface's ordinary reader passes none, so this read has its own `execute`; a
+  value that still comes back as a stream is a defect of ours and is reported as one rather than
+  coerced into an editor.
+- a path whose shape this kind cannot take is refused by the same rule `describeObject` uses, which
+  the two methods share so they cannot come to disagree about one engine.
+- a kind the provider declares no source for is refused by name.
+
+#### Reproducing every one of these
+
+The whole fixture is applied by the mount, so no command below creates anything:
+
+The container name and the host port below are a PRIVATE pair, not the defaults, and that is
+deliberate: a machine already running an Oracle on 1521, or a container already called `oracle`, is
+the ordinary case rather than the exception, and the recipe must not collide with one.
+Every measurement in this section was taken on exactly this pair.
+Remove only what you created.
+
+```bash
+docker run -d --name src-task07-oracle -e ORACLE_PASSWORD='Password123!' -p 15217:1521 \
+  -v "$PWD/docker/oracle-init:/container-entrypoint-initdb.d:ro" gvenzl/oracle-xe
+# wait for "DATABASE IS READY TO USE!" in `docker logs src-task07-oracle`, about four minutes
+docker exec -i src-task07-oracle sqlplus -s app/'Password123!'@localhost:1521/XEPDB1
+# 15217 is the HOST port, for a connection from the Studio UI; the exec above is already
+# inside the container, where the listener is on 1521.
+docker rm -f src-task07-oracle   # when you are done, and nothing else
+```
+
+```sql
+SET LONG 200000 PAGESIZE 0 LINESIZE 32767 LONGCHUNKSIZE 200000
+SELECT DBMS_METADATA.GET_DDL('FUNCTION','APP_WRAPPED_MULTI','APP') FROM DUAL;   -- wrapped
+SELECT DBMS_METADATA.GET_DDL('FUNCTION','APP_CONJ_DEFEATER','APP') FROM DUAL;   -- plain, and imitates it
+SELECT DBMS_METADATA.GET_DDL('FUNCTION','APP_MARKERLESS_HEADER','APP') FROM DUAL; -- keyword, no marker
+SELECT LINE, POSITION, TEXT FROM ALL_ERRORS WHERE NAME = 'APP_MARKERLESS_HEADER'; -- PLS-00753
+SELECT DBMS_METADATA.GET_DDL('BOGUS_TYPE','APP_ORDERS','APP') FROM DUAL;        -- ORA-31600
+SELECT DBMS_METADATA.GET_DDL('MATERIALIZED VIEW','APP_REVENUE_MV','APP') FROM DUAL; -- ORA-31600 again
+SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY','APP_WRAPPED_PKG','APP') FROM DUAL; -- wrapped body
+SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY','APP_SPEC_ONLY_PKG','APP') FROM DUAL; -- ORA-31603, absent
+SELECT DBMS_METADATA.GET_DDL('TABLE','REPORT_DAILY','REPORTING') FROM DUAL;     -- ORA-31603, refused
+SELECT DBMS_METADATA.GET_DDL('TABLE','NO_SUCH_TABLE','REPORTING') FROM DUAL;    -- ORA-31603, absent
+SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER = 'REPORTING';
+```
+
+The last statement is the second question by hand: it answers a row for `REPORT_DAILY` and none for
+`NO_SUCH_TABLE`, which is the entire difference between a refusal and a raise.
+The two ORA-31600 lines are the other vocabulary's failure mode: the dictionary spelling
+`MATERIALIZED VIEW` is as invalid an `object_type` as `BOGUS_TYPE` is, which is why the nine metadata
+spellings are pinned in the suite rather than left to a table two consumers read differently.
+
 #### The fixture
 
 [`docker/oracle-init/01-object-fixture.sql`](../../docker/oracle-init/01-object-fixture.sql),
 mounted at `/container-entrypoint-initdb.d` by the `oracle` service in `database-compose.yml`. It
 creates two owners so the lifted confinement is observable, one object of every declared kind, the
-three trigger cases above, and the package whose body does not compile. Connect as `APP` /
+three trigger cases above, the package whose body does not compile, and the wrapped-PL/SQL block with
+the four plain units that imitate it and the fifth, INVALID one that carries the keyword without the
+marker ([Object source](#object-source-789)). Connect as `APP` /
 `Password123!` on service `XEPDB1`.
 
 It also seeds ROWS, two in `APP.APP_CUSTOMERS` and two in `REPORTING.REPORT_DAILY`, and those are
@@ -1255,6 +1514,14 @@ Three things about it are load-bearing:
   recreated before an edit takes effect.
 
 ---
+
+### Object edit (#789)
+
+This engine is a REFUSAL of the strongest class in the fleet: the FAILURE destroys the object.
+A `CREATE OR REPLACE` that fails to COMPILE overwrites the stored source with the broken text, marks the object `INVALID`, and THE DRIVER DOES NOT THROW, measured on FUNCTION, PROCEDURE, PACKAGE BODY, PACKAGE SPEC, TRIGGER and a `FORCE` VIEW.
+For a TRIGGER that is a table outage rather than one broken object: every INSERT then answers `ORA-04098` while `USER_TRIGGERS.STATUS` still reads `ENABLED`.
+Detecting that success-that-is-not-a-success means reading the driver's warning, and it is unwritable here until an ambient declaration grows: [`db-drivers.d.ts`](../../src/types/db-drivers.d.ts) declares oracledb's `Result` with no `warning` member at all.
+No kind here declares `acceptsSourceEdits`, and `tests/isolated/object-edit-declarations.test.ts` is what holds that absence and this section together.
 
 ## 8. Monitoring & health
 

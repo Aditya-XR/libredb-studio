@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
-import { callerBoundTruncationReason } from "@/lib/db/object-kinds";
+import { QueryError } from "@/lib/db/errors";
+import { applySourceBound, callerBoundTruncationReason, sourceBoundTruncationReason } from "@/lib/db/object-kinds";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 
 function fakeProvider(overrides: Record<string, any> = {}) {
@@ -111,7 +112,70 @@ describe("assertObjectSurface", () => {
         kinds: { table: 2, view: 4 },
         sampleObject: { path: ["app", "order_summary"], kind: "view" },
       }),
-    ).rejects.toThrow(/the expectation names the container \["warehouse"\], which listContainers did not answer/);
+    ).rejects.toThrow(/whose prefix \["warehouse"\] listContainers did not answer/);
+  });
+
+  // The three below are the container WALK (#789), which replaced a lookup in the parentless
+  // listing. Trino is why: its schemas are only ever answered by `listContainers(["memory"])`,
+  // so the old check refused a schema that exists, and a schema is the only depth at which
+  // Trino can count its functions.
+  test("accepts a container deeper than the root listing, and runs the contract there", async () => {
+    const asked: (readonly string[] | undefined)[] = [];
+    const provider = fakeProvider({
+      listContainers: async (parent?: readonly string[]) => {
+        asked.push(parent);
+        return parent === undefined
+          ? [{ path: ["app"], name: "app", level: 0 }]
+          : [{ path: [...parent, "inner"], name: "inner", level: 1 }];
+      },
+      countObjects: async (container: readonly string[]) => {
+        expect(container).toEqual(["app", "inner"]);
+        return { table: { count: 2 }, view: { count: 4 } };
+      },
+      listObjects: async (_c: readonly string[], kind: string) =>
+        kind === "view"
+          ? [{ path: ["app", "inner", "order_summary"], name: "order_summary", kind: "view" }]
+          : [
+              { path: ["app", "inner", "orders"], name: "orders", kind },
+              { path: ["app", "inner", "customers"], name: "customers", kind },
+            ],
+    });
+    await assertObjectSurface(provider as never, {
+      containers: [["app"]],
+      container: ["app", "inner"],
+      kinds: { table: 2, view: 4 },
+      sampleObject: { path: ["app", "inner", "order_summary"], kind: "view" },
+    });
+    // The walk asks the provider one level at a time and never below the named container.
+    expect(asked).toContainEqual(["app"]);
+  });
+
+  test("rejects a deep container whose LAST segment the provider never answered", async () => {
+    const provider = fakeProvider({
+      listContainers: async (parent?: readonly string[]) =>
+        parent === undefined
+          ? [{ path: ["app"], name: "app", level: 0 }]
+          : [{ path: [...parent, "inner"], name: "inner", level: 1 }],
+    });
+    await expect(
+      assertObjectSurface(provider as never, {
+        containers: [["app"]],
+        container: ["app", "gone"],
+        kinds: { table: 2, view: 4 },
+        sampleObject: { path: ["app", "gone", "order_summary"], kind: "view" },
+      }),
+    ).rejects.toThrow(/whose prefix \["app","gone"\] listContainers did not answer/);
+  });
+
+  test("rejects an expectation naming the EMPTY container, which certifies nothing", async () => {
+    await expect(
+      assertObjectSurface(fakeProvider() as never, {
+        containers: [["app"]],
+        container: [],
+        kinds: { table: 2, view: 4 },
+        sampleObject: { path: ["app", "order_summary"], kind: "view" },
+      }),
+    ).rejects.toThrow(/names the container \[\], which selects nothing and certifies nothing/);
   });
 
   test("rejects a count for a kind the provider never declared", async () => {
@@ -847,5 +911,931 @@ describe("assertObjectSurface and the bulk column read", () => {
       { container: ["app"], kind: "view", limit: undefined },
       { container: ["app"], kind: "table", limit: 1 },
     ]);
+  });
+});
+
+/**
+ * The source half (#789 Phase 2).
+ *
+ * Every test here drives a deliberately WRONG provider double and asserts the helper
+ * throws, because a correct provider passes a weak helper: "conformance passes" is
+ * evidence about the provider and never about the helper.
+ */
+describe("assertObjectSurface and the object source read", () => {
+  const listed: Record<string, { path: readonly string[]; name: string; kind: string }[]> = {
+    table: [
+      { path: ["app", "orders"], name: "orders", kind: "table" },
+      { path: ["app", "products"], name: "products", kind: "table" },
+    ],
+    view: [{ path: ["app", "order_summary"], name: "order_summary", kind: "view" }],
+    function: [
+      { path: ["app", "order_total(integer)"], name: "order_total", kind: "function" },
+      { path: ["app", "order_tax(integer)"], name: "order_tax", kind: "function" },
+    ],
+  };
+
+  const readable = "SELECT 1 FROM orders";
+  const absentName = "no_such_routine(integer)";
+
+  // Every positive double raises for the absent path, because the helper drives the absence
+  // arm on every provider it certifies. A double that answered a document there would fail
+  // for the one reason the test is not about.
+  function raiseIfAbsent(path: readonly string[]): void {
+    if (path[path.length - 1] === absentName) {
+      throw new QueryError(`no routine called "${absentName}" in schema app`, "postgres");
+    }
+  }
+
+  function capabilities(kindOverrides: Record<string, unknown> = {}) {
+    return {
+      queryLanguage: "sql",
+      containerLevels: [{ id: "schema", label: "Schema", labelPlural: "Schemas" }],
+      objectKinds: [
+        { id: "table", role: "relation", label: "Table", labelPlural: "Tables" },
+        { id: "view", role: "relation", label: "View", labelPlural: "Views" },
+        {
+          id: "function",
+          role: "routine",
+          label: "Function",
+          labelPlural: "Functions",
+          hasSource: true,
+          sourceLanguage: "sql",
+          ...kindOverrides,
+        },
+      ],
+    };
+  }
+
+  function sourceProvider(overrides: Record<string, unknown> = {}) {
+    return fakeProvider({
+      type: "postgres",
+      getCapabilities: () => capabilities(),
+      countObjects: async () => ({ table: { count: 2 }, view: { count: 1 }, function: { count: 2 } }),
+      listObjects: async (_c: readonly string[], kind: string) => listed[kind] ?? [],
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => {
+        raiseIfAbsent(path);
+        return {
+          path,
+          kind,
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              ...applySourceBound(readable, limit),
+              language: "sql",
+              form: "complete",
+              origin: "regenerated",
+            },
+          ],
+        };
+      },
+      ...overrides,
+    });
+  }
+
+  const expectation = {
+    containers: [["app"]],
+    kinds: { table: 2, view: 1, function: 2 },
+    sampleObject: { path: ["app", "order_summary"], kind: "view" },
+    absentSource: { path: ["app", absentName], kind: "function" },
+  };
+
+  // The one positive case. It is here so the twelve refusals below are known to be
+  // refusing something a correct provider does not do.
+  test("passes a provider whose declaration, method and answers agree", async () => {
+    await assertObjectSurface(sourceProvider() as never, expectation);
+  });
+
+  // The pairing, in both directions. It is the only assertion in this block that certifies
+  // a provider implementing NOTHING, which is fifteen of the seventeen on the day it lands.
+  test("a provider that declares a source-bearing kind and implements no method is refused", async () => {
+    const provider = sourceProvider({ readObjectSource: undefined });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /declares 1 source-bearing kind\(s\) and does not implement readObjectSource/,
+    );
+  });
+
+  test("a provider that implements the method and declares no source-bearing kind is refused", async () => {
+    const provider = sourceProvider({ getCapabilities: () => capabilities({ hasSource: undefined }) });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /declares 0 source-bearing kind\(s\) and implements readObjectSource/,
+    );
+  });
+
+  test("refuses a provider that declares an editable kind and implements neither method", async () => {
+    // `acceptsSourceEdits: true` lands on the `function` kind and nothing else moves, so the double
+    // still counts, lists and describes exactly what the expectation says.
+    const provider = sourceProvider({ getCapabilities: () => capabilities({ acceptsSourceEdits: true }) });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /declares 1 editable kind\(s\) and does not implement both buildObjectEdit and applyObjectEdit/,
+    );
+  });
+
+  test("refuses a provider that implements the pair and declares no editable kind", async () => {
+    // The OTHER direction, and it is the one a biconditional with one population cannot see. An
+    // apply with no declaration is reachable by deleting one line from a provider, and nothing
+    // else in this repository would notice.
+    const provider = sourceProvider({
+      buildObjectEdit: async () => ({
+        built: false,
+        refusal: { refusal: "unsupported", sentence: "no", at: { within: "none" } },
+      }),
+      applyObjectEdit: async () => ({ outcome: "interrupted", committed: "unknown", sentence: "no", duration: 0 }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /declares 0 editable kind\(s\) and implements both buildObjectEdit and applyObjectEdit/,
+    );
+  });
+
+  test("refuses a provider that implements only one of the pair", async () => {
+    const provider = sourceProvider({
+      getCapabilities: () => capabilities({ acceptsSourceEdits: true }),
+      buildObjectEdit: async () => ({
+        built: false,
+        refusal: { refusal: "unsupported", sentence: "no", at: { within: "none" } },
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /declares 1 editable kind\(s\) and does not implement both buildObjectEdit and applyObjectEdit/,
+    );
+  });
+
+  // THE OTHER HALF OF "only one of the pair", and it is here because the brief's four tests left
+  // it open: every one of them omits `applyObjectEdit`, so the `applyObjectEdit` conjunct alone
+  // refuses them and the `buildObjectEdit` conjunct is driven by nothing. MEASURED: replacing
+  // `typeof provider.buildObjectEdit === "function"` with `true` left all 84 tests green. This
+  // double is the only population in which that term decides the verdict (#789 Phase 3).
+  test("refuses a provider that implements only applyObjectEdit, which is ruling 1a violated", async () => {
+    const provider = sourceProvider({
+      getCapabilities: () => capabilities({ acceptsSourceEdits: true }),
+      applyObjectEdit: async () => ({ outcome: "interrupted", committed: "unknown", sentence: "no", duration: 0 }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /declares 1 editable kind\(s\) and does not implement both buildObjectEdit and applyObjectEdit/,
+    );
+  });
+
+  // THE HALF DECLARATION, found by review of the first commit and RED before the repair that
+  // followed it. The edit pairing above passes this double (one editable kind, both methods), the
+  // zero-count refusal passes it (the fixture holds two functions), and the `read === undefined`
+  // early return then leaves the whole walk, and with it the `undriven` refusal at the end of the
+  // helper, unexecuted. MEASURED against the first commit: this exact double RESOLVED, 1 pass 0
+  // fail. The live population is a provider that keeps `acceptsSourceEdits` on a kind while a
+  // refactor drops `hasSource` and `readObjectSource` from the same declaration, which leaves the
+  // edit declared with nothing readable behind it (#789 Phase 3).
+  test("refuses a provider that declares an editable kind and reads no source at all", async () => {
+    const provider = sourceProvider({
+      getCapabilities: () =>
+        capabilities({ acceptsSourceEdits: true, hasSource: undefined, sourceLanguage: undefined }),
+      readObjectSource: undefined,
+      buildObjectEdit: async () => ({
+        built: false,
+        refusal: { refusal: "unsupported", sentence: "no", at: { within: "none" } },
+      }),
+      applyObjectEdit: async () => ({ outcome: "interrupted", committed: "unknown", sentence: "no", duration: 0 }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /declares the editable kind\(s\) function and implements no readObjectSource/,
+    );
+  });
+
+  // The OTHER population the `undriven` refusal exists for, and the one that keeps it killable: an
+  // editable kind that is not itself source-bearing WHILE another kind is. The early return above
+  // is not taken here, so the walk runs, reads `view`, and never reaches `function`. MEASURED
+  // against the first commit: deleting the `undriven` block killed no test at all, because no
+  // committed double ever reached the walk with an editable kind in it.
+  test("refuses an editable kind the walk never reads while another kind is read", async () => {
+    const mixed = {
+      queryLanguage: "sql",
+      containerLevels: [{ id: "schema", label: "Schema", labelPlural: "Schemas" }],
+      objectKinds: [
+        { id: "table", role: "relation", label: "Table", labelPlural: "Tables" },
+        {
+          id: "view",
+          role: "relation",
+          label: "View",
+          labelPlural: "Views",
+          hasSource: true,
+          sourceLanguage: "sql",
+        },
+        { id: "function", role: "routine", label: "Function", labelPlural: "Functions", acceptsSourceEdits: true },
+      ],
+    };
+    const provider = sourceProvider({
+      getCapabilities: () => mixed,
+      buildObjectEdit: async () => ({
+        built: false,
+        refusal: { refusal: "unsupported", sentence: "no", at: { within: "none" } },
+      }),
+      applyObjectEdit: async () => ({ outcome: "interrupted", committed: "unknown", sentence: "no", duration: 0 }),
+    });
+    await expect(
+      assertObjectSurface(provider as never, {
+        ...expectation,
+        absentSource: { path: ["app", absentName], kind: "view" },
+      }),
+    ).rejects.toThrow(/declares the editable kind\(s\) function and the walk drove buildObjectEdit for none of them/);
+  });
+
+  // THE GREEN PATH OF THE EDIT WALK, which nothing committed reached: every editable double above
+  // throws before `editsDriven.add()` ever runs, so the `undriven` refusal was certified by no
+  // passing test and the build call itself was never made against a conforming provider. This is
+  // the positive control for all of them, and it also pins WHAT the helper submits: the first
+  // readable part's OWN id and text, unchanged, for the first object of the editable kind.
+  //
+  // `buildObjectEdit` is a `function` and not an arrow SO THAT `this` is observable. The helper
+  // calls it as `provider.buildObjectEdit!.call(provider, ...)`; a detached
+  // `const build = provider.buildObjectEdit!; await build(...)` binds `this` to undefined under
+  // ESM strict mode and this double throws, which is the mutation that makes the receiver a fact
+  // rather than a style (#789 Phase 3).
+  test("passes a provider whose editable kind is read, and DRIVES its buildObjectEdit", async () => {
+    const requests: unknown[] = [];
+    const provider = sourceProvider({
+      getCapabilities: () => capabilities({ acceptsSourceEdits: true }),
+      buildObjectEdit: async function (this: { type?: string } | undefined, request: unknown) {
+        if (this?.type !== "postgres") {
+          throw new Error("buildObjectEdit was called without its provider as `this`");
+        }
+        requests.push(request);
+        return {
+          built: false,
+          refusal: { refusal: "unsupported", sentence: "this double builds nothing", at: { within: "none" } },
+        };
+      },
+      applyObjectEdit: async () => ({ outcome: "interrupted", committed: "unknown", sentence: "no", duration: 0 }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).resolves.toBeUndefined();
+    expect(requests).toEqual([
+      { path: ["app", "order_total(integer)"], kind: "function", partId: "definition", text: readable },
+    ]);
+  });
+
+  test("a provider that declares nothing and implements nothing passes, which is fourteen of seventeen", async () => {
+    // The zero-iteration case, asserted rather than assumed: this is the state of most of the
+    // fleet, so if it threw, every abstaining provider's suite would be red. The positive test at
+    // `:1005` already drives this double; this one names WHY it must keep passing.
+    await expect(assertObjectSurface(sourceProvider() as never, expectation)).resolves.toBeUndefined();
+  });
+
+  test("a provider that declares an editable kind whose build ANSWERS NOTHING is refused", async () => {
+    // The pairing above certifies that the two methods EXIST. This certifies that the build
+    // ANSWERS, which is a different fact: a declaration with a stub behind it that returns
+    // `undefined` passes the pairing and fails here.
+    const provider = sourceProvider({
+      getCapabilities: () => capabilities({ acceptsSourceEdits: true }),
+      buildObjectEdit: (async () => undefined) as never,
+      applyObjectEdit: async () => ({ outcome: "interrupted", committed: "unknown", sentence: "no", duration: 0 }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /buildObjectEdit\("function"\) answered no ObjectEditBuild/,
+    );
+  });
+
+  test("an editable kind the expectation counts at ZERO is refused, because nothing drives its build", async () => {
+    // The loop's zero-iteration case, refused BY NAME. An editable kind with no object in the
+    // fixture is a `buildObjectEdit` no assertion reaches, which is this epic's signature defect
+    // wearing a declaration.
+    //
+    // THE `countObjects` OVERRIDE IS LOAD-BEARING AND IS THE ONLY TEST IN THIS STEP THAT NEEDS
+    // ONE. `assertObjectSurface` compares every `expected.kinds` entry against `countObjects`
+    // BEFORE it calls `assertSourceSurface`, so an expectation counting `function` at 0 against
+    // the block's default `function: { count: 2 }` dies on that comparison and never reaches 9a.
+    // MEASURED by running the real helper against this exact double while this plan was repaired:
+    // without the line below it throws `expect(received).toBe(expected) / Expected: 0 /
+    // Received: 2`, and with it the refusal 9a raises is the one this test asserts.
+    const provider = sourceProvider({
+      getCapabilities: () => capabilities({ acceptsSourceEdits: true }),
+      countObjects: async () => ({ table: { count: 2 }, view: { count: 1 }, function: { count: 0 } }),
+      buildObjectEdit: async () => ({
+        built: false,
+        refusal: { refusal: "unsupported", sentence: "no", at: { within: "none" } },
+      }),
+      applyObjectEdit: async () => ({ outcome: "interrupted", committed: "unknown", sentence: "no", duration: 0 }),
+    });
+    await expect(
+      assertObjectSurface(provider as never, {
+        ...expectation,
+        kinds: { ...expectation.kinds, function: 0 },
+        emptyKinds: { function: "this fixture holds no routine yet" },
+      }),
+    ).rejects.toThrow(/declares the editable kind "function" and the expectation counts it at 0/);
+  });
+
+  test("an expectation with no absentSource is refused, so the absence raise is always driven", async () => {
+    const { absentSource: _absentSource, ...noAbsent } = expectation;
+    await expect(assertObjectSurface(sourceProvider() as never, noAbsent)).rejects.toThrow(/names no absentSource/);
+  });
+
+  // ONE notch narrower than "exercised none", which is where this class of guard has been
+  // wrong three times in this epic: Oracle declares nine source-bearing kinds, and an
+  // expectation naming one of them would silence a "none" guard while eight went unread.
+  test("an expectation that exercises only some source-bearing kinds is refused by name", async () => {
+    const twoSourceKinds = sourceProvider({
+      getCapabilities: () => ({
+        ...capabilities(),
+        objectKinds: capabilities().objectKinds.map((kind) =>
+          kind.id === "view" ? { ...kind, hasSource: true, sourceLanguage: "sql" } : kind,
+        ),
+      }),
+    });
+    const { view: _view, ...withoutView } = expectation.kinds;
+    await expect(assertObjectSurface(twoSourceKinds as never, { ...expectation, kinds: withoutView })).rejects.toThrow(
+      /source-bearing kinds the expectation never exercised \(view\)/,
+    );
+  });
+
+  /**
+   * The zero, which is the one expectation that READS NOTHING (Task 1b, #789).
+   *
+   * The eight tests below are the whole of it. A source-bearing kind counted above zero is
+   * read by the loop; a source-bearing kind the expectation OMITS is refused by the test
+   * above; and between those two sits a kind the expectation NAMES AT ZERO, which is
+   * exercised by nothing and passed in silence. Oracle declares nine source-bearing kinds,
+   * so an expectation naming eight truthfully and the ninth at zero certified that ninth
+   * unread. Requiring a non-zero instead would be wrong, because legitimate zeros are already
+   * committed here: Trino counts `materialized_view` at 0 and Druid counts `lookup` and
+   * `system_table` at 0. So what is required is the REASON, and the reason is held to four bars: it exists, it
+   * is not blank, it is not one of four named verdicts, and `listObjects` agrees the fixture
+   * really holds none of the kind.
+   *
+   * `view` is source-bearing and empty in every double here, so the kind under test is
+   * genuinely at zero rather than made zero by the expectation alone.
+   */
+  function emptyViewProvider(overrides: Record<string, unknown> = {}) {
+    return sourceProvider({
+      getCapabilities: () => ({
+        ...capabilities(),
+        objectKinds: capabilities().objectKinds.map((kind) =>
+          kind.id === "view" ? { ...kind, hasSource: true, sourceLanguage: "sql" } : kind,
+        ),
+      }),
+      countObjects: async () => ({ table: { count: 2 }, view: { count: 0 }, function: { count: 2 } }),
+      listObjects: async (_c: readonly string[], kind: string) => (kind === "view" ? [] : (listed[kind] ?? [])),
+      ...overrides,
+    });
+  }
+
+  const emptyViewExpectation = {
+    ...expectation,
+    kinds: { table: 2, view: 0, function: 2 },
+    sampleObject: { path: ["app", "order_total(integer)"], kind: "function" },
+  };
+
+  test("a source-bearing kind expected at zero passes when the expectation says why", async () => {
+    await assertObjectSurface(emptyViewProvider() as never, {
+      ...emptyViewExpectation,
+      emptyKinds: { view: "the fixture defines no view over the two probe tables yet" },
+    });
+  });
+
+  test("a source-bearing kind expected at zero with no reason is refused by name", async () => {
+    await expect(assertObjectSurface(emptyViewProvider() as never, emptyViewExpectation)).rejects.toThrow(
+      /counts the source-bearing kind "view" at 0, which reads nothing, and emptyKinds carries no reason for it/,
+    );
+  });
+
+  // Whitespace and not only the empty string, because a reason nobody can read is the same
+  // absence wearing an answer's clothes, which is the bar `assertSourceDocument` already
+  // holds an engine's own refusal sentence to.
+  test("a blank reason for a kind expected at zero is refused", async () => {
+    await expect(
+      assertObjectSurface(emptyViewProvider() as never, { ...emptyViewExpectation, emptyKinds: { view: "  \n " } }),
+    ).rejects.toThrow(/emptyKinds\["view"\] carries no sentence a person can read/);
+  });
+
+  // The other direction, so a sentence cannot outlive the absence it describes: `function`
+  // holds two objects and is read by the loop, so a reason for it explains nothing.
+  test("a reason for a kind that is not a source-bearing kind at zero is refused", async () => {
+    await expect(
+      assertObjectSurface(emptyViewProvider() as never, {
+        ...emptyViewExpectation,
+        emptyKinds: { view: "the fixture defines no view yet", function: "stale, this kind holds two" },
+      }),
+    ).rejects.toThrow(
+      /emptyKinds names "function", which is not a source-bearing kind this expectation counts at zero/,
+    );
+  });
+
+  // Fix round 1, finding 3: the one half of the reason's truthfulness a machine CAN decide.
+  // The listing loop skips a kind counted at zero, so a count and a listing that disagree
+  // for that kind let a sentence saying the fixture holds none of it stand beside a listing
+  // that holds one. The helper tolerates count/listing disagreement in magnitude on purpose
+  // (two reads at two instants), but zero against non-empty is not a magnitude.
+  test("a reason for a kind listObjects actually returns objects for is refused", async () => {
+    await expect(
+      assertObjectSurface(
+        emptyViewProvider({
+          listObjects: async (_c: readonly string[], kind: string) =>
+            kind === "view" ? [{ path: ["app", "order_summary"], name: "order_summary", kind: "view" }] : listed[kind],
+        }) as never,
+        { ...emptyViewExpectation, emptyKinds: { view: "the fixture defines no view yet" } },
+      ),
+    ).rejects.toThrow(/while listObjects\("view"\) returned 1 object\(s\), the first at \["app","order_summary"\]/);
+  });
+
+  // Fix round 1, finding 5: the docblock named three strings as not-reasons and the helper
+  // refused none of them, so a task under gate pressure could write `none` and turn a
+  // silence into a different silence. Trimmed and case-folded, because `  None ` is the
+  // same non-answer.
+  test("a verdict rather than a fact is refused for a kind expected at zero", async () => {
+    for (const verdict of ["none", "  N/A ", "Not Applicable", "TODO"]) {
+      await expect(
+        assertObjectSurface(emptyViewProvider() as never, { ...emptyViewExpectation, emptyKinds: { view: verdict } }),
+      ).rejects.toThrow(/states no fact; write what is absent and why/);
+    }
+  });
+
+  // Fix round 1, finding 6: the stale-reason guard sat AFTER the `readObjectSource === undefined`
+  // return, so a reason on a provider bearing no source at all was ignored rather than refused.
+  // That is the exact state a provider task reaches by dropping a `hasSource` declaration and
+  // leaving the sentence behind.
+  test("a reason on a provider that bears no source at all is refused, not ignored", async () => {
+    const noSource = sourceProvider({
+      getCapabilities: () => capabilities({ hasSource: undefined, sourceLanguage: undefined }),
+      readObjectSource: undefined,
+    });
+    await expect(
+      assertObjectSurface(noSource as never, {
+        ...expectation,
+        emptyKinds: { view: "a sentence about a kind that bears no source" },
+      }),
+    ).rejects.toThrow(/emptyKinds names "view", which is not a source-bearing kind this expectation counts at zero/);
+  });
+
+  // Fix round 1, finding 7: `zeroed` tested `=== 0` while `wanted` tested `> 0`, so a count
+  // that is neither left a source-bearing kind unread AND unexplained. The two predicates are
+  // exact complements now, and the message carries the count rather than the word zero.
+  test("a source-bearing kind counted below zero is held to the same reason", async () => {
+    // Listing an object for `view` is the reviewer's own probe shape: with an empty listing
+    // the loop above refuses the negative count first, and it is the pair that reached the
+    // source half unread.
+    const negative = emptyViewProvider({
+      countObjects: async () => ({ table: { count: 2 }, view: { count: -1 }, function: { count: 2 } }),
+      listObjects: async (_c: readonly string[], kind: string) =>
+        kind === "view" ? [{ path: ["app", "order_summary"], name: "order_summary", kind: "view" }] : listed[kind],
+    });
+    await expect(
+      assertObjectSurface(negative as never, { ...emptyViewExpectation, kinds: { table: 2, view: -1, function: 2 } }),
+    ).rejects.toThrow(/counts the source-bearing kind "view" at -1, which reads nothing/);
+  });
+
+  // Fix round 1, finding 8, escalated to the orchestrator in the report and given a
+  // diagnostic here so a wave-4 task meets a named gap rather than a puzzle. A kind that
+  // declares `hasSource` and whose count is the `{ unavailable }` arm (cassandra/objects.ts
+  // and trino/index.ts both answer it structurally) can be neither NAMED, which throws in the
+  // count loop, nor OMITTED, which throws as unexercised, so the expectation is
+  // unsatisfiable and the cheap repair under gate pressure is to drop the declaration.
+  test("a source-bearing kind whose count is unavailable says why the expectation cannot be written", async () => {
+    const unavailable = sourceProvider({
+      countObjects: async () => ({
+        table: { count: 2 },
+        view: { count: 1 },
+        function: { unavailable: 'Cassandra has no statement that lists the kind "function"' },
+      }),
+    });
+    await expect(assertObjectSurface(unavailable as never, expectation)).rejects.toThrow(
+      /declares hasSource, which this expectation shape cannot express/,
+    );
+  });
+
+  test("an absentSource naming a kind the source loop never read has no control, and is refused", async () => {
+    await expect(
+      assertObjectSurface(sourceProvider() as never, {
+        ...expectation,
+        absentSource: { path: ["app", "nope"], kind: "table" },
+      }),
+    ).rejects.toThrow(/absentSource names the kind "table", which the source loop never read/);
+  });
+
+  // Both doubles below are correct in EVERY other respect: they raise for the absent path and
+  // they honour the caller's bound. Without that the helper throws for the bound instead and
+  // the assertion pins nothing, which a mutation of the path and kind checks proved.
+  test("a document answering for a different path than it was asked is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => {
+        raiseIfAbsent(path);
+        return {
+          path: ["app", "somewhere_else"],
+          kind,
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              ...applySourceBound(readable, limit),
+              language: "sql",
+              form: "complete",
+              origin: "stored",
+            },
+          ],
+        };
+      },
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(/somewhere_else/);
+  });
+
+  test("a document answering for a different kind than it was asked is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], _kind: string, limit?: number) => {
+        raiseIfAbsent(path);
+        return {
+          path,
+          kind: "procedure",
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              ...applySourceBound(readable, limit),
+              language: "sql",
+              form: "complete",
+              origin: "stored",
+            },
+          ],
+        };
+      },
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(/procedure/);
+  });
+
+  test("a part with an empty text is refused, because an empty definition is not a definition", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string) => ({
+        path,
+        kind,
+        parts: [
+          { id: "definition", label: "Definition", text: "   ", language: "sql", form: "complete", origin: "stored" },
+        ],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(/answered a part with no text/);
+  });
+
+  test("a refusal with an empty sentence is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string) => ({
+        path,
+        kind,
+        parts: [{ id: "definition", label: "Definition", unavailable: "  " }],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /answered a refusal with no sentence/,
+    );
+  });
+
+  test("two parts sharing one id are refused, because neither can be addressed", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string) => ({
+        path,
+        kind,
+        parts: [
+          {
+            id: "definition",
+            label: "Specification",
+            text: readable,
+            language: "sql",
+            form: "complete",
+            origin: "stored",
+          },
+          { id: "definition", label: "Body", text: readable, language: "sql", form: "complete", origin: "stored" },
+        ],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(/share the id "definition"/);
+  });
+
+  test("a language that disagrees with the kind's declared default is refused", async () => {
+    const provider = sourceProvider({
+      getCapabilities: () => capabilities({ sourceLanguage: "lua" }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /declares sourceLanguage "lua" and the part carries "sql"/,
+    );
+  });
+
+  // A kind that declares no `sourceLanguage` leaves the part's id to the provider, so the
+  // comparison is skipped rather than defaulted. Without this the arm never runs.
+  test("a kind that declares no sourceLanguage accepts whatever the part carries", async () => {
+    const provider = sourceProvider({ getCapabilities: () => capabilities({ sourceLanguage: undefined }) });
+    await assertObjectSurface(provider as never, expectation);
+  });
+
+  test("a provider whose every part is a refusal cannot be bound-checked, and says so", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string) => ({
+        path,
+        kind,
+        parts: [{ id: "definition", label: "Definition", unavailable: "Encrypted." }],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /no source-bearing kind answered a readable part/,
+    );
+  });
+
+  test("a provider whose longest definition is under the probe cannot be bound-checked, and says so", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string) => ({
+        path,
+        kind,
+        parts: [
+          { id: "definition", label: "Definition", text: "x", language: "sql", form: "complete", origin: "stored" },
+        ],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /so a bound cannot be told from no bound/,
+    );
+  });
+
+  test("a provider that ignores the limit is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string) => ({
+        path,
+        kind,
+        parts: [
+          {
+            id: "definition",
+            label: "Definition",
+            text: readable,
+            language: "sql",
+            form: "complete",
+            origin: "stored",
+          },
+        ],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /limit \d+\) returned \d+ characters/,
+    );
+  });
+
+  test("a provider that bounds a part and reports nothing is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => ({
+        path,
+        kind,
+        parts: [
+          {
+            id: "definition",
+            label: "Definition",
+            text: limit === undefined ? readable : readable.slice(0, limit),
+            language: "sql",
+            form: "complete",
+            origin: "stored",
+          },
+        ],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(/reported no truncation/);
+  });
+
+  test("a provider that reports its bound in its own words, without the shared sentence, is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => ({
+        path,
+        kind,
+        parts: [
+          {
+            id: "definition",
+            label: "Definition",
+            text: limit === undefined ? readable : readable.slice(0, limit),
+            language: "sql",
+            form: "complete",
+            origin: "stored",
+            ...(limit === undefined ? {} : { truncated: { limit, reason: "source limit reached" } }),
+          },
+        ],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /which does not carry the one sentence a caller's bound is reported with/,
+    );
+  });
+
+  // The NUMBER and the SENTENCE are two facts and a provider can get one right while the
+  // other is wrong. This double reports the correct sentence beside a limit it never applied,
+  // which is exactly what a reader would be shown as the size of the bound.
+  test("a provider that reports the right sentence beside the wrong limit number is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => {
+        raiseIfAbsent(path);
+        const bounded = applySourceBound(readable, limit);
+        return {
+          path,
+          kind,
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              text: bounded.text,
+              language: "sql",
+              form: "complete",
+              origin: "stored",
+              ...(bounded.truncated === undefined
+                ? {}
+                : { truncated: { limit: bounded.truncated.limit + 1, reason: bounded.truncated.reason } }),
+            },
+          ],
+        };
+      },
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /reported the bound as 11, which is not the limit it was given \(10\)/,
+    );
+  });
+
+  /*
+    The union does NOT make this shape unrepresentable, which is the opposite of what the
+    helper's own docblock claimed until this test was written. MEASURED with tsc 6.0.3 and
+    NO cast anywhere: a part literal carrying `unavailable` beside `text`, `language`, `form`
+    and `origin` compiles as an `ObjectSourcePart`, because TypeScript's excess-property check
+    on a union admits any property declared on ANY member of it. `isSourcePartUnavailable`
+    then narrows it to the refusal arm and the document-shape walk continues past every check
+    below, so a Source pane would render the refusal sentence over a definition the engine
+    really returned. That is the DBeaver shape this contract exists to make impossible,
+    running in the one direction the type does not close.
+  */
+  test("a part carrying both a refusal and a text is refused, because the union does not stop it", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string) => {
+        raiseIfAbsent(path);
+        return {
+          path,
+          kind,
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              text: readable,
+              language: "sql",
+              form: "complete",
+              origin: "regenerated",
+              unavailable: "Encrypted.",
+            },
+          ],
+        };
+      },
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /answered a part that carries both a refusal and a text/,
+    );
+  });
+
+  // A provider with a SECOND bound of its own names both, so the guard asks for CONTAINS
+  // and never for equality.
+  test("accepts a bound reason that carries the shared sentence inside a composed one", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => {
+        raiseIfAbsent(path);
+        const bounded = applySourceBound(readable, limit);
+        return {
+          path,
+          kind,
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              text: bounded.text,
+              language: "sql",
+              form: "complete",
+              origin: "stored",
+              ...(bounded.truncated === undefined
+                ? {}
+                : {
+                    truncated: {
+                      limit: bounded.truncated.limit,
+                      reason: `${bounded.truncated.reason}, and the catalog stores only the first 4,000 characters`,
+                    },
+                  }),
+            },
+          ],
+        };
+      },
+    });
+    await assertObjectSurface(provider as never, expectation);
+  });
+
+  // The escape hatch a bounded probe would otherwise leave open: a provider could answer
+  // short on an unbounded call and wave the caller's flag at it.
+  test("a provider that reports a caller's bound on an UNBOUNDED read is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string) => ({
+        path,
+        kind,
+        parts: [
+          {
+            id: "definition",
+            label: "Definition",
+            text: readable,
+            language: "sql",
+            form: "complete",
+            origin: "stored",
+            truncated: { limit: 4, reason: sourceBoundTruncationReason(4) },
+          },
+        ],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /was called with no limit and reported one/,
+    );
+  });
+
+  // A bound of the provider's OWN on an unbounded read stays certifiable, which is the
+  // other side of the same assertion: redis and libredb walk a bounded keyspace and say so.
+  test("accepts a provider's own bound on an unbounded read", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => {
+        raiseIfAbsent(path);
+        const bounded = applySourceBound(readable, limit);
+        return {
+          path,
+          kind,
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              text: bounded.text,
+              language: "sql",
+              form: "complete",
+              origin: "stored",
+              truncated: bounded.truncated ?? { limit: 4000, reason: "the catalog stores only 4,000 characters" },
+            },
+          ],
+        };
+      },
+    });
+    await assertObjectSurface(provider as never, expectation);
+  });
+
+  test("a provider that answers a document for an absent object instead of raising is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => ({
+        path,
+        kind,
+        parts: [
+          {
+            id: "definition",
+            label: "Definition",
+            ...applySourceBound(readable, limit),
+            language: "sql",
+            form: "complete",
+            origin: "stored",
+          },
+        ],
+      }),
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /did not raise for \["app","no_such_routine\(integer\)"\]; it answered a document/,
+    );
+  });
+
+  test("a provider that raises something other than a QueryError for an absent object is refused", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => {
+        if (path[path.length - 1] === "no_such_routine(integer)") throw new TypeError("undefined is not a function");
+        return {
+          path,
+          kind,
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              ...applySourceBound(readable, limit),
+              language: "sql",
+              form: "complete",
+              origin: "stored",
+            },
+          ],
+        };
+      },
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /did not raise for .*; it answered TypeError: undefined is not a function/,
+    );
+  });
+
+  test("a raise that does not name the object is refused, because the reader cannot tell which one", async () => {
+    const provider = sourceProvider({
+      readObjectSource: async (path: readonly string[], kind: string, limit?: number) => {
+        if (path[path.length - 1] === "no_such_routine(integer)") throw new QueryError("not found", "postgres");
+        return {
+          path,
+          kind,
+          parts: [
+            {
+              id: "definition",
+              label: "Definition",
+              ...applySourceBound(readable, limit),
+              language: "sql",
+              form: "complete",
+              origin: "stored",
+            },
+          ],
+        };
+      },
+    });
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /without naming "no_such_routine\(integer\)"/,
+    );
   });
 });

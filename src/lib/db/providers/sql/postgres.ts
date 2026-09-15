@@ -3,10 +3,12 @@
  * Full PostgreSQL support with connection pooling
  */
 
+import { randomBytes, randomUUID } from "node:crypto";
 import { Pool, type PoolClient, type PoolConfig as PgPoolConfig, type QueryConfig } from "pg";
 import { SQLBaseProvider } from "./sql-base";
 import {
   type DatabaseConnection,
+  type OpenQueryTransactionOutcome,
   type QueryResult,
   type HealthInfo,
   type MaintenanceType,
@@ -33,8 +35,28 @@ import {
   type ObjectDetailBatch,
   type ObjectKindSpec,
   type ContainerLevelSpec,
+  type ObjectSourceDocument,
+  type ObjectEditBuild,
+  type ObjectEditOutcome,
+  type ObjectEditPlan,
+  type ObjectEditRefusalClass,
+  type ObjectEditRequest,
+  type ObjectEditStep,
+  type ObjectPartEdit,
+  type ObjectSourceForm,
 } from "../../types";
-import { callerBoundTruncationReason, containerDepth, declaredKinds, findKind } from "../../object-kinds";
+import {
+  applySourceBound,
+  callerBoundTruncationReason,
+  containerDepth,
+  declaredKinds,
+  findKind,
+  kindAcceptsSourceEdits,
+  requireEditableKind,
+  requireSourceKind,
+} from "../../object-kinds";
+import { EDIT_CHARACTER_LIMIT, userPositionOf } from "../../object-edit";
+import { connectionFingerprint } from "../../connection-fingerprint";
 import { comparePaths } from "../../object-path";
 import {
   DatabaseConfigError,
@@ -592,11 +614,18 @@ const PROKIND_BY_KIND: Record<string, string> = { function: "f", procedure: "p" 
 // COALESCE is load-bearing. `array_to_string` over an empty array answers NULL, not the
 // empty string, so a zero-argument routine would otherwise have a NULL identity and no
 // address at all.
+//
+// ONE WRITER for the expression itself (#789 Phase 2): the listing PRODUCES the segment and
+// the source read CONSUMES it, so a second copy of this expression is a second chance for the
+// two to disagree about what a routine's address is, and the read would then answer "no such
+// routine" for an object the tree had just listed.
+const ROUTINE_IDENTITY_EXPR = `p.proname || '(' || COALESCE(pg_catalog.array_to_string(ARRAY(
+            SELECT pg_catalog.format_type(t, NULL) FROM unnest(p.proargtypes) AS t), ','), '') || ')'`;
+
 const LIST_ROUTINES_SQL = `
         SELECT
           p.proname AS name,
-          p.proname || '(' || COALESCE(pg_catalog.array_to_string(ARRAY(
-            SELECT pg_catalog.format_type(t, NULL) FROM unnest(p.proargtypes) AS t), ','), '') || ')' AS identity
+          ${ROUTINE_IDENTITY_EXPR} AS identity
         FROM pg_catalog.pg_proc p
         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = $1 AND p.prokind = $2`;
@@ -610,6 +639,433 @@ const LIST_TRIGGERS_SQL = `
         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = $1 AND NOT t.tgisinternal`;
+
+// ============================================================================
+// Object source (#789 Phase 2)
+// ============================================================================
+
+/**
+ * The `pg_get_*` call each source-bearing kind is read with, and what its text IS.
+ *
+ * THE OID IS PASSED AND A NAME CAST IS NEVER USED, which is the one rule nobody would have
+ * written from the documentation. `pg_get_viewdef('app.order_summary'::regclass, false)`
+ * resolves the NAME first, and name resolution needs `USAGE` on the schema: measured on
+ * PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1), a role holding nothing at all got
+ * `ERROR: 42501: permission denied for schema app` from the cast and the COMPLETE text from
+ * `pg_get_viewdef(<oid>, false)` in the same session, while `SELECT app.order_total(1)` was
+ * refused. So a provider that casts manufactures a refusal the engine never made, on an
+ * object the tree has already listed. Every statement below joins `pg_namespace` on the
+ * schema NAME, which any caller may read, and hands the catalog's own `oid` to the function.
+ *
+ * `false` for the pretty flag, on all three functions, and the reason is PostgreSQL's own:
+ * "the default format is more likely to be interpreted the same way by future versions of
+ * PostgreSQL; so avoid using pretty-printed output for dump purposes". Phase 3 may submit
+ * this text back.
+ *
+ * Fully parameterised, every one of them, which is why they are preferred over any
+ * `SHOW`-shaped alternative: no identifier escaper is needed on this engine because no
+ * caller-supplied name ever reaches statement TEXT.
+ */
+function viewSourceSql(relkind: string): string {
+  return `
+        SELECT pg_catalog.pg_get_viewdef(c.oid, false) AS definition
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = ${relkind}`;
+}
+
+// The routine's last path segment is the identity the LISTING wrote, so the same expression
+// is on both sides of the comparison. `prokind` is bound rather than interpolated, exactly
+// as the listing binds it.
+// FIVE columns beyond the definition, and every one of them is read by the EDIT rather than
+// by the pane (#789 Phase 3). The read is ONE statement for both callers on purpose: the
+// build re-reads the object through the same expression the LISTING wrote, so the identity
+// the tree published, the identity the pane read and the identity the guard block compares
+// are the same three characters of SQL and cannot drift into three answers.
+//
+// `md5(pg_get_functiondef(p.oid))` is the revision, computed SERVER SIDE, and the four
+// candidates measured against it on PostgreSQL 18.4 were all rejected: `xmin` moves on a
+// byte-identical replace and on a GRANT EXECUTE, so it produces FALSE conflicts; `ctid` moves
+// on a plain VACUUM FULL while `xmin` survives; a frozen catalog row reports `xmin` of 1; and
+// `proconfig` records nothing about the body at all. The md5 of the engine's own rendering did
+// not move on COMMENT ON or on GRANT EXECUTE and did move on a real body change.
+//
+// THE SAME MEASUREMENT MAKES `xmin` THE RIGHT POST-CONDITION, and the two are not in tension:
+// a revision answers "is the TEXT still the one I read", where a move that changed nothing is a
+// false conflict, and the post-condition answers "was the ROW I addressed the row that got
+// written", where a move that changed nothing is the whole signal. `buildObjectEdit` reads this
+// md5 for the guard and the emitted unit reads `xmin` for the post-condition, and neither is
+// used for the other's question.
+//
+// `pg_has_role(current_user, p.proowner, 'USAGE')` is ONE expression rather than a comparison
+// against `current_user` plus a membership query, because a role IS a member of itself: the
+// single call is true for the owner and for any member of the owning role, which is exactly
+// the population `CREATE OR REPLACE` accepts. MEASURED on 18.4: `CREATE OR REPLACE` on
+// somebody else's function is an OWNERSHIP check and not a privilege check, it answers
+// `must be owner of function order_total` with SQLSTATE 42501, and the shipped error mapper
+// turns that into HTTP 500 because the message matches none of its substrings.
+//
+// The two `current_setting` columns are the session facts the plan pins and asserts, read at
+// BUILD so the preview can show the reader what the apply will run under.
+//
+// `check_function_bodies` has two readers, the build's third refusal and the pre block's LB002
+// assertion. `search_path` HAS NONE TODAY, and that is recorded rather than left for the next
+// reader to discover: the plan pins the object's own container schema plus `pg_catalog`, which is
+// derived from the path and never from this column, so the value the connection happened to carry
+// is read and then dropped. It stays selected because it is the session fact the pin REPLACES,
+// which is the one thing a reader asking "what did my apply run under, and what would it have run
+// under" needs, and the surface that will show it is the preview's session list rather than this
+// provider. Nothing in this file reads `row.search_path`: `grep` it and the answer is this
+// comment.
+//
+// The oid is still passed and never cast, for `viewSourceSql`'s measured reason, and
+// `ROUTINE_IDENTITY_EXPR` is still the single writer of the identity expression.
+const SOURCE_ROUTINE_SQL = `
+        SELECT pg_catalog.pg_get_functiondef(p.oid) AS definition,
+               md5(pg_catalog.pg_get_functiondef(p.oid)) AS revision,
+               pg_catalog.pg_get_userbyid(p.proowner) AS owner,
+               pg_catalog.pg_has_role(current_user, p.proowner, 'USAGE') AS may_replace,
+               current_setting('search_path') AS search_path,
+               current_setting('check_function_bodies') AS check_function_bodies
+        FROM pg_catalog.pg_proc p
+        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = $1 AND p.prokind = $2 AND ${ROUTINE_IDENTITY_EXPR} = $3`;
+
+// Three binds, because a trigger is addressed by its TABLE as well as by its name: `tgname`
+// is unique per table and not per schema, which is the nesting `attachedTo: "table"` declares
+// and `LIST_TRIGGERS_SQL` produces. `NOT tgisinternal` is the same exclusion the listing and
+// the count apply, so a path this provider never listed cannot be read here either.
+const SOURCE_TRIGGER_SQL = `
+        SELECT pg_catalog.pg_get_triggerdef(t.oid, false) AS definition
+        FROM pg_catalog.pg_trigger t
+        JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = $3 AND NOT t.tgisinternal`;
+
+/**
+ * What ONE kind's definition text is, alongside the statement that reads it.
+ *
+ * `form` travels WITH the statement rather than in a second record, so a kind cannot gain a
+ * reader and keep somebody else's description of what that reader returns.
+ */
+interface SourceStatement {
+  readonly sql: string;
+  readonly params: unknown[];
+  readonly form: ObjectSourceForm;
+}
+
+/**
+ * The relation-shaped source statements, keyed by kind and built from the SAME relkind map
+ * the listing uses, so a kind cannot be read under one relkind and listed under another.
+ *
+ * `table` and `sequence` are absent, and that is the declaration: there is no
+ * `pg_get_tabledef` and no `pg_get_sequencedef`, and `pg_catalog.pg_sequences` publishes a
+ * sequence's properties rather than any text.
+ */
+const SOURCE_VIEW_SQL: Record<string, string> = {
+  view: viewSourceSql(RELKIND_BY_KIND.view),
+  materialized_view: viewSourceSql(RELKIND_BY_KIND.materialized_view),
+};
+
+/** The attached kinds' source statements, keyed the way `SOURCE_VIEW_SQL` is keyed. */
+const SOURCE_ATTACHED_SQL: Record<string, string> = { trigger: SOURCE_TRIGGER_SQL };
+
+/**
+ * Which statement reads one kind's definition, or nothing when this file has no reader.
+ *
+ * `partial` for a view and a materialized view because `pg_get_viewdef` answers the bare
+ * `SELECT` and no `CREATE`, measured on 18.4; `complete` for the three the engine wraps in a
+ * runnable `CREATE OR REPLACE` or `CREATE TRIGGER`. Nothing here reads the database TYPE id,
+ * and the kind ids it does read are the same ones `objectListingStatement` reads, for the
+ * same reason: which catalog answers is a per-kind fact.
+ */
+function sourceStatement(
+  schema: string,
+  kind: string,
+  name: string,
+  attachedTo: string | undefined,
+): SourceStatement | undefined {
+  const relation = SOURCE_VIEW_SQL[kind];
+  if (relation !== undefined) return { sql: relation, params: [schema, name], form: "partial" };
+  const prokind = PROKIND_BY_KIND[kind];
+  if (prokind !== undefined) return { sql: SOURCE_ROUTINE_SQL, params: [schema, prokind, name], form: "complete" };
+  // BOTH halves are required and neither is a position: the KIND says which catalog answers,
+  // and the DECLARATION says the object hangs off a parent whose segment the path carries. A
+  // second attached kind added later without a reader here falls out as undefined rather than
+  // being read out of `pg_trigger`.
+  const attached = SOURCE_ATTACHED_SQL[kind];
+  if (attached !== undefined && attachedTo !== undefined) {
+    return { sql: attached, params: [schema, attachedTo, name], form: "complete" };
+  }
+  return undefined;
+}
+
+/**
+ * The id of the ONE part every PostgreSQL source read produces (#789 Phase 2, Phase 3).
+ *
+ * ONE writer for two readers: `readObjectSource` writes it onto the part and `buildObjectEdit`
+ * refuses a request naming any other, so a caller cannot address a part this provider never
+ * produced. Two literals would let the read and the build disagree about the same string, and
+ * the disagreement would surface as an apply against a part nobody had shown.
+ */
+const SOURCE_PART_ID = "definition";
+
+/**
+ * The engine's own rendering of the routine's HEADER, which is what identity is compared on
+ * (#789 Phase 3).
+ *
+ * Everything up to and including the parenthesis that CLOSES THE PARAMETER LIST, found by a scan
+ * that counts nesting and skips both kinds of quoted text, and no parser beyond that. The
+ * comparison itself stays a byte comparison and that is exact rather than approximate for one
+ * reason: both sides are `pg_get_functiondef` output, because the reader started from it and the
+ * build re-read it. So the question is never "does this parse to the same signature", it is "are
+ * these the same bytes the engine wrote".
+ *
+ * MEASURED on PostgreSQL 18.4 why the identity has to be refused at all: a `CREATE OR REPLACE
+ * FUNCTION` with a changed argument type is a SILENT SUCCESS that creates a SECOND `pg_proc` row
+ * and leaves the original untouched, after which every call site fails `42725 is not unique`.
+ *
+ * WHY IT IS NOT `indexOf(")")`, which is what it was until the second external review of PR #831
+ * found it. The first `)` is not the header's own whenever anything before the parameter list
+ * closes carries one, and MEASURED on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1) four ordinary
+ * shapes do: a parameter DEFAULT holding a call, rendered `DEFAULT abs('-1'::integer)`; a DEFAULT
+ * holding a `)` inside a string literal, rendered `DEFAULT ')'::text`; a quoted function NAME, as
+ * in `app."we)ird"(a integer, b integer)`; and a quoted PARAMETER name, as in
+ * `app.pn("a)b" integer, c integer)`. Everything after that early cut was uncompared, so a change
+ * to a LATER parameter passed the check that exists to stop it. MEASURED through this provider on
+ * 2026-09-14: the build ACCEPTED `b integer DEFAULT 2` -> `b bigint DEFAULT 2` on `app.dc` and
+ * sealed a plan for it, and the apply then answered `applied-elsewhere` with `undone: true`,
+ * because the post-condition found the addressed row unrewritten and rolled the unit back.
+ *
+ * WHY BOTH QUOTE KINDS ARE TRACKED AND WHY EACH IGNORES THE OTHER, which is two guards and not
+ * one: PostgreSQL 18.4 renders `app.mix("a')b" integer, c integer)` and
+ * `app.mix2(a text DEFAULT '")'::text, b integer DEFAULT 1)` back exactly as written, so a `'`
+ * inside a quoted identifier and a `"` inside a string literal both reach this scan. Toggle
+ * either flag while the other is set and the scan leaves the quoted run at the wrong character.
+ *
+ * WHAT THE PARAMETER TYPE MODIFIERS DO, which is the case a reader expects to be the dangerous one
+ * and is not: `pg_get_functiondef` renders parameter types through `format_type(t, NULL)` and the
+ * modifier is DROPPED. MEASURED on 18.4, a function declared
+ * `(a numeric(10,2), b varchar(9), c char(5), d time(3), e timestamp(3), f decimal(8,4),
+ * g interval hour to second(2), h bit(4))` renders as
+ * `(a numeric, b character varying, c character, d time without time zone,
+ * e timestamp without time zone, f numeric, g interval, h bit)`, with no parenthesis left in it.
+ * So a typmod can only ever reach this comparison from the text the READER submitted.
+ *
+ * WHY THE SCAN CANNOT FALSE-ACCEPT even where it parses the submitted text wrongly, which it will
+ * for a shape `pg_get_functiondef` never renders, a dollar-quoted DEFAULT being the one to expect:
+ * the CURRENT text is always the engine's own rendering and is cut at the right place, so an
+ * accept requires the submitted cut to produce those exact bytes, and any mis-cut of the submitted
+ * text produces different ones and refuses. The error is one-directional by construction.
+ *
+ * WHEN THE SCAN FINDS NO CLOSING PARENTHESIS AT ALL it answers the whole text, which is the
+ * behaviour the `indexOf` reading had for the same case. A submitted text with no closed parameter
+ * list is SQL no engine will take, and it is refused here rather than sent.
+ *
+ * THE LIMIT IN THE FALSE-REFUSE DIRECTION, which the wave 5 review MEASURED and which this
+ * function cannot close: `pg_get_functiondef` renders parameter DEFAULTS inside this header, and a
+ * changed DEFAULT is an ordinary in-place replace. MEASURED on 18.4,
+ * `CREATE OR REPLACE FUNCTION app.f_def(a integer DEFAULT 1)` re-created as `DEFAULT 2` left
+ * `count(*) = 1` and `oid = 16787` with `xmin` moving 857 -> 858, and the rendering then said
+ * `DEFAULT 2`. So this refusal REFUSES an edit PostgreSQL would have performed. It stays refused
+ * rather than parsed apart, because telling a changed DEFAULT from a changed argument list inside
+ * the rendered header needs a parser for the header and this design has none: to a byte comparison
+ * they are the same bytes. A parameter RENAME and a parameter typmod the reader adds are in that
+ * same class, both MEASURED on 18.4 as in-place replaces: adding `numeric(10,2)` to a parameter
+ * already rendered `numeric` left `oid = 16385` with `xmin` moving 754 -> 779. What the refusal
+ * must NOT do is state a fork it cannot know, which is what its sentence did until the wave 5
+ * measurement, and `docs/providers/postgres.md` carries both directions of the limit.
+ *
+ * WHY THIS IS A SECOND SCANNER AND NOT A SHARED ONE with `trinoFunctionSegmentParts`, which counts
+ * nesting and quotes for the same reason: the two scans differ in every dimension that would have
+ * to agree. That one runs RIGHT TO LEFT over a bounded path segment that is known to end in `)`
+ * and splits it into a name and an argument list; this one runs LEFT TO RIGHT over an unbounded
+ * document to find where a prefix ends. That one toggles on `"` only, because a Trino type list
+ * has no other quote; this one has to toggle on `'` as well, because PostgreSQL renders parameter
+ * DEFAULTS as string literals inside the text it scans. A shared helper would take a direction, an
+ * alphabet and a return shape as parameters and would be longer than both of its callers.
+ */
+function routineIdentityHeader(text: string): string {
+  let depth = 0;
+  let single = false;
+  let double = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    // A doubled quote is PostgreSQL's escape for both kinds and it needs no arm of its own: it
+    // toggles the flag twice, which leaves it where it started.
+    if (character === "'" && !double) single = !single;
+    else if (character === '"' && !single) double = !double;
+    else if (single || double) continue;
+    else if (character === "(") depth += 1;
+    else if (character === ")") {
+      depth -= 1;
+      if (depth === 0) return text.slice(0, index + 1);
+    }
+  }
+  return text;
+}
+
+/**
+ * SQLSTATE to an apply verdict, AS DATA (#789 Phase 3).
+ *
+ * A TABLE and never a chain of message substrings, and the reason is a shipped defect this
+ * apply must not inherit: `errors.ts` turns a message containing `permission denied` into an
+ * `AuthenticationError` answered HTTP 401, so a `42501` on an apply would send a user whose
+ * credential is connected and correct back to re-enter a password that was never wrong, and a
+ * `42P13` becomes HTTP 500 because its message matches none of its substrings.
+ *
+ * THE THREE PRIVATE CODES are this design's own, raised by the emitted unit's guard blocks, and
+ * they are three codes rather than one because they mean three DIFFERENT outcomes. `LB001` is a
+ * lost update detected before anything was written, `LB002` is a session fact that moved between
+ * the build and the apply, and `LB003` is the post-condition finding that the addressed object
+ * did not change, which on this engine is a fork the same round trip has already rolled back.
+ * All three are in the range PostgreSQL documents for user-defined conditions.
+ *
+ * THE FIVE ENGINE CODES were measured on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1): `42501` is the
+ * ownership refusal `must be owner of function order_total`, `42601` is a syntax error in the
+ * submitted body, `42P13` is `cannot change return type of existing function`, `42809` is a
+ * routine addressed as the wrong kind, and `42P16` is an invalid table definition reached through
+ * a `BEGIN ATOMIC` body.
+ *
+ * D62, CARRIED AS A NAMED LIMIT rather than closed: this type id also serves CockroachDB and
+ * Materialize and neither was probed, so a code not in this table is `definition` carrying THE
+ * ENGINE'S OWN SENTENCE, which is a true report of a refusal this product does not recognise
+ * rather than a guess at which class it belongs to.
+ */
+const APPLY_VERDICT_BY_SQLSTATE: Readonly<Record<string, ObjectEditRefusalClass | "conflict" | "applied-elsewhere">> =
+  Object.freeze({
+    LB001: "conflict",
+    LB002: "guard",
+    LB003: "applied-elsewhere",
+    "42501": "privilege",
+    "42601": "definition",
+    "42P13": "definition",
+    "42809": "definition",
+    "42P16": "definition",
+  });
+
+/**
+ * The ONE message this apply reads, and the measurement that makes it the only one.
+ *
+ * MEASURED through the product: two overlapping applies of one object answered
+ * `tuple concurrently updated` after blocking for 2.8 seconds, at HTTP 500 `DATABASE_ERROR`,
+ * with a sentence no user can act on. The engine reports it under `XX000`, the catch-all
+ * internal-error class, so there is nothing else to read: the code cannot distinguish it from
+ * any other internal error. It is checked AFTER the table above, so a SQLSTATE this design
+ * recognises always wins and the message is only ever consulted for a code that is not data.
+ *
+ * THE EVIDENCE CLASS OF THAT ORDERING, named because the wave 5 review found it certified by prose
+ * alone and its mutation surviving: the precedence is asserted by a test that feeds this classifier
+ * an error carrying `42P13` AND this message, which is a SYNTHETIC error. No code in the table was
+ * observed carrying this message on 18.4. What the test certifies is a property of this file, that
+ * one error has two readers and the code reads first, and there is no other way to certify it.
+ */
+/**
+ * The transaction-local custom GUC the apply's PRE block stashes the addressed row's `xmin` in,
+ * written ALREADY QUOTED because it is a SQL literal in two places (#789 Phase 3).
+ *
+ * ONE writer for two readers: the `set_config` in the pre block and the `current_setting` in the
+ * post block are the same name, and two literals would let the capture and the comparison drift
+ * into two names, after which the post block raises `42704 unrecognized configuration parameter`
+ * on every apply.
+ *
+ * It is a constant rather than a value derived from anything, so nothing a caller controls reaches
+ * it and no quoting question arises.
+ *
+ * WHAT IT LEAVES BEHIND, MEASURED on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1) rather than assumed,
+ * because "transaction-local" is two different answers depending on who asks. `set_config(...,
+ * true)` inside the apply's implicit transaction is visible to the post block in the same round
+ * trip. A NEW session answers `ERROR: unrecognized configuration parameter "libredb.row_version"`.
+ * THE SAME POOLED SESSION, which is the one that matters here because D73 measured session state
+ * persisting across Studio users on the cached provider, keeps the placeholder and reads it back as
+ * the EMPTY STRING: `current_setting('libredb.row_version', true)` answered null before the apply
+ * and `""` after it on backend pid 167. The captured value does not survive, so nothing leaks and
+ * no later apply can read a stale row version: the pre block writes it before the post block reads
+ * it, in the same transaction, or the pre block raised and there is no post block.
+ *
+ * The one shape that would read the empty string is a capture subquery answering NULL, which
+ * `set_config` stores as `''` rather than as NULL (MEASURED: `set_config(..., NULL, true)` returns
+ * `''` and reads back `= '' -> t`). It is unreachable here rather than handled: an absent row makes
+ * the md5 guard above it NULL, `IS DISTINCT FROM` the revision, and LB001 raises first.
+ */
+const ROW_VERSION_SETTING_LITERAL = "'libredb.row_version'";
+
+const CONCURRENT_UPDATE_SENTENCE = "tuple concurrently updated";
+
+/**
+ * Whether a failed source read is the SERVER refusing rather than nobody answering.
+ *
+ * Two codes and no others, and both are a wire-compatible FORK missing a piece of PostgreSQL
+ * rather than a permission: 42883 is "function ... does not exist", which a fork without
+ * `pg_get_functiondef` answers, and 42703 is "column ... does not exist", which a fork
+ * without `pg_proc.prokind` answers for the routine statement. This type id serves CockroachDB
+ * and Materialize, so both arms are reachable. Both were measured on PostgreSQL 18.4 by asking
+ * for a function and for a column that do not exist.
+ *
+ * Everything else RAISES, deliberately, and the narrowness is the point: a transport failure
+ * is nobody answering at all, and rendering "Connection terminated unexpectedly" in the Source
+ * pane as this object's own refusal would present a symptom as a fact about the object. That
+ * is the same rule the Redis source read states, in this engine's vocabulary.
+ *
+ * There is no privilege arm here and that absence is MEASURED rather than an oversight: the
+ * `pg_get_*` family applies no privilege check at all (see `viewSourceSql`), so PostgreSQL has
+ * no privilege-driven refusal for object source to report.
+ */
+function isMissingSourceCatalogError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: string }).code;
+  return code === "42883" || code === "42703";
+}
+
+/**
+ * One row of a source read, with the five columns only the ROUTINE statement answers.
+ *
+ * All five are optional because the view and trigger statements select `definition` alone and
+ * every one of them is absent on those rows. A reader that assumed them present would read
+ * `undefined` as a fact about the object rather than as a fact about which statement ran, so
+ * the only consumer of the five, `routineEditAffordance` and `buildObjectEdit`, is reached only
+ * for a kind that declared `acceptsSourceEdits`, which is only ever a routine kind.
+ */
+interface SourceRow {
+  definition: string | null;
+  revision?: string | null;
+  owner?: string | null;
+  may_replace?: boolean | null;
+  search_path?: string | null;
+  check_function_bodies?: string | null;
+}
+
+/**
+ * The edit affordance for one routine, and the ONE place the ownership sentence is written
+ * (#789 Phase 3).
+ *
+ * MEASURED on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1): `CREATE OR REPLACE FUNCTION` on an
+ * object owned by another role answers `ERROR: must be owner of function order_total` with
+ * SQLSTATE 42501, and it does so with `GRANT USAGE` and `GRANT CREATE` on the schema already
+ * held, which is the control `docker/postgres-init/03-object-fixture.sql` creates: the check is
+ * OWNERSHIP and not privilege, so no grant can make the apply work. That is why the answer is
+ * given on the READ, before the reader types anything.
+ *
+ * The sentence names the OWNER, because the reader's next action is to connect as a role that
+ * is a member of it and nothing else on the screen can tell them which role that is. It is the
+ * provider's own sentence rather than the engine's, because the engine has not spoken yet: no
+ * statement has been sent, and quoting `must be owner of function order_total` here would put
+ * an error the server never answered into a pane that is only reading.
+ *
+ * `may_replace` is `pg_has_role(current_user, proowner, 'USAGE')`, which is true for the owner
+ * and for any member of the owning role, and a NULL or absent value reads as false: an answer
+ * this provider could not get is never an offer to write.
+ */
+function routineEditAffordance(row: SourceRow, schema: string, name: string): ObjectPartEdit {
+  if (row.may_replace === true) return { offered: true };
+  return {
+    offered: false,
+    reason:
+      `this connection's database account does not own "${schema}.${name}", ` +
+      `which is owned by "${row.owner ?? "another role"}", ` +
+      "and PostgreSQL checks ownership rather than privilege for CREATE OR REPLACE",
+  };
+}
 
 // Columns for ONE object, from pg_attribute rather than from `CTE_COLUMNS_INFO`.
 //
@@ -807,6 +1263,43 @@ function containerSchema(capabilities: ProviderCapabilities, container: readonly
     );
   }
   return segment;
+}
+
+/**
+ * The shape one kind's object path has, refused rather than read from the wrong segment.
+ *
+ * Derived, not counted. `2` and `3` are right for a one-level engine and wrong for the five
+ * two-level ones in this epic, and a provider copying this file must not inherit a literal
+ * that refuses every valid path on a catalog-plus-schema engine. The segment names come from
+ * the declared level labels, so the message and the depth cannot disagree: they are the same
+ * array.
+ *
+ * ONE writer for two readers since #789 Phase 2. `describeObject` and `readObjectSource` ask
+ * the same question about the same path, and two copies of this derivation is two chances for
+ * the detail pane and the Source tab to disagree about what a trigger's address is.
+ *
+ * The levels come from `declaredLevels()` and never from `containerLevels.length`, which is
+ * what this function counted when the hoist inherited it from `describeObject`. The two agree
+ * at every depth `ContainerLevels` admits, and they disagree past it: `containerDepth()`
+ * saturates at two, so a third declared level made this check demand four segments while
+ * `readObjectSource` sliced the container at two and handed `containerSchema` a two-segment
+ * path. One reader, which is what the `declaredLevels` docblock twelve lines up already said.
+ */
+function assertObjectPathShape(
+  capabilities: ProviderCapabilities,
+  spec: ObjectKindSpec,
+  kind: string,
+  path: readonly string[],
+): void {
+  const segments = declaredLevels(capabilities).map((level) => level.label.toLowerCase());
+  if (spec.attachedTo !== undefined) segments.push(spec.attachedTo);
+  segments.push("name");
+  if (path.length !== segments.length) {
+    throw new QueryError(
+      `A PostgreSQL "${kind}" path is [${segments.join(", ")}], received ${JSON.stringify(path)}`,
+      "postgres",
+    );
+  }
 }
 
 /**
@@ -1062,12 +1555,28 @@ const PERF_TRANSACTION_STATS_SQL = `
         WHERE datname = $1
       `;
 
-// getPerformanceMetrics: checkpoint timings (columns absent on older PG).
-const PERF_CHECKPOINT_SQL = `
+// getPerformanceMetrics: which view carries the checkpoint timings. PostgreSQL 17
+// moved them from pg_stat_bgwriter to pg_stat_checkpointer and renamed them, so the
+// server is asked whether the new view exists rather than its version number, which
+// a wire-compatible fork need not report in step with its catalog.
+const PERF_CHECKPOINTER_PROBE_SQL = `
+          SELECT pg_catalog.to_regclass('pg_catalog.pg_stat_checkpointer') IS NOT NULL AS has_checkpointer
+        `;
+
+// getPerformanceMetrics: checkpoint timings on PostgreSQL 17 and later.
+const PERF_CHECKPOINTER_SQL = `
           SELECT
-            checkpoint_write_time,
-            checkpoint_sync_time
-          FROM pg_stat_bgwriter
+            write_time,
+            sync_time
+          FROM pg_catalog.pg_stat_checkpointer
+        `;
+
+// getPerformanceMetrics: checkpoint timings before PostgreSQL 17.
+const PERF_BGWRITER_CHECKPOINT_SQL = `
+          SELECT
+            checkpoint_write_time AS write_time,
+            checkpoint_sync_time AS sync_time
+          FROM pg_catalog.pg_stat_bgwriter
         `;
 
 // getSlowQueries: pg_stat_statements stats ($1 = database, $2 = limit).
@@ -1376,6 +1885,20 @@ async function probeExplainFormat(client: PoolClient): Promise<ExplainFormat | u
 export class PostgresProvider extends SQLBaseProvider {
   private pool: Pool | null = null;
 
+  /**
+   * The pooled client the most recent `query()` ran a statement on, kept so that
+   * `endOpenQueryTransaction()` can name it (D71).
+   *
+   * A reference to a RELEASED client, deliberately, and it is not a leak: `release()`
+   * returns the client to the pool's idle list without ending it, so the object stays a
+   * live `pg` Client and `getTransactionStatus()` on it still reports the last
+   * ReadyForQuery status the server sent. Naming the client is the whole point — a
+   * rollback issued through a fresh `pool.connect()` is not guaranteed to reach the
+   * client the script's statements ran on, and rolling back somebody else's transaction
+   * is worse than leaving this one open.
+   */
+  private lastQueryClient: PoolClient | null = null;
+
   // Transaction support: dedicated client held outside pool
   private txClient: PoolClient | null = null;
   private txActive = false;
@@ -1443,6 +1966,13 @@ export class PostgresProvider extends SQLBaseProvider {
       // table, view, materialized view and sequence from `pg_class.relkind`; function and
       // procedure from `pg_proc.prokind`; trigger from `pg_trigger`.
       //
+      // FIVE of the seven declare `hasSource`, all `pgsql` (#789 Phase 2). `table` and
+      // `sequence` declare NOTHING, and that is a RESULT rather than a gap: PostgreSQL
+      // publishes no `pg_get_tabledef` and no `pg_get_sequencedef`, and
+      // `pg_catalog.pg_sequences` publishes a sequence's properties rather than any text. A
+      // kind an engine cannot answer for is absent from the declaration and is never declared
+      // and then refused, which is standing ruling 4 one level down.
+      //
       // No `index` kind, deliberately. PostgreSQL's own catalog models an index as a
       // property of the relation it is on - `pg_index` is keyed by `indrelid` and an
       // index cannot exist without one - so it belongs in `describeObject`'s output,
@@ -1454,17 +1984,43 @@ export class PostgresProvider extends SQLBaseProvider {
         // provider still declares nothing: whether a given view is one of those is a
         // per-object fact this declaration is per-kind, so claiming it would offer an
         // import target that fails on most views in most schemas.
-        { id: "view", role: "relation", label: "View", labelPlural: "Views" },
+        { id: "view", role: "relation", label: "View", labelPlural: "Views", hasSource: true, sourceLanguage: "pgsql" },
         {
           id: "materialized_view",
           role: "relation",
           label: "Materialized View",
           labelPlural: "Materialized Views",
+          hasSource: true,
+          sourceLanguage: "pgsql",
         },
         { id: "sequence", role: "config", label: "Sequence", labelPlural: "Sequences" },
-        { id: "function", role: "routine", label: "Function", labelPlural: "Functions" },
-        { id: "procedure", role: "routine", label: "Procedure", labelPlural: "Procedures" },
-        { id: "trigger", role: "attached", label: "Trigger", labelPlural: "Triggers", attachedTo: "table" },
+        {
+          id: "function",
+          role: "routine",
+          label: "Function",
+          labelPlural: "Functions",
+          hasSource: true,
+          sourceLanguage: "pgsql",
+          acceptsSourceEdits: true,
+        },
+        {
+          id: "procedure",
+          role: "routine",
+          label: "Procedure",
+          labelPlural: "Procedures",
+          hasSource: true,
+          sourceLanguage: "pgsql",
+          acceptsSourceEdits: true,
+        },
+        {
+          id: "trigger",
+          role: "attached",
+          label: "Trigger",
+          labelPlural: "Triggers",
+          attachedTo: "table",
+          hasSource: true,
+          sourceLanguage: "pgsql",
+        },
       ],
     };
   }
@@ -1570,6 +2126,11 @@ export class PostgresProvider extends SQLBaseProvider {
     if (this.pool) {
       await this.pool.end();
       this.pool = null;
+      // `pool.end()` ends every client it holds. The reference kept for
+      // `endOpenQueryTransaction()` would then name a dead client whose last reported
+      // ReadyForQuery status never changes again, so it is dropped here rather than left
+      // to answer for a session that no longer exists.
+      this.lastQueryClient = null;
       this.setConnected(false);
     }
   }
@@ -1668,6 +2229,10 @@ export class PostgresProvider extends SQLBaseProvider {
       const { result, executionTime } = await this.measureExecution(async () => {
         try {
           const client = await this.pool!.connect();
+          // Recorded BEFORE the statement runs and kept after the release: a statement
+          // that FAILS inside a transaction is exactly the case D71 is about, and the
+          // client it failed on goes back to the pool in status "E".
+          this.lastQueryClient = client;
           try {
             // Track PID for cancellation support
             if (queryId) {
@@ -1882,6 +2447,45 @@ export class PostgresProvider extends SQLBaseProvider {
 
   public isInTransaction(): boolean {
     return this.txActive;
+  }
+
+  /**
+   * End a transaction a statement run through `query()` left open on the pooled client
+   * it borrowed (D71).
+   *
+   * The pool does not make an unfinished transaction benign here, it widens it. Measured
+   * 2026-09-13 on PostgreSQL 17 through the product's own routes: a script that failed
+   * inside its own BEGIN released the client in status "E", and every later request that
+   * drew that client answered HTTP 500 "current transaction is aborted, commands ignored
+   * until end of transaction block" — twelve retries over 60 seconds, 40 seconds of
+   * idleness, a different user, and `POST /api/db/maintenance` eight minutes later. The
+   * client is one of up to ten, so the connection does not fail, it fails INTERMITTENTLY
+   * for every user on every route until the provider is evicted after 30 idle minutes.
+   *
+   * The status is the server's own, not an inference: `pg` records the ReadyForQuery
+   * status byte of every statement ("I" idle, "T" in a transaction, "E" in a failed one)
+   * and publishes it as `getTransactionStatus()` (pg 8.23). So no statement text is read
+   * and no round trip is spent to find out — which matters, because the transaction can
+   * be opened by a BEGIN inside a form no splitter sees through.
+   *
+   * ROLLBACK and not COMMIT: the argument is at `OpenQueryTransactionOutcome`. "E" leaves
+   * no choice in any case — PostgreSQL ignores everything but a transaction-ending
+   * command there, and COMMIT on an aborted transaction rolls back regardless.
+   *
+   * The interactive session `POST /api/db/transaction` drives is never touched: its
+   * client is checked out for the session's whole life and handed back only by
+   * `commitTransaction` / `rollbackTransaction` / `expireTransaction`, so `query()` never
+   * borrows it and it can never be `lastQueryClient`.
+   */
+  public async endOpenQueryTransaction(): Promise<OpenQueryTransactionOutcome> {
+    const client = this.lastQueryClient;
+    if (client === null) return "none";
+
+    const status = client.getTransactionStatus();
+    if (status !== "T" && status !== "E") return "none";
+
+    await client.query("ROLLBACK");
+    return "rolled-back";
   }
 
   public async queryInTransaction(sql: string, params?: unknown[]): Promise<QueryResult> {
@@ -2147,20 +2751,7 @@ export class PostgresProvider extends SQLBaseProvider {
       throw new QueryError(`PostgreSQL declares no object kind "${kind}"`, "postgres");
     }
 
-    // Derived, not counted. `2` and `3` are right for a one-level engine and wrong for the
-    // five two-level ones in this epic, and a provider copying this file must not inherit a
-    // literal that refuses every valid path on a catalog-plus-schema engine. The segment
-    // names come from the declared level labels, so the message and the depth cannot
-    // disagree: they are the same array.
-    const segments = (this.getCapabilities().containerLevels ?? []).map((level) => level.label.toLowerCase());
-    if (spec.attachedTo !== undefined) segments.push(spec.attachedTo);
-    segments.push("name");
-    if (path.length !== segments.length) {
-      throw new QueryError(
-        `A PostgreSQL "${kind}" path is [${segments.join(", ")}], received ${JSON.stringify(path)}`,
-        "postgres",
-      );
-    }
+    assertObjectPathShape(this.getCapabilities(), spec, kind, path);
 
     if (RELKIND_BY_KIND[kind] === undefined) {
       return { path: [...path], columns: [], indexes: [], foreignKeys: [] };
@@ -2239,6 +2830,660 @@ export class PostgresProvider extends SQLBaseProvider {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * One object's definition text, as PostgreSQL reconstructs it (#789 Phase 2).
+   *
+   * FIVE kinds can answer and the DECLARATION says which: `view`, `materialized_view`,
+   * `function`, `procedure` and `trigger` declare `hasSource`, and `table` and `sequence`
+   * declare nothing because PostgreSQL publishes no `pg_get_tabledef` and no
+   * `pg_get_sequencedef`. A kind that declares nothing is refused here by name rather than
+   * answered with a document holding nothing, and the refusal is read off the declaration and
+   * never off a list of kind ids kept beside it.
+   *
+   * THE TEXT IS A RECONSTRUCTION AND THE DOCUMENT SAYS SO. PostgreSQL calls this output "a
+   * decompiled reconstruction, not the original text of the command", so every part is
+   * `origin: "regenerated"`; a view and a materialized view are `form: "partial"` because
+   * `pg_get_viewdef` answers the bare `SELECT` with no `CREATE` around it, measured on 18.4.
+   *
+   * PASS THE OID, NEVER A CAST. The statements are in `viewSourceSql`, and the measurement
+   * behind that rule is there too: the `pg_get_*` family applies NO privilege check, so a
+   * caller who can SEE an object in the catalog can always read its definition, and the only
+   * thing that can refuse is the NAME RESOLUTION a `regclass` or `regprocedure` cast performs.
+   * A provider that casts manufactures a 42501 the engine never made.
+   *
+   * ABSENCE RAISES AND IS NEVER A REFUSAL PART. No row, a NULL definition and a
+   * whitespace-only definition are one fact on this engine: the catalog holds no such object
+   * at that address, measured (`pg_get_viewdef` answers NULL for an oid that is not a view).
+   * PostgreSQL utters no sentence for it, so a refusal part here would carry OUR silence
+   * dressed as the server's answer, and an empty part would put an empty editor over a
+   * definition nobody read. The two refusal arms this method does report are a wire-compatible
+   * FORK missing a catalog surface, and they carry the server's own sentence unprefixed.
+   *
+   * The schema is the container segment the DECLARATION names `schema` and the object name is
+   * `path[path.length - 1]`, never a literal index: standing ruling 5g, pinned in this
+   * provider's suite by a two-level declaration driven all the way to the binds.
+   */
+  public async readObjectSource(path: readonly string[], kind: string, limit?: number): Promise<ObjectSourceDocument> {
+    this.ensureConnected();
+    const capabilities = this.getCapabilities();
+    const spec = requireSourceKind(capabilities, kind, { displayName: "PostgreSQL", type: "postgres" });
+    assertObjectPathShape(capabilities, spec, kind, path);
+
+    const depth = containerDepth(capabilities);
+    const schema = containerSchema(capabilities, path.slice(0, depth));
+    const name = path[path.length - 1];
+    // What sits BETWEEN the container and the name, which is one segment per declared
+    // attachment and empty for every other kind. `assertObjectPathShape` has already refused
+    // any other length, so the last of these is the parent the declaration named.
+    const nesting = path.slice(depth, path.length - 1);
+    const statement = sourceStatement(schema, kind, name, nesting[nesting.length - 1]);
+    if (statement === undefined) {
+      throw new QueryError(
+        `PostgreSQL declares readable source for the kind "${kind}" but has no statement that reads it`,
+        "postgres",
+      );
+    }
+
+    const client = await this.pool!.connect();
+    let rows: SourceRow[];
+    try {
+      rows = (await client.query(statement.sql, statement.params)).rows as SourceRow[];
+    } catch (error) {
+      if (!isMissingSourceCatalogError(error)) throw mapDatabaseError(error, "postgres", statement.sql);
+      return {
+        path: [...path],
+        kind,
+        parts: [
+          {
+            id: SOURCE_PART_ID,
+            label: "Definition",
+            // The server's own sentence, unprefixed and never through `mapDatabaseError`,
+            // which would put this product's words in front of the server's.
+            unavailable: error instanceof Error ? error.message : String(error),
+          },
+        ],
+      };
+    } finally {
+      client.release();
+    }
+
+    const definition = rows[0]?.definition;
+    if (definition === undefined || definition === null || definition.trim() === "") {
+      throw new QueryError(
+        `PostgreSQL holds no ${spec.label.toLowerCase()} called "${name}" in schema "${schema}"`,
+        "postgres",
+        statement.sql,
+      );
+    }
+    const bounded = applySourceBound(definition, limit);
+    return {
+      path: [...path],
+      kind,
+      parts: [
+        {
+          id: SOURCE_PART_ID,
+          label: "Definition",
+          text: bounded.text,
+          language: spec.sourceLanguage,
+          form: statement.form,
+          origin: "regenerated",
+          ...(bounded.truncated === undefined ? {} : { truncated: bounded.truncated }),
+          // The affordance travels with the READ, and it is resolved on the CONNECTED provider, which
+          // is the whole reason it is here rather than on the client's copy of the declaration (D57).
+          ...(kindAcceptsSourceEdits(capabilities, kind) ? { edit: routineEditAffordance(rows[0], schema, name) } : {}),
+        },
+      ],
+    };
+  }
+
+  /**
+   * A value wrapped in a dollar-quoted string with a tag that is not in it (#789 Phase 3).
+   *
+   * NO LITERAL ESCAPING ANYWHERE IN THE APPLY, by construction. Dollar-quoted strings ignore every
+   * escape, so this is immune to `standard_conforming_strings`, which is another GUC a borrower of
+   * the pooled connection can change and which single-quote doubling would depend on. There is no
+   * `literal()` on `SQLBaseProvider` to reuse: MEASURED, the class is 159 lines and adds
+   * `escapeIdentifier`, `buildLimitClause`, `shouldEnableSSL`, `getInformationSchemaName`,
+   * `getDefaultSchema`, `isReadOnlyQuery`, `isSchemaModifyingQuery` and `prepareQuery`.
+   *
+   * The random source is an ARGUMENT so the collision arm can be executed by a test rather than
+   * being an unreachable line under the coverage gate. It is the same reason `drive-token.ts`
+   * takes its clock as one.
+   */
+  private dollarQuote(value: string, tagSource: () => string = () => randomBytes(6).toString("hex")): string {
+    const tag = `$lb${tagSource()}$`;
+    if (value.includes(tag)) {
+      throw new QueryError(
+        "could not build this apply safely: the generated quote tag occurs inside the definition",
+        "postgres",
+      );
+    }
+    return `${tag}${value}${tag}`;
+  }
+
+  /**
+   * The three coordinates every statement this apply sends is addressed by, derived and never
+   * indexed (#789 Phase 3, standing ruling 5g).
+   *
+   * ONE writer for the build's read, the build's guard blocks and the apply's re-read, because
+   * those three ask the same question about the same object and a second derivation is a second
+   * chance for the guard to compare a different routine from the one being replaced.
+   *
+   * The schema comes through `containerSchema`, which reads the POSITION off the declaration, and
+   * the name is `path[path.length - 1]`. Both are behaviour-identical on this engine's own
+   * one-level declaration and neither is written as a literal index, which is what a two-level
+   * `containerLevels` swapped in by this provider's suite proves.
+   */
+  private routineAddress(
+    capabilities: ProviderCapabilities,
+    kind: string,
+    path: readonly string[],
+  ): { readonly schema: string; readonly prokind: string; readonly name: string } {
+    const schema = containerSchema(capabilities, path.slice(0, containerDepth(capabilities)));
+    const name = path[path.length - 1];
+    const prokind = PROKIND_BY_KIND[kind];
+    if (prokind === undefined) {
+      // The declaration and the statement map are two lists, exactly as they are for the source
+      // read one method up, and a kind can be added to one and not the other. It fails by name
+      // rather than binding `undefined` to `$2`, which would answer "no such routine" for an
+      // object the tree has just listed.
+      throw new QueryError(
+        `PostgreSQL declares an editable kind "${kind}" but has no statement that reads it`,
+        "postgres",
+      );
+    }
+    return { schema, prokind, name };
+  }
+
+  /**
+   * Build the guarded atomic batch that replaces one routine's definition (#789 Phase 3).
+   *
+   * THE STRATEGY IS `guarded-atomic-batch` AND IT IS THE ONLY DAY-ONE STRATEGY THAT CLOSES THE
+   * LOST-UPDATE WINDOW RATHER THAN NARROWING IT, because the precondition and the write travel in
+   * ONE round trip and PostgreSQL wraps a multi-statement simple query in its own implicit
+   * transaction. MEASURED on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1): a `DO` block raising
+   * `42P13` in front of the CREATE left `pg_proc` untouched, and a failing CREATE after a DROP
+   * left the same `oid` and the same `xmin`.
+   *
+   * THE `SET LOCAL` AND THE STATEMENT TRAVEL IN ONE ROUND TRIP AND SPLITTING THEM IS SILENT.
+   * MEASURED on 18.4 through `pg`: `SET LOCAL search_path = app, pg_catalog` sent as its OWN round
+   * trip answers `WARNING: SET LOCAL can only be used in transaction blocks` and the value DOES
+   * NOT TAKE EFFECT, `SHOW search_path` still reading `"$user", public`; the same `SET LOCAL` in
+   * ONE round trip with the CREATE answers `SET` then `CREATE FUNCTION` with no warning; and THE
+   * CONTROL, the identical CREATE without the pin, answers `ERROR: relation "t" does not exist`.
+   * `pg` does not surface that warning as a rejection, so a split pin fails by doing nothing and
+   * the apply then runs under whatever the previous borrower of the pooled connection left. That
+   * is why the unit is ONE step and why `applyObjectEdit` sends `plan.unit.steps[0].text` in a
+   * single parameterless `client.query()`.
+   *
+   * WHY `search_path` IS PINNED AT ALL, and the cost, which `docs/providers/postgres.md` carries
+   * in full. MEASURED on 18.4 with `check_function_bodies` at its default `on`: a `LANGUAGE
+   * plpgsql` body creates under ANY path, while a `LANGUAGE sql` body and a `BEGIN ATOMIC` body
+   * are name-resolved at CREATE time and fail under the wrong one. `pg_proc.proconfig` is NULL for
+   * a function that does not declare its own `SET search_path`, so the value the object was
+   * created under cannot be recovered from the catalog. The pin is therefore the object's own
+   * container schema plus `pg_catalog`, and the cost is accepted and stated: a previously-working
+   * body that reads ANOTHER schema unqualified is refused rather than silently succeeding on
+   * whichever path the last borrower happened to leave.
+   *
+   * FIVE REFUSALS, IN THIS ORDER, and each one answers before anything is sent.
+   *
+   * THE READ HERE IS NOT THE PANE'S READ, and it cannot be taken from the document the pane is
+   * showing: it produces the revision, it is the pre-image the preview's left side needs, it
+   * answers the ownership pre-flight, it reads the two session facts, and it is what refuses a
+   * definition the read bound would have truncated.
+   */
+  public async buildObjectEdit(request: ObjectEditRequest): Promise<ObjectEditBuild> {
+    this.ensureConnected();
+    const capabilities = this.getCapabilities();
+    const spec = requireEditableKind(capabilities, request.kind, { displayName: "PostgreSQL", type: "postgres" });
+    assertObjectPathShape(capabilities, spec, request.kind, request.path);
+    const { schema, prokind, name } = this.routineAddress(capabilities, request.kind, request.path);
+    if (request.partId !== SOURCE_PART_ID) {
+      // A part this provider never produced. It raises rather than refusing, because a refusal is
+      // an engine fact the reader can act on and this is a caller that addressed something that
+      // does not exist: `readObjectSource` writes exactly one part and writes this id on it.
+      throw new QueryError(
+        `A PostgreSQL ${spec.label.toLowerCase()} has one source part, "${SOURCE_PART_ID}", received "${request.partId}"`,
+        "postgres",
+      );
+    }
+
+    const client = await this.pool!.connect();
+    let rows: SourceRow[];
+    try {
+      rows = (await client.query(SOURCE_ROUTINE_SQL, [schema, prokind, name])).rows as SourceRow[];
+    } finally {
+      client.release();
+    }
+
+    const definition = rows[0]?.definition;
+    if (definition === undefined || definition === null || definition.trim() === "") {
+      // The same fact and the same sentence the source read answers for an absent object: the
+      // catalog holds nothing at that address. PostgreSQL utters no sentence for it, so a refusal
+      // would carry our silence dressed as the server's answer.
+      throw new QueryError(
+        `PostgreSQL holds no ${spec.label.toLowerCase()} called "${name}" in schema "${schema}"`,
+        "postgres",
+        SOURCE_ROUTINE_SQL,
+      );
+    }
+    const row = rows[0];
+
+    const refuse = (refusal: ObjectEditRefusalClass, sentence: string): ObjectEditBuild => ({
+      built: false,
+      // `at: { within: "none" }` on every one of them, and it is a fact rather than a default:
+      // nothing has been sent, so no engine has reported a position and there is no coordinate to
+      // convert. An `outside` here would claim a position was reported and could not be placed.
+      refusal: { refusal, sentence, at: { within: "none" } },
+    });
+
+    // 1. The read bound. A part the pane could only show TRUNCATED is never editable: submitting
+    //    the bounded text back is a truncation dressed as an edit, and it would delete everything
+    //    past the bound. The number is core's `EDIT_CHARACTER_LIMIT`, which is
+    //    `SOURCE_CHARACTER_LIMIT` by construction, so this refusal and the pane's bound can never
+    //    drift apart. `docker/postgres-init/03-object-fixture.sql` builds the population: a
+    //    routine whose definition measured 1,215,122 characters on 18.4 and its 945,116-character
+    //    control, so the bound is measured biting rather than assumed to.
+    if (definition.length > EDIT_CHARACTER_LIMIT) {
+      return refuse(
+        "guard",
+        `this definition is ${definition.length.toLocaleString("en-US")} characters and the Source pane is ` +
+          `bounded at ${EDIT_CHARACTER_LIMIT.toLocaleString("en-US")} characters, so the text you edited is a ` +
+          "truncation of it and submitting it back would delete everything past the bound",
+      );
+    }
+
+    // 2. Ownership, answered BEFORE the reader types anywhere it can be, and the sentence is the
+    //    one the read's affordance already wrote, so the pane and the build cannot disagree.
+    const affordance = routineEditAffordance(row, schema, name);
+    if (!affordance.offered) return refuse("privilege", affordance.reason);
+
+    // 3. The GUC. MEASURED on 18.4: with `check_function_bodies = off` a `CREATE OR REPLACE
+    //    FUNCTION` over a body naming a table that does not exist answers `CREATE FUNCTION` and A
+    //    BROKEN FUNCTION IS CREATED AND SUCCESS IS REPORTED. It is session-scoped, and D73
+    //    measured session state persisting across Studio users on the cached provider, so the
+    //    population this refuses is reachable by a previous borrower rather than hypothetical.
+    //    THE COMPARISON IS AGAINST "on" AND NEVER AGAINST "off", and the `?? "an unreadable
+    //    value"` arm is what that buys: a row that answered NO value at all is refused with a
+    //    sentence that says so rather than being read as `on`. Its evidence class is named
+    //    because the two differ: `= off` is MEASURED on 18.4, while the no-value row is D62's and
+    //    is built by a test at this provider's boundary rather than by any server this task
+    //    probed, since `current_setting` on 18.4 always answers a string and a server with no such
+    //    GUC raises 42704 out of the read above.
+    if (row.check_function_bodies !== "on") {
+      return refuse(
+        "guard",
+        `this connection's session has check_function_bodies = ${row.check_function_bodies ?? "an unreadable value"}, ` +
+          "and PostgreSQL then accepts a body it would otherwise reject, so an apply would report success and " +
+          "store a definition that cannot run",
+      );
+    }
+
+    // 4. Byte-identical text. A refusal and never a no-op apply, because sending an apply that
+    //    cannot change anything spends a write path, an audit row and a lock on nothing.
+    //
+    //    WHAT THIS REFUSAL DOES NOT BUY, corrected after the wave 5 review measured it: it does
+    //    NOT empty the post-condition's false-positive population, which is what this comment and
+    //    `docs/providers/postgres.md` both claimed. `pg_get_functiondef` is a CANONICAL rendering,
+    //    so an edit that differs from the server's bytes and re-renders to the same bytes passes
+    //    here. MEASURED on 18.4: a re-indented header with `sql` upper-cased built, applied, and
+    //    was reported `applied-elsewhere` and rolled back. The post-condition below now asks
+    //    whether the addressed ROW was rewritten instead, which that edit answers yes to.
+    if (request.text === definition)
+      return refuse("definition", "this text is identical to the definition on the server");
+
+    // 5. The identity. Both headers are shown, because the reader's next action is to put the
+    //    original name back or to create the new routine deliberately, and neither is possible
+    //    from a sentence that only says no.
+    const submitted = routineIdentityHeader(request.text);
+    const current = routineIdentityHeader(definition);
+    if (submitted !== current) {
+      return refuse(
+        "identity",
+        `this text declares "${submitted}" and the object being edited is "${current}", and LibreDB refuses an ` +
+          "edited header rather than sending it. CREATE OR REPLACE with a different name or a different " +
+          "argument list creates a SECOND routine and leaves this one untouched, after which every call site " +
+          "fails 42725 is not unique. A changed parameter DEFAULT is rendered inside this same header and " +
+          "PostgreSQL replaces that one in place, so it is refused here as well: make it with a CREATE OR " +
+          "REPLACE of your own in the SQL editor",
+      );
+    }
+
+    const revision = row.revision;
+    if (typeof revision !== "string" || revision === "") {
+      // A guarded batch with no token to guard on is not this strategy, so it is refused rather
+      // than downgraded in silence to an unguarded write. The population is D62's: this type id
+      // also serves CockroachDB and Materialize, neither of which was probed, and a fork that
+      // answers no `md5(pg_get_functiondef(oid))` lands here.
+      return refuse(
+        "unsupported",
+        "this server answered no md5 of pg_get_functiondef for this routine, so the lost-update guard this " +
+          "apply is built around cannot be constructed and the edit is refused rather than applied unguarded",
+      );
+    }
+
+    const pinnedSearchPath = `${this.escapeIdentifier(schema)}, pg_catalog`;
+    const guardSubject =
+      `FROM pg_catalog.pg_proc p\n` +
+      `        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n` +
+      `       WHERE n.nspname = ${this.dollarQuote(schema)} AND p.prokind = ${this.dollarQuote(prokind)} ` +
+      `AND ${ROUTINE_IDENTITY_EXPR} = ${this.dollarQuote(name)}`;
+    // THREE PRIVATE SQLSTATEs AND NOT ONE, which is a deviation from the design's single `55006`
+    // with the design's own rule behind it: the design also requires the classifier to map
+    // SQLSTATE to a refusal class AS DATA and never by message substring, and the three raises
+    // mean three DIFFERENT outcomes, a `conflict`, a `refused` and an `applied-elsewhere`. One
+    // shared code would force the classifier back onto the message. `LB001`, `LB002` and `LB003`
+    // are in the range PostgreSQL documents for user-defined conditions.
+    const preBlock =
+      `BEGIN\n` +
+      `  IF (SELECT md5(pg_catalog.pg_get_functiondef(p.oid))\n` +
+      `        ${guardSubject})\n` +
+      `     IS DISTINCT FROM ${this.dollarQuote(revision)}\n` +
+      `  THEN RAISE EXCEPTION 'libredb: this definition changed since it was read' USING ERRCODE = 'LB001';\n` +
+      `  END IF;\n` +
+      `  IF current_setting('check_function_bodies') IS DISTINCT FROM ${this.dollarQuote(row.check_function_bodies)}\n` +
+      `  THEN RAISE EXCEPTION 'libredb: a session setting this preview depends on changed' USING ERRCODE = 'LB002';\n` +
+      `  END IF;\n` +
+      `  PERFORM set_config(${ROW_VERSION_SETTING_LITERAL},\n` +
+      `    (SELECT p.xmin::text\n` +
+      `        ${guardSubject}), true);\n` +
+      `END`;
+    // The post-condition catches what a byte comparison cannot see. MEASURED on 18.4: a raise
+    // anywhere in this round trip rolls the WHOLE thing back, so a fork is detected AND undone in
+    // the same round trip, which is what makes `applied-elsewhere` carry `undone: true` here and
+    // false on an engine with no transaction.
+    //
+    // IT ASKS WHETHER THE ADDRESSED ROW WAS REWRITTEN, NOT WHETHER ITS RENDERING MOVED, and the
+    // difference is a SEVERITY 1 defect this file shipped and the wave 5 review caught end to end.
+    // A revision comparison here reads a CANONICAL rendering: an edit that differs from the
+    // server's bytes and re-renders to the same bytes passes the byte-identical refusal above and
+    // then trips this guard. MEASURED on 18.4 through this provider: `app.order_total(integer)`
+    // re-indented and with `sql` upper-cased answered `applied-elsewhere` and was rolled back,
+    // while the server's md5 was `d9a63a78c5f93adf2aa325d3e0139be3` before and after and
+    // `pg_proc.xmin` moved 776 -> 778. So the guard compares `xmin`, which moves on EVERY rewrite
+    // of the row including a byte-identical one. That is the same property that makes `xmin` a
+    // bad revision TOKEN, where a move that changes nothing is a false conflict, and the right
+    // POST-CONDITION, where it is the only thing that answers "was the row I addressed the row
+    // that got written".
+    //
+    // The value is captured in the PRE block rather than carried from the build, because a value
+    // read at build time is stale by any GRANT EXECUTE in between and that would make the fork
+    // INVISIBLE. It travels in a transaction-local custom GUC, which is gone when the round trip
+    // ends: MEASURED, a new session answers `ERROR: unrecognized configuration parameter
+    // "libredb.row_version"`. MEASURED after the repair, same engine, same emitted shape: the
+    // canonicalized edit answers `SET | DO | CREATE FUNCTION | DO` with no raise, and a unit whose
+    // text creates a DIFFERENT routine answers `ERROR: libredb: this apply did not change the
+    // object it was addressed to` with `count(*) = 0` for the forked name afterwards.
+    const postBlock =
+      `BEGIN\n` +
+      `  IF (SELECT p.xmin::text\n` +
+      `        ${guardSubject})\n` +
+      `     IS NOT DISTINCT FROM current_setting(${ROW_VERSION_SETTING_LITERAL})\n` +
+      `  THEN RAISE EXCEPTION 'libredb: this apply did not change the object it was addressed to' USING ERRCODE = 'LB003';\n` +
+      `  END IF;\n` +
+      `END`;
+    const prefix = `SET LOCAL search_path = ${pinnedSearchPath};\nDO ${this.dollarQuote(preBlock)};\n`;
+    // THE TERMINATOR ENDS THE READER'S LINE BEFORE IT ENDS THE STATEMENT, and the leading newline
+    // is the whole repair (#789, task 22). It used to read `;\nDO ...`, so the semicolon that
+    // terminates the reader's CREATE was the first character after their last one, ON THE SAME
+    // LINE. PostgreSQL discards a `--` comment to the end of the line, so a reader whose edit ends
+    // in a line comment, which is how a person ends one, had that terminator swallowed and the
+    // post-condition `DO` became part of the CREATE.
+    //
+    // MEASURED live through this provider against PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1) on
+    // 2026-09-14, appending ` -- edited by task 22` to the definition of `app.order_total(integer)`:
+    // before the repair the apply answered `syntax error at or near "DO"`, SQLSTATE 42601, with the
+    // reported position inside the text this provider added, so `userPositionOf` answered `outside`
+    // and the pane placed no marker at all. After the repair the same edit answers
+    // `SET | DO | CREATE FUNCTION | DO` and the outcome is `applied`.
+    //
+    // The newline costs the reader's coordinates NOTHING: the prefix is untouched and the user
+    // segment still spans `[0, request.text.length)`, so the marker arithmetic reads the same line
+    // and column it did before.
+    //
+    // The doubled semicolon a reader who terminates their own text produces is not a risk this has
+    // to avoid: MEASURED on 18.4 through `pg`, `SELECT 1;;SELECT 2;` in one parameterless query is
+    // ACCEPTED and answers both rows, so the terminator is appended unconditionally rather than
+    // conditionally on the reader's last character. That is what keeps this one composition correct
+    // for a text ending in a line comment, in a newline, in `$$` and in a semicolon of their own.
+    const suffix = `\n;\nDO ${this.dollarQuote(postBlock)};`;
+    const step: ObjectEditStep = {
+      text: `${prefix}${request.text}${suffix}`,
+      language: spec.sourceLanguage,
+      segments: [
+        { from: "provider", text: prefix },
+        { from: "user", start: 0, end: request.text.length },
+        { from: "provider", text: suffix },
+      ],
+    };
+
+    return {
+      built: true,
+      plan: {
+        planVersion: 1,
+        planId: randomUUID(),
+        issuedAt: new Date().toISOString(),
+        connectionFingerprint: await connectionFingerprint(this.config),
+        type: "postgres",
+        path: [...request.path],
+        kind: request.kind,
+        partId: request.partId,
+        strategy: "guarded-atomic-batch",
+        unit: { medium: "statement", steps: [step] },
+        session: [
+          { mode: "pinned", setting: "search_path", value: pinnedSearchPath },
+          { mode: "asserted", setting: "check_function_bodies", value: row.check_function_bodies },
+        ],
+        revision: { check: "guarded", token: revision, basis: "md5(pg_get_functiondef(oid))", scope: "server" },
+        // Nothing. A `CREATE OR REPLACE FUNCTION` that keeps the identity replaces the addressed
+        // routine and nothing else: MEASURED on 18.4, the `oid` survives, so every dependency,
+        // every GRANT and every comment on it survives with it. The two ways to lose something
+        // here are a changed identity and a changed return type, and both are refused above and
+        // by the engine's own 42P13 rather than warned about.
+        consequences: [],
+      },
+      preimage: { text: definition, language: spec.sourceLanguage },
+    };
+  }
+
+  /**
+   * The routine's current definition and revision, re-read for the outcome that needs it.
+   *
+   * Two callers and two different questions: a SUCCESS needs the NEW revision, because the token
+   * the plan carried is by definition the OLD one and a client that re-applied with it would get a
+   * false conflict; and an `object-changed` conflict needs the server's CURRENT text, because H3
+   * requires the reader to be shown a diff rather than asked to trust a detector.
+   *
+   * It is addressed from the PLAN and never from a fresh derivation of the request, because the
+   * plan is the only thing an apply holds (ruling 1a).
+   */
+  private async readRoutineAfterApply(plan: ObjectEditPlan): Promise<SourceRow | undefined> {
+    const { schema, prokind, name } = this.routineAddress(this.getCapabilities(), plan.kind, plan.path);
+    const client = await this.pool!.connect();
+    try {
+      return (await client.query(SOURCE_ROUTINE_SQL, [schema, prokind, name])).rows[0] as SourceRow | undefined;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Send the plan, in ONE round trip, and NEVER the text again (#789 Phase 3, ruling 1a).
+   *
+   * `plan.unit.steps[0].text` is sent verbatim in a single parameterless `client.query()`. Nothing
+   * here re-reads the object to re-assemble a statement, nothing consults `getCapabilities()` for
+   * anything the plan already carries, and this provider's own suite proves that by MOVING both
+   * the server's definition and the capability answer between the build and the apply and then
+   * asserting the sent bytes byte for byte.
+   *
+   * ONE ROUND TRIP IS LOAD-BEARING AND SPLITTING IT FAILS IN SILENCE. MEASURED on PostgreSQL 18.4:
+   * a `SET LOCAL` in its own round trip answers `WARNING: SET LOCAL can only be used in
+   * transaction blocks`, the pin does nothing, and `pg` does not surface that warning as a
+   * rejection, so the apply would run under whatever the previous borrower of the pooled
+   * connection left and nothing downstream could see it.
+   *
+   * NO PARAMETERS, ever. Binding one does not degrade the atomicity, it REFUSES it: MEASURED,
+   * `42601 cannot insert multiple commands into a prepared statement`.
+   *
+   * THIS METHOD OPENS NO TRANSACTION OF ITS OWN, and that is a prohibition rather than an
+   * omission: `txActive` is one flag per `connection.id` (D72), a dangling `BEGIN` poisons one
+   * pooled client for the whole process (D71), and PostgreSQL's own implicit transaction around a
+   * multi-statement simple query already gives this strategy every atomicity guarantee it claims.
+   *
+   * A VERDICT THE ENGINE REACHED IS RETURNED AND NEVER THROWN, which is what keeps a deliberate
+   * refusal off the 500 path the shipped error mapper would otherwise put it on.
+   */
+  public async applyObjectEdit(plan: ObjectEditPlan): Promise<ObjectEditOutcome> {
+    this.ensureConnected();
+    if (plan.unit.medium !== "statement") {
+      // A command unit is not a shape this provider ever issues. It raises rather than refusing,
+      // because a refusal reports an engine fact and this is a plan from somewhere else.
+      throw new QueryError("A PostgreSQL object edit plan carries a statement unit, received a command", "postgres");
+    }
+    const [step] = plan.unit.steps;
+    const started = Date.now();
+    const client = await this.pool!.connect();
+    // A CLIENT THAT IS NOT IDLE BELONGS TO SOMEBODY ELSE'S TRANSACTION, and this apply refuses
+    // rather than writing into it (#789 Phase 3, D78). The status is the server's own last
+    // ReadyForQuery byte, read locally, so the check costs no round trip and cannot be defeated by
+    // a BEGIN no splitter sees through, which is the same argument `endOpenQueryTransaction()`
+    // makes for reading it.
+    //
+    // MEASURED on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1) through `pg` 8.23 on 2026-09-14,
+    // driving this provider against a throwaway container: a lone `BEGIN` through `query()`
+    // releases its pooled client in status `T`, `pg`'s idle list is LIFO so the next
+    // `pool.connect()` hands back THE SAME client, and without this guard the apply ran inside
+    // that foreign transaction and answered `applied` with a `guarded` revision token. Then
+    // `endOpenQueryTransaction()`, which names that very client, rolled the apply away: `xmin`
+    // 856 back to 825, the definition byte-identical to the pre-image. Ruling 1a is that the bytes
+    // the user approved are the bytes the database ends up with, and they were not. Two more
+    // consequences in the same run: the revision handed back is whichever image the re-read's own
+    // borrowed client happened to see, the post-image on the same client and the PRE-image on a
+    // different one; and the `SET LOCAL search_path` pin SURVIVED into the rest of the foreign
+    // transaction, `SHOW search_path` reading `app, pg_catalog` afterwards.
+    //
+    // NEITHER A ROLLBACK NOR A RETRY. A rollback here destroys work this user was never shown,
+    // which is the axis ruling 1b measures; and `POSTGRES_POOL_MAX=1`, which a single-slot
+    // PgBouncer also produces, has no other client to retry on. So the refusal is the honest
+    // answer, and it is `guard` because the precondition is this design's own: this method opens
+    // no transaction and depends on PostgreSQL's implicit one around its single round trip.
+    const borrowed = client.getTransactionStatus();
+    if (borrowed !== "I") {
+      client.release();
+      return {
+        outcome: "refused",
+        refusal: {
+          refusal: "guard",
+          sentence:
+            "this connection's pooled session is inside a transaction somebody else opened, so an apply " +
+            "sent on it would not be committed by this request and could be rolled back with theirs",
+          // No engine spoke, so there is no SQLSTATE to carry and no reported position to convert.
+          at: { within: "none" },
+        },
+        duration: Date.now() - started,
+      };
+    }
+    // THE FAILURE IS CAUGHT HERE AND CLASSIFIED AFTER THE RELEASE, and the order is load-bearing
+    // rather than tidy. `classifyApplyFailure` takes a SECOND pooled client for the conflict arm's
+    // re-read, and classifying inside the `catch` runs it BEFORE this `finally`, so the failed
+    // client is still checked out while the re-read asks for another one. At the default pool size
+    // that is invisible; on a pool of one, which `POSTGRES_POOL_MAX=1` and a single-slot PgBouncer
+    // both produce, the re-read waits for a client that is waiting for it.
+    let failure: { error: unknown } | undefined;
+    try {
+      await client.query(step.text);
+    } catch (error) {
+      failure = { error };
+    } finally {
+      client.release();
+    }
+    if (failure !== undefined) {
+      return await this.classifyApplyFailure(plan, step, failure.error, Date.now() - started);
+    }
+
+    const after = await this.readRoutineAfterApply(plan);
+    return {
+      outcome: "applied",
+      revision:
+        typeof after?.revision === "string"
+          ? { check: "guarded", token: after.revision, basis: "md5(pg_get_functiondef(oid))", scope: "server" }
+          : // The apply succeeded and the re-read did not answer. The write is not in doubt, so the
+            // outcome is still `applied`, and the revision says out loud that this provider could
+            // not produce one rather than carrying the OLD token, which a client would compare on
+            // its next apply and be told the object had not moved.
+            {
+              check: "unavailable",
+              reason:
+                "the apply succeeded and the re-read that produces the new revision answered no row for this routine",
+            },
+      duration: Date.now() - started,
+    };
+  }
+
+  /**
+   * One engine failure, turned into the outcome arm it IS (#789 Phase 3).
+   *
+   * The SQLSTATE decides, from `APPLY_VERDICT_BY_SQLSTATE`, and a code that is not in the table is
+   * `definition` with the engine's own sentence rather than a guess (D62). An error carrying NO
+   * SQLSTATE at all is not a verdict the engine reached: the statement was sent and its answer
+   * never arrived, so it is `interrupted` with `committed: "unknown"`, and a client that retried
+   * on it would apply twice.
+   */
+  private async classifyApplyFailure(
+    plan: ObjectEditPlan,
+    step: ObjectEditStep,
+    error: unknown,
+    duration: number,
+  ): Promise<ObjectEditOutcome> {
+    const sentence = error instanceof Error ? error.message : String(error);
+    const code = (error as { code?: unknown }).code;
+    if (typeof code !== "string") return { outcome: "interrupted", committed: "unknown", sentence, duration };
+
+    const verdict = APPLY_VERDICT_BY_SQLSTATE[code];
+    if (verdict === "conflict") {
+      const current = await this.readRoutineAfterApply(plan);
+      return {
+        outcome: "conflict",
+        conflict: "object-changed",
+        // The server's own text, re-read after the guard refused, so H3's diff is against what is
+        // actually there rather than against what the plan remembered. The language is the plan's
+        // own, because the apply holds the plan and nothing else.
+        current: { text: current?.definition ?? "", language: step.language },
+        duration,
+      };
+    }
+    if (verdict === "applied-elsewhere") {
+      return { outcome: "applied-elsewhere", undone: true, duration };
+    }
+    if (verdict === undefined && sentence.includes(CONCURRENT_UPDATE_SENTENCE)) {
+      return { outcome: "conflict", conflict: "engine-refused-concurrent", sentence, code, duration };
+    }
+
+    const hint = (error as { hint?: unknown }).hint;
+    const position = (error as { position?: unknown }).position;
+    return {
+      outcome: "refused",
+      refusal: {
+        refusal: verdict ?? "definition",
+        sentence,
+        code,
+        ...(typeof hint === "string" ? { hint } : {}),
+        // PostgreSQL's `position` is a 1-BASED CHARACTER offset into the text that was sent and it
+        // arrives as a STRING although `QueryError.position` is typed `number`, so both halves of
+        // the conversion happen here: the string becomes a number and the 1-based offset becomes
+        // the 0-based one `userPositionOf` takes. MEASURED: the same body error is `position 23`
+        // bare and `position 63` assembled, prefix 40, and an uncorrected coordinate is silently
+        // CLAMPED by Monaco rather than rejected, so nothing downstream catches it being wrong.
+        at:
+          typeof position === "string" || typeof position === "number"
+            ? userPositionOf(step, Number(position) - 1)
+            : { within: "none" },
+      },
+      duration,
+    };
   }
 
   // ============================================================================
@@ -2530,24 +3775,26 @@ export class PostgresProvider extends SQLBaseProvider {
         txRow = undefined;
       }
 
-      // Get checkpoint stats (optional - columns may not exist in older PG versions)
-      // "N/A" from the start rather than "0", so an unread counter never leaves
-      // here looking like a checkpoint that took no time.
+      // Get checkpoint stats. "N/A" from the start rather than "0", so an unread
+      // counter never leaves here looking like a checkpoint that took no time.
       let checkpointWriteTime = "N/A";
       try {
-        const checkpointRes = await client.query(PERF_CHECKPOINT_SQL);
+        // Reading the old columns and catching the failure answered "N/A" on every
+        // PostgreSQL 17+ server, and wrote an ERROR into its log on every monitoring
+        // refresh (#825). The probe picks the view that has them instead.
+        const probeRes = await client.query(PERF_CHECKPOINTER_PROBE_SQL);
+        const checkpointRes = await client.query(
+          probeRes.rows[0]?.has_checkpointer ? PERF_CHECKPOINTER_SQL : PERF_BGWRITER_CHECKPOINT_SQL,
+        );
         const checkpointRow = checkpointRes.rows[0];
-        const writeTime = measuredNumber(checkpointRow?.checkpoint_write_time);
-        const syncTime = measuredNumber(checkpointRow?.checkpoint_sync_time);
-        // Either half alone is a reading; neither is not. PostgreSQL 17 moved both
-        // columns from pg_stat_bgwriter to pg_stat_checkpointer, so on 17+ the query
-        // throws and the catch below answers - measured 2026-08-23 through this
-        // provider against postgres:18, which reported checkpointWriteTime "N/A".
+        const writeTime = measuredNumber(checkpointRow?.write_time);
+        const syncTime = measuredNumber(checkpointRow?.sync_time);
+        // Either half alone is a reading; neither is not.
         if (writeTime !== undefined || syncTime !== undefined) {
           checkpointWriteTime = `${(((writeTime ?? 0) + (syncTime ?? 0)) / 1000).toFixed(1)}s`;
         }
       } catch {
-        // The columns do not exist on this server (17+), or the view is not readable.
+        // No to_regclass() (Materialize), or the view is not readable by this role.
         checkpointWriteTime = "N/A";
       }
 

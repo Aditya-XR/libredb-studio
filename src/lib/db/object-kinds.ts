@@ -5,7 +5,8 @@
  * is answered here, in one place, so the defaults cannot drift: an absent
  * `acceptsRowWrites` reads as false in every caller because there is only one caller.
  */
-import type { KindCount, ObjectKindSpec, ProviderCapabilities } from "@/lib/db/types";
+import { QueryError } from "@/lib/db/errors";
+import type { DatabaseType, KindCount, ObjectKindSpec, ObjectSourcePart, ProviderCapabilities } from "@/lib/db/types";
 
 /**
  * How many container levels this engine declares, as the tree models them.
@@ -128,4 +129,193 @@ export function isCountSampled(count: KindCount): count is { readonly count: num
  */
 export function callerBoundTruncationReason(limit: number): string {
   return `the bulk column read was bounded at ${limit} object${limit === 1 ? "" : "s"} by its caller`;
+}
+
+/**
+ * Whether THIS KIND has a readable definition (#789 Phase 2).
+ *
+ * Absent and undeclared both read as FALSE, and the name says the scope so a caller cannot
+ * inline the default. It is NOT conjoined with anything, for the same reason
+ * `kindAcceptsRowWrites` is not: the per-object question is a different one, and only the READ
+ * can answer it. Four kinds in the fleet are readable for some of their objects and not
+ * others, and this answers for the kind.
+ */
+export function kindHasSource(capabilities: ProviderCapabilities, id: string): boolean {
+  return findKind(capabilities, id)?.hasSource === true;
+}
+
+/**
+ * Whether THIS KIND accepts an edited definition back (#789 Phase 3).
+ *
+ * Absent and undeclared both read as FALSE, and it is NOT conjoined with `hasSource` for the
+ * reason `kindHasSource` is not conjoined with anything: a kind that declared an edit and no
+ * source is a broken DECLARATION, and the census refuses it by name. A derivation that hid it by
+ * answering false would take the only guard that can see it away.
+ */
+export function kindAcceptsSourceEdits(capabilities: ProviderCapabilities, id: string): boolean {
+  return findKind(capabilities, id)?.acceptsSourceEdits === true;
+}
+
+/**
+ * The narrowing predicate for a refused part (#789 Phase 2).
+ *
+ * The `readonly` on every member is LOAD-BEARING and measured against TypeScript 6.0.3: a
+ * predicate written without it narrows the true branch and NOTHING on the false branch, so
+ * every caller is left holding the whole union with no `.text` on it. The one-property spelling
+ * `isCountUnavailable` uses does not compile here at all, because `ObjectSourcePart` has three
+ * required members on the refused arm, and that red build is the safe direction.
+ */
+export function isSourcePartUnavailable(
+  part: ObjectSourcePart,
+): part is { readonly id: string; readonly label: string; readonly unavailable: string } {
+  return "unavailable" in part;
+}
+
+/** The default per-part character bound the source route applies when a caller names none. */
+export const SOURCE_CHARACTER_LIMIT = 1_000_000;
+
+/**
+ * The most parts one document may carry before the route refuses it.
+ *
+ * The tuple type has no upper bound and the shipped maximum is two (an Oracle or MariaDB
+ * package), but the embedded seam takes its document from a HOST outside our compiler, so the
+ * real response size is `SOURCE_CHARACTER_LIMIT` times `parts.length` unless something bounds
+ * the count. Four times the largest shape any engine produces, so no correct provider can
+ * reach it.
+ */
+export const SOURCE_PART_LIMIT = 8;
+
+/**
+ * The ONE sentence a caller's source bound is reported with (#789 Phase 2).
+ *
+ * A function beside `callerBoundTruncationReason` rather than a reuse of it: the two bound
+ * different things and the existing sentence names objects. One place for the same reason that
+ * one records, which is that eleven implementers wrote three unrelated phrasings for one event
+ * before it was written down.
+ */
+export function sourceBoundTruncationReason(limit: number): string {
+  return `the source read was bounded at ${limit.toLocaleString("en-US")} characters by its caller`;
+}
+
+/**
+ * One part's text under a caller's bound, with the mark the bound owes (#789 Phase 2).
+ *
+ * Hoisted here rather than written sixteen times, on the evidence that `comparePaths` was
+ * written four times before anyone owned it. An exact answer is NEVER marked, which is the
+ * rule `sampledFrom` already follows verbatim, because marking one teaches a reader to
+ * discount every mark.
+ */
+export function applySourceBound(
+  text: string,
+  limit: number | undefined,
+): { readonly text: string; readonly truncated?: { readonly limit: number; readonly reason: string } } {
+  if (limit === undefined || text.length <= limit) return { text };
+  const cut = text.slice(0, limit);
+  // The bound counts UTF-16 CODE UNITS, so it can land BETWEEN the two halves of a surrogate
+  // pair, and an astral character is exactly that: a PL/pgSQL body or a Lua library holding an
+  // emoji, cut at that offset, would end in an unpaired high surrogate. That is not a
+  // character, JSON serializes it as a lone escape and Monaco draws a replacement glyph, so
+  // the pair is dropped whole. The last unit of the cut can only BE a high surrogate when its
+  // low half sits at `limit` in the original, because this arm runs only when the text is
+  // longer than the bound. `truncated.limit` still names the CALLER's number rather than the
+  // emitted length: the bound is what was asked for, and reporting anything else describes a
+  // bound nobody set.
+  const last = cut.charCodeAt(cut.length - 1);
+  const kept = last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+  return { text: kept, truncated: { limit, reason: sourceBoundTruncationReason(limit) } };
+}
+
+/**
+ * The entry guard every `readObjectSource` opens with, in ONE place (#789 Phase 2).
+ *
+ * Hoisted in the same spirit as `applySourceBound` above it and for the same measured reason
+ * standing ruling 5h gives for `comparePaths`: this preamble was written NINE times, verbatim,
+ * across `sqlite`, `libsql`, `clickhouse`, `cassandra`, `trino`, `postgres`, `mssql`, `mysql`
+ * and `duckdb`, and SonarCloud's duplication report on PR #820 named one of its copies as a
+ * block repeating across five providers at once. The only thing that ever differed between the
+ * nine was the engine's display name and its type id, so both are arguments.
+ *
+ * THREE SEPARATE FACTS, THREE SEPARATE SENTENCES, and collapsing them would lose a distinction
+ * a caller acts on. A kind the engine never declared is a caller asking for something that does
+ * not exist here; a declared kind with no `hasSource` is the engine having no such text at all;
+ * a source-bearing kind with no `sourceLanguage` is a DECLARATION missing half of itself, and
+ * it raises rather than defaulting because an unregistered or absent Monaco id degrades to
+ * plain text with no throw and nothing observable, so a kind that declared source and forgot
+ * its language would ship a Source tab that had quietly stopped highlighting. The wording of
+ * all three is carried over unchanged from the nine copies, because the provider suites assert
+ * on those sentences and a reworded throw would be a behaviour change hiding inside a hoist.
+ *
+ * THE ENGINE IS ONE ARGUMENT rather than two adjacent strings: `displayName` and `type` are
+ * both strings, a positional pair of them can be swapped silently, and an object at the call
+ * site names each one. There is no display-name registry to read either from: `compatibility.ts`
+ * holds no such map and `ProviderLabels` carries entity words rather than a product name, so
+ * inventing one to serve one message would be a larger change than this one. Each provider
+ * already writes its own name as a literal and passes that literal.
+ *
+ * The return narrows `sourceLanguage` to `string`, which is the whole point of the third throw:
+ * the caller reads `spec.sourceLanguage` with no `??` and no second undefined check.
+ */
+export function requireSourceKind(
+  capabilities: ProviderCapabilities,
+  kind: string,
+  engine: { readonly displayName: string; readonly type: DatabaseType },
+): ObjectKindSpec & { readonly sourceLanguage: string } {
+  const spec = findKind(capabilities, kind);
+  if (spec === undefined) {
+    throw new QueryError(`${engine.displayName} declares no object kind "${kind}"`, engine.type);
+  }
+  if (spec.hasSource !== true) {
+    throw new QueryError(`${engine.displayName} publishes no definition text for the kind "${kind}"`, engine.type);
+  }
+  const { sourceLanguage } = spec;
+  if (sourceLanguage === undefined) {
+    throw new QueryError(
+      `${engine.displayName} declares readable source for the kind "${kind}" and no sourceLanguage to render it with`,
+      engine.type,
+    );
+  }
+  return { ...spec, sourceLanguage };
+}
+
+/**
+ * The entry guard every `buildObjectEdit` opens with, in ONE place (#789 Phase 3).
+ *
+ * Hoisted before the first provider is written, rather than after nine copies of it exist:
+ * `assertObjectPathShape` is written out eight times in this tree (D67) and `requireSourceKind`
+ * exists because nine copies of the same preamble tripped the duplication gate on PR #820 (D69).
+ * Three providers will call this one on day one and a later phase adds more.
+ *
+ * THREE SEPARATE FACTS, THREE SEPARATE SENTENCES, and collapsing them would lose a distinction a
+ * caller acts on: a kind the engine never declared, a declared kind this engine will not write
+ * back, and an editable kind with no `sourceLanguage`, which is a DECLARATION missing half of
+ * itself. The third raises rather than defaulting for the reason `requireSourceKind` gives: an
+ * unregistered or absent Monaco id degrades to plain text with no throw and nothing observable.
+ *
+ * THE ENGINE IS ONE ARGUMENT rather than two adjacent strings, for `requireSourceKind`'s measured
+ * reason: both are strings, a positional pair of them can be swapped silently, and an object at
+ * the call site names each one.
+ */
+export function requireEditableKind(
+  capabilities: ProviderCapabilities,
+  kind: string,
+  engine: { readonly displayName: string; readonly type: DatabaseType },
+): ObjectKindSpec & { readonly sourceLanguage: string } {
+  const spec = findKind(capabilities, kind);
+  if (spec === undefined) {
+    throw new QueryError(`${engine.displayName} declares no object kind "${kind}"`, engine.type);
+  }
+  if (spec.acceptsSourceEdits !== true) {
+    throw new QueryError(
+      `${engine.displayName} does not apply an edited definition for the kind "${kind}"`,
+      engine.type,
+    );
+  }
+  const { sourceLanguage } = spec;
+  if (sourceLanguage === undefined) {
+    throw new QueryError(
+      `${engine.displayName} declares an editable kind "${kind}" and no sourceLanguage to render it with`,
+      engine.type,
+    );
+  }
+  return { ...spec, sourceLanguage };
 }

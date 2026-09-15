@@ -76,7 +76,7 @@ import type {
   ProviderCapabilities,
 } from "@/lib/db/types";
 import { TRINO_METADATA_SCHEMA, TRINO_UNKNOWN_TEXT } from "./introspect";
-import type { TrinoRow } from "./transport";
+import { TrinoTransportError, type TrinoRow } from "./transport";
 
 /** The canonical type-id, for the errors raised here. */
 const TYPE_ID = "trino";
@@ -272,8 +272,13 @@ export function trinoMaterializedViewListSql(container: TrinoContainer): string 
  *
  * A `SHOW` statement and not a projection, because there is no relation to project:
  * `information_schema` holds eight views on this engine and none of them is a routine
- * catalog, and `system.jdbc.procedures` answers zero rows for a schema holding three
- * functions (measured). The column names below therefore cannot be aliased, which is why
+ * catalog, and `system.jdbc.procedures` is EMPTY: `SELECT count(*)` over the whole table
+ * answers 0 while `SHOW FUNCTIONS FROM memory.app` answers a row for every function this
+ * repository's fixture creates (re-measured on 476, 2026-09-13, with that fixture applied).
+ * The emptiness of the WHOLE TABLE is what is stated here, rather than a row count against
+ * one schema, because a per-schema count goes stale the moment the fixture gains a function
+ * and this sentence counts nothing (#789). The column names below therefore cannot be
+ * aliased, which is why
  * {@link TRINO_FUNCTION_COLUMNS} spells them with their spaces.
  */
 export function trinoFunctionListSql(catalog: string, schema: string): string {
@@ -665,4 +670,703 @@ export function listedObject(
  */
 export function functionSegment(name: string, argumentTypes: string): string {
   return `${name}(${argumentTypes})`;
+}
+
+// ============================================================================
+// The source read (#789)
+// ============================================================================
+
+/**
+ * The one part id every Trino source document carries.
+ *
+ * Provider-local, and core reads it as an identity WITHIN ONE DOCUMENT and for nothing else
+ * (#789). Trino answers exactly one text per object: there is no spec-and-body split here,
+ * because the engine holds no object whose definition comes in two pieces.
+ */
+export const TRINO_SOURCE_PART_ID = "definition";
+
+export interface TrinoSourceStatement {
+  /** The object keyword `SHOW CREATE` takes: `TABLE`, `VIEW`, `MATERIALIZED VIEW`, `FUNCTION`. */
+  readonly object: string;
+  /** The reply's only column, which is also the part's label. */
+  readonly column: string;
+}
+
+/**
+ * The `SHOW CREATE` form one source-bearing kind is read with, and the single column its
+ * reply carries.
+ *
+ * Both halves of each row were MEASURED on trinodb/trino:476 on 2026-09-13, against the
+ * `memory` catalog `database-compose.yml` configures and an Iceberg catalog on an Apache
+ * Hive 4.0.1 standalone metastore, and all four match what the object-source design
+ * predicted. The column names are the engine's own and cannot be aliased, the same property
+ * {@link TRINO_FUNCTION_COLUMNS} records for `SHOW FUNCTIONS`: `SHOW CREATE` is a statement
+ * rather than a projection, so there is nowhere to put an `AS`.
+ *
+ * The column is ALSO the part's label, deliberately, rather than a friendlier word of this
+ * product's own. It is the engine's own name for the text (design guarantee: a label is the
+ * engine's word, rendered as-is), and it makes a wrong column VISIBLE: a reply column
+ * spelled wrongly reads as `undefined` and turns a readable definition into a refusal, which
+ * passes a whole-statement pin and every count assertion (the epic's recipe rule 6), so
+ * binding the label to the same constant puts that mistake in front of a reader.
+ */
+const TRINO_SOURCE_STATEMENTS: Readonly<Record<string, TrinoSourceStatement>> = {
+  table: { object: "TABLE", column: "Create Table" },
+  view: { object: "VIEW", column: "Create View" },
+  materialized_view: { object: "MATERIALIZED VIEW", column: "Create Materialized View" },
+  function: { object: "FUNCTION", column: "Create Function" },
+};
+
+/**
+ * The statement one kind's source is read with, or a refusal naming the kind.
+ *
+ * `Object.hasOwn` and not `in`: a kind id is an OPEN string, so `TRINO_SOURCE_STATEMENTS["toString"]`
+ * answers a function off the prototype chain and a kind spelled `toString` would be accepted
+ * as readable (standing ruling 5g, #789).
+ */
+export function trinoSourceStatementFor(kind: string): TrinoSourceStatement {
+  if (!Object.hasOwn(TRINO_SOURCE_STATEMENTS, kind)) {
+    throw new QueryError(
+      `Trino declares readable source for the kind "${kind}" and no SHOW CREATE form for it`,
+      TYPE_ID,
+    );
+  }
+  return TRINO_SOURCE_STATEMENTS[kind];
+}
+
+/** One object's definition statement, three-part named and every segment quoted. */
+export function trinoObjectSourceSql(
+  statement: TrinoSourceStatement,
+  catalog: string,
+  schema: string,
+  name: string,
+): string {
+  return `SHOW CREATE ${statement.object} ${quoteIdentifier(catalog)}.${quoteIdentifier(schema)}.${quoteIdentifier(name)}`;
+}
+
+/**
+ * The engine's own fault NAME for a Hive-native view that cannot be translated into Trino SQL.
+ *
+ * DOCUMENTED AND NOT MEASURED HERE, stated in advance rather than reported around. Reaching
+ * it needs a `hive` connector catalog holding a view that Hive itself created, which the
+ * compose cluster does not configure and which no statement this provider can send will
+ * produce. The message it comes with is Trino's own `Failed to translate Hive view '%s': %s`,
+ * and that message is what the refusal part carries, untouched in whichever shape it arrives
+ * and unprefixed by any word of this product's own.
+ *
+ * THE NAME AND NOT THE MESSAGE IS WHAT THE BRANCH IS KEYED ON, and the first round of this
+ * work had it the other way round. A `startsWith` on the sentence bets on a wording that is
+ * demonstrably not uniform on this engine: of the failure replies captured verbatim from 476
+ * in `tests/integration/db/trino-provider.test.ts`, `line 1:1: mismatched input 'SELEKT'.`
+ * and `line 1:1: Table 'memory.app.no_such_table' does not exist` carry the source location
+ * the analyzer attached, while `This connector does not support creating tables`, thrown by
+ * a connector rather than by the analyzer, is bare. Which shape a message takes is a property
+ * of where the throw came from, and for THIS branch, the one branch that cannot be reached on
+ * any cluster this repository can start, that property is unmeasurable. So a location prefix
+ * on the sentence would silently turn the declared refusal back into a raise, which is the
+ * exact case the branch exists for.
+ *
+ * The name is not unmeasurable. `errorName` is on the wire on every failed statement,
+ * {@link TrinoTransportError} already carries it as `code` (its own docblock calls it "the
+ * engine's stable fault name"), and it does not move when a release rewords a sentence.
+ *
+ * It is matched on the FAULT and not on the kind, because the fault is what identifies it:
+ * only a `view` can produce one today, but a provider that keyed the branch on the kind would
+ * have to be edited again the day another one can.
+ *
+ * Module-private: the only reader is the predicate below, and the tests reach the fault
+ * through the verbatim wire payload they serve rather than through this constant.
+ */
+const TRINO_HIVE_VIEW_TRANSLATION_FAULT = "HIVE_VIEW_TRANSLATION_ERROR";
+
+/**
+ * The engine's own translation-failure sentence, or `undefined` for any other failure.
+ *
+ * Takes the transport's UNMAPPED error, because {@link TrinoTransportError.code} is the thing
+ * being read and `mapTrinoError` discards it: everything in the `engine` category becomes a
+ * bare `QueryError` carrying the message alone.
+ *
+ * A failure that is NOT this one is rethrown by the caller rather than dressed as a refusal:
+ * a missing object must RAISE (design guarantee 6), and turning every failure into an
+ * `unavailable` part would put "the definition cannot be read" in front of a user whose
+ * object simply is not there.
+ */
+export function trinoTranslationRefusal(error: unknown): string | undefined {
+  if (!(error instanceof TrinoTransportError)) return undefined;
+  return error.code === TRINO_HIVE_VIEW_TRANSLATION_FAULT ? error.message : undefined;
+}
+
+/**
+ * Why a reply this provider received carries no definition.
+ *
+ * A DEVIATION from the "engine's own sentence, unprefixed" guarantee, declared rather than
+ * smuggled, and it is the same deviation `mssql` and `duckdb` already declared: the read
+ * SUCCEEDED, so the engine said nothing to carry. Measured on 476, no `SHOW CREATE` this
+ * provider sends answers a blank or a non-text value, so both arms exist for the release
+ * that changes that rather than for a shape seen here - and the two are kept apart because
+ * they are different facts about the cluster and only one of them is a text at all.
+ */
+export function trinoUnreadableSourceReason(statement: TrinoSourceStatement, name: string, value: unknown): string {
+  const where = `the "${statement.column}" column of SHOW CREATE ${statement.object} for ${name}`;
+  if (typeof value === "string") {
+    return `Trino answered ${where} with a text holding nothing but whitespace, and an empty definition is not a definition.`;
+  }
+  return `Trino answered ${where} as ${value === null ? "null" : typeof value} rather than as text.`;
+}
+
+// ----------------------------------------------------------------------------
+// Overload resolution, which is a signature comparison and not a string compare
+// ----------------------------------------------------------------------------
+
+/**
+ * The first TOP-LEVEL parenthesis pair, as the offsets of its own two characters, or `null`
+ * when the text holds none.
+ *
+ * QUOTE AWARE, and that is not defensive. Measured on 476: a function whose name holds an
+ * open parenthesis renders its definition as
+ * `CREATE FUNCTION memory.app."we(ird"(x bigint)`, so the FIRST `(` in the string belongs to
+ * the NAME and a scan that took it would read `ird"(x bigint` as the parameter list. The
+ * fixture holds that function (`docker/trino-init/01-object-fixture.sql`) so this scan is
+ * driven by an object rather than by an argument.
+ *
+ * A `"` toggles the quoted state, which handles Trino's doubled-quote escape without a case
+ * of its own: `""` toggles twice and lands back where it started.
+ */
+function trinoParenthesisedSpan(text: string): { readonly open: number; readonly close: number } | null {
+  let quoted = false;
+  let depth = 0;
+  let open = -1;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+    if (character === "(") {
+      if (depth === 0) open = index;
+      depth += 1;
+      continue;
+    }
+    if (character === ")") {
+      depth -= 1;
+      if (depth === 0) return { open, close: index };
+    }
+  }
+  return null;
+}
+
+/**
+ * The text inside the first TOP-LEVEL parentheses, or `null` when the text has none.
+ *
+ * The OFFSETS are the primitive and this is the slice, because {@link trinoCreateFunctionIdentity} needs
+ * what comes BEFORE the list as well and two scanners for one parenthesis pair would be two
+ * readings that could disagree about which pair it is.
+ */
+function trinoParenthesisedList(text: string): string | null {
+  const span = trinoParenthesisedSpan(text);
+  return span === null ? null : text.slice(span.open + 1, span.close);
+}
+
+/**
+ * One comma-separated list split at its TOP LEVEL only.
+ *
+ * The nesting matters on both sides of the comparison below: measured on 476, one argument
+ * can read `decimal(10,2)` and another `row("a" bigint,"b" varchar)`, so a split on every
+ * comma would turn three arguments into six.
+ *
+ * THERE IS NO EMPTY-LIST ARM, and its absence is measured rather than an oversight. An early
+ * `list.trim() === "" -> []` was written here for the fixture's zero-argument `answer()`, and
+ * mutating it away left the whole suite at 137 pass 0 fail: an empty list answers `[""]`
+ * instead of `[]`, `[""]` normalises to the empty string, and so does `[]`, so the two are
+ * the same signature on BOTH sides of the comparison. A guard for a state that changes no
+ * answer is a covered line nothing executes (standing ruling 5b, #789), so it is gone.
+ */
+function trinoSplitTopLevel(list: string): string[] {
+  const parts: string[] = [];
+  let quoted = false;
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < list.length; index += 1) {
+    const character = list[index];
+    if (character === '"') quoted = !quoted;
+    else if (quoted) continue;
+    else if (character === "(") depth += 1;
+    else if (character === ")") depth -= 1;
+    else if (character === "," && depth === 0) {
+      parts.push(list.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(list.slice(start));
+  return parts;
+}
+
+/**
+ * One rendered PARAMETER as its TYPE alone, with the parameter name dropped.
+ *
+ * `SHOW CREATE FUNCTION` renders `amount decimal(10, 2)` where `SHOW FUNCTIONS` renders
+ * `decimal(10,2)`, so the two can only be compared once the name is gone. The name is
+ * everything up to the FIRST SPACE, and that single rule is enough because of what Trino 476
+ * will not accept, measured on 2026-09-13 rather than assumed:
+ *
+ * - a name that NEEDS quoting is fine and renders quoted, `"order" bigint` for a reserved
+ *   word, and the closing quote is followed by the space this scan stops at;
+ * - a name HOLDING a space is refused outright at creation: `CREATE FUNCTION
+ *   memory.app.spaced("my arg" bigint) RETURNS bigint RETURN "my arg"` answers
+ *   `Internal error`, and so does the same statement with a name holding a comma.
+ *
+ * So there is no name this rule mis-reads, and a quote-aware scan for the closing quote was
+ * written here first and then DELETED: it answered `bigint` for `"order" bigint` exactly as
+ * this line does, mutating it away left the whole suite at 137 pass 0 fail, and an arm no
+ * payload can reach is reported as covered while dead (standing ruling 5b, #789).
+ *
+ * `slice(space + 1)` and not a `space === -1` arm, for the same reason: an element with no
+ * space at all is not a `name type` pair, `indexOf` answers -1, and `slice(0)` hands back the
+ * whole text, which is the best reading available for something this shape. A branch would
+ * be one more line no statement can reach.
+ */
+function trinoParameterType(parameter: string): string {
+  const text = parameter.trim();
+  return text.slice(text.indexOf(" ") + 1).trim();
+}
+
+/**
+ * One argument type list reduced to a form the engine's TWO renderings of it agree on.
+ *
+ * THIS IS THE MEASUREMENT THIS WHOLE FILE'S FUNCTION READ RESTS ON, and it refutes the
+ * obvious implementation. `SHOW CREATE FUNCTION` answers one row per overload and carries no
+ * `Argument Types` column of its own, so the row belonging to a path segment has to be found
+ * by comparing signatures - and the two renderings are NOT the same text. Measured on 476
+ * for the fixture's `hard`:
+ *
+ *     SHOW FUNCTIONS  `Argument Types`  decimal(10,2), array(varchar), row("a" bigint,"b" varchar)
+ *     SHOW CREATE     parameter list    amount decimal(10, 2), tags array(varchar), r ROW(a bigint, b varchar)
+ *
+ * three differences in one signature: a space inside `decimal(10, 2)`, `ROW` in upper case
+ * against `row`, and field names quoted on one side and bare on the other. So the comparison
+ * is made on a form with the case, the whitespace and the quoting removed, which is what the
+ * two renderings do agree on.
+ *
+ * WHAT THAT COSTS, said plainly rather than left for a reader to find: removing the
+ * whitespace also removes the boundary between a ROW field's NAME and its TYPE, so
+ * `row(a bigint)` and a hypothetical `row(ab igint)` reduce to the same string. The second
+ * is not a type Trino will parse, so no pair of real signatures collides, but the form is
+ * lossy and this is where that is written down.
+ */
+function trinoNormalisedSignature(types: readonly string[]): string {
+  return types.map((type) => type.toLowerCase().replace(/[\s"]/g, "")).join(",");
+}
+
+/** A `SHOW FUNCTIONS` `Argument Types` cell as the comparable signature above. */
+export function trinoArgumentSignature(argumentTypes: string): string {
+  return trinoNormalisedSignature(trinoSplitTopLevel(argumentTypes));
+}
+
+/**
+ * One `Create Function` statement's parameter list AS IT IS WRITTEN, one element per parameter
+ * with the parameter NAME dropped, or `null` when no parameter list can be found at all.
+ *
+ * SEPARATE FROM THE SIGNATURE BELOW BECAUSE THE TWO ARE READ BY DIFFERENT AUDIENCES, and the
+ * signature is the wrong thing to show one of them. `trinoNormalisedSignature` lower-cases the
+ * text and strips its whitespace and its quotes, which is exactly what lets the engine's two
+ * renderings of one signature be compared and is exactly what makes the result unreadable: it
+ * removes the boundary between a ROW field's NAME and its TYPE, so the fixture's `hard` shape
+ * reduces to `decimal(10,2),array(varchar),row(abigint,bvarchar)`, in which `abigint` names no
+ * type Trino will parse. A human who is being told WHICH object was written needs the rendering,
+ * and the comparison needs the signature, so this returns the first and
+ * {@link trinoCreateSignature} derives the second from it. ONE WRITER for the parameter-list
+ * scan, so the string a reader is shown and the string the provider compares can never come from
+ * two different readings of one statement.
+ */
+function trinoCreateArgumentTypes(createStatement: unknown): readonly string[] | null {
+  if (typeof createStatement !== "string") return null;
+  const list = trinoParenthesisedList(createStatement);
+  if (list === null) return null;
+  return trinoArgumentTypesIn(list);
+}
+
+/**
+ * One parenthesised list read as its parameter TYPES, one element per parameter.
+ *
+ * ONE WRITER, because {@link trinoCreateArgumentTypes} and {@link trinoCreateFunctionIdentity} both need
+ * it and they find the list by different routes: the first slices it and the second already holds
+ * the offsets of the pair it came from. Two copies of `split, then drop the names` is two readings
+ * that can drift, and this file's whole overload comparison rests on them not drifting.
+ */
+function trinoArgumentTypesIn(list: string): string[] {
+  return trinoSplitTopLevel(list).map(trinoParameterType);
+}
+
+/**
+ * One `Create Function` statement as the comparable signature above, or `null` when its
+ * parameter list cannot be found at all.
+ */
+export function trinoCreateSignature(createStatement: unknown): string | null {
+  const types = trinoCreateArgumentTypes(createStatement);
+  return types === null ? null : trinoNormalisedSignature(types);
+}
+
+// ============================================================================
+// The object edit (#789 Phase 3)
+// ============================================================================
+
+/**
+ * The eleven characters an apply splices into the reader's own text.
+ *
+ * A CONSTANT and not a literal at the splice site, because three things have to agree about
+ * it: the bytes inserted, the `provider` segment that maps them, and the coordinate
+ * conversion that has to subtract exactly them. Measured on Trino 476, the reader's text and
+ * the sent text differ by these eleven characters and by nothing else.
+ */
+export const TRINO_REPLACE_CLAUSE = " OR REPLACE";
+
+/**
+ * Where ` OR REPLACE` goes, ANCHORED TO THE FIRST TOKEN, or `null` when the first token is
+ * not `CREATE` (#789 Phase 3).
+ *
+ * A GLOBAL REPLACE OF `CREATE` IS THE WRONG IMPLEMENTATION AND THE FIXTURE CONTAINS ITS
+ * COUNTEREXAMPLE: a body may hold the word `CREATE` in a string literal or in a column name,
+ * and `text.replace("CREATE", ...)` would rewrite whichever came first while
+ * `text.replaceAll` would rewrite all of them. The anchor is the FIRST non-whitespace run,
+ * and the returned offset is the end of that run, so an apply inserts the clause immediately
+ * after the keyword rather than at a position it searched for.
+ *
+ * Case-insensitive on the keyword, because the comparison is over a token this product did
+ * not write. Measured on 476, `SHOW CREATE FUNCTION` always renders it upper case, so the
+ * lower-case arm is defensive about a text the READER typed rather than about a text the
+ * engine produced, and the reader's text is what is handed in here.
+ *
+ * THE LEADING-WHITESPACE ARM IS REACHED IN THE PRODUCT AND CHANGES NO OUTCOME THERE, said
+ * plainly rather than dressed as a safety net. This runs BEFORE the build's first-line identity
+ * check, so an indented submission does reach it and does get a non-zero offset; that submission
+ * is then refused anyway, because its first line is not byte-identical to the formatter's. The
+ * arm is what keeps the offset correct rather than what keeps anything safe, and the same
+ * reasoning is why a `replace("CREATE", ...)` at the splice site is EXTENSIONALLY EQUAL to this
+ * anchor for every text that survives the identity check: measured as a mutation, it kills no
+ * test, and `replaceAll` kills one.
+ */
+export function trinoSpliceAt(text: string): number | null {
+  const start = text.search(/\S/);
+  if (start === -1) return null;
+  const end = text.slice(start).search(/\s|$/) + start;
+  return text.slice(start, end).toUpperCase() === "CREATE" ? end : null;
+}
+
+/**
+ * One rendered identifier, or one whole rendered TYPE, in the form Trino's OWN identifier rules
+ * make two spellings of one thing equal, and nothing more (#789 Phase 3).
+ *
+ * THIS EXISTS BECAUSE {@link trinoNormalisedSignature} IS THE WRONG READING FOR AN IDENTITY, and
+ * the difference cost a live fork. That form strips EVERY space and EVERY double quote, which is
+ * what the two RENDERINGS of one signature demand of the overload resolution and is far more than
+ * this engine's identifier rules allow. Measured on trinodb/trino:476 in container `trino-t32r1`
+ * on host port 18633 on 2026-09-15, three pairs that reduce to ONE string under that form and
+ * COEXIST as two rows in `SHOW FUNCTIONS FROM memory.app`:
+ *
+ *     rowf(r row("a b" bigint))     beside  rowf(r row("ab" bigint))
+ *     rowf(r row("Ab" bigint))      beside  rowf(r row("ab" bigint))
+ *     dq(r row("a""b" bigint))      beside  dq(r row(ab bigint))
+ *
+ * and three pairs that reduce to one string and really ARE one object, each one applied over the
+ * other on that container with the row count unchanged:
+ *
+ *     row(ab bigint)                over    row("ab" bigint)
+ *     row(Ab bigint)                over    row("ab" bigint)
+ *     memory.app.PLUS_ONE(x bigint) over    memory.app.plus_one(x bigint)
+ *
+ * So the rule is not "strip the quotes" and it is not "keep the quotes": it is Trino's, which is
+ * that an UNDELIMITED identifier folds to lower case and a DELIMITED one is the text between its
+ * quotes, with `""` standing for one quote. A delimited identifier whose text is already a legal
+ * lower-case bare identifier therefore names exactly what the bare spelling names, and is emitted
+ * bare; anything else keeps its delimiters, so `"a b"`, `"Ab"` and `a"b` can never collapse onto
+ * `ab`. Whitespace OUTSIDE the quotes is dropped, which is what makes `decimal(10, 2)` and
+ * `decimal(10,2)` one string and is the one lossy step left: it also removes the boundary between
+ * a ROW field's bare name and its type, so `row(a bigint)` and `row(ab igint)` still reduce to the
+ * same text and the second is not a type this engine will parse.
+ *
+ * `foldQuotedCase` IS THE ONE PLACE THIS ENGINE HAS TWO RULES RATHER THAN ONE, measured rather
+ * than assumed. A quoted ROW FIELD name keeps its case, which is what makes `row("Ab" bigint)` a
+ * second overload; a quoted FUNCTION name does not, and `CREATE FUNCTION memory.app.casefn(x
+ * bigint)` over an existing `memory.app."CaseFn"` answers `ALREADY_EXISTS`, errorCode 12, on the
+ * same container. So the name half passes `true` and the type half passes `false`, and a single
+ * rule would be wrong for one of them either way.
+ *
+ * THE DOUBLED-QUOTE ARM IS LOAD BEARING AND ITS POPULATION IS SERVER PRODUCED. `SHOW CREATE
+ * FUNCTION memory.app.dq` answers `ROW("a""b" bigint)` verbatim on that container, and a scan
+ * that toggled on every quote without pairing them would read it as the two bare identifiers `a`
+ * and `b` and emit `ab`, which is a DIFFERENT overload there: the two coexist as two rows.
+ *
+ * There is no "the closing quote never arrived" arm, and its absence is a consequence of the
+ * caller rather than an oversight: every text this reader sees has already been through
+ * {@link trinoParenthesisedSpan}, whose scan is quote aware, so a statement whose quotes do not
+ * pair has no readable parenthesis span and is refused before it reaches here. The loop ends at
+ * the end of the text and needs no branch to say so.
+ */
+function trinoFoldIdentifiers(text: string, foldQuotedCase: boolean): string {
+  let folded = "";
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== '"') {
+      const character = text[index] as string;
+      if (!/\s/.test(character)) folded += character.toLowerCase();
+      index += 1;
+      continue;
+    }
+    let quoted = "";
+    index += 1;
+    while (index < text.length) {
+      if (text[index] !== '"') {
+        quoted += text[index];
+        index += 1;
+        continue;
+      }
+      if (text[index + 1] !== '"') {
+        index += 1;
+        break;
+      }
+      quoted += '"';
+      index += 2;
+    }
+    const content = foldQuotedCase ? quoted.toLowerCase() : quoted;
+    folded += /^[a-z_][a-z0-9_]*$/.test(content) ? content : `"${content.replace(/"/g, '""')}"`;
+  }
+  return folded;
+}
+
+/**
+ * The IDENTITY a `CREATE FUNCTION` statement declares: the qualified name it writes and the
+ * argument types it declares, or `null` when neither can be read out of it (#789 Phase 3).
+ *
+ * IT IS FUNCTION SHAPED, WHICH THE NAME SAYS BECAUSE NOTHING ELSE HERE CAN. The reader takes the
+ * FIRST TOP-LEVEL PARENTHESIS PAIR in the whole statement as the PARAMETER LIST, and only a
+ * routine has one. The keyword list is the caller's, so the words `MATERIALIZED VIEW` or `VIEW`
+ * can be handed in and the walk will accept them, and the answer for a view would be nonsense
+ * rather than an error: `CREATE VIEW memory.app.v AS SELECT count(*) FROM t` yields the name
+ * `memory.app.v AS SELECT count` and an argument list of `*`, and `CREATE VIEW memory.app.v AS
+ * SELECT 1` has no parenthesis anywhere and takes the `null` arm, whose caller then tells the
+ * reader that a definition opens with a name and "the parameter list in parentheses", which a
+ * view has never had.
+ *
+ * NOTHING BUILDS THAT POPULATION TODAY and this paragraph is what stops it being built by
+ * accident: `function` is the only kind on this engine that declares `acceptsSourceEdits`, which
+ * the provider's kind table states and the suite pins by value. The `view` deferral comment
+ * beside that declaration names this reader, so whoever un-defers `view` has to give the identity
+ * a view-shaped reading first. A guard here instead would be a branch over an empty population,
+ * which this file's own precedent refuses (standing ruling 5b, #789).
+ *
+ * THIS REPLACES A FIRST-LINE COMPARISON, AND THE POPULATION THAT KILLED THAT COMPARISON IS
+ * MEASURED. The build compared `text.split("\n")[0]` on both sides, which certifies the identity
+ * only while the WHOLE parameter list sits on line one. MEASURED on trinodb/trino:476 in
+ * container `trino-t32` on host port 18532 on 2026-09-15:
+ *
+ * - the formatter does NOT wrap on width: a function with 200 parameters and deliberately long
+ *   names answers 11,845 characters on one line, so the wrap the repair was briefed to expect is
+ *   not a thing this formatter does;
+ * - it DOES render an identifier verbatim, so a ROW field name holding a newline splits the
+ *   header. `CREATE FUNCTION memory.app.nlrow(r ROW("a<newline>b" bigint), y bigint)` is the
+ *   server's OWN text for such an object, its line one ends inside the ROW, and everything after
+ *   it was unchecked.
+ *
+ * Driven end to end through this provider against that container: with `y bigint` edited to
+ * `y varchar` below line one the build ACCEPTED the text, the apply SUCCEEDED, the outcome was
+ * `applied-elsewhere` with `undone: false`, and `SHOW FUNCTIONS FROM memory.app` answered two
+ * `nlrow` rows where it had answered one. Trino has no transaction to take that back and this
+ * design will not issue a DROP, so the second function stays.
+ *
+ * WHAT THE IDENTITY IS ON THIS ENGINE, and all three halves were measured on the same container:
+ * a changed ARGUMENT TYPE forks, a changed qualified NAME forks
+ * (`rename_probe` and `rename_probe2` left two rows), and a changed RETURN TYPE and a RENAMED
+ * parameter are replaced IN PLACE, one row before and one after. So the identity is the name and
+ * the argument TYPES and nothing else, which is also exactly what {@link functionSegment} mints a
+ * path segment from.
+ *
+ * THE WIDENING THAT FOLLOWS IS DELIBERATE. A parameter rename and any whitespace the reader adds
+ * inside the header now BUILD, where the first-line comparison refused them. They were false
+ * refusals: `SHOW FUNCTIONS` publishes no parameter name, the path segment carries none, and the
+ * measured apply above replaced the function in place and rendered the new name back.
+ *
+ * `key` is the comparison value and it is LENGTH FRAMED, because a name may hold any character
+ * this engine will quote, including a newline and a comma: concatenating the name and the
+ * signature with a plain separator lets one slide across the boundary into the other.
+ *
+ * THE KEYWORDS ARE THE CALLER'S, and that is what lets one reader serve both sides of the apply.
+ * The BUILD reads the reader's own text, which opens `CREATE <object>`, and the APPLY reads the
+ * bytes it SENDS, which open `CREATE OR REPLACE <object>` because this provider spliced
+ * {@link TRINO_REPLACE_CLAUSE} into them. Passing the words rather than inferring them is also
+ * what keeps `CREATE OR REPLACE FUNCTION` REFUSED on the build side: the reader's text is not
+ * allowed to carry the clause this product adds, because the splice would then add a second one.
+ * A phrase may hold spaces, `MATERIALIZED VIEW` and `OR REPLACE` both do, so the list is
+ * flattened on whitespace and nothing here branches on a kind or on a type id.
+ *
+ * It is a token walk rather than a regular expression because the NAME may hold whitespace
+ * between its quotes and a `\s+`-separated pattern would have to stop guessing where the name
+ * begins.
+ *
+ * THERE IS NO "THE HEAD RAN OUT OF TOKENS" ARM, and its absence is measured rather than an
+ * oversight. `if (offset === -1) return null` was written here for a head like `CREATE   (`, and
+ * mutating it away left the whole suite at 197 pass 0 fail. It cannot change an answer: with
+ * `offset` at -1 the scan compares `head.slice(cursor - 1, cursor)`, which is the LAST CHARACTER
+ * of the keyword it just matched, and no word in {@link TRINO_SOURCE_STATEMENTS} is one character
+ * long, so the comparison below fails and the walk answers `null` by that line instead. Enumerated
+ * rather than argued: nine head shapes across all three keyword sets, `""`, `"   "`, `"CREATE"`,
+ * `"CREATE   "`, `"CREATE FUNCTION"`, `"CREATE FUNCTION   "`, `"  CREATE  "`,
+ * `"CREATE MATERIALIZED"` and `"CREATE MATERIALIZED   "`, 27 pairs, ZERO differing. A guard for a
+ * state that changes no answer is a covered line nothing executes (standing ruling 5b, #789).
+ *
+ * THE LENGTH FRAMING ON `key` SURVIVED ITS OWN MUTATION and is kept anyway, which is a judgement
+ * and not a measurement, so it is written as one. Dropping it to `${name}:${signature}` left the
+ * suite at 197 pass 0 fail, and no population in this product distinguishes the two: a collision
+ * needs either a rendered TYPE holding a colon or an UNQUOTED colon inside a name, and the
+ * coordinator can print neither, while a quoted name always carries its quotes and a normalised
+ * signature never holds a quote at all. It stays because this key is an identity comparison ahead
+ * of a write and the framing costs one call.
+ */
+export interface TrinoCreateFunctionIdentity {
+  /** The qualified name exactly as the statement writes it, `memory.app.plus_one`. */
+  readonly name: string;
+  /** One element per parameter, the TYPE as written, the parameter name dropped. */
+  readonly argumentTypes: readonly string[];
+  /** The comparison value: the length-framed name, then the two-rendering-proof signature. */
+  readonly key: string;
+}
+
+export function trinoCreateFunctionIdentity(
+  createStatement: string,
+  keywords: readonly string[],
+): TrinoCreateFunctionIdentity | null {
+  const span = trinoParenthesisedSpan(createStatement);
+  if (span === null) return null;
+  const head = createStatement.slice(0, span.open);
+  let cursor = 0;
+  for (const keyword of keywords.flatMap((phrase) => phrase.split(" "))) {
+    const from = cursor + head.slice(cursor).search(/\S/);
+    // `\s|$` and never `\s` alone: the last keyword may run to the end of the head, and a -1 arm
+    // for that would be a second way to say the same thing.
+    const to = from + head.slice(from).search(/\s|$/);
+    if (head.slice(from, to).toUpperCase() !== keyword) return null;
+    cursor = to;
+  }
+  const name = head.slice(cursor).trim();
+  // `CREATE FUNCTION(x bigint)` names nothing, and neither does a head that is only keywords.
+  if (name === "") return null;
+  const argumentTypes = trinoArgumentTypesIn(createStatement.slice(span.open + 1, span.close));
+  const foldedName = trinoFoldIdentifiers(name, true);
+  const foldedTypes = argumentTypes.map((type) => trinoFoldIdentifiers(type, false)).join(",");
+  return { name, argumentTypes, key: `${String(foldedName.length)}:${foldedName}:${foldedTypes}` };
+}
+
+/**
+ * A function path segment taken apart into the bare name and the argument types it was minted
+ * from, or `null` when it is not a segment shape at all (#789 Phase 3).
+ *
+ * THE EXACT INVERSE OF {@link functionSegment}, and the provider suite asserts that round trip
+ * over every function in `docker/trino-init/01-object-fixture.sql` rather than over an example.
+ * That fixture is what makes the scan below load-bearing instead of defensive:
+ *
+ * - `we(ird(bigint)` has its FIRST parenthesis inside the NAME, so a left-to-right scan for
+ *   the parameter list reads the name as `we` and the arguments as `ird(bigint`. The scan is
+ *   therefore RIGHT TO LEFT, from the final `)` back to the `(` that matches it.
+ * - `rowparen(row("a)b" bigint,"c" varchar))` holds a `)` inside a QUOTED row-field name, so
+ *   the scan has to toggle on `"`. Toggling from the right is symmetric to toggling from the
+ *   left for Trino's doubled-quote escape, because a `""` pair toggles twice either way.
+ * - `hard(decimal(10,2), array(varchar), row("a" bigint,"b" varchar))` nests three levels, so
+ *   the scan counts depth rather than stopping at the first `(` it meets.
+ *
+ * WHY THIS EXISTS RATHER THAN A SECOND `SHOW FUNCTIONS` ROUND TRIP. An apply holds the PLAN
+ * and nothing else (#789 ruling 1a), and its first round trip has to be the re-read the
+ * `compared` revision is compared against. Resolving the overload through `SHOW FUNCTIONS`
+ * first would put a different statement in front of it, and the re-read would no longer be
+ * the thing that happens immediately before the write.
+ */
+export function trinoFunctionSegmentParts(segment: string): { name: string; argumentTypes: string } | null {
+  if (!segment.endsWith(")")) return null;
+  let quoted = false;
+  let depth = 0;
+  for (let index = segment.length - 1; index >= 0; index -= 1) {
+    const character = segment[index];
+    if (character === '"') quoted = !quoted;
+    else if (quoted) continue;
+    else if (character === ")") depth += 1;
+    else if (character === "(") {
+      depth -= 1;
+      if (depth === 0) {
+        return index === 0
+          ? // `(bigint)` with nothing in front of it names no function.
+            null
+          : { name: segment.slice(0, index), argumentTypes: segment.slice(index + 1, -1) };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The 0-based offset into `text` of a 1-based line and column, or `null` when the coordinate
+ * is not in the text (#789 Phase 3).
+ *
+ * THE WHOLE CONVERSION AND NOT A SUBTRACTION OF ELEVEN, and the difference is measured rather
+ * than stylistic. Trino 476 reports `errorLocation` as a 1-based `lineNumber` and
+ * `columnNumber` into the statement it was SENT, and the splice is on LINE 1 only: measured on
+ * 476, a `RETURN nope` body error answers `line 3:8` both bare and spliced, so a rule that
+ * subtracted eleven columns from every line would move a body marker eleven characters to the
+ * left. Resolving to an offset and handing that to `userPositionOf` subtracts the splice
+ * exactly where the splice is, which on line 1 is exactly the eleven characters of
+ * {@link TRINO_REPLACE_CLAUSE} and everywhere else is nothing.
+ *
+ * WHAT EACH REFUSAL BUYS, AND WHICH POPULATION BUILDS IT, written out because a review measured
+ * all three surviving their own mutation with the suite green and 100% line coverage over them.
+ *
+ * 1. THE COORDINATE VALIDATION IS LOAD-BEARING FOR `line`, and its population is this provider's
+ *    own transport rather than any coordinator reply observed on 476. `readLocation` in
+ *    `http-transport.ts` accepts ANY finite number for `lineNumber` and `columnNumber`, so a
+ *    document carrying `0` or `1.5` crosses the seam intact. Without this line, MEASURED by
+ *    running the body over the statement the apply sends, `line 0` resolves to offset 72 of 86
+ *    and `line 1.5` to offset 0, both of which are REAL positions in the reader's text: the
+ *    product would then underline a token the engine never named, and Monaco accepts it in
+ *    silence. The `column` half of the same condition is a different matter and is stated as
+ *    such: `column 0` resolves to -1 and `column 1.5` to 0.5, and `userPositionOf` answers
+ *    `outside` for both on its own, so those two disjuncts hold this function to its contract
+ *    and change no outcome at the only caller.
+ * 2. THE `line > lines.length` ARM WAS DELETED BY THAT REVIEW RATHER THAN TESTED, because it can
+ *    change no answer at all and no test could go red for it. Summing `length + 1` over every
+ *    line of a text is `text.length + 1`, so a line past the end always resolves PAST the end
+ *    and arm 3 already answers `null`. VERIFIED by running the body without it over six text
+ *    shapes, every line from `lines.length + 1` to `lines.length + 5` and every column from 1 to
+ *    200, 6,000 coordinates: 0 of them answered anything but `null`.
+ * 3. THE END-OF-INPUT ARM HAS A LIVE POPULATION AND IS THIS FUNCTION'S CONTRACT rather than a
+ *    second safety net at the caller. MEASURED on trinodb/trino:476 on 2026-09-14, container
+ *    `libredb-trino-t08fix`, host port 18509: a truncated `RETURN (x +` answers
+ *    `line 3:12: mismatched input '<EOF>'` on an 83-character statement whose third line is 11
+ *    characters, so the coordinate resolves to offset 83, exactly one past the last character.
+ *    `userPositionOf` answers `outside` for that offset on its own, so deleting this arm changes
+ *    nothing the product does; what it changes is what this exported function returns, and the
+ *    suite pins it here. The reader is told the engine reported a position that is not in their
+ *    text, which for an `<EOF>` coordinate is true.
+ */
+export function trinoSentOffsetOf(text: string, line: number, column: number): number | null {
+  if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1) return null;
+  const before = text
+    .split("\n")
+    .slice(0, line - 1)
+    .reduce((total, one) => total + one.length + 1, 0);
+  const offset = before + column - 1;
+  return offset < text.length ? offset : null;
+}
+
+/**
+ * A SHA-256 of one text, lower-case hex (#789 Phase 3).
+ *
+ * The revision token for an engine that publishes none. MEASURED on Trino 476: no surface the
+ * provider can read carries a version, a modification instant or a generation counter for a
+ * catalog function, so the only thing that can be compared is the definition text itself, and
+ * H3's third state (`compared`) is what that produces. A digest rather than the text, because
+ * the plan travels through a request body and a maximal definition is 1,000,000 characters.
+ *
+ * `crypto.subtle` and not `node:crypto`, matching `src/lib/db/connection-fingerprint.ts`: the
+ * same digest has to be computable wherever a plan is read.
+ */
+export async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

@@ -15,6 +15,7 @@
   no module graph is created by it.
 */
 import type { StoredObject } from "@/lib/db/detailed-object";
+import type { ObjectSourceDocument } from "@/lib/db/types";
 
 export type DatabaseType =
   | "postgres"
@@ -343,6 +344,53 @@ export interface QueryResult {
   columnTypes?: Record<string, string>;
 }
 
+/**
+ * A Source tab's whole state: an ADDRESS, what has been read against it, and which part is
+ * shown (#789 Phase 2).
+ *
+ * No connection id, deliberately. Tabs are already scoped per connection by the persistence
+ * key `libredb_workspace_tabs_v1:${connection.id}`, and the shell renders the active
+ * connection beside the active tab, so an id here would be a third copy of a fact two places
+ * already hold and the three could disagree.
+ *
+ * The ADDRESS is the only half that is persisted, and `PersistedTabState` in
+ * `src/hooks/use-tab-manager.ts` is where that is enforced and argued. A restored Source tab
+ * therefore carries `path` and `kind` alone and RE-READS, which is also why every other field
+ * here is optional: absent is the state a freshly opened and a freshly restored tab share, and
+ * it is what tells the viewer to issue a read.
+ */
+export interface SourceTabState {
+  readonly path: readonly string[];
+  readonly kind: string;
+  /** Absent while loading and after a failed read. Never persisted: see `PersistedTabState`. */
+  readonly document?: ObjectSourceDocument;
+  /** The route's own sentence. */
+  readonly failure?: string;
+  readonly activePartId?: string;
+  /** The catalog-change counter's value when this document was read. */
+  readonly readAtToken?: number;
+  /**
+   * WHICH part the reader is editing, and never a boolean (#789 Phase 3, discussion #778).
+   *
+   * Per part and not per tab, so two parts of one Oracle package can hold two independent drafts,
+   * the writable buffer can only ever be the part on screen, and a part switch is what leaves edit
+   * mode. A boolean would have to be read together with `activePartId` at every site, and the pair
+   * can disagree.
+   *
+   * NOT PERSISTED, like every other field here but the address. The unsaved text itself lives in
+   * its own bounded store keyed by address and part, so a restored tab re-reads and then offers
+   * the draft back rather than reopening in a writable state nothing has re-checked.
+   */
+  readonly editingPartId?: string;
+  /**
+   * Whether the buffer differs from the text the engine answered. Not persisted either.
+   *
+   * The tab bar is the reader of it, and the pane writes it ONLY when the boolean flips, so it
+   * costs one render per transition rather than one per keystroke.
+   */
+  readonly dirty?: boolean;
+}
+
 export interface QueryTab {
   id: string;
   name: string;
@@ -356,6 +404,22 @@ export interface QueryTab {
   currentOffset?: number;
   isLoadingMore?: boolean;
   allRows?: Record<string, unknown>[];
+  /**
+   * Present exactly on a Source tab (#789 Phase 2).
+   *
+   * An optional FIELD and deliberately not a fifth member of `type`. Every member of that
+   * union is a QUERY DIALECT that `resolveTabType` may answer and that
+   * `editorLanguageForTabType` maps onto `QueryEditor`'s closed language union, so a
+   * `"source"` member would be an arm the resolver can never produce and the language mapper
+   * would have to answer for, and it would put the per-object language decision back into the
+   * two functions `CLAUDE.md` keeps it out of. The definition's own Monaco language travels on
+   * the PART instead, which is where the provider put it.
+   *
+   * A Source tab therefore still carries a `type`, and it is the neutral default: nothing
+   * reads it, because both surfaces that would branch on it, the tab bar's icon and the editor
+   * pane, branch on the presence of this field first.
+   */
+  source?: SourceTabState;
 }
 
 export interface QueryHistoryItem {
