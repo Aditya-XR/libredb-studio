@@ -3,7 +3,8 @@
  *
  * One process per file is not a performance choice, it is the isolation the suite
  * needs. bun's `mock.module()` is process-wide with no undo, and whole-module mocks
- * are the standard pattern in `tests/api/` (36 files mock `@/lib/auth` alone), so
+ * are the standard pattern in `tests/api/` (29 of its files mock `@/lib/auth`, and 36
+ * files do across the whole suite), so
  * any file that needs the real module fails when it shares a process with one that
  * mocked it. bun 1.4.2 has `--isolate`, which resets the module registry per file
  * in ONE process, and it does contain `mock.module`, but it is also the subject of
@@ -24,6 +25,8 @@ export type SpawnOutcome = {
   output: string;
   durationMs: number;
   timedOut: boolean;
+  /** Titles of the tests the file skipped, from bun's junit report. */
+  skippedTests: string[];
 };
 
 export type FileOutcome = {
@@ -34,6 +37,7 @@ export type FileOutcome = {
   durationMs: number;
   output: string;
   counts: TestCounts | null;
+  skippedTests: string[];
 };
 
 export type RunSummary = {
@@ -41,6 +45,8 @@ export type RunSummary = {
   failures: FileOutcome[];
   durationMs: number;
   jobs: number;
+  /** The per-file budget a timed-out file ran into. */
+  timeoutMs: number;
   totals: {
     files: number;
     filesPassed: number;
@@ -51,7 +57,12 @@ export type RunSummary = {
   };
 };
 
-export type RunFile = (input: { file: string; coverageDir: string | null; timeoutMs: number }) => Promise<SpawnOutcome>;
+export type RunFile = (input: {
+  file: string;
+  index: number;
+  coverageDir: string | null;
+  timeoutMs: number;
+}) => Promise<SpawnOutcome>;
 
 export type RunTestFilesInput = {
   files: string[];
@@ -70,7 +81,27 @@ function toOutcome(file: string, spawned: SpawnOutcome): FileOutcome {
   // A signal death arrives as exitCode null. `exitCode === 0` is correctly false for
   // it, but any reading that coerces (`exitCode || 0`, `!exitCode`) turns a SIGSEGV
   // into a pass, so the status is derived once, here.
-  const status = spawned.timedOut ? "timed-out" : spawned.exitCode === 0 ? "passed" : "failed";
+  //
+  // Two more shapes are failures although the child exited 0, and both are about a
+  // file whose tests are unaccounted for:
+  //
+  // - No summary at all. bun always prints its counts when it reaches the end of a
+  //   file, so their absence means the process left early: a test calling
+  //   `process.exit(0)` does it (measured 1.4.2: exit 0, banner only, and the tests
+  //   after it never run), and so would a native addon calling exit(). Reporting
+  //   that as a pass is the one way this runner could turn a red tree green.
+  // - A summary saying zero of everything. The runner's own rule is that a
+  //   discovered file runs, so a file that registered nothing is either a
+  //   registration that silently stopped happening or a file that should not exist.
+  const registeredNothing = counts !== null && counts.pass + counts.fail + counts.skip + counts.todo === 0;
+  // `timedOut` is the runner's own flag, set when it fired the kill. A child that
+  // finished cleanly in the same millisecond still exited 0, and it did not time out.
+  const killedByTimeout = spawned.timedOut && spawned.exitCode !== 0;
+  const status = killedByTimeout
+    ? "timed-out"
+    : spawned.exitCode === 0 && counts !== null && !registeredNothing
+      ? "passed"
+      : "failed";
 
   return {
     file,
@@ -80,6 +111,7 @@ function toOutcome(file: string, spawned: SpawnOutcome): FileOutcome {
     durationMs: spawned.durationMs,
     output: spawned.output,
     counts,
+    skippedTests: spawned.skippedTests,
   };
 }
 
@@ -115,7 +147,7 @@ export async function runTestFiles(input: RunTestFilesInput): Promise<RunSummary
       const index = next;
       next += 1;
       const file = files[index] as string;
-      const spawned = await runFile({ file, coverageDir: coverageDirFor(file, index, input), timeoutMs });
+      const spawned = await runFile({ file, index, coverageDir: coverageDirFor(file, index, input), timeoutMs });
       const outcome = toOutcome(file, spawned);
       outcomes.push(outcome);
       finished += 1;
@@ -149,5 +181,5 @@ export async function runTestFiles(input: RunTestFilesInput): Promise<RunSummary
     .filter((outcome) => outcome.status !== "passed")
     .sort((a, b) => (order.get(a.file) ?? 0) - (order.get(b.file) ?? 0));
 
-  return { outcomes, failures, durationMs: now() - startedAt, jobs, totals };
+  return { outcomes, failures, durationMs: now() - startedAt, jobs, timeoutMs, totals };
 }

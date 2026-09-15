@@ -134,8 +134,10 @@ export function describeIf(missing: string | null, title: string, body: () => vo
     describe(title, body);
     return;
   }
-  // bun prints the title of a skipped test, but only in a terminal; the warning keeps the reason in
-  // a piped CI log too, which is where "0 fail" would otherwise read as "everything ran".
+  // bun prints a skipped test's title NOWHERE: measured on 1.4.2 piped, with FORCE_COLOR, and under
+  // a real pty, its output carries the count and nothing else. Two readers need the reason anyway.
+  // `bun run test` gets it from bun's junit report, which the runner asks every child for and prints
+  // under the file in its summary; somebody running this one file directly gets it from this line.
   console.warn(`posix-tools: skipping "${title}" - ${missing}`);
   describe.skip(`${title} [skipped: ${missing}]`, body);
 }

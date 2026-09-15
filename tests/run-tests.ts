@@ -19,13 +19,14 @@
  *   bun tests/run-tests.ts --coverage --merge-into=coverage/lcov.info
  *   bun tests/run-tests.ts tests/unit -- --bail  pass flags to bun test
  */
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
+import { assertCoverageDirIsOurs } from "./runner/coverage";
 import { COVERAGE_EXEMPT_FILES, selectTestFiles } from "./runner/discover";
 import { coverageDirFor, type RunFile, runTestFiles, type SpawnOutcome } from "./runner/execute";
 import { parseRunnerArgs, type RunnerOptions } from "./runner/options";
-import { formatFileLine, formatSummary } from "./runner/report";
+import { formatFileLine, formatSummary, parseSkippedTests } from "./runner/report";
 
 const root = path.resolve(import.meta.dir, "..");
 
@@ -48,9 +49,14 @@ function childEnvironment(): Record<string, string | undefined> {
   return wantsColour ? { ...process.env, FORCE_COLOR: "1" } : { ...process.env };
 }
 
-function spawnTestFile(bunArgs: string[]): RunFile {
-  return async ({ file, coverageDir, timeoutMs }): Promise<SpawnOutcome> => {
+function spawnTestFile(bunArgs: string[], junitDir: string): RunFile {
+  return async ({ file, index, coverageDir, timeoutMs }): Promise<SpawnOutcome> => {
     const coverageArgs = coverageDir ? ["--coverage", "--coverage-reporter=lcov", `--coverage-dir=${coverageDir}`] : [];
+    // Every child writes a junit report, because it is the only place bun names the
+    // tests a file SKIPPED, and in this repository a skip carries its reason in its
+    // title. The file is small, it is read only when the child reports a skip, and
+    // the whole directory is removed when the run ends.
+    const junitPath = path.join(junitDir, `file-${index + 1}.xml`);
 
     const command = [
       process.execPath,
@@ -59,6 +65,8 @@ function spawnTestFile(bunArgs: string[]): RunFile {
       // kill-on-close Job Object on Windows, so a timeout leaves nothing behind.
       "--no-orphans",
       "test",
+      "--reporter=junit",
+      `--reporter-outfile=${junitPath}`,
       ...bunArgs,
       ...coverageArgs,
       // "./" matters: bun reads a bare relative path as a SUBSTRING FILTER over the
@@ -105,6 +113,7 @@ function spawnTestFile(bunArgs: string[]): RunFile {
       output: `${stderr}${stdout}`,
       durationMs: Date.now() - startedAt,
       timedOut,
+      skippedTests: existsSync(junitPath) ? parseSkippedTests(readFileSync(junitPath, "utf8")) : [],
     };
   };
 }
@@ -154,9 +163,19 @@ async function main(): Promise<number> {
   }
 
   if (options.coverage) {
-    rmSync(path.resolve(root, options.coverageDir), { recursive: true, force: true });
-    mkdirSync(path.resolve(root, options.coverageDir), { recursive: true });
+    const coverageDir = path.resolve(root, options.coverageDir);
+    // --coverage-dir is a path the caller chooses and this line deletes it, so it is
+    // checked before it is emptied. See tests/runner/coverage.ts.
+    if (existsSync(coverageDir)) assertCoverageDirIsOurs(options.coverageDir, readdirSync(coverageDir));
+    rmSync(coverageDir, { recursive: true, force: true });
+    mkdirSync(coverageDir, { recursive: true });
   }
+  // The merged report goes too, and before the run rather than after it: a run that
+  // ends red never reaches the merge, and a stale lcov left beside it is a report of
+  // a tree that no longer exists, which `coverage:check` would happily pass.
+  if (options.mergeInto) rmSync(path.resolve(root, options.mergeInto), { force: true });
+
+  const junitDir = mkdtempSync(path.join(tmpdir(), "libredb-test-junit-"));
 
   const selection = options.selectors.length > 0 ? options.selectors.join(" ") : "tests/";
   process.stdout.write(
@@ -171,7 +190,7 @@ async function main(): Promise<number> {
     coverage: options.coverage,
     coverageDir: options.coverageDir,
     coverageExempt: COVERAGE_EXEMPT_FILES,
-    runFile: spawnTestFile(options.bunArgs),
+    runFile: spawnTestFile(options.bunArgs, junitDir),
     onResult: (outcome, position, total) => {
       process.stdout.write(`${formatFileLine(outcome, position, total)}\n`);
       // A failing file's whole output is printed where it lands rather than kept for
@@ -179,6 +198,8 @@ async function main(): Promise<number> {
       if (outcome.status !== "passed") process.stdout.write(`${outcome.output}\n`);
     },
   });
+
+  rmSync(junitDir, { recursive: true, force: true });
 
   process.stdout.write(`${formatSummary(summary)}\n`);
   if (summary.failures.length > 0) return 1;

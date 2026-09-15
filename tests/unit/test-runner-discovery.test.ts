@@ -69,6 +69,19 @@ describe("test discovery", () => {
     expect(selectTestFiles(root, [path.join(root, one)])).toEqual([one]);
   });
 
+  test("a relative selector means what it means in the directory it was typed in", () => {
+    // From tests/unit, `bun ../run-tests.ts lib/lazy.test.ts` names the file beside
+    // you. Resolving against the repository root instead answered "is not under
+    // tests/", a true sentence about a path nobody wrote.
+    const cwd = process.cwd();
+    try {
+      process.chdir(path.join(root, "tests/unit"));
+      expect(selectTestFiles(root, ["lib/lazy.test.ts"])).toEqual(["tests/unit/lib/lazy.test.ts"]);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
   test("selecting nothing selects everything", () => {
     expect(selectTestFiles(root, [])).toEqual(discoverTestFiles(root));
   });

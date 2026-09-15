@@ -13,6 +13,22 @@ import path from "node:path";
 const root = path.resolve(import.meta.dir, "../..");
 const RUNNER = "tests/run-tests.ts";
 
+// The throwaway fixture the cases below write. It lives under tests/ because a
+// selector outside it is refused (tests/runner/discover.ts), so a run interrupted
+// between the write and the `finally` would leave a failing file that discovery then
+// collects. Removing a leftover here, at module scope, means the next run of this
+// file heals the tree rather than staying red on somebody else's interrupt.
+const FIXTURE = path.join(root, "tests/unit/runner-fixture.test.ts");
+rmSync(FIXTURE, { force: true });
+
+function writeFixture(body: string): void {
+  // writeFileSync, not Bun.write: Bun.write returns a promise, and leaving it
+  // unawaited let the runner start against a file that was still empty. bun then
+  // ran 0 tests and exited 0, so this passed on Linux and failed on windows-latest
+  // (measured 2026-09-15).
+  writeFileSync(FIXTURE, body);
+}
+
 function runRunner(args: string[]): { exitCode: number; stdout: string; stderr: string } {
   const result = Bun.spawnSync([process.execPath, RUNNER, ...args], { cwd: root });
   return {
@@ -36,7 +52,7 @@ describe("the test runner, end to end", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain("tests/unit/test-runner-options.test.ts");
     expect(stdout).toContain("PASS");
-    expect(stdout).toContain("1 files: 1 passed");
+    expect(stdout).toContain("1 file: 1 passed");
   });
 
   test("a single file is addressed as a path, so a name that is a substring of another does not drag it in", () => {
@@ -48,7 +64,7 @@ describe("the test runner, end to end", () => {
     const { exitCode, stdout } = runRunner(["tests/unit/lib/auth.test.ts"]);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("1 files: 1 passed");
+    expect(stdout).toContain("1 file: 1 passed");
     expect(stdout).not.toContain("auth-jwt-config");
   });
 
@@ -67,24 +83,51 @@ describe("the test runner, end to end", () => {
   });
 
   test("a failing test file makes the runner exit 1 and prints the child's own failure output", () => {
-    const failing = path.join(root, "tests/unit/runner-failure-fixture.test.ts");
-    // writeFileSync, not Bun.write: Bun.write returns a promise, and leaving it
-    // unawaited let the runner start against a file that was still empty. bun then
-    // ran 0 tests and exited 0, so this case passed on Linux, where the write
-    // happened to land first, and failed on windows-latest (measured 2026-09-15).
-    writeFileSync(
-      failing,
+    writeFixture(
       'import { expect, test } from "bun:test";\ntest("deliberately failing fixture", () => {\n  expect(1).toBe(2);\n});\n',
     );
     try {
-      const { exitCode, stdout } = runRunner(["tests/unit/runner-failure-fixture.test.ts"]);
+      const { exitCode, stdout } = runRunner(["tests/unit/runner-fixture.test.ts"]);
 
       expect(exitCode).toBe(1);
       expect(stdout).toContain("FAIL");
       expect(stdout).toContain("deliberately failing fixture");
-      expect(stdout).toContain("re-run alone with: bun test ./tests/unit/runner-failure-fixture.test.ts");
+      expect(stdout).toContain("re-run alone with: bun test ./tests/unit/runner-fixture.test.ts");
     } finally {
-      rmSync(failing, { force: true });
+      rmSync(FIXTURE, { force: true });
+    }
+  });
+
+  test("a skipped test reaches the summary by name, because bun prints that name nowhere", () => {
+    // The reason a test did not run lives in its title by convention here, and bun
+    // reports only a count, so the runner reads its junit report. Without this, a
+    // Windows run that skips a dozen files says "0 fail" and names nothing.
+    writeFixture(
+      'import { expect, test } from "bun:test";\n' +
+        'test.skipIf(true)("needs a POSIX shell, which this platform has not", () => {\n' +
+        "  expect(1).toBe(1);\n});\n" +
+        'test("runs anyway", () => {\n  expect(1).toBe(1);\n});\n',
+    );
+    try {
+      const { exitCode, stdout } = runRunner(["tests/unit/runner-fixture.test.ts"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Files with skipped tests:");
+      expect(stdout).toContain("needs a POSIX shell, which this platform has not");
+    } finally {
+      rmSync(FIXTURE, { force: true });
+    }
+  });
+
+  test("a file that registers no test is a failure, not a green line", () => {
+    writeFixture('import { expect } from "bun:test";\nexpect(1).toBe(1);\n');
+    try {
+      const { exitCode, stdout } = runRunner(["tests/unit/runner-fixture.test.ts"]);
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toContain("FAIL");
+    } finally {
+      rmSync(FIXTURE, { force: true });
     }
   });
 

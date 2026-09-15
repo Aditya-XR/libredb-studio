@@ -1345,6 +1345,11 @@ describe("isDangerousQuery", () => {
     const ratio = largeBest / smallBest;
     const measured = `${smallBest.toFixed(1)}ms at 35KB, ${largeBest.toFixed(1)}ms at 350KB, ${ratio.toFixed(1)}x`;
     expect(ratio, measured).toBeLessThan(40);
+    // And a ceiling the ratio cannot see: a rewrite that is uniformly slow keeps its
+    // shape while costing a second per execute. 17.4ms measured here, 6406ms for the
+    // pattern this replaced, so 2000ms separates the two without measuring the
+    // machine the way the old absolute budget did.
+    expect(largeBest, measured).toBeLessThan(2000);
   });
 
   // ── The gate reads what the RUNNER will run (S1) ─────────────────────────

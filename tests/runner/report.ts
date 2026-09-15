@@ -32,6 +32,35 @@ export function parseTestCounts(output: string): TestCounts | null {
   return found ? counts : null;
 }
 
+const XML_ENTITY: Record<string, string> = {
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&apos;": "'",
+};
+
+/**
+ * The titles of the tests a file skipped, read from bun's own junit report.
+ *
+ * bun prints a skipped test's title NOWHERE: measured on 1.4.2 piped, with
+ * FORCE_COLOR set, and under a real pty, the output carries the count (" 4 skip")
+ * and nothing else. In this repository a skip always states its reason in its title
+ * (a deb postinstall, a snap launcher, an AppImage permission audit: artifacts that
+ * cannot exist on the platform), so the count alone hides the only thing worth
+ * reading. The junit reporter names them, so the runner asks each child for one.
+ *
+ * A report that is missing or truncated (a child killed mid-write) names nothing
+ * rather than raising: the run's verdict comes from exit codes, never from here.
+ */
+export function parseSkippedTests(report: string): string[] {
+  const skipped: string[] = [];
+  for (const match of report.matchAll(/<testcase\b[^>]*\bname="([^"]*)"[^>]*>\s*<skipped\b/g)) {
+    skipped.push((match[1] as string).replace(/&(amp|lt|gt|quot|apos);/g, (entity) => XML_ENTITY[entity] as string));
+  }
+  return skipped;
+}
+
 function seconds(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(1)}s`;
 }
@@ -54,10 +83,14 @@ export function formatFileLine(outcome: FileOutcome, position: number, total: nu
   return `${place} ${label} ${seconds(outcome.durationMs).padStart(6)}  ${outcome.file}  ${countsSuffix(outcome.counts)}`;
 }
 
-function failureReason(outcome: FileOutcome): string {
-  if (outcome.status === "timed-out") return `timed out after ${seconds(outcome.durationMs)}`;
+function failureReason(outcome: FileOutcome, timeoutMs: number): string {
+  // The BUDGET, not the elapsed time: a killed child is given a few more seconds to
+  // die before SIGKILL, so the elapsed time is always the larger, unrelated number.
+  if (outcome.status === "timed-out") return `timed out, the budget is ${seconds(timeoutMs)} per file`;
   if (outcome.signal) return `killed by ${outcome.signal}`;
   if (outcome.counts && outcome.counts.fail > 0) return `${outcome.counts.fail} failing`;
+  if (outcome.counts === null)
+    return `exit ${outcome.exitCode}, and it printed no summary, so its tests are unaccounted for`;
   return `exit ${outcome.exitCode}`;
 }
 
@@ -72,10 +105,12 @@ export function formatSummary(summary: RunSummary): string {
   if (totals.filesFailed > 0) files.push(`${totals.filesFailed} failed`);
   if (totals.filesTimedOut > 0) files.push(`${totals.filesTimedOut} timed out`);
 
+  const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+  const totalTests = totals.tests.pass + totals.tests.fail + totals.tests.skip + totals.tests.todo;
   const lines = [
     "",
     "=".repeat(72),
-    `${totals.files} files: ${files.join(", ")}  |  ${totals.tests.pass + totals.tests.fail + totals.tests.skip + totals.tests.todo} tests: ${tests.join(", ")}  |  ${seconds(summary.durationMs)} with ${summary.jobs} jobs`,
+    `${plural(totals.files, "file")}: ${files.join(", ")}  |  ${plural(totalTests, "test")}: ${tests.join(", ")}  |  ${seconds(summary.durationMs)} with ${plural(summary.jobs, "job")}`,
   ];
 
   if (totals.filesWithoutCounts > 0) {
@@ -84,22 +119,23 @@ export function formatSummary(summary: RunSummary): string {
     );
   }
 
-  // A skipped test is not a passing test. bun prints a skipped title only to a
-  // terminal, so in a CI log or a piped run the file and its count are the only
-  // trace that something did not run; each such test carries its reason in its own
-  // title (a platform that cannot host the artifact, a tool that is not installed).
+  // A skipped test is not a passing test, and bun prints its title nowhere (see
+  // parseSkippedTests), so this is where a reader meets it. Each such title states
+  // the reason: a platform that cannot host the artifact, a tool that is not
+  // installed. A run that says only "3 skip" has told nobody anything.
   const skipping = summary.outcomes.filter((outcome) => (outcome.counts?.skip ?? 0) > 0);
   if (skipping.length > 0) {
     lines.push("", "Files with skipped tests:");
     for (const outcome of skipping.sort((a, b) => a.file.localeCompare(b.file))) {
       lines.push(`  ${outcome.file} (${outcome.counts?.skip} skipped)`);
+      for (const title of outcome.skippedTests) lines.push(`    ${title}`);
     }
   }
 
   if (summary.failures.length > 0) {
     lines.push("", "Failed files:");
     for (const outcome of summary.failures) {
-      lines.push(`  ${outcome.file} (${failureReason(outcome)})`);
+      lines.push(`  ${outcome.file} (${failureReason(outcome, summary.timeoutMs)})`);
       lines.push(`    re-run alone with: bun test ./${outcome.file}`);
     }
   }

@@ -58,9 +58,17 @@ export function discoverTestFiles(root: string): string[] {
   return collect(root, TESTS_DIRECTORY).sort();
 }
 
-/** A selector as the user typed it, reduced to a repository-relative POSIX path. */
+/**
+ * A selector as the user typed it, reduced to a repository-relative POSIX path.
+ *
+ * A relative selector is resolved against the working directory, not against the
+ * repository root, because that is what the person typing it meant: from
+ * `tests/unit`, `bun ../run-tests.ts lib/lazy.test.ts` names the file beside them.
+ * Resolving against the root instead answered "is not under tests/", which is a true
+ * sentence about a path they never wrote.
+ */
 function normalizeSelector(root: string, selector: string): string {
-  const absolute = path.isAbsolute(selector) ? selector : path.join(root, selector);
+  const absolute = path.isAbsolute(selector) ? selector : path.resolve(process.cwd(), selector);
   return path.relative(root, absolute).split(path.sep).join("/").replace(/\/+$/, "");
 }
 

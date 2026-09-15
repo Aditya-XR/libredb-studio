@@ -6,7 +6,7 @@ const PASS_OUTPUT = " 3 pass\n 0 fail\nRan 3 tests across 1 file. [12.00ms]\n";
 const FAIL_OUTPUT = " 2 pass\n 1 fail\nRan 3 tests across 1 file. [12.00ms]\n";
 
 function passed(output = PASS_OUTPUT): SpawnOutcome {
-  return { exitCode: 0, signal: null, output, durationMs: 1, timedOut: false };
+  return { exitCode: 0, signal: null, output, durationMs: 1, timedOut: false, skippedTests: [] };
 }
 
 const files = ["tests/unit/a.test.ts", "tests/unit/b.test.ts", "tests/unit/c.test.ts"];
@@ -55,6 +55,7 @@ describe("running the files", () => {
     });
 
     expect(peak).toBe(2);
+    expect(seen).toHaveLength(9);
     expect(new Set(seen).size).toBe(9);
   });
 
@@ -63,7 +64,7 @@ describe("running the files", () => {
     const summary = await run({
       runFile: async ({ file }) =>
         file.endsWith("b.test.ts")
-          ? { exitCode: 7, signal: null, output: "boom", durationMs: 1, timedOut: false }
+          ? { exitCode: 7, signal: null, output: "boom", durationMs: 1, timedOut: false, skippedTests: [] }
           : passed(),
     });
 
@@ -78,7 +79,7 @@ describe("running the files", () => {
     const summary = await run({
       runFile: async ({ file }) =>
         file.endsWith("c.test.ts")
-          ? { exitCode: null, signal: "SIGSEGV", output: "", durationMs: 1, timedOut: false }
+          ? { exitCode: null, signal: "SIGSEGV", output: "", durationMs: 1, timedOut: false, skippedTests: [] }
           : passed(),
     });
 
@@ -90,7 +91,14 @@ describe("running the files", () => {
     const summary = await run({
       runFile: async ({ file }) =>
         file.endsWith("a.test.ts")
-          ? { exitCode: null, signal: "SIGTERM", output: "hung here", durationMs: 1000, timedOut: true }
+          ? {
+              exitCode: null,
+              signal: "SIGTERM",
+              output: "hung here",
+              durationMs: 1000,
+              timedOut: true,
+              skippedTests: [],
+            }
           : passed(),
     });
 
@@ -103,7 +111,7 @@ describe("running the files", () => {
     const summary = await run({
       runFile: async ({ file }) =>
         file.endsWith("b.test.ts")
-          ? { exitCode: 1, signal: null, output: FAIL_OUTPUT, durationMs: 1, timedOut: false }
+          ? { exitCode: 1, signal: null, output: FAIL_OUTPUT, durationMs: 1, timedOut: false, skippedTests: [] }
           : passed(),
     });
 
@@ -113,7 +121,14 @@ describe("running the files", () => {
 
   test("output bun printed no summary for is counted as unknown, never as zero", async () => {
     const summary = await run({
-      runFile: async () => ({ exitCode: 1, signal: null, output: "segfault", durationMs: 1, timedOut: false }),
+      runFile: async () => ({
+        exitCode: 1,
+        signal: null,
+        output: "segfault",
+        durationMs: 1,
+        timedOut: false,
+        skippedTests: [],
+      }),
     });
 
     expect(summary.totals.tests.pass).toBe(0);
@@ -158,6 +173,53 @@ describe("running the files", () => {
     });
 
     expect(progress).toEqual(["1/3 tests/unit/a.test.ts", "2/3 tests/unit/b.test.ts", "3/3 tests/unit/c.test.ts"]);
+  });
+
+  test("a file that registered no test at all is a failure, even though bun exits 0", async () => {
+    // Measured with bun 1.4.2: a file with no test in it prints " 0 pass / 0 fail"
+    // and exits 0. The runner's own rule is that a discovered file runs, so a file
+    // that ran nothing is a defect rather than a pass.
+    const summary = await run({
+      runFile: async ({ file }) =>
+        file.endsWith("a.test.ts")
+          ? {
+              exitCode: 0,
+              signal: null,
+              output: " 0 pass\n 0 fail\nRan 0 tests across 1 file. [3.00ms]\n",
+              durationMs: 1,
+              timedOut: false,
+              skippedTests: [],
+            }
+          : passed(),
+    });
+
+    expect(summary.failures.map((outcome) => outcome.file)).toEqual(["tests/unit/a.test.ts"]);
+    expect(summary.totals.filesFailed).toBe(1);
+  });
+
+  test("a file that exits 0 without printing a summary is a failure, not a pass", async () => {
+    // A test calling process.exit(0) ends the process there: bun exits 0, prints its
+    // banner and nothing else, and every test after that line never runs. Measured
+    // with bun 1.4.2. Counting that as a pass is the one way this runner could
+    // report a green run over a tree whose tests did not all run.
+    const summary = await run({
+      runFile: async ({ file }) =>
+        file.endsWith("c.test.ts")
+          ? { exitCode: 0, signal: null, output: "bun test v1.4.2\n", durationMs: 1, timedOut: false, skippedTests: [] }
+          : passed(),
+    });
+
+    expect(summary.failures.map((outcome) => outcome.file)).toEqual(["tests/unit/c.test.ts"]);
+    expect(summary.totals.filesWithoutCounts).toBe(1);
+  });
+
+  test("a child that finished as the timeout fired is read by its exit code, not by the timer", async () => {
+    const summary = await run({
+      runFile: async () => ({ ...passed(), timedOut: true }),
+    });
+
+    expect(summary.failures).toEqual([]);
+    expect(summary.totals.filesTimedOut).toBe(0);
   });
 
   test("a runner that is handed no files refuses rather than reporting a green run", async () => {
