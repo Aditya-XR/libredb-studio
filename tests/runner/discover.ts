@@ -7,11 +7,15 @@
  * hand-written list: `tests/components/WireCompatibilityHint.test.tsx` shipped with
  * #426 and never ran once, because the runner of the day named its files one by one.
  *
+ * A symbolic link or junction under `tests/` is refused by name rather than followed:
+ * following one can run files from outside the repository, loop on a link to a parent
+ * and list one file twice under two names, while skipping it drops its tests silently.
+ *
  * `scripts/security-check.mjs` asks this module (through `bun tests/run-tests.ts
  * --list`) whether a test named by `docs/SECURITY.md` is actually executed, so the
  * discovery rule is also the repository's definition of "this test runs".
  */
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 const TESTS_DIRECTORY = "tests";
@@ -43,13 +47,28 @@ export const COVERAGE_EXEMPT_FILES: readonly string[] = [
   "tests/isolated/monaco-loader-wiring.test.ts",
 ];
 
+/**
+ * Every entry is classified with lstat rather than by its Dirent type. A Dirent for
+ * a link is neither a directory nor a file (measured on bun 1.4.2), which is how a
+ * linked test used to be skipped without a word, and what bun's Dirent reports for a
+ * Windows junction could not be measured; lstat reports a junction as a symbolic
+ * link, as it does on POSIX. The extra lstat per entry is cheap: measured on Linux
+ * over the 543 files the tree held then, `discoverTestFiles` went from 0.43 ms to
+ * 1.1 ms a call.
+ */
 function collect(root: string, directory: string): string[] {
-  return readdirSync(path.join(root, directory), { withFileTypes: true }).flatMap((entry) => {
-    const child = `${directory}/${entry.name}`;
-    if (entry.isDirectory()) {
-      return directory === TESTS_DIRECTORY && EXCLUDED.has(entry.name) ? [] : collect(root, child);
+  return readdirSync(path.join(root, directory)).flatMap((name) => {
+    const child = `${directory}/${name}`;
+    const stats = lstatSync(path.join(root, child));
+    if (stats.isSymbolicLink()) {
+      throw new Error(
+        `${child} is a symbolic link or junction: the test runner does not follow links, so a test behind one would never run. Replace it with the real file or directory.`,
+      );
     }
-    return entry.isFile() && TEST_FILE.test(entry.name) ? [child] : [];
+    if (stats.isDirectory()) {
+      return directory === TESTS_DIRECTORY && EXCLUDED.has(name) ? [] : collect(root, child);
+    }
+    return stats.isFile() && TEST_FILE.test(name) ? [child] : [];
   });
 }
 
@@ -72,14 +91,21 @@ function normalizeSelector(root: string, selector: string): string {
   // path.relative compares spellings. Measured on windows-latest: os.tmpdir() is the
   // 8.3 short form (C:\Users\RUNNER~1\...) and import.meta.dir the long one, so a
   // runner started from a temp directory called a correct selector "not under
-  // tests/". A junction or a symlinked checkout does the same anywhere. The working
-  // directory always exists, so it is resolved; an absolute selector is resolved when
-  // it exists, and one that does not exist matches no file either way.
-  const absolute = path.isAbsolute(selector)
-    ? existsSync(selector)
-      ? realpathSync.native(selector)
-      : selector
-    : path.resolve(realpathSync.native(process.cwd()), selector);
+  // tests/". A junction or a symlinked checkout does the same anywhere. The two
+  // realpaths that carry it are the root's and the resolved selector's: the resolved
+  // path is realpathed when it exists, which covers a link inside a relative selector
+  // (`u/x.test.ts` with u -> tests/unit) and, on Windows, a wrong-case or 8.3 segment.
+  // The working directory itself is not realpathed again: measured on bun 1.4.2, after
+  // chdir into a link `process.cwd()` already answers the real path, so the call could
+  // only ever have changed which message a selector that does not EXIST is refused
+  // with, and an unfalsifiable line is worse than the message it might improve.
+  // The realpath is of the resolved path, never of the raw selector: bun's existsSync
+  // follows a link before a "..", its realpath collapses the ".." as text first, so
+  // for `u/../unit/x.test.ts` the two disagree and realpath threw a raw ENOENT
+  // (measured on 1.4.2). A selector that does not exist keeps its spelling, and
+  // matches no file either way.
+  const resolved = path.resolve(process.cwd(), selector);
+  const absolute = existsSync(resolved) ? realpathSync.native(resolved) : resolved;
   return path.relative(realpathSync.native(root), absolute).split(path.sep).join("/").replace(/\/+$/, "");
 }
 
