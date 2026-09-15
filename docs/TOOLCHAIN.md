@@ -308,8 +308,69 @@ The twelve chart tests that drive the real `helm` binary open with `// @requires
 Where `helm` is missing, or the chart's PostgreSQL subchart is not built, those files are not started, and the summary names them once under the reason and the command that fixes it; a selection made only of such files is an error, not an empty green run.
 Every CI job that runs the suite sets `LIBREDB_REQUIRE_HELM=1`, which makes the same condition stop the run before anything starts, and `tests/unit/helm-pin-matrix.test.ts` fails if one of those jobs loses the variable.
 The decision is per file rather than per test because each of those files needs Helm for everything it does, so skipping inside them would print about 180 test titles where twelve file names say the same.
-Leaving them out costs no line coverage, because what they exercise is the chart's templates, which no lcov measures: measured with `helm` hidden from `PATH`, 531 files ran and the merged report was still 100% of 56883 lines.
+Leaving them out costs no line coverage, because what they exercise is the chart's templates, which no lcov measures: measured on 2026-09-15 with `helm` hidden from `PATH`, 531 files ran and the merged report was still 100% of 56883 lines.
 `tests/unit/test-runner-requirements.test.ts` holds the marker true of the tree in both directions: a file that spawns helm carries it, and a file that carries it spawns helm.
+
+### What a file's verdict is read from, and how a run ends
+
+A file's counts come from the junit report bun writes for it, never from its console output.
+Every child is spawned with `--reporter=junit --reporter-outfile=<scratch>/file-N.xml`, and those two options are appended AFTER any argument forwarded past `--`, because bun takes the last of a repeated option: a forwarded `--reporter-outfile` would otherwise redirect the report and leave every file looking as though it wrote none.
+Reading the console is what the runner did before, and free-form text mixed with whatever the tests printed can be made to say anything: measured on bun 1.4.2, a file that registered no test and printed the line ` 1 pass` was reported PASS with exit 0, and so was a test that printed a whole summary block on stderr and then called `process.exit(0)` so the tests after it never ran.
+Both shapes defeat exactly the two guards that keep a red tree from turning green, "printed no summary" and "registered nothing".
+`--bail` is the same defect from the other side: it prints no count line at all, while the report still carries the failure.
+A report that is absent and one the parser cannot read are told apart, and neither ever becomes zero counts: the file fails, its line reads "no test report" or "unreadable test report", and the summary says how many files left no readable report and that their tests are not in the totals above it.
+There is one shape no report can show, and the runner says so rather than pretending otherwise: bun honours a committed `.only`, so such a file writes an honest report naming that one test and exits 0, and the tests it never ran are absent from the report, the totals and the verdict alike (measured on 1.4.2).
+That has to be refused before the run rather than read out of what the run wrote, and nothing refuses it today: `docs/BACKLOG.md` D90.
+
+Forwarding a flag to `bun test` works only when the runner is invoked directly and a selector comes first.
+Measured on 1.4.2: `bun run test -- --bail` reaches the script as `["--bail"]`, because `bun run` removes the first `--`, and bun removes one that sits straight after the script path too, so `bun tests/run-tests.ts -- --bail` loses it as well.
+`bun tests/run-tests.ts tests/unit -- --bail` is the form that arrives whole, and it is what the runner's unknown-option error names when it refuses a flag it does not own.
+
+The titles of the tests a file skipped come from the same report, and their describe path from its nested `<testsuite>` elements rather than from the `classname` attribute.
+classname lists those titles too, but bun joins them with " &gt; " and writes a literal ">" inside a title as "&gt;" as well, so no split rule can tell the separator from the character: measured on 1.4.2, splitting classname turned a describe titled "rows where count > 100" into "100 > rows where count".
+The titles are worth printing at all because a skip in this repository states its reason in its title, and bun prints that title nowhere: piped, with `FORCE_COLOR` set, and under a real pty, the output carries the count and nothing else.
+A todo is in neither the count nor the list, although bun writes one as `<skipped message="TODO" />` as well: a todo has no reason to state and is already its own column in the totals line, and listing one under an "(N skipped)" header that does not count it would print two different numbers for one block.
+A file whose report could not be read still prints the titles the parser reached before it stopped, under "unreadable report; it named N skipped tests" instead of a count it does not have.
+
+Each child's stdout and stderr are captured rather than inherited, because several files run at once and interleaved output belongs to nobody, and each stream is bounded at BOTH ends by `tests/runner/capture.ts`: the first megabyte, the last megabyte, and one line naming how many bytes fell between them.
+Both ends are kept because both are read, the head for bun's file header and the first failure diff, the tail for the rest of the diffs and bun's own per-file summary.
+The megabyte is measured against this tree rather than guessed: across the 543 files the tree held when the measurement was taken on 2026-09-15, the largest prints 154,526 bytes on stdout, the largest stderr is 48,369 bytes and the median is 104 bytes, so nothing that runs here today is ever cut, and the worst case per running child is 4 MB.
+Nothing is decided from that text, so a cut can never change a verdict.
+A passing file's output is dropped once its line has been printed, which is what stops a whole run's output adding up: held to the end, four passing files printing 100 MB each peaked at 406 MB of RSS against 249 MB for one.
+
+Every exit path writes its last line and waits for the bytes to leave the process before it calls `process.exit`.
+bun writes to a pipe asynchronously and `process.exit` throws away whatever is still queued: measured on 1.4.2 through a piped stdout, a run whose failing file printed a megabyte lost about a third of that output and the whole summary with it, "Failed files:" and the re-run hint included, while the exit code stayed 1.
+The wait has to be a real write whose callback resolves, because an empty write's callback does not wait for the queue and a `drain` event never arrives: `write()` returned false while `writableLength` was 0 and `writableNeedDrain` was false.
+A non-empty write's callback does wait for everything queued before it, measured at 1 MB and at 10 MB and against a reader that started 1.5 seconds late, so one such write also drains the lines printed as the files landed.
+What that covers is the lines this process writes: the per-file lines, the summary, the failed-file block and the re-run hint.
+It does not cover a child's own console output, and nothing here can: measured under CPU load on 1.4.2, a failing file's `bun test` process drops part of its queued stdout as it exits, between 20 and 90 per cent of a megabyte, and it does so with no runner in the picture at all, so a failure diff read from a busy CI machine can still be truncated under an accurate verdict (`docs/BACKLOG.md` D89).
+A write that fails because the reader has gone rather than because this process could not write is not the runner's problem and does not become its exit code: an `EPIPE` from `| head -1` or a closed terminal leaves the run's own 0, 1 or 128 plus signal in place, and exit 2 stays for a write the runner really could not make, a full disk for instance (measured against `/dev/full`, which reports `ENOSPC` and does exit 2).
+
+SIGINT, SIGTERM, SIGHUP and SIGBREAK all end a run the same way: no further file is started, the files still running are killed, the scratch directory is removed, `Interrupted (SIGNAL).` is written, and the runner exits 128 plus the signal's number, so 130, 143 and 129, measured end to end for those three, and 149 for SIGBREAK, which only Windows can deliver and which is therefore pinned over the mapping rather than over a run.
+The number is taken from the platform's own `os.constants.signals` where the platform names the signal, because that is the number its shell will report, and from the table written out in `tests/runner/signals.ts` where it does not: measured on 1.4.2, that table has no SIGBREAK on Linux or macOS, and `128 + undefined` is NaN, which `process.exit` refuses with a RangeError thrown from inside the listener.
+SIGTERM is what `timeout(1)`, `docker stop`, Kubernetes and systemd send, and what `bun run test` forwards; SIGBREAK is Ctrl+Break, which GitHub Actions on Windows sends 7.5 seconds after Ctrl+C, and naming it is valid on every platform.
+Handling only SIGINT, as this did, meant a run stopped any other way printed nothing at all and left its junit scratch directory behind in the temporary directory.
+A scratch directory that cannot be removed is named on stderr and exits 2, neither swallowed nor thrown: measured on 1.4.2, a throw from inside a signal listener left the process RUNNING and the queue started the next file.
+The default disposition is put back before the handler awaits anything, so a second signal kills the process outright instead of starting a second cleanup over the first, and the last write is raced against a three-second grace.
+That grace is there because a reader that has stopped reading blocks the write behind a full pipe: measured on 1.4.2, the process then sat out the whole stall and survived a second SIGINT, a SIGTERM and a SIGHUP.
+When the grace runs out the run still ends with its own exit code and its scratch directory gone, and the only thing lost is the `Interrupted` line, which the reader that was not reading would not have seen anyway.
+
+Discovery refuses a symbolic link or junction under `tests/` by name instead of walking through it.
+It used to skip one in silence, because a `readdirSync` Dirent for a link reports neither `isDirectory()` nor `isFile()`, so a linked directory and a file link named `*.test.ts` both fell out of the selection with nothing printed; entries are classified with `lstat` now, which also reports a Windows junction as a link.
+Refusing rather than following is the other half of that decision: following a link can run files from outside the repository, loop on a link to a parent, or list one file twice under two names, while skipping it drops its tests without a word.
+
+The default concurrency is one job per available CPU, and it is not memory-aware.
+`availableParallelism()` in bun 1.4.2 follows CPU affinity and a cgroup v2 CPU quota, measured on a 20-core host: 2 under `taskset -c 0-1`, and 2 under `CPUQuota=200%`.
+So a container with a CPU limit already gets as many jobs as it has CPU, and a laptop, a Codespace and a GitHub-hosted runner are all sized by that.
+What the default does not read is a memory limit.
+A test file's peak RSS over a 32-file sample runs from 58 MiB to 341 MiB with a median of 100 MiB, and under real concurrency the heaviest layer adds about 80 to 90 MiB per extra job: `tests/components` measured 599 MB at 4 jobs, 998 MB at 8 and 1599 MB at 16.
+In a container with a memory limit and no CPU limit on a many-core host, pass `--jobs=N`.
+A run that did not is readable rather than mysterious in the one case where the kernel kills a single child: that file's line names the OOM killer and `--jobs=N` in its reason, because the runner sends SIGKILL itself only to a child that outran its budget, and that child is reported as timed out instead.
+Where the cgroup kills the whole group the runner dies with its children, so that reason is never printed and no file is named at all.
+Under Kubernetes's default `memory.oom.group` the kernel SIGKILLs every process in the cgroup, and SIGKILL cannot be handled, so the output simply stops after the files that had already landed and the exit code is the only signal: reasoned from the kernel's semantics, not measured here.
+Under systemd's default `OOMPolicy` the unit is stopped with SIGTERM instead, which this runner now takes: measured before that handling existed, such a run ended at exit 143 with no summary and its scratch directory left behind, so it now ends at the same 143 with `Interrupted (SIGTERM).` and nothing left in the temporary directory.
+Neither shape names the file that exhausted the memory, which is the second reason a memory-aware default is worth having.
+That default is `docs/BACKLOG.md` D88.
 
 ### Dependency installation in CI
 

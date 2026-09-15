@@ -540,7 +540,7 @@ Sample tables: `app.customers`, `app.products`, `app.orders`, `app.order_items`,
 
 ## Testing
 
-LibreDB Studio has a comprehensive test suite: 543 test files and 17,499 tests across seven layers, plus 79 browser tests, with **100% line coverage** enforced by CI (`bun run coverage:check`).
+LibreDB Studio has a comprehensive test suite: 545 test files and 17,555 tests across seven layers, plus 79 browser tests, with **100% line coverage** enforced by CI (`bun run coverage:check`).
 
 ### Quick Commands
 
@@ -549,7 +549,7 @@ LibreDB Studio has a comprehensive test suite: 543 test files and 17,499 tests a
 bun run test
 
 # Run by layer
-bun run test:unit          # Pure function tests (322 files)
+bun run test:unit          # Pure function tests (324 files)
 bun run test:api           # API route handler tests (35 files)
 bun run test:integration   # Database provider tests (24 files)
 bun run test:hooks         # React hook tests (21 files)
@@ -573,7 +573,7 @@ bun run test:coverage
 
 | Layer | Directory | Files | Tests | What it covers |
 |-------|-----------|-------|-------|----------------|
-| **Unit** | `tests/unit/` | 321 | 9,645 | Pure functions: SQL parser, connection strings, data masking, query limiter, schema diff, error classes, DB icons, showcase queries, and the packaging and chart manifests |
+| **Unit** | `tests/unit/` | 324 | 9,645 | Pure functions: SQL parser, connection strings, data masking, query limiter, schema diff, error classes, DB icons, showcase queries, and the packaging and chart manifests |
 | **API** | `tests/api/` | 35 | 602 | Route handlers: auth, query, transaction, maintenance, AI endpoints, middleware |
 | **Integration** | `tests/integration/` | 24 | 2,768 | Database providers: PG, MySQL, SQLite, MongoDB, Couchbase, Redis, Oracle, MSSQL, ClickHouse, Druid, Elasticsearch, OpenSearch, Trino |
 | **Hooks** | `tests/hooks/` | 21 | 566 | React hooks: auth, connections, tabs, query execution, transactions, inline editing, monitoring |
@@ -582,14 +582,14 @@ bun run test:coverage
 | **Components** | `tests/components/`, `tests/isolated/` | 107 | 3,376 | UI components with `happy-dom`: Studio, Sidebar, QueryEditor, ResultsGrid, Admin Dashboard, Charts, ERD |
 | **E2E** | `e2e/` | 18 | 79 | Full browser flows: login, connections, query execution, tabs, export, admin |
 
-Counted on 2026-09-15, the first seven rows with `bun tests/run-tests.ts` and the last with
-`playwright test --list`. The nineteenth spec in `e2e/`, `base-path.spec.ts`, is not in that 18: it
-needs its own server configuration and runs as `bun run test:e2e:base-path`.
+The Files column was counted on 2026-09-15 with `bun tests/run-tests.ts --list` for the first seven rows and `playwright test --list` for the last.
+The Tests column comes from an earlier full run the same day, over the 542 files the tree held then, so the per-layer numbers are a little below the 17,555 above: they do not yet count the three test files this branch adds under `tests/unit/` or the cases it adds to the runner's own test files.
+The nineteenth spec in `e2e/`, `base-path.spec.ts`, is not in that 18: it needs its own server configuration and runs as `bun run test:e2e:base-path`.
 
 ### Key Details
 
 - **Test runner**: [`tests/run-tests.ts`](tests/run-tests.ts) over `bun:test`. It discovers every `*.test.ts` and `*.test.tsx` file under `tests/` except `tests/live/`, so a new test file runs the moment it is added, and it runs each file in its own bun process, several at a time (one per CPU by default, `--jobs=N` to change it).
-- **Why a process per file**: bun's `mock.module()` is process-wide with no undo, and whole-module mocks are the standard pattern in `tests/api/`, so files that share a process contaminate each other. On Linux with 20 cores and bun 1.4.2, the suite took 211 seconds one file at a time, 61 seconds 4 at a time and 36 seconds 20 at a time, measured at 538 files.
+- **Why a process per file**: bun's `mock.module()` is process-wide with no undo, and whole-module mocks are the standard pattern in `tests/api/`, so files that share a process contaminate each other. On Linux with 20 cores and bun 1.4.2, the suite took 211 seconds one file at a time, 61 seconds 4 at a time and 36 seconds 20 at a time, measured on 2026-09-15 over the 538 files the tree held then; `docs/BACKLOG.md` D86 carries the same three timings and the same basis.
 - **One command everywhere**: the runner is TypeScript rather than shell so that the command a contributor is told to run works on Linux, macOS and Windows from the platform's own shell. The bash scripts it replaced did not: one used `mapfile`, a bash 4 builtin that macOS's bash 3.2 does not have.
 - **E2E**: Playwright runs the full suite on Chromium and the `security-headers` spec on WebKit (`webkit-security`), against a production build (`bun run build && bun start`)
 - **CI**: GitHub Actions runs lint + typecheck + build, the required `Unit & Integration Tests` job (`bun run test:coverage` then `bun run coverage:check`) on ubuntu, a non-required `Cross-platform Tests` job running `bun run test` on windows-latest and macos-latest, E2E tests, and SonarCloud analysis

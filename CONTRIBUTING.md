@@ -66,6 +66,10 @@ Feature suggestions are welcome! Please provide:
    own bun process, and `bun test tests/api` puts them all in one, where one file's `mock.module()`
    becomes every file's. To run a single file, name it: `bun tests/run-tests.ts tests/unit/x.test.ts`.
    `bun run test:coverage && bun run coverage:check` prints the exact uncovered `file:line` ranges.
+   `bun tests/run-tests.ts --jobs=N` lowers the concurrency, which by default is one job per available CPU: that follows CPU affinity and a cgroup CPU limit, but no memory limit, and a job peaks at roughly 60 to 340 MiB.
+   Use it in a memory-limited container that has no CPU limit, and when a file comes back as killed by SIGKILL from outside the runner, which on Linux is usually the OOM killer.
+   A flag meant for `bun test` goes past a `--` the runner can see, which means invoking the runner directly with a selector first: `bun tests/run-tests.ts tests/unit -- --bail`.
+   `bun run test -- --bail` does not work, because `bun run` removes the first `--` before the script sees it, and bun removes one that sits straight after the script path too.
 5. **Keep the provider triad in lockstep.** Anything under `src/lib/db/providers/**` has a matching
    `docs/providers/<type-id>.md` and `tests/integration/db/<type-id>-provider.test.ts`; a change to
    one moves the other two in the same PR.
