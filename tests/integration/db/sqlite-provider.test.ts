@@ -19,6 +19,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -994,6 +995,37 @@ describe("SQLiteProvider", () => {
         expect((await reader.query("SELECT v FROM r")).rows).toEqual([{ v: "held" }]);
       } finally {
         await reader.disconnect();
+      }
+    });
+
+    // The same claim on the path nobody plans for: the connection points at a file
+    // that is not a SQLite database, which is the ordinary "wrong file in the
+    // dialog" mistake. `connect()` opens the handle before it fails, so a catch that
+    // only records the error leaves the user's own file held open: on Windows they
+    // then cannot delete or move the file they just picked by accident. Measured
+    // 2026-09-15 through /proc/self/fd, before the fix: one descriptor on notes.txt
+    // survived a connect() that had already thrown and reported isConnected() false.
+    test("a connect that fails releases the file it had already opened", async () => {
+      const notADatabase = join(fileTmpDir, "notes.txt");
+      writeFileSync(notADatabase, "these are notes, not a database\n");
+      provider = new SQLiteProvider(makeSQLiteConfig({ database: notADatabase }));
+
+      await expect(provider.connect()).rejects.toThrow();
+      expect(provider.isConnected()).toBe(false);
+
+      const moved = `${notADatabase}.moved`;
+      renameSync(notADatabase, moved);
+      renameSync(moved, notADatabase);
+
+      if (existsSync("/proc/self/fd")) {
+        const held = readdirSync("/proc/self/fd").flatMap((fd) => {
+          try {
+            return [readlinkSync(join("/proc/self/fd", fd))];
+          } catch {
+            return [];
+          }
+        });
+        expect(held.filter((target) => target === notADatabase)).toEqual([]);
       }
     });
   });

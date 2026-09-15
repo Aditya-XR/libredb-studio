@@ -1119,6 +1119,16 @@ export class SQLiteProvider extends SQLBaseProvider {
 
       this.setConnected(true);
     } catch (error) {
+      // The handle is opened before the pragmas run, so a failure past that line
+      // leaves this holding the user's file: the ordinary case is a connection that
+      // points at something which is not a SQLite database at all, where the open
+      // succeeds and `PRAGMA journal_mode` raises "file is not a database". Closing
+      // here for the reason disconnect() does: POSIX hides an unreleased handle,
+      // Windows does not, and a file the user picked by mistake would stay
+      // undeletable. Nulling it also keeps `connect()`'s own `if (this.db) return`
+      // from turning a retry into a silent no-op on a provider that is not connected.
+      this.db?.close(true);
+      this.db = null;
       this.setError(error instanceof Error ? error : new Error(String(error)));
 
       // Typed refusals keep their own identity: wrapping them would strip the

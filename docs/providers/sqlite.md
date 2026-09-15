@@ -180,9 +180,21 @@ three descriptors survived a `disconnect()` that reported `isConnected() === fal
 that, because it unlinks a file that is still open; Windows does not, and a user could not delete or
 move a database Studio had disconnected from. `close(true)` finalizes and closes for real, and
 raises if SQLite cannot. `node:sqlite` needs no flag: its own `close()` finalizes the statements it
-tracks (measured on Node 24.14.0). The portable reading either way is the sidecars: SQLite
-checkpoints the WAL and removes `-wal` and `-shm` only when the connection really closes, which is
-what `tests/integration/db/sqlite-provider.test.ts` asserts on both adapters.
+tracks (measured on Node 24.14.0).
+
+The sidecars are NOT the portable reading of this, although they look like it: probed on all three
+runners, `close(true)` removes `-wal` and `-shm` on Linux and Windows and leaves both in place on
+macOS, where bun:sqlite links Apple's system libsqlite3. That is the library keeping the WAL rather
+than a handle keeping the file, because opening the same database with node:sqlite and closing it
+removed them on that same macOS run, which takes the exclusive lock a surviving handle would deny.
+So `tests/integration/db/sqlite-provider.test.ts` asks each platform what it can answer: everywhere,
+the file can be renamed after `disconnect()`, which is what Windows refuses for a live handle; on
+Linux, no descriptor of the process still points into the directory. The node adapter's harness does
+assert the sidecars, because its own SQLite removes them everywhere.
+
+The same close runs on the failure path of `connect()`: an open that succeeds and then fails its
+pragmas (a connection pointed at a file that is not a database, the ordinary wrong-file mistake)
+used to leave the handle held, so the user could not delete or move the file they had just picked.
 
 ### 3.3 Read vs write dispatch
 
