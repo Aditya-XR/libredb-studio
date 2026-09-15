@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { COVERAGE_EXEMPT_FILES, discoverTestFiles, selectTestFiles } from "../runner/discover";
 
@@ -79,6 +80,22 @@ describe("test discovery", () => {
       expect(selectTestFiles(root, ["lib/lazy.test.ts"])).toEqual(["tests/unit/lib/lazy.test.ts"]);
     } finally {
       process.chdir(cwd);
+    }
+  });
+
+  test("a root spelled differently from the working directory is still the same directory", () => {
+    // Measured on windows-latest, 2026-09-15: os.tmpdir() answers the 8.3 short form
+    // (C:\Users\RUNNER~1\...) while import.meta.dir answers the long one
+    // (C:\Users\runneradmin\...), so a runner started from a temp directory resolved a
+    // correct relative selector to a path "not under tests/" and exited 2. A junction
+    // reproduces the same two spellings of one directory on every platform (on POSIX
+    // the type argument is ignored and it is an ordinary directory symlink).
+    const link = path.join(mkdtempSync(path.join(tmpdir(), "runner-spelling-")), "repo");
+    symlinkSync(root, link, "junction");
+    try {
+      expect(selectTestFiles(link, ["tests/unit/lib/lazy.test.ts"])).toEqual(["tests/unit/lib/lazy.test.ts"]);
+    } finally {
+      rmSync(path.dirname(link), { recursive: true, force: true });
     }
   });
 

@@ -11,7 +11,7 @@
  * --list`) whether a test named by `docs/SECURITY.md` is actually executed, so the
  * discovery rule is also the repository's definition of "this test runs".
  */
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 const TESTS_DIRECTORY = "tests";
@@ -68,8 +68,19 @@ export function discoverTestFiles(root: string): string[] {
  * sentence about a path they never wrote.
  */
 function normalizeSelector(root: string, selector: string): string {
-  const absolute = path.isAbsolute(selector) ? selector : path.resolve(process.cwd(), selector);
-  return path.relative(root, absolute).split(path.sep).join("/").replace(/\/+$/, "");
+  // Both sides in real-path space, because one directory can have two spellings and
+  // path.relative compares spellings. Measured on windows-latest: os.tmpdir() is the
+  // 8.3 short form (C:\Users\RUNNER~1\...) and import.meta.dir the long one, so a
+  // runner started from a temp directory called a correct selector "not under
+  // tests/". A junction or a symlinked checkout does the same anywhere. The working
+  // directory always exists, so it is resolved; an absolute selector is resolved when
+  // it exists, and one that does not exist matches no file either way.
+  const absolute = path.isAbsolute(selector)
+    ? existsSync(selector)
+      ? realpathSync.native(selector)
+      : selector
+    : path.resolve(realpathSync.native(process.cwd()), selector);
+  return path.relative(realpathSync.native(root), absolute).split(path.sep).join("/").replace(/\/+$/, "");
 }
 
 /**

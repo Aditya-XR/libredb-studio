@@ -107,9 +107,9 @@ describe("the test runner, end to end", () => {
     const sandbox = sandboxWith(
       'import { expect, test } from "bun:test";\ntest("deliberately failing fixture", () => {\n  expect(1).toBe(2);\n});\n',
     );
-    const { exitCode, stdout } = runInSandbox(sandbox);
+    const { exitCode, stdout, stderr } = runInSandbox(sandbox);
 
-    expect(exitCode).toBe(1);
+    expect(exitCode, `runner stderr: ${stderr}`).toBe(1);
     expect(stdout).toContain("FAIL");
     expect(stdout).toContain("deliberately failing fixture");
     expect(stdout).toContain("re-run alone with: bun test ./tests/unit/fixture.test.ts");
@@ -129,9 +129,9 @@ describe("the test runner, end to end", () => {
         '  test("exports SNAP_DATA", () => {\n    expect(1).toBe(1);\n  });\n});\n' +
         'test("runs anyway", () => {\n  expect(1).toBe(1);\n});\n',
     );
-    const { exitCode, stdout } = runInSandbox(sandbox);
+    const { exitCode, stdout, stderr } = runInSandbox(sandbox);
 
-    expect(exitCode).toBe(0);
+    expect(exitCode, `runner stderr: ${stderr}`).toBe(0);
     expect(stdout).toContain("Files with skipped tests:");
     expect(stdout).toContain("needs a POSIX shell, which this platform has not");
     expect(stdout).toContain("snap launcher [skipped: no sh on this platform] > exports SNAP_DATA");
@@ -139,9 +139,9 @@ describe("the test runner, end to end", () => {
 
   test("a file that registers no test is a failure, not a green line", () => {
     const sandbox = sandboxWith('import { expect } from "bun:test";\nexpect(1).toBe(1);\n');
-    const { exitCode, stdout } = runInSandbox(sandbox);
+    const { exitCode, stdout, stderr } = runInSandbox(sandbox);
 
-    expect(exitCode).toBe(1);
+    expect(exitCode, `runner stderr: ${stderr}`).toBe(1);
     expect(stdout).toContain("FAIL");
   });
 
