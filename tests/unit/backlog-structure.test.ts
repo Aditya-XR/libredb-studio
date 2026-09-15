@@ -406,7 +406,12 @@ describe("a quoted grep command answers what the entry says it answers", () => {
           `(no backslash escapes, no bracket expressions): ${pattern}`,
       );
     }
-    return new RegExp(pattern.replaceAll(/[+?|(){}]/g, "\\$&"));
+    // The backslash is in the escape class as well, although the refusal above means one
+    // never reaches this line: a translation that escapes some metacharacters and not the
+    // escape character itself is only correct while its caller is, and this one should be
+    // correct on its own terms. `. * ^ $` are deliberately NOT escaped: BRE and JS read
+    // those the same way, so escaping them would change the question the entry asks.
+    return new RegExp(pattern.replaceAll(/[\\+?|(){}]/g, "\\$&"));
   };
 
   /**
