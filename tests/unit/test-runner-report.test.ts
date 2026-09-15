@@ -227,6 +227,23 @@ describe("what the runner prints", () => {
     expect(text).not.toContain("tests/unit/a.test.ts (");
   });
 
+  test("files that could not run here are listed under the reason, which is printed once", () => {
+    const notRun = [
+      { file: "tests/unit/helm-chart-agent.test.ts", reason: "Helm is not installed." },
+      { file: "tests/unit/helm-chart-route.test.ts", reason: "Helm is not installed." },
+    ];
+    const text = formatSummary(summary(), notRun);
+
+    expect(text).toContain("Files not run on this machine:");
+    expect(text.split("Helm is not installed.").length - 1).toBe(1);
+    expect(text).toContain("tests/unit/helm-chart-agent.test.ts");
+    expect(text).toContain("tests/unit/helm-chart-route.test.ts");
+  });
+
+  test("a run where everything could run says nothing about it", () => {
+    expect(formatSummary(summary(), [])).not.toContain("not run on this machine");
+  });
+
   test("a run with no skips says nothing about skips", () => {
     expect(formatSummary(summary())).not.toContain("Files with skipped tests");
   });

@@ -27,6 +27,7 @@ import { COVERAGE_EXEMPT_FILES, selectTestFiles } from "./runner/discover";
 import { coverageDirFor, type RunFile, runTestFiles, type SpawnOutcome } from "./runner/execute";
 import { parseRunnerArgs, type RunnerOptions } from "./runner/options";
 import { formatFileLine, formatSummary, parseSkippedTests } from "./runner/report";
+import { missingHelm, planRequirements, requiredCapabilities, systemHelmProbe } from "./runner/requirements";
 
 const root = path.resolve(import.meta.dir, "..");
 
@@ -174,6 +175,15 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  // Decided before anything is deleted or started: a run that has to be refused (a CI job whose
+  // Helm is missing) refuses with the coverage directory and the merged report still intact.
+  const plan = planRequirements({
+    files,
+    readSource: (file) => readFileSync(path.join(root, file), "utf8"),
+    missing: { helm: () => missingHelm(systemHelmProbe(root)) },
+    required: requiredCapabilities(process.env),
+  });
+
   if (options.coverage) {
     const coverageDir = path.resolve(root, options.coverageDir);
     // --coverage-dir is a path the caller chooses and this line deletes it, so it is
@@ -195,13 +205,15 @@ async function main(): Promise<number> {
   runScratch = junitDir;
 
   const selection = options.selectors.length > 0 ? options.selectors.join(" ") : "tests/";
+  const notRunNote =
+    plan.notRun.length > 0 ? ` (${plan.notRun.length} not run on this machine, listed at the end)` : "";
   process.stdout.write(
-    `bun ${Bun.version} on ${process.platform}-${process.arch}: ${files.length} files from ${selection}, ` +
+    `bun ${Bun.version} on ${process.platform}-${process.arch}: ${plan.run.length} files from ${selection}${notRunNote}, ` +
       `${options.jobs} at a time${options.coverage ? ", with coverage" : ""}\n\n`,
   );
 
   const summary = await runTestFiles({
-    files,
+    files: plan.run,
     jobs: options.jobs,
     timeoutMs: options.fileTimeoutMs,
     coverage: options.coverage,
@@ -216,10 +228,10 @@ async function main(): Promise<number> {
     },
   });
 
-  process.stdout.write(`${formatSummary(summary)}\n`);
+  process.stdout.write(`${formatSummary(summary, plan.notRun)}\n`);
   if (summary.failures.length > 0) return 1;
 
-  if (options.mergeInto) mergeCoverage(options, files);
+  if (options.mergeInto) mergeCoverage(options, plan.run);
   return 0;
 }
 

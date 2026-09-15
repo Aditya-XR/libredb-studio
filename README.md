@@ -540,7 +540,7 @@ Sample tables: `app.customers`, `app.products`, `app.orders`, `app.order_items`,
 
 ## Testing
 
-LibreDB Studio has a comprehensive test suite: 542 test files and 17,477 tests across seven layers, plus 79 browser tests, with **100% line coverage** enforced by CI (`bun run coverage:check`).
+LibreDB Studio has a comprehensive test suite: 543 test files and 17,499 tests across seven layers, plus 79 browser tests, with **100% line coverage** enforced by CI (`bun run coverage:check`).
 
 ### Quick Commands
 
@@ -549,7 +549,7 @@ LibreDB Studio has a comprehensive test suite: 542 test files and 17,477 tests a
 bun run test
 
 # Run by layer
-bun run test:unit          # Pure function tests (321 files)
+bun run test:unit          # Pure function tests (322 files)
 bun run test:api           # API route handler tests (35 files)
 bun run test:integration   # Database provider tests (24 files)
 bun run test:hooks         # React hook tests (21 files)

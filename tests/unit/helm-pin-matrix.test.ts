@@ -280,6 +280,20 @@ describe("#434 regression: the suite-running jobs cannot drift apart", () => {
     expect(pins.filter(([, version]) => version !== first)).toEqual([]);
   });
 
+  test("every job that runs the suite requires the chart tests, so none of them can quietly skip", () => {
+    // A test file marked `@requires helm` runs only where helm and the built chart dependency are
+    // there, and is listed as not run elsewhere (tests/runner/requirements.ts). That is the right
+    // answer on a contributor's machine and the wrong one in CI, where a lost setup-helm step would
+    // otherwise turn twelve chart test files into a line in a green log. LIBREDB_REQUIRE_HELM=1 makes
+    // the runner refuse instead, and this holds every suite-running job to setting it.
+    const unenforced = SUITE_SITES.filter((site) => {
+      const pin = BY_SITE.get(site);
+      if (pin === undefined) return true;
+      return !jobCommandLines(readWorkflow(pin.file), pin.job).some((line) => /LIBREDB_REQUIRE_HELM:\s*"1"/.test(line));
+    });
+    expect(unenforced).toEqual([]);
+  });
+
   test("reintroducing `helm install --dry-run=client` requires a Helm 4 suite pin", () => {
     // The workaround in helm-chart-dualstack.test.ts exists only because Helm
     // 3.16 calls IsReachable() on a client-side dry run. The idiom becomes legal

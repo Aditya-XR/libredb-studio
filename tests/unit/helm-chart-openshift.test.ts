@@ -1,3 +1,4 @@
+// @requires helm
 /**
  * Regression tests for the chart-0.1.20 OpenShift and seed-connection
  * behaviors introduced with the operator PR (#152):

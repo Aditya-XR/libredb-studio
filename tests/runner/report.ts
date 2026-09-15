@@ -8,6 +8,7 @@
  * skipped, and how to re-run any file that failed on its own.
  */
 import type { FileOutcome, RunSummary, TestCounts } from "./execute";
+import type { NotRunFile } from "./requirements";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching the terminal escapes bun writes
 const ANSI = /\[[0-9;]*m/g;
@@ -105,7 +106,7 @@ function failureReason(outcome: FileOutcome, timeoutMs: number): string {
   return `exit ${outcome.exitCode}`;
 }
 
-export function formatSummary(summary: RunSummary): string {
+export function formatSummary(summary: RunSummary, notRun: NotRunFile[] = []): string {
   const { totals } = summary;
   const tests = [`${totals.tests.pass} pass`];
   if (totals.tests.fail > 0) tests.push(`${totals.tests.fail} fail`);
@@ -128,6 +129,19 @@ export function formatSummary(summary: RunSummary): string {
     lines.push(
       `${totals.filesWithoutCounts} ${totals.filesWithoutCounts === 1 ? "file" : "files"} printed no summary, so their tests are not in the totals above.`,
     );
+  }
+
+  // A file that needs something this machine does not have was never started, so it is in none
+  // of the totals above. It is named here under its reason, printed once: on a machine without
+  // Helm that is twelve chart test files and one sentence (see tests/runner/requirements.ts).
+  if (notRun.length > 0) {
+    lines.push("", "Files not run on this machine:");
+    const byReason = new Map<string, string[]>();
+    for (const { file, reason } of notRun) byReason.set(reason, [...(byReason.get(reason) ?? []), file]);
+    for (const [reason, files] of byReason) {
+      lines.push(`  ${reason}`);
+      for (const file of files.sort()) lines.push(`    ${file}`);
+    }
   }
 
   // A skipped test is not a passing test, and bun prints its title nowhere (see

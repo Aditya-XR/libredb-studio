@@ -1,3 +1,4 @@
+// @requires helm
 /**
  * Regression tests for the chart's dual-stack Service surface
  * (service.ipFamilyPolicy / service.ipFamilies), added for #432:

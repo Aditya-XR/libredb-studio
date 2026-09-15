@@ -43,11 +43,24 @@ function sandboxWith(fixture: string): string {
   return sandbox;
 }
 
-function runInSandbox(sandbox: string): { exitCode: number; stdout: string; stderr: string } {
-  const result = Bun.spawnSync([process.execPath, "tests/run-tests.ts", "tests/unit/fixture.test.ts"], {
-    cwd: sandbox,
-  });
+function runInSandbox(
+  sandbox: string,
+  selectors: string[] = ["tests/unit/fixture.test.ts"],
+  env: Record<string, string | undefined> = withoutRequirements(),
+): { exitCode: number; stdout: string; stderr: string } {
+  const result = Bun.spawnSync([process.execPath, "tests/run-tests.ts", ...selectors], { cwd: sandbox, env });
   return { exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+}
+
+/**
+ * This process's environment without the run requirements CI sets. The CI job that runs this
+ * file exports LIBREDB_REQUIRE_HELM=1 for the real suite, and a sandbox child inheriting it
+ * would refuse to run for a reason that belongs to the parent, not to the case under test.
+ */
+function withoutRequirements(): Record<string, string | undefined> {
+  const env = { ...process.env };
+  delete env.LIBREDB_REQUIRE_HELM;
+  return env;
 }
 
 function runRunner(args: string[]): { exitCode: number; stdout: string; stderr: string } {
@@ -135,6 +148,34 @@ describe("the test runner, end to end", () => {
     expect(stdout).toContain("Files with skipped tests:");
     expect(stdout).toContain("needs a POSIX shell, which this platform has not");
     expect(stdout).toContain("snap launcher [skipped: no sh on this platform] > exports SNAP_DATA");
+  });
+
+  test("a file that needs Helm is named as not run where Helm is unusable, and refused where it is required", () => {
+    // The sandbox has no charts/ directory, so Helm is unusable in it on every machine: either
+    // there is no helm binary, or there is one and no built chart dependency beside it.
+    const sandbox = sandboxWith(
+      'import { expect, test } from "bun:test";\ntest("adds", () => {\n  expect(1 + 1).toBe(2);\n});\n',
+    );
+    writeFileSync(
+      path.join(sandbox, "tests/unit/chart.test.ts"),
+      [
+        ["//", "@requires", "helm"].join(" "),
+        'import { test } from "bun:test";',
+        'test("renders", () => {});',
+        "",
+      ].join("\n"),
+    );
+
+    const relaxed = runInSandbox(sandbox, ["tests/unit"]);
+    expect(relaxed.exitCode, `runner stderr: ${relaxed.stderr}`).toBe(0);
+    expect(relaxed.stdout).toContain("Files not run on this machine:");
+    expect(relaxed.stdout).toContain("tests/unit/chart.test.ts");
+    expect(relaxed.stdout).toContain("1 file: 1 passed");
+
+    const strict = runInSandbox(sandbox, ["tests/unit"], { ...withoutRequirements(), LIBREDB_REQUIRE_HELM: "1" });
+    expect(strict.exitCode).toBe(2);
+    expect(strict.stderr).toContain("tests/unit/chart.test.ts needs helm");
+    expect(strict.stderr).toContain("LIBREDB_REQUIRE_HELM=1");
   });
 
   test("a file that registers no test is a failure, not a green line", () => {

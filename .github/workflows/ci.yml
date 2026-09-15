@@ -159,6 +159,10 @@ jobs:
         # the point: the gate and the documented command cannot drift apart.
         run: bun run test:coverage
         env:
+          # Optional on a contributor's machine, mandatory here: this job installs Helm and
+          # builds the chart dependency, so a chart test that did not run is a defect, and the
+          # runner refuses the run instead of listing it as not run (tests/runner/requirements.ts).
+          LIBREDB_REQUIRE_HELM: "1"
           JWT_SECRET: test-secret-for-ci-build-only-32ch
           ADMIN_EMAIL: admin@libredb.org
           ADMIN_PASSWORD: test-admin
@@ -270,6 +274,10 @@ jobs:
         # what makes this job evidence.
         run: bun run test
         env:
+          # Optional on a contributor's machine, mandatory here: this job installs Helm and
+          # builds the chart dependency, so a chart test that did not run is a defect, and the
+          # runner refuses the run instead of listing it as not run (tests/runner/requirements.ts).
+          LIBREDB_REQUIRE_HELM: "1"
           JWT_SECRET: test-secret-for-ci-build-only-32ch
           ADMIN_EMAIL: admin@libredb.org
           ADMIN_PASSWORD: test-admin

@@ -76,6 +76,11 @@ jobs:
         # separate test:ci script any more, because there is no longer a
         # shared-process form of the suite for it to be the alternative to.
         run: bun run test
+        env:
+          # Optional on a contributor's machine, mandatory here: this job installs Helm and
+          # builds the chart dependency, so a chart test that did not run is a defect, and the
+          # runner refuses the run instead of listing it as not run (tests/runner/requirements.ts).
+          LIBREDB_REQUIRE_HELM: "1"
 
       - name: Build
         run: bun run build

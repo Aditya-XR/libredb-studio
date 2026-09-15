@@ -11,5 +11,5 @@ workflow run so CI can verify it. You do not need to withdraw correct work becau
 is unavailable.
 
 If your sandbox can reach the npm registry, `npm install -g bun` is another way to install Bun.
-Helm is only needed for the chart tests in the test suite. The repository's devcontainer provides
-Bun and Helm and installs the JavaScript and chart dependencies automatically.
+Helm is only needed to run the chart tests: without it `bun run test` leaves those files out and names them, and CI runs them.
+The repository's devcontainer provides Bun and Helm and installs the JavaScript and chart dependencies automatically.

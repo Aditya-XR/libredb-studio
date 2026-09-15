@@ -303,6 +303,14 @@ registration, because the runner already gives it a process. What is still not a
 reverse repair: pushing one file's constraint outward onto every file that might legitimately import
 the module.
 
+A test file that needs a tool a contributor may not have says so on its first line, and today there is one such tool.
+The twelve chart tests that drive the real `helm` binary open with `// @requires helm`, and `tests/runner/requirements.ts` reads the marker before it starts a file.
+Where `helm` is missing, or the chart's PostgreSQL subchart is not built, those files are not started, and the summary names them once under the reason and the command that fixes it; a selection made only of such files is an error, not an empty green run.
+Every CI job that runs the suite sets `LIBREDB_REQUIRE_HELM=1`, which makes the same condition stop the run before anything starts, and `tests/unit/helm-pin-matrix.test.ts` fails if one of those jobs loses the variable.
+The decision is per file rather than per test because each of those files needs Helm for everything it does, so skipping inside them would print about 180 test titles where twelve file names say the same.
+Leaving them out costs no line coverage, because what they exercise is the chart's templates, which no lcov measures: measured with `helm` hidden from `PATH`, 531 files ran and the merged report was still 100% of 56883 lines.
+`tests/unit/test-runner-requirements.test.ts` holds the marker true of the tree in both directions: a file that spawns helm carries it, and a file that carries it spawns helm.
+
 ### Dependency installation in CI
 
 Every workflow job installs dependencies through the local composite action
