@@ -1403,9 +1403,9 @@ container in the suite. The mock simulates a Redis 7.2.x server (`redis_version:
 Redis 6.0+ instance.
 
 > ⚠️ **Mock isolation:** `bun`'s `mock.module()` is process-wide. Run the suite with
-> `bun run test` (which isolates execution groups), **never** bare `bun test` across multiple
-> files — see the note in [`CLAUDE.md`](../../CLAUDE.md). The Redis file mocks `ioredis`, which
-> would otherwise leak into any other test sharing the process.
+> `bun run test`, which gives every test file its own bun process, never bare `bun test` across
+> multiple files - see the note in [`CLAUDE.md`](../../CLAUDE.md). The Redis file mocks `ioredis`,
+> which would otherwise leak into any other test sharing the process.
 
 ### 11.2 Coverage
 

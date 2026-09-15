@@ -76,8 +76,9 @@ SQLite driver by runtime:
   sqlite connection is actually used.
 - **Identical behaviour:** the adapter exposes the exact `bun:sqlite`-shaped surface the provider
   uses (`exec` / `prepare().all/get/run` / `close`) and bridges the small `node:sqlite` deltas
-  (`get()` miss returns `null` not `undefined`; `run().changes` normalized to `number`), so results
-  and error mapping are the same under both runtimes.
+  (`get()` miss returns `null` not `undefined`; `run().changes` normalized to `number`;
+  `close(throwOnError)` is bun's flag for "release the file now" and node:sqlite needs none), so
+  results and error mapping are the same under both runtimes.
 - **Why not `better-sqlite3`?** Bun refuses to load it outright, and its native binding must match
   the installing runtime's ABI (a bun-installed binding fails under Node). The built-in drivers
   need no native dependency at all. (`better-sqlite3` remains the *storage-layer* driver.)
@@ -169,6 +170,31 @@ directories are created on connect.
 concurrency, NORMAL sync for a speed/durability balance. The agent read-only profile runs a
 different open sequence entirely — `journal_mode = WAL` is itself a write and fails on a read-only
 handle ([§12.1](#121-where-the-boundary-is)).
+
+`disconnect()` closes with `close(true)`, and the argument is load-bearing. Bare `close()` on
+`bun:sqlite` is `sqlite3_close_v2`: with any statement still unfinalized the connection becomes a
+zombie and the database, its `-wal` and its `-shm` stay **open** until the last statement is
+finalized or garbage collected. This provider prepares a statement per query and drops the
+reference, so that used to be whenever the collector got to it, measured through `/proc/self/fd`,
+three descriptors survived a `disconnect()` that reported `isConnected() === false`. POSIX hides
+that, because it unlinks a file that is still open; Windows does not, and a user could not delete or
+move a database Studio had disconnected from. `close(true)` finalizes and closes for real, and
+raises if SQLite cannot. `node:sqlite` needs no flag: its own `close()` finalizes the statements it
+tracks (measured on Node 24.14.0).
+
+The sidecars are NOT the portable reading of this, although they look like it: probed on all three
+runners, `close(true)` removes `-wal` and `-shm` on Linux and Windows and leaves both in place on
+macOS, where bun:sqlite links Apple's system libsqlite3. That is the library keeping the WAL rather
+than a handle keeping the file, because opening the same database with node:sqlite and closing it
+removed them on that same macOS run, which takes the exclusive lock a surviving handle would deny.
+So `tests/integration/db/sqlite-provider.test.ts` asks each platform what it can answer: everywhere,
+the file can be renamed after `disconnect()`, which is what Windows refuses for a live handle; on
+Linux, no descriptor of the process still points into the directory. The node adapter's harness does
+assert the sidecars, because its own SQLite removes them everywhere.
+
+The same close runs on the failure path of `connect()`: an open that succeeds and then fails its
+pragmas (a connection pointed at a file that is not a database, the ordinary wrong-file mistake)
+used to leave the handle held, so the user could not delete or move the file they had just picked.
 
 ### 3.3 Read vs write dispatch
 
@@ -934,9 +960,9 @@ SQLite is the **only** provider whose integration tests run against a **real eng
 Embedded + in-memory/tempfile means there is no server to provision, so the tests exercise actual
 SQL execution, schema PRAGMAs, maintenance, and monitoring end-to-end.
 
-> Mock-isolation still applies to the *suite* (other files mock their drivers process-wide), so run
-> with `bun run test:ci` / `bun run test:coverage`, not the single-process `bun run test`. See
-> [`CLAUDE.md`](../../CLAUDE.md).
+> Other files in the suite mock their drivers process-wide, and `bun run test` keeps them apart by
+> giving every test file its own bun process, so neither this file nor the whole suite is exposed to
+> another file's mocks. See [`CLAUDE.md`](../../CLAUDE.md).
 
 ### 11.2 Coverage
 
@@ -958,7 +984,7 @@ since bun and node report read-only violations differently.
 
 ```bash
 bun test tests/integration/db/sqlite-provider.test.ts   # real :memory: engine
-bun run test:ci                                          # CI publish gate (per-file isolation)
+bun run test                                             # the whole suite, one process per file
 bun run test:coverage                                    # CI coverage workflow
 ```
 

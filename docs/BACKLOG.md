@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1–D94, U17 · 38
+- [Drivers and connections](#drivers-and-connections) — D1–D97, U17 · 43
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U21 · 12
@@ -40,7 +40,7 @@ None of it is a GitHub issue.
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A5 · 4
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B80 · 24
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 25
 
 ---
 
@@ -876,41 +876,6 @@ collides with every one of them.
 **Done when:** one definition of each replaces the copies, with the sqlite and libsql source read
 sharing its statement.
 
-### D68. `bun run test` is red on a shared process, and only CI's per-file isolation hides it
-
-`bun run test` is the pre-commit command CLAUDE.md documents, and it runs
-`bun test tests/unit tests/api tests/integration` in ONE bun process. `mock.module()` is
-process-wide, so a mock one layer needs reaches every file in that process. CI runs
-`tests/run-core.sh` instead, one process per file, and is blind to the whole class by
-construction.
-
-Measured 2026-09-13, and the same numbers at `acf50738` and on the #789 branch, so it predates
-that epic: every file under `tests/api/` mocks `@/lib/auth` with stubbed `signJWT`, `verifyJWT`,
-`getSession`, `login` and `logout`, which is that layer's standard pattern. Run
-`tests/unit/lib/auth.test.ts`, `tests/unit/lib/auth-jwt-config.test.ts` and
-`tests/unit/seed/resolve-connection.test.ts` beside `tests/api/db-objects.test.ts` and the four
-files together are 31 fail; each of them alone is 0 fail.
-
-**It is not one module.** RE-MEASURED 2026-09-14 (#789 Phase 3): `tests/api/admin/audit.test.ts`
-mocks `@/lib/audit` the same way, and `tests/api/db/objects/edit-apply.test.ts` reads the audit ring
-to assert what an apply logs. Run those two files together and it is 20 pass 11 fail; each alone is
-0 fail, and `bun run test:ci` runs all 424 core files and exits 0. So the pattern is a LAYER mocking
-a module a sibling in the same layer legitimately needs, and `@/lib/auth` against three unit files is
-one instance of it rather than the whole of it. The full `bun run test` at that commit is 42 fail,
-all of them in these two groups.
-
-The cost is not a red gate, because no gate runs that shape. It is that a contributor following
-CLAUDE.md sees dozens of failures on a clean checkout and cannot tell them from their own.
-
-#789 removed its own three instances by moving the files with the unshareable assumption into
-`tests/isolated/`, where `tests/run-components.sh` gives each a process and
-`tests/unit/component-runner-coverage.test.ts` makes an unregistered one a red test. The same
-remedy does not fit here: it is not three files but a whole layer's mocking pattern against three
-unit files that legitimately want the real module. `docs/TOOLCHAIN.md` carries the diagnosis.
-
-**Done when:** `bun run test` on a clean checkout is green, either because the auth mocking pattern
-stops reaching `tests/unit`, or because the documented command runs the same isolation CI does.
-
 ### D69. Six type-ids still open `readObjectSource` with their own entry guard, and one of its sentences is less true
 
 `requireSourceKind` in `src/lib/db/object-kinds.ts` is the one entry guard for `readObjectSource`:
@@ -1243,6 +1208,146 @@ Two halves, and the second is what stops it recurring:
 **Done when:** a test fails on a stale `file.ts:NNNN` anywhere under `src/`, `docs/` and `tests/`,
 and the citations present at that commit all resolve. The test needs one case per shape it must
 accept, a single line, a range and a comma pair, and one negative that fails when an anchor moves.
+
+### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses two exports
+
+`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 36 hits, measured 2026-09-15. Five of
+them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`,
+the agent routes' pattern). Twenty-nine write out the same five-key object - `getSession`, `signJWT`,
+`verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token
+nothing reads, and one of those twenty-nine is `tests/helpers/object-edit-route-harness.ts`, a shared
+harness that could have been the factory and copied the stub instead. The remaining two write a
+shorter stub of their own, one with two keys and one with a single `getSession`.
+
+`src/lib/auth.ts` exports seven names. The two no hand-written stub carries are
+`shouldMarkCookieSecure` and `resetCookieSecurityWarning`:
+`grep -rn 'shouldMarkCookieSecure' tests/` returns exactly one hit, and it is a sentence in a comment
+rather than a stub key, while `resetCookieSecurityWarning` appears only in
+`tests/unit/lib/auth.test.ts`, which imports the real module.
+`src/app/api/auth/oidc/login/route.ts` imports `shouldMarkCookieSecure` and awaits it to decide the
+auth cookie's `secure` flag, so every one of those stubs is already an export short of the module it
+replaces. Nothing has hit that yet only because `tests/api/auth/oidc-login.test.ts` is one of the
+route tests that does NOT mock `@/lib/auth`.
+
+Nothing can catch it either. `mock.module` is declared `module(id: string, factory: () => any)` in
+`node_modules/bun-types/test.d.ts`, so a stub that has drifted from the module it stands in for is
+invisible to `bun run typecheck`, and the drift can only show up as a `TypeError` in whichever route
+reaches the missing export first.
+
+Per-file process isolation does nothing about this and was never meant to. The runner gives each
+file its own process, so a stub can no longer reach a sibling that wants the real module. What a
+process boundary cannot do is make the stub the right SHAPE.
+
+**Done when:** one factory in `tests/helpers/`, typed `(): typeof import("@/lib/auth")`, replaces the
+hand-written stubs, so adding an export to `src/lib/auth.ts` fails `typecheck` in every file that
+mocks it instead of at run time in one of them. The same shape then covers the other layer-wide
+mocks, `@/lib/db` in fifteen files and `@/lib/audit` in four.
+
+### D86. `bun test --isolate` has not been re-probed, and the runner pays a process per test file
+
+`tests/run-tests.ts` spawns one bun process per test file, 549 of them on 2026-09-15, because
+`mock.module()` is process-wide with no undo and whole-module mocks are a whole layer's standard
+pattern. That is what it costs, measured on Linux with 20 cores and bun 1.4.2 earlier the same day,
+over the 538 files the tree held then: 211 seconds one file at a time, 61 seconds 4 at a time, 36
+seconds 20 at a time, and about 60 seconds at 8 with coverage on. `README.md` carries the same three
+timings against the same 538 files.
+
+bun 1.4.2 has `--isolate`, which resets the module registry per file inside ONE process and does
+contain `mock.module`. If it were reliable here, the runner could start a handful of processes
+rather than one per file. It is not adopted because of oven-sh/bun#41655, a NAPI finalizer SIGSEGV
+that reproduces serially on 1.4.2, and this suite loads three NAPI addons: `better-sqlite3`,
+`oracledb` and `@duckdb/node-api`. `docs/TOOLCHAIN.md` records the same refusal, beside the one for
+`--parallel`.
+
+**Done when:** #41655 is closed and a probe has run the whole suite under `--isolate` twenty
+consecutive times on each of Linux, macOS and Windows with no crash, no leaked subprocess and the
+same per-file pass counts as the process-per-file runner, after which the runner may take it - or
+the probe reproduced a failure and this entry is replaced by what it reproduced. A mode that is
+flaky at this size is worse than a slow one, because its failures arrive wearing the tests' own
+clothes.
+
+### D87. Two packaging tests cannot run on Windows because the scripts they drive shell out
+
+Measured 2026-09-15, while making `bun run test` green on all three platforms. Two tests now declare
+a platform or tool requirement and say so in their own title, and in both cases the requirement comes
+from the script under test rather than from the test:
+
+- `scripts/build-azure-package.mjs:273` builds the marketplace archive with `execFileSync("zip", ...)`.
+  A stock Windows 11 machine has neither `zip` nor `unzip`, so `tests/unit/build-azure-package.test.ts`
+  gates its build cases on both binaries. Writing the two-file archive with a pure JavaScript zip
+  writer would make the Azure package reproducible everywhere and let the test read the archive back
+  in process, which is what it already does for the standalone zip since this change.
+- `scripts/ci-install.sh` is the bun install retry policy used by every workflow, and
+  `tests/unit/ci-install.test.ts` drives it with a fixture PATH holding two `chmod 0755` stubs.
+  Windows has no exec bit and no shebang dispatch, so the whole file is skipped there. The policy is
+  twenty lines of arithmetic and `bun install`; as `scripts/ci-install.mjs` it would run under the
+  same `shell: bash` steps and be testable on every platform.
+
+Neither is a correctness defect today: CI runs both on Linux, and the skips are declared rather than
+silent. What they cost is that a Windows contributor cannot verify a change to either script.
+
+**Done when:** the Azure package is written without an external archiver, `ci-install` is a script bun
+or node can run, and both test files run unconditionally on all three platforms.
+
+### D95. The runner's default concurrency reads the CPUs and never the memory limit
+
+Measured 2026-09-15 on Linux x64 with 20 cores and bun 1.4.2, while reviewing #837.
+`tests/run-tests.ts` passes `availableParallelism()` to `parseRunnerArgs`, which makes the default one job per available CPU.
+That much already behaves: `availableParallelism()` in bun 1.4.2 follows CPU affinity and a cgroup v2 CPU quota, measured as 2 under `taskset -c 0-1` and 2 under `systemd-run --property=CPUQuota=200%`, so a container with a CPU limit is sized by it.
+A container with a MEMORY limit and no CPU limit on a many-core host is not, and that is the case that fails: `docker run --memory=2g` on a 64-core host starts 64 jobs.
+
+What a job costs, measured over a 32-file sample run one at a time under `/usr/bin/time`, in peak RSS: minimum 58 MiB, median 100 MiB, p90 199 MiB, maximum 341 MiB.
+Under real concurrency the files do not peak together, so the marginal cost is lower: the runner over `tests/components` peaked at 599 MB with 4 jobs, 998 MB with 8 and 1599 MB with 16, a slope of about 80 to 90 MiB per extra job over a fixed 300 MB.
+The largest run actually made was 16 jobs, so 64 jobs is 5 to 6 GiB extrapolated from that slope rather than measured, and 12.4 GiB if every file peaked at the p90 bound at once, against a 2 GiB limit.
+Under Kubernetes or systemd the whole run is then killed rather than one file: measured before this branch handled SIGTERM, a run stopped by systemd's default `OOMPolicy` ended at exit 143 with no summary and its scratch directory left behind, and it now ends at the same 143 with `Interrupted (SIGTERM).`; under Kubernetes's `memory.oom.group` the kernel SIGKILLs the runner too, so nothing is printed at all (reasoned, not measured).
+Neither shape names the file that ran the container out of memory, which is what a memory-aware default would prevent rather than explain.
+
+Which API can carry the limit was measured too, and only one of the three can.
+`process.constrainedMemory()` follows a cgroup v2 `memory.max` (2147483648 under `MemoryMax=2G`) and equals `os.totalmem()` when there is no limit, which makes it usable with no fallback branch.
+`process.availableMemory()` does NOT: inside the same 2 GiB scope it returned the host's 34 GB, unlike node 24, which follows the cgroup there.
+`os.freemem()` is not a budget at all, since it moves with unrelated load and leaves out reclaimable page cache.
+Not measured: what `constrainedMemory()` returns on macOS and on Windows, where there is no cgroup for bun to read; reasoned, it should be total RAM, and that is what the entry rests on.
+
+A fixed cap is the wrong shape and was rejected: `Math.min(cpuCount, 16)` still needs 1.6 to 3.1 GiB inside a 1 GiB container, and it caps a workstation on a constant nobody measured against memory.
+What this PR did instead is make the failure readable: a file killed by SIGKILL from outside the runner now names the OOM killer and `--jobs=N` in its reason, `CONTRIBUTING.md` says when to pass it, and `docs/TOOLCHAIN.md` carries these numbers.
+
+The shape it would take: `parseRunnerArgs`'s injected context grows from `{ cpuCount }` to `{ cpuCount, memoryBytes }`, `tests/run-tests.ts` passes `process.constrainedMemory()`, and the default becomes
+`Math.max(1, Math.min(cpuCount, Math.floor(memoryBytes / JOB_MEMORY_BUDGET_BYTES)))`.
+A budget of 256 MiB is the one this measurement supports: above the p90 per-file peak of 199 MiB and about three times the concurrent slope.
+A 2 GiB limit would then give 8 jobs, where 8 measured 940 MiB of anonymous memory, and the measured host, whose `constrainedMemory()` is 67,118,133,248 bytes (64 GB, 62.5 GiB), would give 250, so the CPUs stay the binding constraint everywhere else.
+An explicit `--jobs=N` must still win over it, and the budget is a constant that drifts as the suite grows, so its docblock has to carry the basis above.
+
+**Done when:** `parseRunnerArgs` takes a memory budget beside the CPU count, `tests/unit/test-runner-options.test.ts` pins the four cases (64 CPUs with 2 GiB gives 8, 8 CPUs with 64 GiB gives 8, 4 CPUs with 100 MiB gives 1 and never 0, and an explicit `--jobs=32` wins over all of it), and a CI run on macos-latest and windows-latest has printed `process.constrainedMemory()` against `os.totalmem()` so the unmeasured half of the premise is measured rather than reasoned.
+
+### D96. bun 1.4.2 drops part of a child's own console output when the child exits under load
+
+Measured 2026-09-15 on Linux x64 with 20 cores and bun 1.4.2, while reviewing #837.
+A test file that prints a megabyte and then fails does not always get that megabyte to whoever is reading the run: the bytes are lost by the child `bun test` process at its own exit, before anything the runner can drain.
+A fixture printing 1024 lines of 1023 bytes, run 20 times with the machine deliberately loaded, lost output in 15 of the 20 runs and delivered as few as 182 of the 1024 lines; unloaded, 10 of 10 runs were whole.
+The loss is not the runner's pipe: with the runner's own stdout redirected to a FILE, 3 of 10 loaded runs still lost 15 to 40 per cent of the file's output, and with no runner in the picture at all, `bun test ./fixture.test.ts 2>/dev/null | cat > out` under load delivered 126 of 1024 lines in 1 of 10 runs.
+
+What the runner does guarantee is its own last lines: the summary, the `Failed files:` block and the re-run hint are written through a drain that waits for the bytes to leave the process, and those survived every one of those runs.
+So the cost is a contributor reading a red CI log from a busy machine and getting a truncated failure diff under an accurate verdict, not a wrong verdict.
+`tests/unit/test-runner-cli.test.ts` states this where it would otherwise be tempting to assert the whole output back: its megabyte case asserts the verdict, the summary and that the file's output reached stdout at all, and says in a comment why it cannot assert the line count.
+
+There is nothing to fix inside this repository: the queue that is dropped belongs to the child process.
+What can be done is to re-probe, and to stop the claim drifting back to "whole output" in the meantime.
+
+**Done when:** the focused repro has been run against a bun newer than 1.4.2 under the same load, and either it is whole 10 times out of 10 and this entry closes, or the entry names the newest version it still reproduces on and is reported upstream.
+
+### D97. A committed `.only` makes a file report PASS with the rest of its tests never run
+
+Measured 2026-09-15 on bun 1.4.2, while reviewing #837.
+bun honours `.only` by default, and nothing in the runner, the lint configuration or the required checks refuses one that reaches `main`.
+A fixture holding `it.only`, a failing `it`, a `describe.todo` and a `describe.concurrent` with two more tests wrote a junit report of `tests="1" failures="0"`, exited 0, and the runner printed `PASS 0.0s tests/unit/only.test.ts 1 pass`; the same file without the `.only` registers five tests.
+So four registered tests, one of them failing, are absent from the report, from the run's totals and from CI's verdict, and the run is green.
+
+The runner cannot close this from the report it reads, which is why `toOutcome`'s docblock now names `.only` as the shape the report cannot see.
+bun's report is honest about the one test it ran; the file that should have been refused is the one on disk.
+It has to be refused before the run, and there are two cheap shapes: an `eslint-plugin-no-only-tests` rule (or oxlint's `jest/no-focused-tests`) scoped to `tests/**` and `e2e/**`, or a grep over the same paths inside the required `Lint, Typecheck and Build` check, which costs one command and no new dependency.
+The coverage gate is not a reliable second line of defence either: whether it goes red depends on which lines the unrun tests were the only cover for, which is a property of the file rather than of the `.only` (reasoned, not measured).
+
+**Done when:** a file carrying `it.only`, `test.only` or `describe.only` under `tests/` or `e2e/` fails a required check, and a test pins that gate by driving it over a fixture that carries one, with a control fixture that does not and passes.
 
 
 ## Value interpolation
@@ -2746,3 +2851,43 @@ capability object cost nothing, and now the request SHAPE is derived from it.
 
 **Done when:** no read is issued for a connection whose declaration has not arrived, proven by a test
 that switches between two engines of different depth and asserts what was posted.
+
+### B81. A failure nobody attributed leaves the browser asserting that the server serves no seeds
+
+B37 landed and left this file; its id survives in the comments on `src/hooks/use-connection-payload.ts`
+and `src/hooks/use-connection-manager.ts`, which is where the reasoning below can be read against the
+code. It gave `ServedSeeds` a way to say "I do not have the seed list", and then gave the state an
+initial value of `{loaded: true, seeds: []}` under the name `NO_SERVED_SEEDS`, commented as
+"loaded, and genuinely empty". Before the first answer arrives nothing has been measured, so that
+value is a claim the browser is not entitled to, and it is the claim B37 was filed about.
+
+Measured on 2026-09-15 by driving the whole path with a gateway error page, the shape
+`tests/hooks/use-connection-manager.test.ts` already pins as intended:
+`GET /api/connections/managed` answers 502 with `text/html`, no `reason` is read from the body, so
+`setServedSeeds` is never called and the state is still the module constant by identity.
+`initializeConnections` then falls back to `storage.getConnections()`, the user's editable seed copy
+renders, and `resolveAgentRunConnectionId` answers `{id: null, reason: "browser-only"}`. The rail
+says, of a connection this application seeds itself:
+
+> Sample (Employees) cannot be rebuilt on the server: its settings live in this browser.
+
+That is B37's sentence, false in both halves, reached through a proxy instead of a malformed
+`seed-connections.yaml`. The hook's own comment says such a failure "says nothing" about the seed
+configuration; leaving the state at `{loaded: true, seeds: []}` is not saying nothing, it is saying
+the list is empty.
+
+The 404 arm is right by accident rather than by design: where the route does not exist at all, as in
+the platform embed, there is no seed service and no seeds, so "loaded, empty" is the true answer.
+Only a third state can hold both that and "asked, and the answer told me nothing".
+
+Two tests on the same subject cannot see this, and one of them is the reason it reads as deliberate.
+`tests/hooks/use-connection-manager.test.ts` waits on `connections` reaching `[]` and then asserts
+`servedSeeds` equals `{loaded: true, seeds: []}`, for the 404 arm and for the 502 arm. Both are the
+initial values, and with an empty `localStorage` neither moves on either path, so both tests pass
+against a hook that never issues the request. They pin the initial state under the name of a
+measured one. There is no honest barrier to wait on there while the settled value and the unasked
+value are the same object shape, which is the same defect one level up.
+
+**Done when:** an unasked seed list is distinguishable from a measured empty one, a non-OK the
+server did not attribute leaves the browser in the unasked state rather than the empty one, and the
+two tests above wait on a fact that a hook which never fetched cannot satisfy.

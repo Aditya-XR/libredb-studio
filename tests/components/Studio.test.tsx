@@ -452,8 +452,8 @@ mock.module("@/components/agent/AgentRail", () => ({
  * always holds an ask, and what the rail is handed has to BE it. The hook's own
  * behaviour — that nothing is asked for until a shortcut asks, and what an ask
  * contains — is covered in tests/hooks/use-agent-prefill.test.ts, which runs in a
- * different process: `mock.module` is process-wide, and Studio.test.tsx is its own
- * isolation group (tests/run-components.sh Group 1), so no suite shares this stub.
+ * different process: `mock.module` is process-wide, and the runner gives every test
+ * file a bun process of its own, so no other suite ever sees this stub.
  */
 const PREFILL_SENTINEL = {
   id: 7,

@@ -632,7 +632,15 @@ describe("ObjectSourceView", () => {
     render(<Harness reader={readerFor(oneReadablePart)} />);
     await waitFor(() => expect(screen.getByTestId("source-editor")).toBeTruthy());
 
-    expect(definedThemes).toContain(STUDIO_THEME_DARK);
+    /*
+     * The registration is polled, the theme in use is not, and the difference is where each one
+     * happens: `theme` is a render prop, so it is on the element the poll above already found,
+     * while `beforeMount` runs from the editor double's passive effect, which React schedules
+     * AFTER the commit that put that element on screen. Reading `definedThemes` straight after
+     * the element therefore races the effect, and it lost on 5 of 24 concurrent runs of this file
+     * with "Expected to contain: db-dark / Received: []" before this poll was here.
+     */
+    await waitFor(() => expect(definedThemes).toContain(STUDIO_THEME_DARK));
     expect(definedThemes).toContain(STUDIO_THEME_LIGHT);
     expect(screen.getByTestId("source-editor").getAttribute("data-theme")).toBe(STUDIO_THEME_LIGHT);
   });
@@ -703,7 +711,18 @@ describe("ObjectSourceView", () => {
     expect(clear).toBeTruthy();
     expect(Object.hasOwn(clear!, "failure")).toBe(true);
     expect(Object.hasOwn(clear!, "readAtToken")).toBe(true);
-    await waitFor(() => expect(screen.queryByTestId("object-source-stale")).toBeNull());
+    /*
+     * `=== null` and not `expect(node).toBeNull()`, here and at every other absence poll in this
+     * file. A poll that FAILS hands bun the live happy-dom node to pretty-print, and bun walks the
+     * whole node's object graph to build the diff: measured at 301 ms for a 260-node subtree, so a
+     * handful of failing polls eats waitFor's entire 5 s budget and a momentarily slow machine
+     * turns a healthy test red. The boolean costs 0 ms and asserts exactly the same removal.
+     *
+     * `waitForElementToBeRemoved` is not the alternative: it demands the element still be present
+     * when it is called, and at this site, and at all five others below, it is already gone by
+     * then. That was measured, by logging the element on the line above each poll.
+     */
+    await waitFor(() => expect(screen.queryByTestId("object-source-stale") === null).toBe(true));
   });
 
   test("keeps the part the reader was on across a re-read, so the stale control does not move them", async () => {
@@ -728,7 +747,7 @@ describe("ObjectSourceView", () => {
     rerender(<Harness reader={reader} refreshToken={1} />);
     await userEvent.click(screen.getByTestId("object-source-stale-reread"));
     await waitFor(() => expect(reader.calls).toBe(2));
-    await waitFor(() => expect(screen.queryByTestId("object-source-stale")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("object-source-stale") === null).toBe(true));
 
     expect(screen.getByTestId("source-editor").getAttribute("data-path")?.endsWith("/body")).toBe(true);
     expect(screen.getAllByRole("tab").map((tab) => tab.getAttribute("aria-selected"))).toEqual(["false", "true"]);
@@ -2338,7 +2357,7 @@ describe("ObjectSourceView edit mode", () => {
 
     await click("object-source-apply-cancel");
 
-    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
     expect(editor().readOnly).toBe(false);
     expect((screen.getByTestId("object-source-preview") as HTMLButtonElement).disabled).toBe(false);
   });
@@ -2366,7 +2385,7 @@ describe("ObjectSourceView edit mode", () => {
 
     await click("object-source-apply-confirm");
 
-    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
     expect(readDraft(window.localStorage, draftKey("definition"))).toBeUndefined();
     expect(patches).toContainEqual(expect.objectContaining({ editingPartId: undefined, dirty: undefined }));
     expect(applied).toHaveBeenCalledTimes(1);
@@ -2626,7 +2645,7 @@ describe("ObjectSourceView edit mode", () => {
       await Promise.resolve();
     });
 
-    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
     expect(readDraft(window.localStorage, draftKey("definition"))).toBeUndefined();
   });
 
@@ -3023,7 +3042,7 @@ describe("ObjectSourceView across two Source tabs", () => {
     await waitFor(() => expect(screen.getByTestId("object-source-apply-building")).toBeTruthy());
 
     await click("object-source-apply-cancel");
-    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
     await act(async () => {
       land(BUILT);
       await Promise.resolve();

@@ -254,11 +254,14 @@ async function readDefaultBody(req: NextRequest): Promise<Record<string, unknown
  * not a hole. Both halves are pinned: the empty object is returned in
  * `tests/unit/lib/api/object-route-edit.test.ts` and both end-to-end answers are measured through
  * this handler in `tests/api/db-objects.test.ts`, under
- * `describe("the body read the handler actually performs")`. They live in that file rather than in
- * one of their own because a SECOND `mock.module("@/lib/db", ...)` in one bun process breaks the
- * real module graph for the files that mock `@/lib/db/factory` later: measured, a separate file
- * carrying the same mocks took `bun test tests/api` from 558 pass / 0 fail to 510 pass / 5 fail
- * with 5 `SyntaxError: Export named 'getOrCreateProvider' not found` errors.
+ * `describe("the body read the handler actually performs")`. They live in that file because it is
+ * where this handler's end-to-end answers are measured. The original reason has since expired: a
+ * SECOND `mock.module("@/lib/db", ...)` in one bun process broke the real module graph for the
+ * files that mocked `@/lib/db/factory` later, and a separate file carrying the same mocks took
+ * `bun test tests/api` from 558 pass / 0 fail to 510 pass / 5 fail with 5 `SyntaxError: Export
+ * named 'getOrCreateProvider' not found` errors. `bun run test` now runs every test file in its
+ * own process, so two files can hold that mock without meeting each other; the hazard is only
+ * within a file now.
  */
 export async function readBoundedJson(req: NextRequest, byteLimit: number): Promise<Record<string, unknown>> {
   // `req.body` is null for a request that carried no body at all, which is what a GET or a bodiless

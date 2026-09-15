@@ -1931,12 +1931,10 @@ canned result sets keyed by query shape, which exercises the same provider code 
 server.
 
 > **Mock isolation:** `bun`'s `mock.module()` is process-wide, so test files that mock different
-> drivers (here `pg`, elsewhere `ioredis`, etc.) cross-contaminate when they share a process. Running
-> a **single file** is safe (one file = one process). The full `bun run test` script runs the core
-> group (`tests/unit tests/api tests/integration`) in **one process** and is therefore load-order
-> flaky — so **CI does not use it**. The deterministic runner is **`bun run test:ci`** (per-file
-> process isolation via `tests/run-core.sh`); the coverage workflow uses `bun run test:coverage`
-> (also per-file). See [`CLAUDE.md`](../../CLAUDE.md).
+> drivers (here `pg`, elsewhere `ioredis`, etc.) would cross-contaminate if they shared a process.
+> They never do: `bun run test` gives every test file its own bun process, so a single file is safe
+> and so is the whole suite, which is the same command CI runs. `bun run test:coverage` is that
+> runner with coverage on. See [`CLAUDE.md`](../../CLAUDE.md).
 
 ### 13.2 Coverage
 
@@ -1954,8 +1952,8 @@ table/index/storage stats, pool stats, capabilities, and `pg_stat_activity` pass
 
 ```bash
 bun test tests/integration/db/postgres-provider.test.ts   # just this file (single process — safe)
-bun run test:ci                                            # CI publish gate — per-file isolation (tests/run-core.sh)
-bun run test:coverage                                      # CI coverage workflow — per-file core + components
+bun run test                                               # the whole suite, one process per file, what CI runs
+bun run test:coverage                                      # CI coverage workflow: the same runner, with coverage
 ```
 
 ### 13.4 Optional: verifying against a live PostgreSQL

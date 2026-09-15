@@ -1098,14 +1098,22 @@ async function openFunctionTab(): Promise<void> {
   await waitFor(() => expect(screen.getByTestId("source-editor")).toBeTruthy());
 }
 
-/** Edit, Preview, confirm. Every step is the gesture a reader makes, in that order. */
+/**
+ * Edit, Preview, confirm. Every step is the gesture a reader makes, in that order.
+ *
+ * The last poll asks `=== null` instead of asserting `toBeNull()` on the node, and so does every
+ * other absence poll in this file. On a FAILING poll bun pretty-prints the received value, and
+ * for a happy-dom node that means walking its whole object graph: 301 ms for a 260-node subtree,
+ * measured. Four such polls and waitFor's 5 s budget is gone, so a briefly busy machine fails a
+ * test whose subject is fine. The boolean costs 0 ms and asserts the same removal.
+ */
 async function applySuccessfully(): Promise<void> {
   await click("object-source-edit");
   await waitFor(() => expect(screen.getByTestId("object-source-preview")).toBeTruthy());
   await click("object-source-preview");
   await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
   await click("object-source-apply-confirm");
-  await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog") === null).toBe(true));
 }
 
 describe("a successful apply in the standalone shell", () => {
@@ -1330,7 +1338,7 @@ describe("the tab strip's dirty mark survives a remount and still clears", () =>
     act(() => {
       screen.getAllByRole("tab")[0].click();
     });
-    await waitFor(() => expect(screen.queryByTestId("source-editor")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("source-editor") === null).toBe(true));
     act(() => {
       screen.getAllByRole("tab")[1].click();
     });
@@ -1342,7 +1350,7 @@ describe("the tab strip's dirty mark survives a remount and still clears", () =>
       editorProbe.change?.(DEFINITION);
       await Promise.resolve();
     });
-    await waitFor(() => expect(screen.queryByTestId("tab-dirty-dot")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("tab-dirty-dot") === null).toBe(true));
   });
 });
 

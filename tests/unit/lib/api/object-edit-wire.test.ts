@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import {
   isObjectEditBuildResponseShape,
   isObjectEditOutcomeShape,
@@ -830,6 +830,9 @@ describe("every host-supplied string is bounded", () => {
 
 const REPO_ROOT = join(import.meta.dir, "../../../../");
 
+/** Repository-relative and POSIX-spelled, so the closure reads the same on Windows as on Linux. */
+const repoRelative = (file: string): string => relative(REPO_ROOT, file).split(sep).join("/");
+
 /** The file a specifier names, resolved the way the bundler resolves it, or `undefined`. */
 function moduleFileOf(specifier: string, fromDirectory: string): string | undefined {
   const base = specifier.startsWith("@/")
@@ -859,7 +862,7 @@ describe("the wire module's import closure stays free of the server", () => {
       for (const match of readFileSync(file, "utf8").matchAll(/^import\s+(type\s+)?[^;]*?from\s+"([^"]+)";/gm)) {
         if (match[1] !== undefined) continue;
         const specifier = match[2] as string;
-        const named = `${relative(REPO_ROOT, file)} imports ${specifier}`;
+        const named = `${repoRelative(file)} imports ${specifier}`;
         if (!specifier.startsWith("@/") && !specifier.startsWith(".")) {
           external.push(named);
           continue;
@@ -874,7 +877,7 @@ describe("the wire module's import closure stays free of the server", () => {
     // A control on the walk itself, because an assertion over an empty or one-file closure would
     // pass for the wrong reason: the two value imports this module's docblock names, and what THEY
     // reach, must all be in it.
-    expect([...walked].map((file) => relative(REPO_ROOT, file)).sort()).toEqual([
+    expect([...walked].map(repoRelative).sort()).toEqual([
       "src/lib/api/error-codes.ts",
       "src/lib/api/object-edit-wire.ts",
       "src/lib/db/errors.ts",
