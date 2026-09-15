@@ -791,6 +791,49 @@ describe("DataProfiler", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  // ── Shortcuts dialog (#746) ────────────────────────────────────────────────
+
+  test("? opens the shortcuts dialog while the profiler is open", () => {
+    const props = createDefaultProps({ isOpen: true });
+    const { queryByText } = render(<DataProfiler {...props} />);
+    expect(queryByText("Keyboard Shortcuts")).toBeNull();
+
+    fireEvent.keyDown(document, { key: "?" });
+
+    expect(queryByText("Keyboard Shortcuts")).not.toBeNull();
+  });
+
+  test("? does nothing while the profiler is closed", () => {
+    const props = createDefaultProps({ isOpen: false });
+    const { queryByText } = render(<DataProfiler {...props} />);
+
+    fireEvent.keyDown(document, { key: "?" });
+
+    expect(queryByText("Keyboard Shortcuts")).toBeNull();
+  });
+
+  // Radix's Dialog handles Escape in the capture phase and only calls
+  // preventDefault() - not stopPropagation() - so this component's OWN Escape
+  // listener (bound on `document`, above) still ran and closed the profiler
+  // underneath the shortcuts dialog on the very same keypress.
+  test("Escape closes only the shortcuts dialog, leaving the profiler open", async () => {
+    const onClosed = mock(() => {});
+    const { container, queryByText } = render(<ProfilerHost onClosed={onClosed} />);
+
+    await waitFor(() => {
+      expect(within(container).queryByText("Data Profiler")).not.toBeNull();
+    });
+
+    fireEvent.keyDown(document, { key: "?" });
+    expect(queryByText("Keyboard Shortcuts")).not.toBeNull();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(queryByText("Keyboard Shortcuts")).toBeNull();
+    expect(onClosed).not.toHaveBeenCalled();
+    expect(within(container).queryByText("Data Profiler")).not.toBeNull();
+  });
+
   // Same rule as every other connection-bearing request: a managed (seed)
   // connection is sent as its seed id, because the copy the browser holds has had
   // `password` and `connectionString` stripped. Sending the object made
