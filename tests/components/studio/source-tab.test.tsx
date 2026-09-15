@@ -228,6 +228,8 @@ mock.module("@/lib/storage", () => ({
     deleteConnection: () => {},
     saveQuery: () => {},
     getActiveConnectionId: () => null,
+    getFavoriteConnectionIds: () => [] as string[],
+    toggleFavoriteConnection: () => [] as string[],
   },
 }));
 
