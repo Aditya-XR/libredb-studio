@@ -1127,8 +1127,14 @@ export class SQLiteProvider extends SQLBaseProvider {
       // Windows does not, and a file the user picked by mistake would stay
       // undeletable. Nulling it also keeps `connect()`'s own `if (this.db) return`
       // from turning a retry into a silent no-op on a provider that is not connected.
-      this.db?.close(true);
-      this.db = null;
+      //
+      // `finally`, because `close(true)` raises when SQLite cannot close, and a
+      // reference kept past that throw is exactly the silent no-op described above.
+      try {
+        this.db?.close(true);
+      } finally {
+        this.db = null;
+      }
       this.setError(error instanceof Error ? error : new Error(String(error)));
 
       // Typed refusals keep their own identity: wrapping them would strip the
@@ -1173,9 +1179,14 @@ export class SQLiteProvider extends SQLBaseProvider {
       this.enforceQueryOnly();
     } catch (error) {
       // Released now, for the same reason disconnect() does it: a refused profile that
-      // left the file held open would be a lock on a database nobody is using.
-      this.db.close(true);
-      this.db = null;
+      // left the file held open would be a lock on a database nobody is using. The
+      // reference goes in a `finally`, because `close(true)` raises when it cannot
+      // close, and the refusal the caller needs to see is still `error`.
+      try {
+        this.db.close(true);
+      } finally {
+        this.db = null;
+      }
       throw error;
     }
 

@@ -1012,6 +1012,12 @@ describe("SQLiteProvider", () => {
 
       await expect(provider.connect()).rejects.toThrow();
       expect(provider.isConnected()).toBe(false);
+      // A retry has to ask the file again rather than answer from a handle that is
+      // not there: `connect()` returns early when it still holds one, so a catch that
+      // released the file but kept the reference would make this second call resolve,
+      // silently, on a provider that is not connected.
+      await expect(provider.connect()).rejects.toThrow();
+      expect(provider.isConnected()).toBe(false);
 
       const moved = `${notADatabase}.moved`;
       renameSync(notADatabase, moved);
