@@ -365,8 +365,12 @@ describe("LoginPage showcase (issue #425)", () => {
     // yet (or no longer does), and docs/CHANNELS.md is explicit that a deprecated channel
     // renders nothing at all. Parsed from the YAML rather than listed here, so a newly
     // promoted or newly retired row is covered without touching this test.
+    // Resolved against this file rather than against the cwd, the way RootLayout.test.tsx:43
+    // reads its screenshot. A bare "distribution/channels.yaml" is only found when the process
+    // happens to start in the repo root, and one bun process per test file is exactly the setup
+    // in which that stops being something a test may assume.
     const { container } = renderShowcase();
-    const inventory = parseYaml(readFileSync("distribution/channels.yaml", "utf8")) as {
+    const inventory = parseYaml(readFileSync(new URL("../../distribution/channels.yaml", import.meta.url), "utf8")) as {
       channels: { status: string; name: string; short_name?: string }[];
     };
     const unlisted = inventory.channels.filter((channel) => channel.status !== "live");

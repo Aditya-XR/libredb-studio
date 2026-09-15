@@ -59,6 +59,8 @@
  * directory or an entry in a runner script, is where the requirement is written down.
  */
 import { readdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { EXTERNAL_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { createDatabaseProvider } from "@/lib/db/factory";
@@ -66,9 +68,22 @@ import { declaredKinds } from "@/lib/db/object-kinds";
 import type { DatabaseConnection } from "@/lib/db/types";
 import type { DatabaseType } from "@/lib/types";
 
-const MONACO_ROOT = "node_modules/monaco-editor";
-const BASIC_CONTRIBUTION = `${MONACO_ROOT}/min/vs/basic-languages/monaco.contribution.js`;
-const RICH_LANGUAGE_DIR = `${MONACO_ROOT}/min/vs/language`;
+/**
+ * The installed package, located through the resolver rather than by spelling out a path.
+ *
+ * `"node_modules/monaco-editor"` is relative to the cwd, and both reads below run at MODULE
+ * scope: a process that did not start in the repo root fails this file with ENOENT before a
+ * single test registers, which reads as a missing bundle rather than as a wrong cwd. Resolving
+ * from `import.meta.url` also follows a hoisted or nested install instead of assuming the flat
+ * one. `join` rather than string concatenation, so the separator is the platform's.
+ *
+ * monaco-editor's `exports` map has no `./package.json` entry, so this leans on bun's resolver
+ * answering it anyway (verified: it returns the installed package's own manifest). If that ever
+ * stops being true the failure is a named resolution error here, not a silent wrong path.
+ */
+const MONACO_ROOT = dirname(createRequire(import.meta.url).resolve("monaco-editor/package.json"));
+const BASIC_CONTRIBUTION = join(MONACO_ROOT, "min/vs/basic-languages/monaco.contribution.js");
+const RICH_LANGUAGE_DIR = join(MONACO_ROOT, "min/vs/language");
 
 /**
  * The version the two counts below are counts OF.

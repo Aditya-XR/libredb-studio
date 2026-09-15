@@ -128,12 +128,27 @@ describe("ConnectionSignature", () => {
   });
 
   test("advances to the next URI on its own", async () => {
+    /*
+     * The wait asks for the URI it wants. It used to end on "the text changed at all" and
+     * then demand index 1 on the line after, which is a component-bug report waiting for a
+     * busy machine: the 6000ms window spans more than two 2600ms cycles, so a process that
+     * stalls long enough to miss the index-1 plateau satisfies "not the first text" with
+     * index 2 already on screen, and even a wait that ended on index 1 can have the interval
+     * fire again before the next statement reads the node. Asked for index 1 by name, a poll
+     * that finds index 2 is a failing poll rather than the end of the wait.
+     *
+     * The read before the wait is the control: it fixes the opening frame at index 0, so a
+     * component that painted index 1 from the start could not pass this. Both reads compare
+     * the whole URI rather than the scheme alone, because one scheme can be a prefix of
+     * another and `toContain` would then answer for the wrong frame.
+     */
     stubReducedMotion(false);
     const { getByTestId } = render(<ConnectionSignature />);
-    const first = getByTestId("connection-signature").textContent;
-    expect(first).toContain(SIGNATURE_URIS[0].scheme);
+    const uriText = (uri: (typeof SIGNATURE_URIS)[number]) => `${uri.scheme}${uri.rest}`;
+    expect(getByTestId("connection-signature").textContent).toBe(uriText(SIGNATURE_URIS[0]));
 
-    await waitFor(() => expect(getByTestId("connection-signature").textContent).not.toBe(first), { timeout: 6000 });
-    expect(getByTestId("connection-signature").textContent).toContain(SIGNATURE_URIS[1].scheme);
+    await waitFor(() => expect(getByTestId("connection-signature").textContent).toBe(uriText(SIGNATURE_URIS[1])), {
+      timeout: 6000,
+    });
   });
 });

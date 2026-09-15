@@ -62,6 +62,16 @@ const AGENT_BUDGET: ReadOnlyStatementBudget = {
   maxResultBytes: 64 * 1024,
 };
 
+/**
+ * The `database` the two construction censuses hand the libredb provider.
+ *
+ * It is a path that is never opened, so what matters about it is only that it is a legal one:
+ * the "/tmp/test.libredb" it replaces names a directory that does not exist on Windows, and a
+ * hardcoded absolute path shared by every process is a collision waiting for the day something
+ * does open it. `tmpdir()` answers the platform's own scratch directory on all three.
+ */
+const CENSUS_LIBREDB_FILE = join(tmpdir(), "factory-census.libredb");
+
 // ============================================================================
 // Helper: build a minimal DatabaseConnection for a given type
 // ============================================================================
@@ -502,7 +512,11 @@ describe("createDatabaseProvider", () => {
   });
 
   test('creates provider for type "libredb"', async () => {
-    const conn = makeConnection("libredb", { database: "/tmp/test.libredb" });
+    // A path the platform owns rather than a hardcoded "/tmp/...", which is not a directory
+    // on Windows at all. Nothing opens this file: `createDatabaseProvider` constructs and
+    // validates without touching the disk, so this is the spelling of a path and not a
+    // fixture. It is named all the same, so a provider that ever did open it says where.
+    const conn = makeConnection("libredb", { database: CENSUS_LIBREDB_FILE });
     const provider = await createDatabaseProvider(conn);
     expect(provider).toBeDefined();
     expect(provider.type).toBe("libredb");
@@ -529,7 +543,7 @@ describe("createDatabaseProvider", () => {
       druid: { port: 8888 },
       trino: { port: 8080, database: "tpch" },
       cassandra: { port: 9042, database: "probe", localDataCenter: "datacenter1" } as Partial<DatabaseConnection>,
-      libredb: { database: "/tmp/test.libredb" },
+      libredb: { database: CENSUS_LIBREDB_FILE },
     };
 
     const declaringTypes: string[] = [];
@@ -1312,7 +1326,16 @@ describe("acquireExecutionProfileProvider", () => {
       sqliteTmpDir = mkdtempSync(join(tmpdir(), "libredb-factory-sqlite-"));
     });
 
-    afterAll(() => {
+    afterAll(async () => {
+      /*
+       * The cache is emptied before the directory goes, and the await is the point.
+       * Nothing else clears it after the last test of this group, so a provider that
+       * connected here still holds an open handle on a file inside `sqliteTmpDir`. POSIX
+       * unlinks an open file and never complains, so the old spelling looked correct on
+       * Linux and macOS; Windows refuses to remove a file that is open and answers EBUSY,
+       * and `force: true` only swallows ENOENT.
+       */
+      await clearProviderCache();
       rmSync(sqliteTmpDir, { recursive: true, force: true });
     });
 
@@ -1386,7 +1409,16 @@ describe("single-writer file reuse", () => {
     dir = mkdtempSync(join(tmpdir(), "libredb-factory-single-writer-"));
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    /*
+     * The cache is emptied before the directory goes, and the await is the point.
+     * Nothing else clears it after the last test of this group, so a provider that connected
+     * here still holds an open handle on a file inside `dir`. POSIX unlinks an open file
+     * and never complains, so the old spelling looked correct on Linux and macOS; Windows
+     * refuses to remove a file that is open and answers EBUSY, and `force: true` only
+     * swallows ENOENT.
+     */
+    await clearProviderCache();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1480,6 +1512,17 @@ describe("single-writer file reuse", () => {
       id: "duck-file-b",
       database: join(dir, "..", basename(dir), "borrowed.duckdb"),
     });
+    // Relative TO THE CWD, deliberately, and not to the file's own directory. `fileIdentity`
+    // normalises with `path.resolve` (src/lib/db/factory.ts:301), which resolves against
+    // `process.cwd()`, so a spelling relative to anything else would name a different file and
+    // this assertion would fail on every platform rather than exercise the borrow.
+    //
+    // ON WINDOWS THIS LINE CAN LOSE ITS POINT WITHOUT LOSING ITS TRUTH, which is why it is
+    // written down here. `path.relative` cannot express a path across volumes, so a machine
+    // whose TMP sits on a different drive from the checkout gets an ABSOLUTE spelling back and
+    // the case below repeats the `dotted` one instead of adding the relative one. That is a
+    // weaker test on that machine shape, never a false one, and no assertion is added to make
+    // the premise hard: a legitimate Windows layout should not be reported as a defect.
     const relative = makeConnection("duckdb", { id: "duck-file-c", database: relativePath(process.cwd(), file) });
 
     expect(findOpenSingleWriterProvider(dotted)).toBe(writable);
@@ -1702,7 +1745,16 @@ describe("grounding a plan run while the writable provider holds the file (B49)"
     dir = mkdtempSync(join(tmpdir(), "libredb-factory-grounding-"));
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    /*
+     * The cache is emptied before the directory goes, and the await is the point.
+     * Nothing else clears it after the last test of this group, so a provider that connected
+     * here still holds an open handle on a file inside `dir`. POSIX unlinks an open file
+     * and never complains, so the old spelling looked correct on Linux and macOS; Windows
+     * refuses to remove a file that is open and answers EBUSY, and `force: true` only
+     * swallows ENOENT.
+     */
+    await clearProviderCache();
     rmSync(dir, { recursive: true, force: true });
   });
 
