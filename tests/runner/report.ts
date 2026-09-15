@@ -54,9 +54,20 @@ const XML_ENTITY: Record<string, string> = {
  * rather than raising: the run's verdict comes from exit codes, never from here.
  */
 export function parseSkippedTests(report: string): string[] {
+  const decode = (text: string) => text.replace(/&(amp|lt|gt|quot|apos);/g, (entity) => XML_ENTITY[entity] as string);
   const skipped: string[] = [];
-  for (const match of report.matchAll(/<testcase\b[^>]*\bname="([^"]*)"[^>]*>\s*<skipped\b/g)) {
-    skipped.push((match[1] as string).replace(/&(amp|lt|gt|quot|apos);/g, (entity) => XML_ENTITY[entity] as string));
+  for (const match of report.matchAll(/<testcase\b([^>]*)>\s*<skipped\b/g)) {
+    const attributes = match[1] as string;
+    const name = /\bname="([^"]*)"/.exec(attributes)?.[1];
+    if (name === undefined) continue;
+    // The describe path matters as much as the name: a skip made with `describe.skip`
+    // carries its reason in the DESCRIBE title, and the tests inside it are named for
+    // what they check. bun writes that path in `classname`, innermost first and joined
+    // with " > " (measured 1.4.2: "nested > snap launcher [skipped: no sh]"), so it is
+    // turned round to read the way the file does.
+    const classname = /\bclassname="([^"]*)"/.exec(attributes)?.[1] ?? "";
+    const path = classname === "" ? [] : decode(classname).split(" > ").reverse();
+    skipped.push([...path, decode(name)].join(" > "));
   }
   return skipped;
 }

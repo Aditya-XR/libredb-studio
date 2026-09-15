@@ -383,7 +383,7 @@ printing the uncovered file:line ranges. Local check: `bun run test:coverage && 
 `bun run test:coverage` is the same runner as `bun run test` with `--coverage
 --merge-into=coverage/lcov.info`: one lcov per TEST FILE under `coverage/raw/`, merged by
 `scripts/merge-lcov.mjs` at the end. Measured 2026-09-15 on Linux, 8 files at a time: about 60
-seconds, and the merged report is 100% of 56671 lines. Two mechanics of that merge exist for
+seconds, and the merged report is 100% of 56764 lines. Two mechanics of that merge exist for
 Windows: the report list is handed over as a manifest (`--inputs-from=<file>`) because 500-odd paths
 do not fit in a Windows command line, and `merge-lcov.mjs` normalises a backslash `SF:` path, so
 coverage produced on Windows merges as the same file as coverage produced on Linux instead of as a

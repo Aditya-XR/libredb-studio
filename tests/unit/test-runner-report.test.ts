@@ -46,9 +46,23 @@ describe("reading which tests were skipped", () => {
 
   test("names every skipped test, and nothing else", () => {
     expect(parseSkippedTests(report)).toEqual([
-      "packs the payload (needs a POSIX shell)",
-      'mode bits & the "x" bit (POSIX only)',
+      "pack > packs the payload (needs a POSIX shell)",
+      'pack > mode bits & the "x" bit (POSIX only)',
     ]);
+  });
+
+  test("a test skipped by its describe carries that describe's reason, outermost first", () => {
+    // The Windows packaging skips are made with describe.skip, so the reason is in
+    // the describe title and the test inside is only named for what it checks. bun
+    // writes the describe path innermost first, as measured on 1.4.2.
+    const nested = `<testcase name="deeper one" classname="nested &gt; snap launcher [skipped: no sh]" line="14">
+      <skipped />
+    </testcase>
+    <testcase name="top level" classname="" line="20">
+      <skipped />
+    </testcase>`;
+
+    expect(parseSkippedTests(nested)).toEqual(["snap launcher [skipped: no sh] > nested > deeper one", "top level"]);
   });
 
   test("a report with no skips names nothing", () => {

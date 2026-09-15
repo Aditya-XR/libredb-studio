@@ -35,3 +35,23 @@ export function assertCoverageDirIsOurs(directory: string, entries: string[]): v
       "Point --coverage-dir at a directory that is empty or holds only a previous coverage run.",
   );
 }
+
+/**
+ * Raises unless an existing `--merge-into` target is a coverage report.
+ *
+ * The runner removes that file before a coverage run, so that a run which ends red
+ * cannot leave a stale report for `coverage:check` to pass. Removing is only safe
+ * for a file this runner or `scripts/merge-lcov.mjs` wrote: `--merge-into=package.json`
+ * would otherwise delete package.json. An lcov report starts with `TN:` (as bun writes
+ * it) or `SF:` (as the merge writes it), and an empty file is a merge that found no
+ * records, so those three are ours and anything else is somebody's work.
+ */
+export function assertMergeTargetIsOurs(target: string, content: string): void {
+  const firstLine = content.split("\n", 1)[0] ?? "";
+  if (content.trim() === "" || /^(TN|SF):/.test(firstLine)) return;
+
+  throw new Error(
+    `Refusing to replace ${target}: it is not a coverage report (it starts ${JSON.stringify(firstLine.slice(0, 40))}). ` +
+      "Point --merge-into at an lcov file or at a path that does not exist yet.",
+  );
+}

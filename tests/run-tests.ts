@@ -22,7 +22,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
-import { assertCoverageDirIsOurs } from "./runner/coverage";
+import { assertCoverageDirIsOurs, assertMergeTargetIsOurs } from "./runner/coverage";
 import { COVERAGE_EXEMPT_FILES, selectTestFiles } from "./runner/discover";
 import { coverageDirFor, type RunFile, runTestFiles, type SpawnOutcome } from "./runner/execute";
 import { parseRunnerArgs, type RunnerOptions } from "./runner/options";
@@ -34,6 +34,18 @@ const root = path.resolve(import.meta.dir, "..");
 const KILL_ESCALATION_MS = 5_000;
 
 const live = new Set<Bun.Subprocess>();
+
+/**
+ * The run's own temporary directory (the children's junit reports), removed on every
+ * way out: a normal end, an error, and Ctrl+C. The children themselves need no such
+ * care, because `--no-orphans` takes them down with this process.
+ */
+let runScratch: string | null = null;
+
+function removeRunScratch(): void {
+  if (runScratch !== null) rmSync(runScratch, { recursive: true, force: true });
+  runScratch = null;
+}
 
 /**
  * Children inherit the environment, plus one decision: `FORCE_COLOR` when this
@@ -173,9 +185,14 @@ async function main(): Promise<number> {
   // The merged report goes too, and before the run rather than after it: a run that
   // ends red never reaches the merge, and a stale lcov left beside it is a report of
   // a tree that no longer exists, which `coverage:check` would happily pass.
-  if (options.mergeInto) rmSync(path.resolve(root, options.mergeInto), { force: true });
+  if (options.mergeInto) {
+    const mergeTarget = path.resolve(root, options.mergeInto);
+    if (existsSync(mergeTarget)) assertMergeTargetIsOurs(options.mergeInto, readFileSync(mergeTarget, "utf8"));
+    rmSync(mergeTarget, { force: true });
+  }
 
   const junitDir = mkdtempSync(path.join(tmpdir(), "libredb-test-junit-"));
+  runScratch = junitDir;
 
   const selection = options.selectors.length > 0 ? options.selectors.join(" ") : "tests/";
   process.stdout.write(
@@ -199,8 +216,6 @@ async function main(): Promise<number> {
     },
   });
 
-  rmSync(junitDir, { recursive: true, force: true });
-
   process.stdout.write(`${formatSummary(summary)}\n`);
   if (summary.failures.length > 0) return 1;
 
@@ -210,13 +225,17 @@ async function main(): Promise<number> {
 
 process.on("SIGINT", () => {
   for (const child of live) child.kill("SIGTERM");
+  removeRunScratch();
   process.stdout.write("\nInterrupted.\n");
   process.exit(130);
 });
 
 try {
-  process.exit(await main());
+  const code = await main();
+  removeRunScratch();
+  process.exit(code);
 } catch (error) {
+  removeRunScratch();
   // Usage and setup errors exit 2, so a caller can tell "the tests failed" (1) from
   // "the runner could not run them" (2).
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
