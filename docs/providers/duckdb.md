@@ -307,7 +307,7 @@ rather than a gap.
 |---|---|
 | Second read-write `DuckDBInstance.create` on the same file, **same process** | ALLOWED on Linux and macOS, REFUSED on Windows (see below) |
 | `DuckDBInstance.fromCache` on the same file, same process | ALLOWED |
-| Second `access_mode: 'READ_ONLY'` instance, same process, while a writer is open | ALLOWED on Linux and macOS, and genuinely read-only — `current_setting('access_mode')` is `read_only`, `duckdb_databases().readonly` is true, `INSERT` is refused |
+| Second `access_mode: 'READ_ONLY'` instance, same process, while a writer is open | ALLOWED on Linux and macOS, and genuinely read-only: `current_setting('access_mode')` is `read_only`, `duckdb_databases().readonly` is true, `INSERT` is refused |
 | Second read-write **process** while a writer holds the file | `IO Error: Could not set lock on file …: Conflicting lock is held in … (PID nnn)` |
 | Second **READ_ONLY process** while a writer holds the file | **ALSO refused**, with the same lock error |
 | `READ_ONLY` open of a file that does not exist | `IO Error: Cannot open database … in read-only mode: database does not exist` — the engine does not create it |
@@ -331,7 +331,7 @@ rather than the POSIX one twice.
 The consequence for the product is bounded but real, and it is not fixed here: the editor borrows
 the open handle rather than opening a second one (`findOpenSingleWriterProvider`), so ordinary
 browsing is unaffected on every platform. The one path that really does want two handles at once is
-an agent run reaching a connection the editor already has open — `acquireExecutionProfileProvider`
+an agent run reaching a connection the editor already has open, `acquireExecutionProfileProvider`
 opens the file under the profiled key while the writable handle is live. On Windows that open is
 refused, and the run fails with the engine's sentence instead of reading. Not yet measured against a
 running Studio on Windows, only against the engine.

@@ -175,11 +175,11 @@ handle ([§12.1](#121-where-the-boundary-is)).
 `bun:sqlite` is `sqlite3_close_v2`: with any statement still unfinalized the connection becomes a
 zombie and the database, its `-wal` and its `-shm` stay **open** until the last statement is
 finalized or garbage collected. This provider prepares a statement per query and drops the
-reference, so that used to be whenever the collector got to it — measured through `/proc/self/fd`,
+reference, so that used to be whenever the collector got to it, measured through `/proc/self/fd`,
 three descriptors survived a `disconnect()` that reported `isConnected() === false`. POSIX hides
 that, because it unlinks a file that is still open; Windows does not, and a user could not delete or
 move a database Studio had disconnected from. `close(true)` finalizes and closes for real, and
-raises if SQLite cannot. `node:sqlite` needs no flag — its own `close()` finalizes the statements it
+raises if SQLite cannot. `node:sqlite` needs no flag: its own `close()` finalizes the statements it
 tracks (measured on Node 24.14.0). The portable reading either way is the sidecars: SQLite
 checkpoints the WAL and removes `-wal` and `-shm` only when the connection really closes, which is
 what `tests/integration/db/sqlite-provider.test.ts` asserts on both adapters.
