@@ -61,10 +61,11 @@ jobs:
         run: bun run typecheck
 
       - name: Test
-        # Per-file process isolation (run-core.sh) — bun's mock.module() is
-        # process-wide, so the single-process `bun run test` is load-order flaky
-        # here. This mirrors the reliable path ci.yml uses via test:coverage.
-        run: bun run test:ci
+        # `bun run test` is tests/run-tests.ts: one bun process per test file, so
+        # the process-wide mock.module() cannot leak between files. There is no
+        # separate test:ci script any more, because there is no longer a
+        # shared-process form of the suite for it to be the alternative to.
+        run: bun run test
 
       - name: Build
         run: bun run build

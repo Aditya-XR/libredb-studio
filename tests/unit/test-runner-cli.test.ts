@@ -1,0 +1,118 @@
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+// The runner end to end, driven the way a contributor and CI drive it. The unit
+// tests beside this one cover discovery, the command line, the pool and the
+// report against injected data; these cases are here because three of the
+// runner's decisions can only be wrong against the real bun binary: that a file
+// is addressed as a path and not as a substring filter, that a child's exit code
+// reaches the runner's own exit code, and that coverage lands where the merge
+// expects it.
+const root = path.resolve(import.meta.dir, "../..");
+const RUNNER = "tests/run-tests.ts";
+
+function runRunner(args: string[]): { exitCode: number; stdout: string; stderr: string } {
+  const result = Bun.spawnSync([process.execPath, RUNNER, ...args], { cwd: root });
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+  };
+}
+
+describe("the test runner, end to end", () => {
+  test("--list prints one repository-relative path per line and nothing else", () => {
+    const { exitCode, stdout } = runRunner(["--list", "tests/unit/test-runner-cli.test.ts"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe("tests/unit/test-runner-cli.test.ts\n");
+  });
+
+  test("a passing file exits 0 and is reported with its test count", () => {
+    const { exitCode, stdout } = runRunner(["tests/unit/test-runner-options.test.ts"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("tests/unit/test-runner-options.test.ts");
+    expect(stdout).toContain("PASS");
+    expect(stdout).toContain("1 files: 1 passed");
+  });
+
+  test("a single file is addressed as a path, so a name that is a substring of another does not drag it in", () => {
+    // `bun test tests/unit/x.test.ts` without a leading ./ is a SUBSTRING FILTER,
+    // which would also run every file whose path contains that string. The runner
+    // passes ./<path>, so exactly one file runs. tests/unit/lib/auth.test.ts is the
+    // live example: tests/unit/lib/auth-jwt-config.test.ts and
+    // tests/unit/lib/auth-compare.test.ts share its prefix.
+    const { exitCode, stdout } = runRunner(["tests/unit/lib/auth.test.ts"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("1 files: 1 passed");
+    expect(stdout).not.toContain("auth-jwt-config");
+  });
+
+  test("a selector that names nothing exits 2 and says so, rather than passing an empty run", () => {
+    const { exitCode, stderr } = runRunner(["tests/unit/there-is-no-such-file.test.ts"]);
+
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("matched no test files");
+  });
+
+  test("an unknown option exits 2 and names the option", () => {
+    const { exitCode, stderr } = runRunner(["--parallel"]);
+
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("--parallel");
+  });
+
+  test("a failing test file makes the runner exit 1 and prints the child's own failure output", () => {
+    // A throwaway test file outside tests/ so discovery never picks it up: the
+    // runner is pointed at it with an explicit selector.
+    const workDir = mkdtempSync(path.join(tmpdir(), "runner-failing-"));
+    try {
+      const failing = path.join(root, "tests/unit/runner-failure-fixture.test.ts");
+      Bun.write(
+        failing,
+        'import { expect, test } from "bun:test";\ntest("deliberately failing fixture", () => {\n  expect(1).toBe(2);\n});\n',
+      );
+      try {
+        const { exitCode, stdout } = runRunner(["tests/unit/runner-failure-fixture.test.ts"]);
+
+        expect(exitCode).toBe(1);
+        expect(stdout).toContain("FAIL");
+        expect(stdout).toContain("deliberately failing fixture");
+        expect(stdout).toContain("re-run alone with: bun test ./tests/unit/runner-failure-fixture.test.ts");
+      } finally {
+        rmSync(failing, { force: true });
+      }
+    } finally {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  test("--coverage writes one report per file and --merge-into merges them", () => {
+    const workDir = mkdtempSync(path.join(tmpdir(), "runner-coverage-"));
+    try {
+      const rawDir = path.join(workDir, "raw");
+      const merged = path.join(workDir, "lcov.info");
+      const { exitCode, stdout } = runRunner([
+        "tests/unit/test-runner-discovery.test.ts",
+        "--coverage",
+        `--coverage-dir=${rawDir}`,
+        `--merge-into=${merged}`,
+      ]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("with coverage");
+      expect(existsSync(path.join(rawDir, "file-1", "lcov.info"))).toBe(true);
+      // The merged report keeps only src/ records, so the runner's own module is
+      // absent from it by design; what matters here is that the merge ran and
+      // wrote a report the coverage gate can read.
+      expect(existsSync(merged)).toBe(true);
+      expect(readFileSync(path.join(rawDir, "inputs.txt"), "utf8")).toContain("file-1/lcov.info");
+    } finally {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+});
