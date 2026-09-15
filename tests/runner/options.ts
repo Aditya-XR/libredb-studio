@@ -5,6 +5,12 @@
  * refused with the form that works, rather than being read as a selector and
  * silently running the wrong thing. An unknown option is refused by name for the
  * same reason: a forwarded bun flag goes after `--`, where it is visible.
+ *
+ * That refusal also names the trap a contributor is most likely to have hit, because
+ * the obvious command does not work: measured on bun 1.4.2, `bun run test -- --bail`
+ * reaches this parser as `["--bail"]`, since `bun run` consumes the first `--` itself,
+ * and so does bun when the `--` sits straight after the script path. Only
+ * `bun tests/run-tests.ts <selector> -- <flags>` arrives whole.
  */
 
 export type RunnerOptions = {
@@ -103,7 +109,9 @@ export function parseRunnerArgs(argv: string[], { cpuCount }: { cpuCount: number
         break;
       default:
         throw new Error(
-          `Unknown option "${name}". The runner's own options are --jobs, --coverage, --coverage-dir, --merge-into, --file-timeout and --list; everything for bun test goes after --.`,
+          `Unknown option "${name}". The runner's own options are --jobs, --coverage, --coverage-dir, --merge-into, --file-timeout and --list; everything for bun test goes after --. ` +
+            "If you did write one: `bun run` removes the first --, and so does bun when it sits straight after the script path, " +
+            "so the form that arrives whole is `bun tests/run-tests.ts <selector> -- <flags>`.",
         );
     }
   }

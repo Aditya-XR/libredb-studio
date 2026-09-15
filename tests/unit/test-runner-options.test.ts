@@ -78,6 +78,33 @@ describe("runner command line", () => {
     expect(() => parseRunnerArgs(["--parallel"], defaults)).toThrow(/--parallel/);
   });
 
+  test("a bun flag that arrived without its -- is told why, and given the form that works", () => {
+    // `bun run test -- --bail` reaches this parser as ["--bail"]: `bun run` eats the
+    // first --, and so does bun when it sits straight after the script path (measured
+    // on 1.4.2 with an argv probe). Only `bun tests/run-tests.ts <selector> -- <flags>`
+    // survives. Before this, the refusal answered "everything for bun test goes after
+    // --", which is exactly what the user had just written.
+    const refusal = (() => {
+      try {
+        parseRunnerArgs(["--bail"], defaults);
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    })();
+
+    expect(refusal).toContain('Unknown option "--bail"');
+    expect(refusal).toContain("bun run");
+    expect(refusal).toContain("removes the first --");
+    expect(refusal).toContain("bun tests/run-tests.ts <selector> -- <flags>");
+  });
+
+  test("the sentence about bun run is not printed for an option that came through --", () => {
+    // The paired control: past a --, nothing is refused at all, so the advice above
+    // belongs to the refusal and not to every run.
+    expect(parseRunnerArgs(["tests/unit", "--", "--bail"], defaults).bunArgs).toEqual(["--bail"]);
+  });
+
   test("a value written as a separate argument is refused with the form that works", () => {
     expect(() => parseRunnerArgs(["--jobs", "4"], defaults)).toThrow(/--jobs=4/);
   });

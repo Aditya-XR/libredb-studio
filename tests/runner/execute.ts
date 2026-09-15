@@ -15,18 +15,19 @@
  *
  * Spawning is injected so this module can be tested without processes.
  */
-import { parseTestCounts } from "./report";
+import { parseSkippedTests, readTestReport } from "./report";
 
 export type TestCounts = { pass: number; fail: number; skip: number; todo: number };
 
 export type SpawnOutcome = {
   exitCode: number | null;
   signal: string | null;
+  /** Everything the child printed, for a reader. Nothing is decided from it. */
   output: string;
   durationMs: number;
   timedOut: boolean;
-  /** Titles of the tests the file skipped, from bun's junit report. */
-  skippedTests: string[];
+  /** The junit report the child wrote, or null when it wrote none. */
+  junitReport: string | null;
 };
 
 export type FileOutcome = {
@@ -37,6 +38,8 @@ export type FileOutcome = {
   durationMs: number;
   output: string;
   counts: TestCounts | null;
+  /** Whether the file's junit report was read, missing, or there but unreadable. */
+  report: "read" | "missing" | "unreadable";
   skippedTests: string[];
 };
 
@@ -72,34 +75,50 @@ export type RunTestFilesInput = {
   coverageDir: string;
   coverageExempt: readonly string[];
   runFile: RunFile;
+  /**
+   * Asked before a worker picks up a file: true stops the run where it is.
+   *
+   * It is what a stop signal needs, and it is here rather than in the caller because
+   * only this loop knows when the next file would start. The files already running
+   * are not this gate's business; the signal handler kills those children itself.
+   */
+  shouldStop?: () => boolean;
   onResult?: (outcome: FileOutcome, position: number, total: number) => void;
   now?: () => number;
 };
 
 function toOutcome(file: string, spawned: SpawnOutcome): FileOutcome {
-  const counts = parseTestCounts(spawned.output);
+  const { state, counts } = readTestReport(spawned.junitReport);
   // A signal death arrives as exitCode null. `exitCode === 0` is correctly false for
   // it, but any reading that coerces (`exitCode || 0`, `!exitCode`) turns a SIGSEGV
   // into a pass, so the status is derived once, here.
   //
-  // Two more shapes are failures although the child exited 0, and both are about a
-  // file whose tests are unaccounted for:
+  // Three more shapes are failures although the child exited 0:
   //
-  // - No summary at all. bun always prints its counts when it reaches the end of a
-  //   file, so their absence means the process left early: a test calling
-  //   `process.exit(0)` does it (measured 1.4.2: exit 0, banner only, and the tests
+  // - No report, or one that cannot be read. bun writes the report when it reaches
+  //   the end of a file, so its absence means the process left early: a test calling
+  //   `process.exit(0)` does it (measured 1.4.2: exit 0, no report, and the tests
   //   after it never run), and so would a native addon calling exit(). Reporting
-  //   that as a pass is the one way this runner could turn a red tree green.
-  // - A summary saying zero of everything. The runner's own rule is that a
+  //   that as a pass is how this runner would turn a red tree green, for every shape
+  //   the report can see; the one it cannot see is `.only`, which bun honours, so a
+  //   file with a committed `it.only` writes a report naming that test alone and
+  //   exits 0 (measured 1.4.2: four other registered tests, one of them failing,
+  //   absent from the report, from the totals and from the verdict). Nothing here can
+  //   tell that report from a file that really holds one test, so a committed `.only`
+  //   has to be refused before the run, not read out of what the run wrote.
+  // - A report saying zero of everything. The runner's own rule is that a
   //   discovered file runs, so a file that registered nothing is either a
   //   registration that silently stopped happening or a file that should not exist.
+  // - A report that records a failure. The counts are what the verdict is read from,
+  //   so a green exit code does not overrule them: otherwise the summary would print
+  //   that failure in its own totals under a passing file line.
   const registeredNothing = counts !== null && counts.pass + counts.fail + counts.skip + counts.todo === 0;
   // `timedOut` is the runner's own flag, set when it fired the kill. A child that
   // finished cleanly in the same millisecond still exited 0, and it did not time out.
   const killedByTimeout = spawned.timedOut && spawned.exitCode !== 0;
   const status = killedByTimeout
     ? "timed-out"
-    : spawned.exitCode === 0 && counts !== null && !registeredNothing
+    : spawned.exitCode === 0 && counts !== null && !registeredNothing && counts.fail === 0
       ? "passed"
       : "failed";
 
@@ -111,7 +130,12 @@ function toOutcome(file: string, spawned: SpawnOutcome): FileOutcome {
     durationMs: spawned.durationMs,
     output: spawned.output,
     counts,
-    skippedTests: spawned.skippedTests,
+    report: state,
+    // Read even from a report the counts could not be taken from: what it did reach
+    // still names tests, and this is the only place a skip's reason is ever printed.
+    // The summary prints those titles under an unknown count rather than dropping them
+    // (see formatSummary), so this parse is read by someone in that case too.
+    skippedTests: spawned.junitReport === null ? [] : parseSkippedTests(spawned.junitReport),
   };
 }
 
@@ -132,7 +156,7 @@ export function coverageDirFor(
 }
 
 export async function runTestFiles(input: RunTestFilesInput): Promise<RunSummary> {
-  const { files, jobs, timeoutMs, runFile, onResult, now = () => Date.now() } = input;
+  const { files, jobs, timeoutMs, runFile, onResult, shouldStop, now = () => Date.now() } = input;
   if (files.length === 0) {
     throw new Error("The runner was handed no test files, so there is nothing to report as passing.");
   }
@@ -144,15 +168,21 @@ export async function runTestFiles(input: RunTestFilesInput): Promise<RunSummary
 
   async function worker(): Promise<void> {
     while (next < files.length) {
+      if (shouldStop?.()) return;
       const index = next;
       next += 1;
       const file = files[index] as string;
       // oxlint-disable-next-line no-await-in-loop -- one file at a time per worker; the jobs come from the workers.
       const spawned = await runFile({ file, index, coverageDir: coverageDirFor(file, index, input), timeoutMs });
       const outcome = toOutcome(file, spawned);
-      outcomes.push(outcome);
       finished += 1;
       onResult?.(outcome, finished, files.length);
+      // Every outcome is kept until the run ends, and nothing reads a passing file's
+      // output after it has been reported, so it is dropped here rather than carried:
+      // otherwise the runner's memory grows with the whole run's output, passing
+      // files included (measured on 1.4.2: four passing files printing 100 MB each
+      // peaked at 406 MB, against 249 MB for one).
+      outcomes.push(outcome.status === "passed" ? { ...outcome, output: "" } : outcome);
     }
   }
 
