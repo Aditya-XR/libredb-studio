@@ -308,7 +308,7 @@ The twelve chart tests that drive the real `helm` binary open with `// @requires
 Where `helm` is missing, or the chart's PostgreSQL subchart is not built, those files are not started, and the summary names them once under the reason and the command that fixes it; a selection made only of such files is an error, not an empty green run.
 Every CI job that runs the suite sets `LIBREDB_REQUIRE_HELM=1`, which makes the same condition stop the run before anything starts, and `tests/unit/helm-pin-matrix.test.ts` fails if one of those jobs loses the variable.
 The decision is per file rather than per test because each of those files needs Helm for everything it does, so skipping inside them would print about 180 test titles where twelve file names say the same.
-Leaving them out costs no line coverage, because what they exercise is the chart's templates, which no lcov measures: measured on 2026-09-15 with `helm` hidden from `PATH`, 531 files ran and the merged report was still 100% of 56883 lines.
+Leaving them out costs no line coverage, because what they exercise is the chart's templates, which no lcov measures: measured on 2026-09-15 with `helm` hidden from `PATH`, 531 of the 543 files the tree held then ran, and the merged report was still 100% of its lines.
 `tests/unit/test-runner-requirements.test.ts` holds the marker true of the tree in both directions: a file that spawns helm carries it, and a file that carries it spawns helm.
 
 ### What a file's verdict is read from, and how a run ends
@@ -320,7 +320,7 @@ Both shapes defeat exactly the two guards that keep a red tree from turning gree
 `--bail` is the same defect from the other side: it prints no count line at all, while the report still carries the failure.
 A report that is absent and one the parser cannot read are told apart, and neither ever becomes zero counts: the file fails, its line reads "no test report" or "unreadable test report", and the summary says how many files left no readable report and that their tests are not in the totals above it.
 There is one shape no report can show, and the runner says so rather than pretending otherwise: bun honours a committed `.only`, so such a file writes an honest report naming that one test and exits 0, and the tests it never ran are absent from the report, the totals and the verdict alike (measured on 1.4.2).
-That has to be refused before the run rather than read out of what the run wrote, and nothing refuses it today: `docs/BACKLOG.md` D90.
+That has to be refused before the run rather than read out of what the run wrote, and nothing refuses it today: `docs/BACKLOG.md` D97.
 
 Forwarding a flag to `bun test` works only when the runner is invoked directly and a selector comes first.
 Measured on 1.4.2: `bun run test -- --bail` reaches the script as `["--bail"]`, because `bun run` removes the first `--`, and bun removes one that sits straight after the script path too, so `bun tests/run-tests.ts -- --bail` loses it as well.
@@ -343,7 +343,7 @@ bun writes to a pipe asynchronously and `process.exit` throws away whatever is s
 The wait has to be a real write whose callback resolves, because an empty write's callback does not wait for the queue and a `drain` event never arrives: `write()` returned false while `writableLength` was 0 and `writableNeedDrain` was false.
 A non-empty write's callback does wait for everything queued before it, measured at 1 MB and at 10 MB and against a reader that started 1.5 seconds late, so one such write also drains the lines printed as the files landed.
 What that covers is the lines this process writes: the per-file lines, the summary, the failed-file block and the re-run hint.
-It does not cover a child's own console output, and nothing here can: measured under CPU load on 1.4.2, a failing file's `bun test` process drops part of its queued stdout as it exits, between 20 and 90 per cent of a megabyte, and it does so with no runner in the picture at all, so a failure diff read from a busy CI machine can still be truncated under an accurate verdict (`docs/BACKLOG.md` D89).
+It does not cover a child's own console output, and nothing here can: measured under CPU load on 1.4.2, a failing file's `bun test` process drops part of its queued stdout as it exits, between 20 and 90 per cent of a megabyte, and it does so with no runner in the picture at all, so a failure diff read from a busy CI machine can still be truncated under an accurate verdict (`docs/BACKLOG.md` D96).
 A write that fails because the reader has gone rather than because this process could not write is not the runner's problem and does not become its exit code: an `EPIPE` from `| head -1` or a closed terminal leaves the run's own 0, 1 or 128 plus signal in place, and exit 2 stays for a write the runner really could not make, a full disk for instance (measured against `/dev/full`, which reports `ENOSPC` and does exit 2).
 
 SIGINT, SIGTERM, SIGHUP and SIGBREAK all end a run the same way: no further file is started, the files still running are killed, the scratch directory is removed, `Interrupted (SIGNAL).` is written, and the runner exits 128 plus the signal's number, so 130, 143 and 129, measured end to end for those three, and 149 for SIGBREAK, which only Windows can deliver and which is therefore pinned over the mapping rather than over a run.
@@ -370,7 +370,7 @@ Where the cgroup kills the whole group the runner dies with its children, so tha
 Under Kubernetes's default `memory.oom.group` the kernel SIGKILLs every process in the cgroup, and SIGKILL cannot be handled, so the output simply stops after the files that had already landed and the exit code is the only signal: reasoned from the kernel's semantics, not measured here.
 Under systemd's default `OOMPolicy` the unit is stopped with SIGTERM instead, which this runner now takes: measured before that handling existed, such a run ended at exit 143 with no summary and its scratch directory left behind, so it now ends at the same 143 with `Interrupted (SIGTERM).` and nothing left in the temporary directory.
 Neither shape names the file that exhausted the memory, which is the second reason a memory-aware default is worth having.
-That default is `docs/BACKLOG.md` D88.
+That default is `docs/BACKLOG.md` D95.
 
 ### Dependency installation in CI
 
@@ -452,7 +452,7 @@ printing the uncovered file:line ranges. Local check: `bun run test:coverage && 
 `bun run test:coverage` is the same runner as `bun run test` with `--coverage
 --merge-into=coverage/lcov.info`: one lcov per TEST FILE under `coverage/raw/`, merged by
 `scripts/merge-lcov.mjs` at the end. Measured 2026-09-15 on Linux, 8 files at a time: about 60
-seconds, and the merged report is 100% of 56883 lines. Two mechanics of that merge exist for
+seconds, and the merged report is 100% of 57157 lines. Two mechanics of that merge exist for
 Windows: the report list is handed over as a manifest (`--inputs-from=<file>`) because 500-odd paths
 do not fit in a Windows command line, and `merge-lcov.mjs` normalises a backslash `SF:` path, so
 coverage produced on Windows merges as the same file as coverage produced on Linux instead of as a
