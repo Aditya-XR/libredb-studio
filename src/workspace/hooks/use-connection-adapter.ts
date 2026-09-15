@@ -5,9 +5,184 @@ import type { DatabaseConnection } from "@/lib/types";
 import type { DetailedObject } from "@/lib/db/detailed-object";
 import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
 import type { ObjectSource } from "@/components/object-tree";
-import type { ObjectSourceReader } from "@/components/object-source";
+import type { ObjectSourceApplier, ObjectSourceReader } from "@/components/object-source";
+import { EDIT_PLAN_EXECUTABLE_LIMIT } from "@/lib/db/object-edit";
+import { SOURCE_CHARACTER_LIMIT } from "@/lib/db/object-kinds";
 import { useReadGeneration } from "@/hooks/use-read-generation";
 import type { WorkspaceConnection, WorkspaceObjectReader } from "@/workspace/types";
+
+/**
+ * The largest host answer this shell will read, in UTF-16 code units, and the arithmetic behind
+ * every term of it (#789 Phase 3, from discussion #778).
+ *
+ * WHY THIS EXISTS HERE, and a correction to what the round-1 form of this docblock claimed (fix
+ * round 1). `src/lib/api/object-edit-wire.ts` bounds no string in any of its four shape
+ * predicates, and it does not because its brief specified none. The round-1 text then said the
+ * standalone shell was covered because its two routes "bound what they answer". MEASURED and
+ * FALSE: `grep -nE "LIMIT|length"` over `src/app/api/db/objects/edit-plan/route.ts` and
+ * `.../edit-apply/route.ts` finds exactly three bounds and all three are on what the routes
+ * RECEIVE, the body bytes (`EDIT_BODY_BYTE_LIMIT`), the submitted text (`EDIT_CHARACTER_LIMIT`)
+ * and the plan's executable length (`EDIT_PLAN_EXECUTABLE_LIMIT`). Nothing bounds what they
+ * ANSWER: `libraryFact` in `src/lib/db/providers/keyvalue/redis.ts` builds `observed` straight
+ * from `FUNCTION LIST`, and a refusal sentence is whatever the engine said. So the hazard is on
+ * BOTH shells and only its author differs: there a provider's catalog read, here a plain
+ * JavaScript object an adopter constructed. The bound is in this file because this file is where
+ * it could be written; the standalone half is filed for the phase's gate rather than claimed as
+ * covered.
+ *
+ * What the hazard IS, on either shell. The answer reaches `ApplyPreviewDialog`, and the dialog
+ * bounds exactly one of the strings in it, the plan's executable text, which it refuses to draw a
+ * diff above. Every other supplied string in a plan or an outcome, `refusal.sentence`,
+ * `refusal.hint`, `revision.reason` and each consequence's `fact.observed`, is rendered verbatim
+ * into an element with nothing in front of it. Phase 2's `isSourceDocumentShape` bounds its three
+ * host-supplied strings with `SOURCE_CHARACTER_LIMIT` for this reason, MEASURED: a part carrying a
+ * five-million-character truncation reason passed that predicate before the bound was added, and
+ * the whole of it reached a `div`.
+ *
+ * THE NUMBER, derived from two constants this repository already publishes rather than picked:
+ * - `EDIT_PLAN_EXECUTABLE_LIMIT` (1,200,000) is the whole executable text of a plan.
+ * - A plan carries that text a second time at most: a step's `provider` segments hold their own
+ *   framing text, while its `user` segments are offsets and hold none, so the segments cannot
+ *   exceed the step text they describe. Hence the factor of two.
+ * - `SOURCE_CHARACTER_LIMIT` (1,000,000) is one part's text as a READ may answer it, which bounds
+ *   the build's `preimage.text` and a conflict outcome's `current.text`. Neither answer carries
+ *   both, and the sum takes both anyway.
+ * So the largest LEGITIMATE answer either method can produce is about 3,400,000 characters and
+ * this bound is 4,400,000, which leaves a million characters for identifiers, sentences and keys.
+ *
+ * What it costs, stated as a cost: a host that answers a well-formed plan above this size has its
+ * apply refused, with a sentence, on a shell where nothing else would have stopped it.
+ */
+const EMBEDDED_ANSWER_CHARACTER_LIMIT = EDIT_PLAN_EXECUTABLE_LIMIT * 2 + SOURCE_CHARACTER_LIMIT * 2;
+
+/** OURS, and it says nothing was sent, because a build refusal happens before any apply. */
+const UNREADABLE_BUILD_ANSWER =
+  "The host answered the apply preview with more text than LibreDB can read, so nothing was previewed and nothing was sent.";
+
+/**
+ * OURS, and it deliberately does NOT say the apply failed. The apply was sent, the host answered,
+ * and the answer could not be read, so the only honest sentence is that we cannot say. The pane
+ * renders a rejection from `apply` as `interrupted` with `committed: "unknown"`, which is the
+ * same fact in the outcome vocabulary.
+ */
+const UNREADABLE_APPLY_ANSWER =
+  "The apply was sent and the host answered with more text than LibreDB can read, so LibreDB cannot say whether this change landed. Re-read this definition before trying again.";
+
+/**
+ * The host's answer, COPIED as it is counted, and the copy is what everything downstream reads.
+ *
+ * A copy rather than a measurement of the host's own object, and that is the whole repair of fix
+ * round 1. The round-1 form counted the answer and then handed the ORIGINAL on, which made the
+ * bound a claim about how many times a value is read and by whom. Two host answers broke it,
+ * both MEASURED inside `tests/components/studio/embedded-source.test.tsx` before this form
+ * existed:
+ * - REUSE. The walk carried one `seen` set across the whole answer, so every occurrence after the
+ *   first cost nothing, while `ApplyPreviewDialog` draws `consequences.map` occurrence by
+ *   occurrence. Six consequences that were ONE object holding a one-million-character `observed`
+ *   were accepted and all six were drawn: 6,000,456 characters in the DOM against a 4,400,000
+ *   bound.
+ * - A GETTER. The walk read a property, the shape predicate read it again and the renderer a third
+ *   time. An `observed` answering "small" once and two million characters afterwards measured as
+ *   five characters and drew 2,000,076. The same trick makes the bytes a reader approves differ
+ *   from the bytes a host is later handed, which is this shell's only tie to the sealed-plan rule:
+ *   there is no plan token on this path, so the snapshot IS the seal.
+ *
+ * So each property is read EXACTLY ONCE, into a copy, and the copy is what is returned. The
+ * measured characters are the drawn characters by construction.
+ *
+ * OVER THE SAME KEYS THE SHAPE CHECK READS, which is `Object.getOwnPropertyNames` and not
+ * `Object.entries`. `hasExactKeys` in `src/lib/api/object-edit-wire.ts` reads own property NAMES,
+ * enumerable or not, so a non-enumerable `observed` is judged, narrowed and rendered while an
+ * `Object.entries` walk never sees it at all. That was the third defeat, found while repairing the
+ * first two and tested beside them.
+ *
+ * `seen` holds each source object's copy AND what that copy cost, so a repeated reference is
+ * charged again without being walked again, and a CYCLE terminates: a back edge meets an
+ * in-progress entry whose recorded cost is still zero, is charged nothing, and takes the copy that
+ * is being built, so the copy carries the cycle rather than refusing it.
+ *
+ * Not `JSON.stringify(value).length`, for three reasons and only the third is about the copy.
+ * `stringify` answers `undefined` rather than a string for an undefined input, so the length read
+ * would throw, and a host that returns nothing is a shape this seam must survive. It honours
+ * `toJSON`, so a host object could answer a short string for itself and pass a bound its real
+ * strings do not. And its copy is unbounded: it is complete before its length can be looked at,
+ * where this one stops the moment the budget is gone. That last reason is a difference of degree
+ * and not of kind, and the round-1 docblock overstated it: this walk allocates a key-name array
+ * per object level before the budget can abort inside that level, so a host answer with five
+ * million one-character keys allocates a five-million-entry array first. Smaller than a copy of
+ * the strings themselves, and bounded by nothing here either.
+ *
+ * A pathologically DEEP host answer overflows the stack here rather than being counted. That is a
+ * RangeError inside the `async` wrapper below, so it becomes a rejected promise and a visible
+ * failed build or failed apply, which is the same outcome as an overrun and never a page-level
+ * throw.
+ */
+interface AnswerCopy {
+  /** How much budget is LEFT; the walk throws the seam's sentence as soon as it goes negative. */
+  left: number;
+  readonly sentence: string;
+  readonly seen: Map<object, { readonly copy: unknown; cost: number }>;
+}
+
+function spend(walk: AnswerCopy, characters: number): void {
+  walk.left -= characters;
+  if (walk.left < 0) throw new Error(walk.sentence);
+}
+
+function copyWithin(value: unknown, walk: AnswerCopy): unknown {
+  if (typeof value === "string") {
+    spend(walk, value.length);
+    return value;
+  }
+  // Numbers, booleans, null, undefined and a function all cost nothing and are carried through as
+  // they are. Nothing renders them by length, and the shape predicates refuse the ones that are
+  // not what a field declares.
+  if (typeof value !== "object" || value === null) return value;
+
+  const already = walk.seen.get(value);
+  if (already !== undefined) {
+    spend(walk, already.cost);
+    return already.copy;
+  }
+
+  const before = walk.left;
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    const entry = { copy, cost: 0 };
+    walk.seen.set(value, entry);
+    for (const item of value) copy.push(copyWithin(item, walk));
+    entry.cost = before - walk.left;
+    return copy;
+  }
+
+  const copy: Record<string, unknown> = {};
+  const entry = { copy, cost: 0 };
+  walk.seen.set(value, entry);
+  for (const key of Object.getOwnPropertyNames(value)) {
+    spend(walk, key.length);
+    // ONE read of the property, which is what makes a getter's second answer unreachable.
+    const held = copyWithin((value as Record<string, unknown>)[key], walk);
+    // `defineProperty` and not an assignment, because `copy["__proto__"] = x` sets the prototype
+    // instead of adding a key, and a host answer names its own keys.
+    Object.defineProperty(copy, key, { value: held, enumerable: true, writable: true, configurable: true });
+  }
+  entry.cost = before - walk.left;
+  return copy;
+}
+
+/**
+ * The snapshot of the host's answer, or a THROW carrying `sentence`, which both seams turn into a
+ * visible failure.
+ *
+ * WHAT THE HOST GETS BACK, said out loud because it is a constraint on an adopter: the plan handed
+ * to `objectEditor.apply` is this snapshot of the plan the reader approved, not the object the
+ * host built. A host must therefore bind its own preview to its own apply through a VALUE the plan
+ * carries, `planId`, rather than through object identity: a `WeakMap` keyed on the plan it
+ * returned will not find this one. That is the cost of the bytes drawn being the bytes sent.
+ */
+function withinAnswerBound(answer: unknown, sentence: string): unknown {
+  return copyWithin(answer, { left: EMBEDDED_ANSWER_CHARACTER_LIMIT, sentence, seen: new Map() });
+}
 
 interface UseConnectionAdapterParams {
   connections: WorkspaceConnection[];
@@ -206,6 +381,49 @@ export function useConnectionAdapter({
     return async (conn, path, kind) => read(conn.id, path, kind);
   }, [onObjectsFetch]);
 
+  /**
+   * The APPLY seam, built beside `sourceReader` and for all of its reasons (#789 Phase 3).
+   *
+   * `undefined` when the host declared no `objectEditor`, which is what withholds `onApply` from
+   * the pane, which is what leaves an existing adopter's Source tab exactly as Phase 2 shipped it:
+   * no bar, no sentence, no draft. The absent-affordance rule the read seam states, applied to a
+   * seam that WRITES, where it matters more.
+   *
+   * BOUND, on both methods, and that is not a style choice. `const { build } = host.objectEditor`
+   * followed by `build(...)` calls with no receiver, so an adopter whose `build` reaches
+   * `this.clients[id]` gets a TypeError instead of a plan. The read seam's docblock above records
+   * the same fault for a provider, and this is the same fault on the other direction of travel.
+   *
+   * `async` IS LOAD-BEARING, exactly as it is on `sourceReader`, and the measurement behind it is
+   * the read seam's: a host that threw before returning gave an uncaught `Error` and a host that
+   * returned `undefined` gave `TypeError: undefined is not an object (evaluating '...then')`.
+   * `ObjectSourceView` calls both of these methods with `.then(onValue, onError)` and no `try`, so
+   * without the wrapper the first is a throw inside a click handler and the second is a TypeError
+   * at the same place. With it, the first is a rejection the pane reports as a failed build or a
+   * failed apply, and the second is a resolved non-answer the pane's own shape narrowing refuses.
+   *
+   * WHAT THIS SEAM DOES NOT DO is narrow the host's answer to `ObjectEditBuild` or
+   * `ObjectEditOutcome`. `ObjectSourceApplier` returns `unknown` on both methods and
+   * `ObjectSourceView` narrows with `isObjectEditBuildResponseShape` and
+   * `isObjectEditOutcomeShape` before it draws anything, so a second copy of those predicates here
+   * would be a second implementation of one boundary, on one of the two shells. The size bound
+   * above is here because this is the file that could carry it, and NOT because the standalone
+   * path is covered: measured, its two routes bound only what they receive. That measurement and
+   * the filing that follows from it are in the bound's own docblock.
+   */
+  const sourceApplier = useMemo<ObjectSourceApplier | undefined>(() => {
+    const editor = onObjectsFetch.objectEditor;
+    if (editor === undefined) return undefined;
+    return {
+      async build(connection, request) {
+        return withinAnswerBound(await editor.build(connection.id, request), UNREADABLE_BUILD_ANSWER);
+      },
+      async apply(connection, plan, _planToken, acknowledged) {
+        return withinAnswerBound(await editor.apply(connection.id, plan, acknowledged), UNREADABLE_APPLY_ANSWER);
+      },
+    };
+  }, [onObjectsFetch]);
+
   const schemaContext = useMemo(() => JSON.stringify(schema), [schema]);
 
   // The embedded shell's stand-in for `useProviderMetadata`: it has no
@@ -241,6 +459,8 @@ export function useConnectionAdapter({
     objectSource,
     /** The host's own source read, or `undefined` where it declared none. */
     sourceReader,
+    /** The host's own object editor, or `undefined` where it declared none. */
+    sourceApplier,
     schemaContext,
   };
 }

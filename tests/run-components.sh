@@ -33,7 +33,7 @@ FAIL=0
 # stale a fourth time by naming a DIGIT for the current value, which is the one thing
 # here that cannot stay true: the value is whatever that grep prints, never a number
 # written in prose.
-TOTAL_GROUPS=45
+TOTAL_GROUPS=46
 EXTRA_BUN_ARGS=("$@")
 GROUP_INDEX=0
 COVERAGE_MODE=0
@@ -120,8 +120,12 @@ run_group "Group 0b2: Factory cache and execution profiles" \
 # Measured 2026-09-13: census plus `tests/api/db-objects.test.ts` is 3 fail, the language guard
 # plus the same file is 1 fail, and each of them alone is 0 fail. There is nothing either file can
 # do about it: mocking the factory is what the api layer is for.
+# The edit census joins them for the same reason and adds nothing new to it: it builds every
+# provider through the REAL `createDatabaseProvider` too, and it imports `CENSUS_CONNECTION` from
+# the source census beside it, so the two files share one population and one process.
 run_group "Group 0b3: Object source declaration census" \
   tests/isolated/object-source-declarations.test.ts \
+  tests/isolated/object-edit-declarations.test.ts \
   tests/isolated/monaco-language-ids.test.ts
 
 # Group 0c: exports CJS shim (isolated — importing it pulls @/lib/db/factory into the
@@ -422,6 +426,13 @@ run_group "Group 28: Studio source tab" \
 # to capture the bottom panel's props.
 run_group "Group 29: Embedded workspace source tab" \
   tests/components/studio/embedded-source.test.tsx
+
+# Group 30: The apply preview dialog (#789 Phase 3). Its own group for Group 27's reason: it
+# installs a process-wide @monaco-editor/react double, and Groups 15, 27, 28 and 29 each install a
+# different one. It doubles `DiffEditor` rather than `Editor`, which is a different export of the
+# same module, so sharing a process with any of them would hand one suite the other's editor.
+run_group "Group 30: Apply preview dialog" \
+  tests/components/object-source/ApplyPreviewDialog.test.tsx
 
 # Summary
 echo ""

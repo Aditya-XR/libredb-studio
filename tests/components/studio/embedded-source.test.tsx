@@ -13,11 +13,28 @@ setupFramerMotionMock();
  * would SEE is what is asserted. `setupMonacoMock` is not used here: it stubs the loader alone
  * and this file mounts the real `ObjectSourceView`, whose editor is the subject.
  */
+/**
+ * The pane's own `onChange`, captured from the double so a test can drive a KEYSTROKE.
+ *
+ * The round-1 double swallowed the change event, so nothing in this file could move the pane's
+ * buffer, and the one prop that only a moved buffer can defend, `dirty`, went undefended (fix
+ * round 1, finding 5). The real editor calls `props.onChange(nextText)`; the double forwards the
+ * textarea's own change to it, which is the same call. `ObjectSourceView.test.tsx` captures the
+ * callback the same way and for the same reason.
+ */
+const editorProbe: { change?: (value: string | undefined) => void } = {};
+
 mock.module("@monaco-editor/react", () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const React = require("react");
   return {
-    default: function MockEditor(props: { value?: string; language?: string; options?: Record<string, unknown> }) {
+    default: function MockEditor(props: {
+      value?: string;
+      language?: string;
+      options?: Record<string, unknown>;
+      onChange?: (value: string | undefined) => void;
+    }) {
+      editorProbe.change = props.onChange;
       return React.createElement("textarea", {
         "data-testid": "source-editor",
         "data-language": props.language,
@@ -27,6 +44,52 @@ mock.module("@monaco-editor/react", () => {
       });
     },
     loader: { init: () => Promise.resolve(), config: () => {}, __getMonacoInstance: () => null },
+    /*
+     * `DiffEditor` is the apply preview's surface (#789 Phase 3). A double that omits an export
+     * the real module HAS does not degrade, it throws: bun answers `SyntaxError: Export named
+     * 'DiffEditor' not found` and fails the WHOLE FILE the moment the pane's module graph reaches
+     * the preview, so this file would die without ever rendering a diff. Measured 2026-09-14 on
+     * the standalone shell's suite, which carries the same double for the same reason.
+     */
+    DiffEditor: function MockDiffEditor(props: { original?: string; modified?: string; language?: string }) {
+      return React.createElement("div", {
+        "data-testid": "mock-monaco-diff-editor",
+        "data-language": props.language,
+        "data-original": props.original ?? "",
+        "data-modified": props.modified ?? "",
+      });
+    },
+  };
+});
+
+/**
+ * The viewer's own props, captured while the REAL viewer still renders underneath (#789 Phase 3).
+ *
+ * `refreshToken` is the reason this exists. It is a number this shell hands the viewer and the
+ * viewer turns into a stale banner or into nothing, so every indirect observation of it is an
+ * observation of the banner instead, and the banner is absent both when the counter has not moved
+ * and when the shell forgot to pass one at all. The brief asks for the value, so the value is what
+ * is asserted, and the banner is asserted separately as the consequence a reader actually sees.
+ *
+ * The barrel is doubled rather than the module, because the shell imports `ObjectSourceView`
+ * through `@/components/object-source`, and the two other value exports are spread back in from
+ * their own modules so that anything else reaching this barrel gets the real thing.
+ */
+let capturedSourceViewProps: Record<string, unknown> = {};
+mock.module("@/components/object-source", () => {
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const React = require("react");
+  const { ObjectSourceView } = require("@/components/object-source/ObjectSourceView");
+  const applier = require("@/components/object-source/source-applier");
+  const reader = require("@/components/object-source/source-reader");
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  return {
+    ...applier,
+    ...reader,
+    ObjectSourceView: (props: Record<string, unknown>) => {
+      capturedSourceViewProps = props;
+      return React.createElement(ObjectSourceView, props);
+    },
   };
 });
 
@@ -87,7 +150,15 @@ mock.module("@/components/ui/resizable", () => {
 
 import { StudioWorkspace } from "@/workspace/StudioWorkspace";
 import type { WorkspaceObjectReader } from "@/workspace/types";
-import type { ObjectSourceDocument, ProviderCapabilities } from "@/lib/db/types";
+import type {
+  ObjectEditBuild,
+  ObjectEditConsequenceClass,
+  ObjectEditOutcome,
+  ObjectEditPlan,
+  ObjectEditRequest,
+  ObjectSourceDocument,
+  ProviderCapabilities,
+} from "@/lib/db/types";
 import type { QueryTab } from "@/lib/types";
 
 const DEFINITION = "CREATE FUNCTION app.order_total(integer) RETURNS numeric AS $$ SELECT 1 $$;";
@@ -985,5 +1056,791 @@ describe("a host document that fails the shape check is a failed read, not a ren
     // And the address the host was handed is that same object, so the caption is not right by
     // accident while the read went somewhere else.
     expect(asked).toEqual([["host-conn-1", ["app", "order_total(integer)"], "function"]]);
+  });
+});
+
+/**
+ * The embedded shell's half of the object APPLY seam (#789 Phase 3, from discussion #778).
+ *
+ * THE HOST'S ANSWER IS THE ONLY THING THERE IS on this shell. The standalone shell posts to two
+ * routes of its own and every value it renders has been through a handler that bounded it; here
+ * there is no route, no plan token and no server, and a `build` that answers a plan is a plain
+ * JavaScript object an adopter constructed. So every test below drives the host's own object,
+ * and this file's `afterEach` proves that no request went out while it did.
+ *
+ * What is REAL here: the adapter, the tab manager, the pane, the editability predicate, the draft
+ * store and the preview dialog. Only the host is a double, which is what a host is.
+ */
+const EDITABLE_DOCUMENT = {
+  path: ROUTINE.path,
+  kind: "function",
+  parts: [
+    {
+      id: "definition",
+      label: "Function",
+      text: DEFINITION,
+      language: "sql",
+      form: "complete",
+      origin: "stored",
+      // The affordance travels with the READ, from the party that answered it, which on this
+      // shell is the host. Nothing here consults a declaration, and that is D57 by construction.
+      edit: { offered: true },
+    },
+  ],
+} as unknown as ObjectSourceDocument;
+
+/**
+ * A plan of the shape `isObjectEditPlanShape` accepts, and its single user segment spans the whole
+ * step text on purpose: `spansTheText` in `src/lib/api/object-edit-wire.ts` refuses a plan whose
+ * segments laid end to end fall short of `text.length`, so a short segment would make every
+ * preview below silently exercise the pane's UNREADABLE arm while reading as the happy path.
+ */
+const STEP_TEXT = "CREATE FUNCTION app.order_total(integer) RETURNS numeric AS $$ SELECT 2 $$;";
+
+const PLAN = {
+  planVersion: 1,
+  planId: "host-plan-1",
+  issuedAt: "2026-09-14T00:00:00.000Z",
+  connectionFingerprint: "host-fingerprint",
+  type: "postgres",
+  path: [...ROUTINE.path],
+  kind: "function",
+  partId: "definition",
+  strategy: "guarded-atomic-batch",
+  unit: {
+    medium: "statement",
+    steps: [{ text: STEP_TEXT, language: "sql", segments: [{ from: "user", start: 0, end: STEP_TEXT.length }] }],
+  },
+  session: [],
+  revision: { check: "compared", token: "t1", basis: "pg_proc.xmin", scope: "connection" },
+  consequences: [],
+} as unknown as ObjectEditPlan;
+
+/**
+ * What the host answers a build with, and it is an `ObjectEditBuild` and NOT the route's
+ * `ObjectEditBuildResponse`: a host holds no key, so there is no `planToken` on this path and the
+ * published type it is declared against cannot name an unpublished wire type anyway.
+ */
+const BUILT = {
+  built: true,
+  plan: PLAN,
+  preimage: { text: DEFINITION, language: "sql" },
+} as unknown as ObjectEditBuild;
+const APPLIED = { outcome: "applied", revision: PLAN.revision, duration: 3 } as unknown as ObjectEditOutcome;
+
+type HostEditor = NonNullable<WorkspaceObjectReader["objectEditor"]>;
+
+/** A host that reads definitions and, optionally, edits them. */
+function editingReader(objectEditor?: HostEditor, document: ObjectSourceDocument = EDITABLE_DOCUMENT) {
+  return {
+    ...treeReader(),
+    readObjectSource: async () => document,
+    ...(objectEditor === undefined ? {} : { objectEditor }),
+  } as WorkspaceObjectReader;
+}
+
+async function click(testId: string): Promise<void> {
+  await act(async () => {
+    (screen.getByTestId(testId) as HTMLElement).click();
+    await Promise.resolve();
+  });
+}
+
+/** Open the routine's Source tab and wait until its definition is on screen. */
+async function openSourceTab(): Promise<void> {
+  await openTree();
+  await viewSource();
+  await waitFor(() => expect(screen.getByTestId("source-editor")).toBeTruthy());
+}
+
+/** Mount a host, open the tab, and take the two gestures that reach the preview: Edit, Preview. */
+async function previewThrough(objectEditor: HostEditor): Promise<void> {
+  render(workspace({ reader: editingReader(objectEditor) }));
+  await openSourceTab();
+  await click("object-source-edit");
+  await waitFor(() => expect(screen.getByTestId("object-source-preview")).toBeTruthy());
+  await click("object-source-preview");
+}
+
+/** The whole reader-visible round trip: Edit, Preview, Confirm, and the dialog gone. */
+async function applySuccessfullyThroughTheHost(objectEditor: HostEditor): Promise<void> {
+  await previewThrough(objectEditor);
+  await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
+  await click("object-source-apply-confirm");
+  await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+}
+
+function refreshTokenPassedToTheViewer(): unknown {
+  return capturedSourceViewProps.refreshToken;
+}
+
+describe("the embedded workspace applies an object edit through the host", () => {
+  test("AN EXISTING ADOPTER THAT DOES NOTHING SEES NO CHANGE", async () => {
+    /*
+     * The whole non-regression claim of this phase on this shell, and it is asserted rather than
+     * argued. The document is the EDITABLE one, so the absence below is caused by the host having
+     * declared no `objectEditor` and by nothing else: with a non-editable part the same assertions
+     * would pass over a shell that always passes an applier.
+     */
+    render(workspace({ reader: editingReader(undefined) }));
+    await openSourceTab();
+
+    expect(screen.queryByTestId("object-source-edit-bar")).toBeNull();
+    expect(screen.queryByTestId("object-source-edit")).toBeNull();
+    expect((screen.getByTestId("source-editor") as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(refreshTokenPassedToTheViewer()).toBe(0);
+    expect(screen.queryByTestId("object-source-stale")).toBeNull();
+  });
+
+  test("a host with an editor gets the bar, and both methods are called BOUND", async () => {
+    /*
+     * A method read off an object as a value and called with no receiver loses whatever it reaches
+     * through `this`, which is the same fault `sourceReader`'s docblock already records for the
+     * read seam. Both methods here answer through `this`, so an unbound call throws a TypeError
+     * before returning and the dialog below is never drawn.
+     */
+    const asked: unknown[][] = [];
+    const boundHost = {
+      answer: BUILT,
+      outcome: APPLIED,
+      build(connectionId: string, request: ObjectEditRequest): Promise<ObjectEditBuild> {
+        asked.push(["build", connectionId, request.path, request.kind, request.partId]);
+        return Promise.resolve(this.answer);
+      },
+      apply(
+        connectionId: string,
+        plan: ObjectEditPlan,
+        acknowledged: readonly ObjectEditConsequenceClass[],
+      ): Promise<ObjectEditOutcome> {
+        asked.push(["apply", connectionId, plan.planId, acknowledged]);
+        return Promise.resolve(this.outcome);
+      },
+    };
+
+    render(workspace({ reader: editingReader(boundHost) }));
+    await openSourceTab();
+    expect(screen.getByTestId("object-source-edit-bar")).toBeTruthy();
+
+    await click("object-source-edit");
+    await waitFor(() => expect(screen.getByTestId("object-source-preview")).toBeTruthy());
+    await click("object-source-preview");
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-dialog")).toBeTruthy());
+    await click("object-source-apply-confirm");
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+
+    // The connection ID, the address, the kind and the part: the whole surface, on both methods.
+    expect(asked).toEqual([
+      ["build", "host-conn-1", ["app", "order_total(integer)"], "function", "definition"],
+      ["apply", "host-conn-1", "host-plan-1", []],
+    ]);
+  });
+
+  test("a host that THROWS before returning costs ONE TAB and not the adopter's page", async () => {
+    /*
+     * MEASURED on the plain-arrow form of the READ seam: a host that threw gave an uncaught Error
+     * out of `commitHookEffectListMount`, and a host that returned `undefined` gave
+     * `TypeError: undefined is not an object (evaluating '...then')` at the same place. Both are
+     * render-phase throws that take an adopter's whole page down rather than one tab, and the
+     * apply seam is reached from an event handler rather than an effect, which is a different
+     * call site with the same two shapes.
+     */
+    await previewThrough({
+      build: (() => {
+        throw new Error("host is broken");
+      }) as unknown as HostEditor["build"],
+      apply: async () => APPLIED,
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+    expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("request");
+    expect(screen.getByTestId("object-source-edit-refused").textContent).toContain("host is broken");
+    expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull();
+    // The page is still rendered, which is the half that says this cost one tab.
+    expect(screen.getByRole("treeitem", { name: /order_total/ })).toBeTruthy();
+    expect(screen.getByTestId("source-editor")).toBeTruthy();
+  });
+
+  test("a host that returns a NON-THENABLE is a failed apply and not a crash", async () => {
+    await previewThrough({
+      build: (() => undefined) as unknown as HostEditor["build"],
+      apply: async () => APPLIED,
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+    // Not the host's own sentence, because there is none: an answer that is not a build response
+    // is refused in the pane's own grammar, and nothing was sent.
+    expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("unreadable");
+    expect(screen.getByTestId("object-source-edit-refused").textContent).toContain(
+      "The apply preview could not be read, so nothing was previewed and nothing was sent.",
+    );
+    expect(screen.getByRole("treeitem", { name: /order_total/ })).toBeTruthy();
+  });
+
+  test("a host's malformed PLAN and malformed OUTCOME are both refused at the seam", async () => {
+    /*
+     * The browser probe made the trust boundary concrete: its own stub host declared `package` and
+     * the shell drew a `Packages 1` folder for it, against the same MariaDB whose packages the
+     * standalone shell could not see. NOTHING VERIFIES A HOST, so a host's plan is narrowed by
+     * `isObjectEditPlanShape` and its outcome by `isObjectEditOutcomeShape` before either is drawn.
+     *
+     * Both halves are driven here because they fail in different places and produce different
+     * sentences: a malformed plan never opens the dialog at all, and a malformed outcome opens it
+     * and then cannot say whether the change landed.
+     */
+    const malformedPlan = { ...PLAN, revision: { check: "unavailable", reason: "none", token: "t1" } };
+    render(
+      workspace({
+        reader: editingReader({
+          build: async () =>
+            ({
+              built: true,
+              plan: malformedPlan,
+              preimage: { text: DEFINITION, language: "sql" },
+            }) as unknown as ObjectEditBuild,
+          apply: async () => APPLIED,
+        }),
+      }),
+    );
+    await openSourceTab();
+    await click("object-source-edit");
+    await waitFor(() => expect(screen.getByTestId("object-source-preview")).toBeTruthy());
+    await click("object-source-preview");
+    // A revision that says "no check was possible" while carrying a token is the two-state
+    // collapse the predicate refuses, and the dialog is never drawn over it.
+    await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+    expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("unreadable");
+    expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull();
+    // A second host in one test, because the two halves are two different refusals.
+    cleanup();
+
+    await previewThrough({
+      build: async () => BUILT,
+      apply: async () => ({ outcome: "applied", revision: PLAN.revision }) as unknown as ObjectEditOutcome,
+    });
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
+    await click("object-source-apply-confirm");
+    // An outcome with no duration is not an outcome. The reader is told the answer could not be
+    // read rather than that the change landed.
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-outcome")).toBeTruthy());
+    expect(screen.getByTestId("object-source-apply-outcome").textContent).toContain(
+      "The apply was sent and its answer could not be read",
+    );
+    expect(refreshTokenPassedToTheViewer()).toBe(0);
+  });
+
+  test("a host plan addressed to ANOTHER object is refused, and the host's apply is never called", async () => {
+    /*
+     * THE SECOND HALF OF THE EXTERNAL REVIEW OF PR #831, and this shell is where it bites hardest.
+     * `isObjectEditPlanShape` answers whether a value IS a plan. It cannot answer whether the plan
+     * is a plan for the object whose text the reader just edited, and on this seam there is nothing
+     * else that could: the standalone shell has a server-minted token whose fingerprint and address
+     * the apply route re-derives, and here there is no token, no route and no server. The host's
+     * answer is the seal.
+     *
+     * So a host whose `build` is merely MISTAKEN, answering the previous tab's plan out of a cache
+     * or losing a race between two open Source tabs, gets the reader's text for object A written
+     * over object B, having shown them object A's diff the whole way. That is ruling 1a's own claim
+     * failing on its own terms: the address is part of what was approved.
+     *
+     * THE READ SEAM ALREADY DOES THIS. `namesThisObject` in
+     * `src/components/object-source/ObjectSourceView.tsx` refuses a DOCUMENT whose path and kind
+     * are not the ones that were asked for, and its docblock records why: without it the wrong
+     * object renders under the asked-for name with nothing on screen saying so. The BUILD seam has
+     * no equivalent, which is the gap.
+     *
+     * Three cases and not one, because the address has three components and a predicate that
+     * checked only the path would pass a one-case test while leaving two ways through. Each is a
+     * separate mount with a `cleanup()` between, which is this file's own pattern.
+     */
+    const elsewhere: readonly { readonly label: string; readonly plan: ObjectEditPlan }[] = [
+      { label: "another path", plan: { ...PLAN, path: ["app", "order_tax(integer)"] } as ObjectEditPlan },
+      { label: "another kind", plan: { ...PLAN, kind: "procedure" } as unknown as ObjectEditPlan },
+      { label: "another part", plan: { ...PLAN, partId: "header" } as unknown as ObjectEditPlan },
+    ];
+
+    for (const { label, plan } of elsewhere) {
+      const applied: string[] = [];
+      render(
+        workspace({
+          reader: editingReader({
+            build: async () =>
+              ({ built: true, plan, preimage: { text: DEFINITION, language: "sql" } }) as ObjectEditBuild,
+            apply: async (_connectionId: string, sent: ObjectEditPlan) => {
+              applied.push(sent.planId);
+              return APPLIED;
+            },
+          }),
+        }),
+      );
+      await openSourceTab();
+      await click("object-source-edit");
+      await waitFor(() => expect(screen.getByTestId("object-source-preview")).toBeTruthy());
+      await click("object-source-preview");
+
+      // The dialog is never drawn, so there is no confirm button to press and the reader is never
+      // shown a diff for one object over a plan addressed to another. `${label}` is in the message
+      // so a failure names which of the three components got through.
+      await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+      expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("unreadable");
+      expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull();
+      expect({ label, applied }).toEqual({ label, applied: [] });
+      cleanup();
+    }
+
+    // THE CONTROL, and it is the reason the three cases above are not vacuous: the SAME gestures
+    // over a plan that DOES address this pane reach the dialog and the host's apply. A pane that
+    // refused every build, or a preview button that had stopped working, would pass every line
+    // above and fail here.
+    const reached: string[] = [];
+    await applySuccessfullyThroughTheHost({
+      build: async () => BUILT,
+      apply: async (_connectionId: string, sent: ObjectEditPlan) => {
+        reached.push(sent.planId);
+        return APPLIED;
+      },
+    });
+    expect(reached).toEqual(["host-plan-1"]);
+  });
+
+  test("this shell's refreshToken becomes a counter IT owns, and only its OWN apply moves it", async () => {
+    /*
+     * `refreshToken={0}` was a DECISION and not a stub, and an apply breaks its stated premise,
+     * because an apply THIS shell issues IS a DDL this shell knows about. The counter is still
+     * blind to a host's own DDL, which is why the tab that applied goes STALE rather than being
+     * cleared and re-read: this shell knows something changed and does not know what the host did.
+     */
+    const seen: unknown[] = [];
+    await previewThrough({ build: async () => BUILT, apply: async () => APPLIED });
+    seen.push(refreshTokenPassedToTheViewer());
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
+    await click("object-source-apply-confirm");
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+    seen.push(refreshTokenPassedToTheViewer());
+
+    expect(seen).toEqual([0, 1]);
+    /*
+     * What the reader SEES for it, and it is NOT the stale banner (X25, #789). The same handler
+     * clears the tab, so the pane re-reads at the token the apply moved to and `readAtToken`
+     * equals `refreshToken` again: the tab that applied knows exactly what happened and is not
+     * asked to press anything. The banner is what every OTHER open Source tab gets, and it is
+     * driven where it lives, in `tests/components/object-source/ObjectSourceView.test.tsx`.
+     */
+    await waitFor(() => expect(screen.getByTestId("source-editor")).toBeTruthy());
+    expect(screen.queryByTestId("object-source-stale")).toBeNull();
+  });
+
+  test("a FAILED apply does not move the counter", async () => {
+    /*
+     * The other half of "only its OWN apply moves it", and it is a separate test because the
+     * increment site is a single call the pane makes only for an applied outcome: a shell that
+     * bumped on every answer would pass the test above and mark a tab stale over a definition
+     * nothing changed.
+     */
+    await previewThrough({
+      build: async () => BUILT,
+      apply: async () =>
+        ({
+          outcome: "refused",
+          refusal: {
+            refusal: "privilege",
+            sentence: "must be owner of function order_total",
+            at: { within: "none" },
+          },
+          duration: 2,
+        }) as unknown as ObjectEditOutcome,
+    });
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
+    await click("object-source-apply-confirm");
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-outcome")).toBeTruthy());
+
+    /*
+     * WHICH failure, and it is asserted because the first draft of this test did not: a refusal
+     * whose `at` was `{ within: "object" }`, which is not one of the three arms `isPosition`
+     * accepts, made the outcome unreadable, and an unreadable outcome returns from `landOutcome`
+     * BEFORE the line the counter mutation moves. The test passed and the mutation killed nothing.
+     * Pinning the engine's own sentence is what puts the refused arm in the population.
+     */
+    expect(screen.getByTestId("object-source-apply-outcome").textContent).toContain(
+      "must be owner of function order_total",
+    );
+    expect(refreshTokenPassedToTheViewer()).toBe(0);
+    expect(screen.queryByTestId("object-source-stale")).toBeNull();
+  });
+
+  /*
+   * THE BOUND, and this shell is the only place it can exist (#789 Phase 3).
+   *
+   * `src/lib/api/object-edit-wire.ts` bounds NO string in any of its four shape predicates, and it
+   * does not because its brief specified none. Round 1 said here that the standalone shell does not
+   * care because its two routes bound what they answer. MEASURED and false, and the docblock in
+   * `use-connection-adapter.ts` now carries the grep: the two routes bound only what they RECEIVE,
+   * so the hazard is on both shells and only its author differs. This is the shell where a test can
+   * drive it, because here the answer is a plain object a test can construct. The dialog renders a
+   * refusal sentence, a refusal hint, a revision reason and each consequence's observed fact
+   * verbatim, with only the plan's executable text bounded by anything at all.
+   *
+   * Phase 2 measured the same hazard on the READ seam and closed it there: a part carrying a
+   * five-million-character truncation reason passed `isSourceDocumentShape` and the whole of it
+   * reached a div. This is that measurement applied to the seam that writes.
+   */
+  const HUGE = "x".repeat(5_000_000);
+
+  test("a host BUILD answer larger than this shell can read is refused, and nothing is sent", async () => {
+    let applied = 0;
+    await previewThrough({
+      build: async () =>
+        ({
+          built: true,
+          plan: {
+            ...PLAN,
+            consequences: [
+              { loses: "destroys-comment", fact: { source: "pg_description", observed: HUGE } },
+              { loses: "destroys-index", fact: { source: "pg_index", observed: "one index" } },
+            ],
+          },
+          preimage: { text: DEFINITION, language: "sql" },
+        }) as unknown as ObjectEditBuild,
+      apply: async () => {
+        applied += 1;
+        return APPLIED;
+      },
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+    expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("request");
+    expect(screen.getByTestId("object-source-edit-refused").textContent).toContain(
+      "The host answered the apply preview with more text than LibreDB can read, so nothing was previewed and nothing was sent.",
+    );
+    expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull();
+    // The sentence is a claim about the apply, so it is asserted rather than trusted.
+    expect(applied).toBe(0);
+  });
+
+  /**
+   * THE CONTROL for the test above, and without it that test certified the wrong thing (fix
+   * round 1, finding 4).
+   *
+   * The round-1 fixture spelled its two consequence classes `comment` and `grants`, and NEITHER is
+   * one of the eight names in `CONSEQUENCE_CLASSES`. MEASURED by the reviewer and reproduced here:
+   * the identical fixture with the five-million-character string cut to ten characters is refused
+   * with `data-refusal="unreadable"`, so the plan was malformed independently of its size and the
+   * test above certified "the bound runs before the shape check" rather than the cost the report
+   * states. This test is the population that makes the claim true: the SAME answer, well formed,
+   * with the same two classes and only the size changed, is ACCEPTED and drawn. The two tests
+   * differ in exactly one thing, which is the number of characters.
+   */
+  test("the same build answer with a short fact is ACCEPTED and drawn, which is the size claim's control", async () => {
+    await previewThrough({
+      build: async () =>
+        ({
+          built: true,
+          plan: {
+            ...PLAN,
+            consequences: [
+              { loses: "destroys-comment", fact: { source: "pg_description", observed: "0123456789" } },
+              { loses: "destroys-index", fact: { source: "pg_index", observed: "one index" } },
+            ],
+          },
+          preimage: { text: DEFINITION, language: "sql" },
+        }) as unknown as ObjectEditBuild,
+      apply: async () => APPLIED,
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-dialog")).toBeTruthy());
+    expect(screen.queryByTestId("object-source-edit-refused")).toBeNull();
+    expect(screen.getAllByTestId("object-source-apply-consequence")).toHaveLength(2);
+    expect(document.body.textContent).toContain("0123456789");
+  });
+
+  test("a host APPLY answer larger than this shell can read never claims the change landed", async () => {
+    /*
+     * The apply WAS sent, so the honest sentence is that LibreDB cannot say what happened, and the
+     * pane renders a rejected apply as `interrupted` with `committed: "unknown"`, which is the
+     * same fact in the outcome vocabulary. A sentence saying the apply failed would be a claim
+     * about an engine nobody here has heard from.
+     */
+    await previewThrough({
+      build: async () => BUILT,
+      apply: async () =>
+        ({
+          outcome: "refused",
+          refusal: { refusal: "privilege", sentence: HUGE, at: { within: "none" } },
+          duration: 1,
+        }) as unknown as ObjectEditOutcome,
+    });
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
+    await click("object-source-apply-confirm");
+
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-outcome")).toBeTruthy());
+    expect(screen.getByTestId("object-source-apply-outcome").textContent).toContain(
+      "The apply was sent and the host answered with more text than LibreDB can read, so LibreDB cannot say whether this change landed.",
+    );
+    expect(refreshTokenPassedToTheViewer()).toBe(0);
+  });
+
+  test("a host answer that refers to itself is measured once rather than for ever", async () => {
+    /*
+     * A cycle is a host quirk and not an attack, so it is counted once and walked no further. What
+     * this test is really about is TERMINATION: without the seen-set the walk recurses until the
+     * stack runs out, and the pane would then report `request` with "Maximum call stack size
+     * exceeded" instead of the shape refusal below. The two refusal ids are what tell the two
+     * apart, so the assertion is on the id and not on the presence of a refusal.
+     */
+    const answer: Record<string, unknown> = {
+      built: true,
+      plan: PLAN,
+      preimage: { text: DEFINITION, language: "sql" },
+    };
+    answer.self = answer;
+
+    await previewThrough({
+      build: async () => answer as unknown as ObjectEditBuild,
+      apply: async () => APPLIED,
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+    // Refused on SHAPE, by `isObjectEditBuildResponseShape`'s exact-keys check, which is what the
+    // walk having terminated normally looks like from here.
+    expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("unreadable");
+  });
+
+  test("clearing a document while the host withdraws its reader still issues NO read", async () => {
+    /*
+     * The pane's read effect issues its read through `reader ?? httpSourceReader`, and this package
+     * ships no `/api/db/objects/source`, so a CLEARED document plus a withdrawn host reader would
+     * send the viewer's default reader at a route that does not exist. `sourceFailure` in
+     * `StudioWorkspace.tsx` is non-undefined in the SAME render, so `needsRead` is false and no
+     * read is issued at all.
+     *
+     * THE POPULATION MOVED AND THIS TEST MOVED WITH IT (X25, #789). It used to reach the clear
+     * through the stale banner's own control, because until X25 the apply cleared nothing and the
+     * banner was the only control that did. The apply clears now, so the clear and the withdrawal
+     * are driven together, in ONE act, which is both the tighter race and the exact hazard the
+     * old no-clear behaviour was defended with: apply, host withdraws `readObjectSource`, and the
+     * question is whether anything goes out. Nothing does.
+     */
+    const withReader = editingReader({ build: async () => BUILT, apply: async () => APPLIED });
+    const view = render(workspace({ reader: withReader }));
+    await openSourceTab();
+    await click("object-source-edit");
+    await waitFor(() => expect(screen.getByTestId("object-source-preview")).toBeTruthy());
+    await click("object-source-preview");
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
+
+    const before = requested.length;
+    await act(async () => {
+      (screen.getByTestId("object-source-apply-confirm") as HTMLElement).click();
+      // The withdrawal, inside the same act as the answer landing: the host hands a reader object
+      // with no `readObjectSource` on it, which is `conn.sourceReader === undefined` here.
+      view.rerender(workspace({ reader: treeReader() }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-failure")).toBeTruthy());
+    expect(screen.getByTestId("object-source-failure-message").textContent).toContain(
+      "no longer reads object definitions",
+    );
+    expect(screen.queryByTestId("source-editor")).toBeNull();
+    /*
+     * The door the old reason was written about, named here at the moment it matters rather than
+     * left to the `afterEach`, which would fail with no sentence saying why.
+     */
+    expect(requested.length).toBe(before);
+  });
+
+  /*
+   * THE THREE WAYS A HOST DEFEATS A BOUND THAT COUNTS WHAT IT WALKS (fix round 1, findings 1, 2
+   * and the third one this file found while repairing them).
+   *
+   * The round-1 walk counted DISTINCT objects: it carried one `seen` set across the whole answer,
+   * so every occurrence of an object after the first cost zero, while `ApplyPreviewDialog` draws
+   * `consequences.map` occurrence by occurrence. MEASURED by the reviewer inside this suite: six
+   * consequences that are ONE object with a one-million-character `observed` were ACCEPTED and all
+   * six were drawn, `PROBE consequence rows: 6 characters in the DOM: 6000456` against a bound of
+   * 4,400,000. The second defeat is an enumerable GETTER: the walk read the value once and the
+   * renderer read it again, so an answer measuring five characters drew two million of them, which
+   * also makes the bytes previewed differ from the bytes a host later applies. The third is a
+   * non-enumerable own property: `hasExactKeys` reads `Object.getOwnPropertyNames`, so a
+   * non-enumerable `observed` is judged and rendered while an `Object.entries` walk never sees it.
+   *
+   * All three are closed the same way, and the way is the point: the seam SNAPSHOTS the answer
+   * while it counts it, reading every property exactly once over the same key population the shape
+   * predicates read, and everything downstream renders the snapshot. So the measured characters
+   * are the drawn characters by construction, rather than by a claim about how many times a value
+   * is read.
+   */
+
+  test("a host answer that reuses ONE object pays for EVERY occurrence, because the dialog draws every one", async () => {
+    const shared = { loses: "destroys-comment", fact: { source: "pg_description", observed: "x".repeat(1_000_000) } };
+    let applied = 0;
+    await previewThrough({
+      build: async () =>
+        ({
+          built: true,
+          // Six references to ONE object: 6,000,000 characters on screen, over a 4,400,000 bound.
+          plan: { ...PLAN, consequences: [shared, shared, shared, shared, shared, shared] },
+          preimage: { text: DEFINITION, language: "sql" },
+        }) as unknown as ObjectEditBuild,
+      apply: async () => {
+        applied += 1;
+        return APPLIED;
+      },
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+    expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("request");
+    expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull();
+    // The claim is about the DOM, so the DOM is what is asserted, not only the refusal.
+    expect(document.body.textContent?.length ?? 0).toBeLessThan(100_000);
+    expect(applied).toBe(0);
+  });
+
+  test("a host answer whose value CHANGES between reads is read ONCE, and the bytes drawn are the bytes measured", async () => {
+    let reads = 0;
+    const fact = {
+      source: "pg_description",
+      get observed(): string {
+        reads += 1;
+        return reads === 1 ? "small" : "y".repeat(2_000_000);
+      },
+    };
+
+    await previewThrough({
+      build: async () =>
+        ({
+          built: true,
+          plan: { ...PLAN, consequences: [{ loses: "destroys-comment", fact }] },
+          preimage: { text: DEFINITION, language: "sql" },
+        }) as unknown as ObjectEditBuild,
+      apply: async () => APPLIED,
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-dialog")).toBeTruthy());
+    // ONE read, by the seam, and the shape predicate and the renderer both read the snapshot.
+    expect(reads).toBe(1);
+    expect(document.body.textContent).toContain("small");
+    expect(document.body.textContent?.length ?? 0).toBeLessThan(100_000);
+  });
+
+  test("a host answer's NON-ENUMERABLE own property is measured, because the shape check reads it", async () => {
+    const fact: Record<string, unknown> = { source: "pg_description" };
+    // `hasExactKeys` reads `Object.getOwnPropertyNames`, so this property is judged, and
+    // `describeConsequence` renders it. An `Object.entries` walk never sees it at all.
+    Object.defineProperty(fact, "observed", { value: HUGE, enumerable: false });
+
+    await previewThrough({
+      build: async () =>
+        ({
+          built: true,
+          plan: { ...PLAN, consequences: [{ loses: "destroys-comment", fact }] },
+          preimage: { text: DEFINITION, language: "sql" },
+        }) as unknown as ObjectEditBuild,
+      apply: async () => APPLIED,
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+    expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("request");
+    expect(document.body.textContent?.length ?? 0).toBeLessThan(100_000);
+  });
+
+  test("a host answer whose KEY is larger than this shell can read is refused too", async () => {
+    // A key is not rendered, but it is read, held and compared by everything downstream, and the
+    // budget is spent on it for the same reason the round-1 walk charged for it.
+    await previewThrough({
+      build: async () =>
+        ({
+          built: true,
+          plan: { ...PLAN, [HUGE]: true },
+          preimage: { text: DEFINITION, language: "sql" },
+        }) as unknown as ObjectEditBuild,
+      apply: async () => APPLIED,
+    });
+
+    await waitFor(() => expect(screen.getByTestId("object-source-edit-refused")).toBeTruthy());
+    expect(screen.getByTestId("object-source-edit-refused").getAttribute("data-refusal")).toBe("request");
+  });
+
+  test("a tab remounted inside an unsaved edit still clears its dirty mark when the buffer is reverted", async () => {
+    /*
+     * WHAT `dirty={sourceTab.dirty}` IS FOR, and until fix round 1 nothing in any suite drove it:
+     * deleting the prop left this file at 36 pass 0 fail (mutation h), which is the finding.
+     *
+     * `ObjectSourceView` seeds `dirtyRef` from this prop and writes the flag to the tab only when
+     * the boolean FLIPS. A tab switch unmounts the pane, so without the prop a pane remounted
+     * inside an unsaved edit starts at `false`, and reverting the buffer to the engine's own text
+     * then compares `false` against a `false` that was never true, no patch is written, and the
+     * strip keeps a dirty dot over a tab holding exactly what the database holds.
+     */
+    render(workspace({ reader: editingReader({ build: async () => BUILT, apply: async () => APPLIED }) }));
+    await openSourceTab();
+    await click("object-source-edit");
+
+    await act(async () => {
+      editorProbe.change?.("CREATE FUNCTION app.order_total(integer) RETURNS numeric AS $$ SELECT 99 $$;");
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getByTestId("tab-dirty-dot")).toBeTruthy());
+
+    // The tab switch is the remount: the pane is rendered only for the tab that is active.
+    await userEvent.click(screen.getByRole("tab", { name: /Query 1/ }));
+    expect(screen.queryByTestId("source-editor")).toBeNull();
+    await userEvent.click(screen.getByRole("tab", { name: /Source: app.order_total/ }));
+    await waitFor(() => expect(screen.getByTestId("source-editor")).toBeTruthy());
+    // The mark survives the remount, which is the state this test is about.
+    expect(screen.getByTestId("tab-dirty-dot")).toBeTruthy();
+
+    await act(async () => {
+      editorProbe.change?.(DEFINITION);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-dirty-dot")).toBeNull());
+  });
+  /**
+   * WHAT THE READER IS LOOKING AT ONE RENDER AFTER A SUCCESSFUL APPLY (X25, #789).
+   *
+   * Filed as a residual with a reason, and the reason was checked by driving it rather than by
+   * re-reading it, which is what the two tests below are. This one is the REPRODUCTION: the host
+   * answers the OLD definition on the first read and the NEW one on every read after it, exactly
+   * as an engine does, so a pane that re-read shows `SELECT 2` and a pane that did not shows
+   * `SELECT 1`.
+   *
+   * It is an assertion about the BYTES ON SCREEN and not about the counter. The counter already has
+   * its own test above and a moved counter is not a re-read: `needsRead` in `ObjectSourceView` is
+   * `document === undefined && failure === undefined`, so a shell that moves the token and clears
+   * nothing issues no read at all and only draws the stale banner over text the object no longer
+   * holds.
+   */
+  test("a successful apply leaves the ENGINE'S OWN new text on screen, not the pre-apply text", async () => {
+    const versions = [DEFINITION, STEP_TEXT];
+    let read = 0;
+    const reader = {
+      ...treeReader(),
+      readObjectSource: async () => {
+        const text = versions[Math.min(read, versions.length - 1)] as string;
+        read += 1;
+        return { ...EDITABLE_DOCUMENT, parts: [{ ...EDITABLE_DOCUMENT.parts[0], text }] } as ObjectSourceDocument;
+      },
+      objectEditor: { build: async () => BUILT, apply: async () => APPLIED },
+    } as unknown as WorkspaceObjectReader;
+
+    render(workspace({ reader }));
+    await openSourceTab();
+    // The control for the two-version host: the FIRST read is the pre-apply definition, so a
+    // failure below is about the apply and not about a host that answered the new text all along.
+    expect(shownText()).toBe(DEFINITION);
+
+    await click("object-source-edit");
+    await waitFor(() => expect(screen.getByTestId("object-source-preview")).toBeTruthy());
+    await click("object-source-preview");
+    await waitFor(() => expect(screen.getByTestId("object-source-apply-confirm")).toBeTruthy());
+    await click("object-source-apply-confirm");
+    await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
+
+    // The pane asked the host again, which is the only way new text can reach the screen here.
+    await waitFor(() => expect(read).toBe(2));
+    await waitFor(() => expect(shownText()).toBe(STEP_TEXT));
+    // And the tab that applied is NOT marked stale: it re-read at the token its own apply moved to,
+    // which is what `src/components/Studio.tsx` already produces for the same gesture.
+    expect(screen.queryByTestId("object-source-stale")).toBeNull();
   });
 });

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { partEditability, type SourceEditablePart } from "@/components/object-source/source-editable";
 import { httpSourceReader, isSourceDocumentShape } from "@/components/object-source/source-reader";
 import { SOURCE_CHARACTER_LIMIT } from "@/lib/db/object-kinds";
 import type { DatabaseConnection } from "@/lib/types";
@@ -130,6 +131,105 @@ describe("isSourceDocumentShape", () => {
       isSourceDocumentShape({
         ...document,
         parts: [{ ...readable, truncated: { limit: 10, reason: "r".repeat(SOURCE_CHARACTER_LIMIT) } }],
+      }),
+    ).toBe(true);
+  });
+
+  test("a malformed `edit` makes THAT PART not editable and leaves the document renderable", () => {
+    // It fails SOFT, and that asymmetry is deliberate: refusing the whole document would regress an
+    // existing adopter's READ, which is a feature they have today, over an affordance that is new.
+    // Absence and malformation both read as not editable, and `partEditability` is what decides
+    // that: `edit?.offered === true` is false for every malformed value, so the part answers
+    // `not-offered` and the pane draws no Edit button.
+    const malformed = { path: ["app", "f"], kind: "function", parts: [{ ...readable, edit: { offered: "yes" } }] };
+    expect(isSourceDocumentShape(malformed)).toBe(true);
+    expect(isSourceDocumentShape({ ...document, parts: [{ ...readable, edit: null }] })).toBe(true);
+    expect(isSourceDocumentShape({ ...document, parts: [{ ...readable, edit: "offered" }] })).toBe(true);
+    expect(isSourceDocumentShape({ ...document, parts: [{ ...readable, edit: { offered: false } }] })).toBe(true);
+  });
+
+  test("a well formed `edit` survives the check", () => {
+    expect(
+      isSourceDocumentShape({
+        path: ["app", "f"],
+        kind: "function",
+        parts: [{ ...readable, edit: { offered: true } }],
+      }),
+    ).toBe(true);
+    expect(
+      isSourceDocumentShape({
+        path: ["app", "f"],
+        kind: "function",
+        parts: [{ ...readable, edit: { offered: false, reason: "no" } }],
+      }),
+    ).toBe(true);
+  });
+
+  test("an `edit` on a REFUSAL part does not make the part editable", () => {
+    // The client half of the same rule the route enforces, and the only half that runs on the
+    // embedded shell, where a host cannot reach `boundSourceDocument` at all. The refusal arm never
+    // reaches `partEditability`: `SourceEditablePart` is the TEXT arm and the refusal pane draws
+    // first, so an `edit` sitting beside `unavailable` decides nothing.
+    const refusal = {
+      path: ["app", "f"],
+      kind: "function",
+      parts: [{ id: "d", label: "D", unavailable: "no", edit: { offered: true } }],
+    };
+    expect(isSourceDocumentShape(refusal)).toBe(true);
+  });
+
+  test("an over-long reason under `offered: true` leaves the document readable, because nothing renders it", () => {
+    /*
+     * THE BOUND IS ONE ARM WIDE, and this test is the population check that fix round 1 was
+     * missing (#789 Phase 3). Round 1 checked the length wherever `reason` was a string, on the
+     * argument that "a host shipping megabytes under an `offered: true` is handing this seam the
+     * same value with a different label on it". MEASURED with the real `partEditability` below:
+     * on the `offered: true` arm it answers `{ editable: true }` and never looks at `reason` at
+     * all, so no component renders that string and there is nothing on that arm for a bound to
+     * protect. Refusing the document over it cost the READ of every part in it for a field that
+     * decides only an affordance, which is this epic's signature defect, a guard wider than the
+     * population that renders.
+     *
+     * The assertion on `partEditability` is not decoration: it is the only thing that keeps this
+     * test honest if `source-editable.ts` ever starts rendering the `offered: true` reason, at
+     * which point the arm gains a renderer and this test must be reconsidered rather than
+     * silently outlived.
+     */
+    const part = { ...readable, edit: { offered: true, reason: "n".repeat(SOURCE_CHARACTER_LIMIT + 1) } };
+    expect(isSourceDocumentShape({ ...document, parts: [part] })).toBe(true);
+    expect(partEditability(part as SourceEditablePart)).toEqual({ editable: true });
+  });
+
+  test("rejects an edit refusal whose reason is longer than a text is allowed to be", () => {
+    /*
+     * THE FOURTH HOST-SUPPLIED RENDERED STRING, and the first one this phase adds (#789 Phase 3).
+     * `partEditability` answers `provider-refused` with `edit.reason` VERBATIM and unprefixed
+     * (`source-editable.ts:110-112`), and `ObjectSourceView` renders that sentence, so an
+     * unbounded `reason` is the same failure `unavailable` and `truncated.reason` were bounded
+     * for: on the embedded seam there is no route in front of this predicate, and a host can hand
+     * the shell tens of megabytes of prose to put in a `<span>`.
+     *
+     * IT IS A HARD REFUSAL and the malformed arm above is soft, which is not an inconsistency: a
+     * malformed `edit` degrades safely, because every downstream reader of it answers "not
+     * offered", while an over-long `reason` degrades into rendering the whole of it. Nothing
+     * downstream bounds it: measured at this commit, `partEditability` does not look at the
+     * length and it is not this task's file. An overrun is a failed read here for exactly the
+     * reason the three strings beside it give, and no Phase 2 adopter regresses, because `edit` is
+     * a field this phase invents and no document written before it carries one.
+     *
+     * The CONTROL sits exactly ON the bound and passes, which is what makes this an off-by-one
+     * assertion rather than a refusal of everything large.
+     */
+    expect(
+      isSourceDocumentShape({
+        ...document,
+        parts: [{ ...readable, edit: { offered: false, reason: "r".repeat(SOURCE_CHARACTER_LIMIT + 1) } }],
+      }),
+    ).toBe(false);
+    expect(
+      isSourceDocumentShape({
+        ...document,
+        parts: [{ ...readable, edit: { offered: false, reason: "r".repeat(SOURCE_CHARACTER_LIMIT) } }],
       }),
     ).toBe(true);
   });

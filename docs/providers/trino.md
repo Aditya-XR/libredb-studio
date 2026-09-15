@@ -893,12 +893,12 @@ through the provider itself on trinodb/trino:476:
 | Container | table | view | materialized_view | function |
 |---|---|---|---|---|
 | `memory` | 2 | 1 | 0 | unavailable |
-| `memory.app` | 2 | 1 | 0 | 7 |
+| `memory.app` | 2 | 1 | 0 | 9 |
 | `tpch.tiny` | 8 | 0 | 0 | 0 |
 
-`memory.app` holds `orders` and `customers`, the view `customer_names`, and seven functions. Not one
-of the seven is padding, and four of them exist only because the **source read** (#789) below needs
-an object that defeats a shortcut:
+`memory.app` holds `orders` and `customers`, the view `customer_names`, and nine functions. Not one
+of them is padding, and six exist only because the **source read** and the **object edit** (#789)
+below need an object that defeats a shortcut:
 
 | Function | What it is there for |
 |---|---|
@@ -908,6 +908,8 @@ an object that defeats a shortcut:
 | `answer()` | The empty argument list. |
 | `we(ird(bigint)` | A function NAME holding an open parenthesis, so the first `(` in the segment belongs to the name. |
 | `rowparen(row("a)b" bigint,"c" varchar))` | A ROW field name holding a CLOSE parenthesis, which is what makes the source read's quote-aware scans load-bearing. |
+| `mentions_create(bigint)` | A BODY holding the word `CREATE`. The apply splices ` OR REPLACE` after the FIRST TOKEN, and a global replace of the word would rewrite this body too. See the object-edit section. |
+| `over_limit_fn(bigint)` | The object OVER the 1,000,000-character source bound: `SHOW CREATE FUNCTION` measured 1,001,094 characters for it on 476. See the object-edit section for why it is an ARRAY of decimals and not a long string literal. |
 
 The server returns `orders` before `customers`, which is what makes the provider's own sort
 observable rather than incidental.
@@ -1164,6 +1166,228 @@ escape, so there is one character to protect and it is doubled.
 None. Every kind Trino declares has a definition text and gains `hasSource`. The kinds a reader might
 expect to find missing here are not declared at all: Trino has no trigger, no stored procedure and no
 index anywhere in its model, so there is no folder for them and no source question to answer.
+
+---
+
+### Object edit (#789)
+
+Trino applies an edited definition for ONE kind, `function`, and the strategy is
+`replace-in-place-statement`.
+Everything in this section was measured against a live trinodb/trino:476 on 2026-09-14, through the
+provider or through `POST /v1/statement` directly, against the fixture
+[`docker/trino-init/01-object-fixture.sql`](../../docker/trino-init/01-object-fixture.sql) applies.
+
+#### Which kinds, and which fact each absence is
+
+| Kind | Editable | The engine fact behind it |
+|---|---|---|
+| `function` | Yes | `CREATE OR REPLACE FUNCTION` with the identity unchanged replaces the addressed overload in place. A FAILED one leaves the previous object byte-identical, with no transaction. The round trip is byte-stable: applying the read text back verbatim leaves `SHOW CREATE FUNCTION` answering the same bytes. |
+| `view` | DEFERRED, not refused | `CREATE OR REPLACE VIEW` works on 476 and a failed apply leaves the previous view byte-identical, so the mechanism is the same one. It is held back because `SECURITY DEFINER` is in the read text although the fixture never typed it, so an edit round-trips a security principal the reader never chose, and the consequence class for a changed security principal has no test on this engine yet. |
+| `table` | REFUSED by the engine | `CREATE OR REPLACE TABLE memory.app.t2 (a bigint)` answers `This connector does not support replacing tables`, `NOT_SUPPORTED`, errorCode 13. |
+| `materialized_view` | REFUSED by the engine | `CREATE OR REPLACE MATERIALIZED VIEW memory.app.mv AS SELECT 1 AS a` answers `This connector does not support creating materialized views`, `NOT_SUPPORTED`, errorCode 13. |
+
+#### The statement is SPLICED, and the splice is anchored to the FIRST TOKEN
+
+The apply sends the reader's own bytes with eleven characters, ` OR REPLACE`, inserted immediately
+after the first token, and nothing else.
+For the fixture's own shape that is offset 6, so the sent text is
+`CREATE OR REPLACE FUNCTION memory.app.plus_one(x bigint)...`.
+
+**The header is spliced and never ASSEMBLED**, and that is a safety property rather than an economy.
+A header this provider assembled from a catalog row would drop whatever the reader's text carries and
+this provider does not model, and the measured instance is a view's `SECURITY DEFINER`: it is in the
+read text although the author never wrote it, so an assembled header would silently change who the
+object runs as.
+
+**It is never a global replace.** A body may hold the word `CREATE`, which the fixture's
+`mentions_create(bigint)` proves by returning the literal `'CREATE TABLE'`, and a `replaceAll` would
+rewrite the body too. Recorded because it is the honest half of the same measurement: a
+first-occurrence `replace` is EXTENSIONALLY EQUAL to the anchor for every text that survives the
+identity check below, because the read text is `SHOW CREATE` output and always opens with `CREATE` at
+offset zero. The anchor is what makes the rule true of the text rather than of the fixture.
+
+#### The identity is FIRST-LINE equality against the formatter's own output
+
+The read text is the FORMATTER's rendering and not anybody's source: comments are dropped, expressions
+are parenthesised, `U&'\0041'` becomes `'A'` and blocks are re-indented.
+So its first line is canonical, and the fixture's own shapes put the whole parameter list on it,
+including `decimal(10, 2)`, `array(varchar)`, a ROW with a quoted `"a)b"` field and a `we(ird`
+identifier.
+A submission whose first line differs is refused with BOTH headers shown, because the reader's next
+action is to put the original identity back or to create the new function deliberately.
+
+**Why the header is refused rather than sent.** Measured on 476: a changed RETURN TYPE and a renamed
+PARAMETER are both replaced IN PLACE, and only a changed ARGUMENT TYPE LIST forks, leaving three rows
+where there were two and the addressed one untouched.
+
+**UNMEASURED, and named as such: whether the formatter ever WRAPS a very long parameter list onto a
+second line.** It fails SAFE either way, because a wrapped header the reader did not touch is
+byte-identical to itself, so the failure mode is a false refusal and never a false apply. If it bites,
+the repair is to compare through the matching close paren rather than to the end of the line, which is
+a provider change and no contract change.
+
+#### The revision is a COMPARISON, because there is no readable token anywhere
+
+Trino publishes NO revision token, no modification instant and no generation counter for a catalog
+function in any surface this provider can read, so the plan carries
+`{ check: "compared", token: <sha-256 of the read text>, basis: "SHOW CREATE FUNCTION", scope: "server" }`
+and the check is a RE-READ inside the apply, immediately before the write, compared byte for byte.
+
+**It NARROWS the window and does not close it**, and that is stated rather than implied: the re-read
+and the write are two round trips, and another session can still get in between. Only a transaction or
+a lock closes one, and Trino has neither across a read and a later write. A definition that moved is a
+`conflict` carrying the server's current text, and NOTHING is executed.
+
+#### There is no privilege pre-flight, and that absence is measured
+
+Whether an apply is possible here is a per-CATALOG fact. Measured on 476 across the five catalogs the
+compose cluster configures, exactly one of them accepts a catalog function and a different one
+accepts a view, and no surface answers the question in advance: the only way to know is to try.
+So every readable `function` part carries `edit: { offered: true }` and the refusal arrives at apply
+time as `unsupported`, carrying the connector's own `NOT_SUPPORTED` and errorCode 13.
+
+#### The addressed overload is verified AFTER the apply
+
+The provider re-reads `SHOW CREATE FUNCTION`, which is where the new revision token comes from, and
+asks whether the object the statement WROTE is the object the plan was addressed to: the parameter
+list the SENT statement declares, read with the same comparison that found the addressed row in the
+first place.
+If it is a different one, the outcome is `applied-elsewhere` with `undone: false` and `wrote` naming
+the overload that was written, because Trino has no transaction to take it back and this design will
+not issue a `DROP` to clean up.
+
+`wrote` is the parameter list the SENT statement declares, with the parameter names dropped, minted
+in the same `name(argumentTypes)` shape a function path segment uses, so it is an address and not a
+label: paste it into an object path and it resolves to the overload that was written.
+It is deliberately NOT the comparison form the check itself runs on. That form is lower-cased and has
+its whitespace and its quotes stripped, which is what makes the engine's two renderings of one
+signature comparable at all, and it removes the boundary between a ROW field's name and its type: the
+fixture's `hard` shape reduces to `decimal(10,2),array(varchar),row(abigint,bvarchar)`, in which
+`abigint` names no type Trino will parse, so `wrote` carries
+`plus_one(decimal(10, 2), array(varchar), ROW(a bigint, b varchar))` instead.
+
+Why that arm is reachable at all: a fork needs an argument-type edit, which the first-line check above
+already refuses, so this is the CONTROL that catches a first-line rule this design got wrong rather
+than a path anybody expects to take.
+The named UNMEASURED case above, a formatter that wraps a long parameter list onto a second line, is
+exactly such a rule: a first-line comparison would pass an argument-list change made below the wrap,
+and this is what would catch it.
+
+**It asks that question and NOT whether the addressed row's text moved, and the difference is a
+defect this provider shipped.** The read text is the formatter's CANONICAL rendering, so an edit that
+differs from the server's bytes and canonicalizes back to them passes the byte-identical refusal and
+then trips a comparison of the two renderings.
+Measured on 476 through this provider, container `libredb-trino-t08fix` on host port 18509: with
+`plus_one(x bigint)` in place, applying
+`CREATE OR REPLACE FUNCTION memory.app.plus_one(x bigint) RETURNS bigint RETURN ((x  +  1)) -- I reformatted this and added a comment`
+SUCCEEDS, `SHOW CREATE FUNCTION` comes back byte-identical to the pre-image, and the rendering
+comparison called that legitimate in-place apply somebody else's object.
+It is the same defect the PostgreSQL provider carried and repaired.
+
+**The catalog's own row set was tried as the replacement and measured unsound in both directions**,
+recorded because it is the obvious repair and reads as the right one.
+A fork does add a row: measured in the same container, two rows for `memory.app.plus_one` before,
+three after a `CREATE OR REPLACE FUNCTION memory.app.plus_one(x varchar)`, the addressed `(x bigint)`
+row byte-identical, and the new row first in the reply.
+But a fork onto an argument list that ALREADY EXISTS adds no row, measured through this provider with
+a hand-built plan, so the row set answers `applied` while the addressed object was never touched; and
+the re-read happens after the write, so another session creating a sibling overload of the same name
+in that window adds a row to a perfectly ordinary in-place apply.
+
+#### Coordinates, and why it is not a subtraction
+
+`errorLocation` carries a 1-based `lineNumber` and `columnNumber` into the statement that was SENT.
+The provider resolves that pair to an offset and converts the offset through the plan's own segment
+map, so the splice is subtracted exactly where the splice is.
+
+A rule that subtracted eleven columns from every line would be wrong, measured: a `RETURN nope` body
+error answers `line 3:8` BOTH bare and spliced, because the splice is on line 1 only. A coordinate
+that lands inside the eleven characters this product wrote is reported as `outside` and never as a
+number, because an out-of-range coordinate handed to Monaco is silently CLAMPED rather than rejected.
+
+Two more coordinates answer `outside`, and only the first of them was observed on 476. A syntax error
+at END OF INPUT reports one column past the last character: measured, a truncated `RETURN (x +`
+answers `line 3:12: mismatched input '<EOF>'. Expecting: <expression>` on an 83-character statement
+whose third line is 11 characters. And a `lineNumber` that is not a line at all, `0` or a fraction, is
+refused rather than resolved: the transport accepts any FINITE number from the failure document, and
+without that refusal `line 0` resolves to a REAL offset in the reader's text and underlines a token
+the engine never named.
+
+#### A timeout is `interrupted` and never a `TimeoutError`
+
+`mapTrinoError` mints a `TimeoutError` for the `timeout` category and
+[`src/lib/api/errors.ts`](../../src/lib/api/errors.ts) answers that HTTP 408 with `retryable: true`.
+A client that retried an apply whose disposition is unknown would apply twice, so a timeout, a
+cancellation and an unreachable coordinator are all `interrupted` with `committed: "unknown"`.
+
+Everything else the coordinator refused is classified from the transport's CATEGORY as data:
+`unsupported` to `unsupported`, `auth` to `privilege`, and everything the table does not name to
+`definition` with the coordinator's own sentence, unprefixed. `refusal.code` carries the engine's
+stable fault NAME, which is what the transport keeps; the integer `errorCode` is deliberately dropped
+one layer down, because it is the less stable of the two.
+
+#### The object the READ BOUND bites, and why it is an array of decimals
+
+`over_limit_fn(bigint)` reads back at **1,001,094 characters**, one thousand and ninety-four past the
+1,000,000-character source bound, so the Source pane truncates it and an edit of it is refused with a
+`guard` sentence rather than applied.
+
+**A long string literal cannot reach that bound on this engine**, and that is measured rather than
+assumed. Trino's own `query.max-length` defaults to exactly 1,000,000 characters, which is exactly the
+source bound, so the `CREATE` that would make such an object is refused before the object exists:
+
+```
+Query text length (1025119) exceeds the maximum length (1000000)
+errorName QUERY_TEXT_TOO_LARGE, errorCode 35, errorType USER_ERROR
+```
+
+The way past it is the FORMATTER, which inflates: `SHOW CREATE FUNCTION` re-renders `.1` as
+`DECIMAL '.1'`, three source characters against thirteen rendered ones, so a 231,109-character
+`CREATE` reads back past the bound.
+
+**And it is a FLAT array rather than a chain of `+`.** A chain inflates further, three characters
+against seventeen, and the coordinator refuses one: 749 terms is the most it accepts and 750 answers
+`Internal error`, `GENERIC_INTERNAL_ERROR`, errorCode 65536, which is a parser depth limit. An `ARRAY`
+literal is one node with a list of children, so it does not deepen the tree and it scales linearly.
+
+Regenerate the element list from the repository root with:
+
+```bash
+node -e 'process.stdout.write(Array.from({length:77000},()=>".1").join(","))'
+```
+
+#### The measured acceptance run (#789)
+
+Driven through `POST /api/db/objects/source`, `POST /api/db/objects/edit-plan` and `POST /api/db/objects/edit-apply` against a running Studio, on a coordinator created for the run with `docker/trino-init/` mounted at `/fixtures` and the fixture applied by the CLI in the same image.
+`select version()` answered `476`.
+`SHOW CREATE FUNCTION memory.app.over_limit_fn` measured 1,001,094 characters on that coordinator, which is the number the fixture claims.
+
+**A FAILED APPLY LEAVES THE OBJECT BYTE IDENTICAL.**
+Trino publishes no row identity a client can read, so the assertion is byte equality of `SHOW CREATE FUNCTION` for the addressed overload PLUS the whole `SHOW FUNCTIONS FROM memory.app` listing, both read out of band through the CLI.
+Four failures were driven against `memory.app.plus_one(bigint)`, which has a `double` overload beside it, and all four left both readings identical.
+
+| What was sent | What the apply answered |
+| --- | --- |
+| `RETURN (x + )` | `refused`, `definition`, `line 3:13: mismatched input ')'. Expecting: <expression>`, `SYNTAX_ERROR`, at line 3 column 13 of the reader's own text |
+| `RETURN (x + no_such_column_t19)` | `refused`, `definition`, `line 3:13: Column 'no_such_column_t19' cannot be resolved`, `COLUMN_NOT_FOUND` |
+| `RETURN ARRAY[x, x]` against `RETURNS bigint` | `refused`, `definition`, `line 3:8: Value of RETURN must evaluate to bigint (actual: array(bigint))`, `TYPE_MISMATCH` |
+| A second writer replaced the overload between the build and the apply | `conflict`, `object-changed`, carrying the coordinator's CURRENT text for the diff, and the apply wrote nothing |
+
+The plan's `session` is the empty array on this engine and its `revision` is `{ check: "compared", basis: "SHOW CREATE FUNCTION" }`, both of which the transcripts carry.
+
+**A TRUNCATED PART CANNOT BE EDITED, and this engine HAS the population.**
+The read of `memory.app.over_limit_fn(bigint)` carries `truncated: { limit: 1000000, ... }`, carries NO `edit` key, and 1,000,000 characters of text.
+An edit growing that text answers HTTP 413 at the route; an edit inside the route's bound reaches the build, which answers `built: false` with the `guard` class naming the coordinator's own 1,001,094 characters.
+The CONTROL, `memory.app.plus_one(bigint)` at 75 characters, carries no `truncated`, carries `edit: { offered: true }`, and builds.
+
+**THE SPLICE IS ANCHORED, and the fixture object that proves it was edited in this run.**
+`memory.app.mentions_create(bigint)` returns the literal `'CREATE TABLE'`.
+A successful apply of an edited body left that literal in the body untouched and the sent statement carried ` OR REPLACE` only after the first token, so a global replace of the word would have been visible here and was not.
+
+**THE AUDIT.**
+One successful apply added exactly two `object_edit` events under one `correlationId`: an `action: "PLAN"` decision event and an `action: "replace-in-place-statement"` outcome event, both `result: "success"`, the second carrying a duration.
+A sentinel planted in the submitted body appears in neither event and nowhere in the process's stdout.
+A refused apply produces the same two events with `result: "failure"` and `reason: "object_edit_refused"` on the second, which was seen in the same ring.
 
 ---
 

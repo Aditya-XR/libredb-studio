@@ -69,6 +69,7 @@ import type {
   KindCount,
   ObjectDetailBatch,
   ObjectSourceDocument,
+  ObjectSourcePart,
 } from "@/lib/db/types";
 import {
   callerBoundTruncationReason,
@@ -76,6 +77,7 @@ import {
   findKind,
   isCountUnavailable,
   isSourcePartUnavailable,
+  kindAcceptsSourceEdits,
   relationKindIds,
   sourceBoundTruncationReason,
 } from "@/lib/db/object-kinds";
@@ -589,6 +591,46 @@ async function assertSourceSurface(
         `${typeof read === "function" ? "implements readObjectSource" : "does not implement readObjectSource"}`,
     );
   }
+
+  // The edit pairing, unconditional and outside every loop, exactly as the source pairing above
+  // it is written. There is NO loop here, and that is the point: it certifies the pairing for all
+  // seventeen providers INCLUDING the fourteen that declare no editable kind, which is the
+  // population a loop over editable kinds cannot reach. A build with no apply is a mandatory
+  // preview with nothing behind it; an apply with no build is ruling 1a violated (#789 Phase 3).
+  // THROUGH `kindAcceptsSourceEdits()` and never `kind.acceptsSourceEdits === true` inline: that
+  // function is the single reader of the field, its own docblock says so, and a later phase that
+  // changes the derivation (the way `kindAcceptsRowWrites` sits next to `supportsInlineRowEdit`)
+  // would otherwise move every provider and every route while this helper kept the old semantics
+  // for all seventeen suites (#789 Phase 3).
+  const editableKinds = declaredKinds(capabilities).filter((kind) => kindAcceptsSourceEdits(capabilities, kind.id));
+  // `typeof` and never `"buildObjectEdit" in provider`: the property is optional on the
+  // interface, so an `in` test walks the prototype chain and would answer true for anything the
+  // base class ever grows under that name.
+  const editsBoth = typeof provider.buildObjectEdit === "function" && typeof provider.applyObjectEdit === "function";
+  if (editableKinds.length > 0 !== editsBoth) {
+    throw new Error(
+      `${provider.type} declares ${editableKinds.length} editable kind(s) and ` +
+        `${editsBoth ? "implements both buildObjectEdit and applyObjectEdit" : "does not implement both buildObjectEdit and applyObjectEdit"}`,
+    );
+  }
+
+  // Design 7.2's ZERO-ITERATION REFUSAL, BY NAME, and it is here rather than beside the loop
+  // below so that it answers before `emptyKinds` can raise a different sentence about the same
+  // kind. An editable kind the expectation counts at zero is read by nothing and built by
+  // nothing, so the loop in 9b would run zero times for it and certify the declaration in
+  // silence. A well-formed absence REASON does not excuse it: a reason explains why a fixture
+  // holds none of a READABLE kind, and this phase's whole safety argument is that every editable
+  // kind has its build driven.
+  for (const kind of editableKinds) {
+    if (!((expected.kinds[kind.id] ?? 0) > 0)) {
+      throw new Error(
+        `${provider.type} declares the editable kind "${kind.id}" and the expectation counts it at ` +
+          `${expected.kinds[kind.id] ?? 0}, so buildObjectEdit for it is driven by nothing; hold an object of ` +
+          "it in the fixture, or stop declaring it editable",
+      );
+    }
+  }
+
   // BEFORE the early return, which is where this guard was wrong: a provider bearing no
   // source at all left every reason unread, so a task that dropped a `hasSource` declaration
   // and kept the sentence was not refused. `sourceKinds` is empty here by the pairing above,
@@ -596,6 +638,22 @@ async function assertSourceSurface(
   const reasons = expected.emptyKinds ?? {};
   if (read === undefined) {
     assertNoStaleReason(reasons, []);
+    // THE HALF DECLARATION, and it is refused HERE for the same reason the pairing above sits
+    // before this return: everything below it is skipped, so the `undriven` refusal at the end of
+    // the walk, which exists for exactly this sentence, never executes for a provider that reads
+    // no source at all. MEASURED against the first commit of this task: a double declaring
+    // `acceptsSourceEdits` on `function`, no `hasSource`, no `readObjectSource` and BOTH edit
+    // methods RESOLVED, 1 pass 0 fail, because the pairing saw one editable kind against two
+    // implemented methods and agreed. The live population is a provider that keeps
+    // `acceptsSourceEdits` while a refactor drops `hasSource` and `readObjectSource` from the same
+    // declaration: the edit is then declared with nothing readable behind it, and every other
+    // refuser in this file is upstream of a walk that no longer runs (#789 Phase 3).
+    if (editableKinds.length > 0) {
+      throw new Error(
+        `${provider.type} declares the editable kind(s) ${editableKinds.map((kind) => kind.id).join(", ")} and ` +
+          "implements no readObjectSource, so the edit is declared over a definition nothing can read",
+      );
+    }
     return;
   }
 
@@ -682,6 +740,7 @@ async function assertSourceSurface(
 
   const wanted = new Set(sourceKinds.filter((kind) => (expected.kinds[kind.id] ?? 0) > 0).map((kind) => kind.id));
   const entered = new Set<string>();
+  const editsDriven = new Set<string>();
   let longest: { kind: string; path: readonly string[]; length: number } | undefined;
 
   // `listings` and not `wanted` drives the walk, because `listings` is what the provider
@@ -693,8 +752,11 @@ async function assertSourceSurface(
     const document = await read.call(provider, object.path, kindId);
     entered.add(kindId);
     assertSourceDocument(document, object, kindId, findKind(capabilities, kindId)?.sourceLanguage);
+    const editableHere = kindAcceptsSourceEdits(capabilities, kindId);
+    let firstReadable: Extract<ObjectSourcePart, { readonly text: string }> | undefined;
     for (const part of document.parts) {
       if (isSourcePartUnavailable(part)) continue;
+      if (editableHere && firstReadable === undefined) firstReadable = part;
       // The escape hatch a bounded probe would otherwise leave open: a provider could answer
       // short on an unbounded call and wave the flag at it. A bound of its OWN stays
       // certifiable; the CALLER's bound is not, because no caller passed one.
@@ -710,10 +772,45 @@ async function assertSourceSurface(
         longest = { kind: kindId, path: object.path, length: part.text.length };
       }
     }
+
+    // Design 7.2's second assertion. The text submitted back is the part's OWN text, unchanged,
+    // which is deterministic on every engine and needs nothing invented: a provider that refuses
+    // byte-identical text answers a `definition` refusal, and a refusal IS an answer. What is
+    // being refused here is a declaration with a stub behind it, which the pairing cannot see.
+    if (editableHere) {
+      if (firstReadable === undefined) {
+        throw new Error(
+          `${provider.type} declares "${kindId}" editable and answered no readable part for ` +
+            `${JSON.stringify(object.path)}, so buildObjectEdit is driven by nothing`,
+        );
+      }
+      const built = await provider.buildObjectEdit!.call(provider, {
+        path: object.path,
+        kind: kindId,
+        partId: firstReadable.id,
+        text: firstReadable.text,
+      });
+      // NO `built === null ||` in front of this: optional chaining short-circuits on null as well
+      // as undefined, so `typeof (null)?.built !== "boolean"` is already true and the disjunct
+      // decided nothing. MEASURED with node: `const b = null; typeof (b)?.built !== "boolean"`
+      // prints true, and deleting the disjunct killed no test (#789 Phase 3).
+      if (typeof (built as { built?: unknown } | null | undefined)?.built !== "boolean") {
+        throw new Error(`buildObjectEdit("${kindId}") answered no ObjectEditBuild: ${JSON.stringify(built)}`);
+      }
+      editsDriven.add(kindId);
+    }
   }
 
   if (longest === undefined) {
     throw new Error("no source-bearing kind answered a readable part, so every source assertion is vacuous");
+  }
+
+  const undriven = editableKinds.filter((kind) => !editsDriven.has(kind.id)).map((kind) => kind.id);
+  if (undriven.length > 0) {
+    throw new Error(
+      `${provider.type} declares the editable kind(s) ${undriven.join(", ")} and the walk drove buildObjectEdit for ` +
+        "none of them, so every edit assertion here is vacuous",
+    );
   }
   // A bounded probe proves nothing unless the UNBOUNDED answer is longer than the bound.
   if (longest.length < 2) {

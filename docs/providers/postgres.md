@@ -659,6 +659,275 @@ One writer for both, because two copies are two chances for the read to answer "
 It is among the ids the installed `monaco-editor` 0.56.0 registers, unlike `plsql` and `tsql`, which Oracle and SQL Server have to render under `sql`.
 A PL/pgSQL body inside a `$function$` dollar-quoted string is highlighted as PostgreSQL SQL rather than as a procedural language, which is the closest this bundle can come.
 
+### 3.1.6 Object edit (#789)
+
+Two kinds accept an edited definition back, `function` and `procedure`, and both declare `acceptsSourceEdits: true`.
+Everything below was measured on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1) through `pg`, against a container brought up on `docker/postgres-init/`.
+
+**The three kinds that are REFUSED, each with the engine fact behind it, and one that is deferred.**
+A refusal here is a decision with a reason, not a gap somebody has not got to yet.
+
+| Kind | Why it is not editable |
+| --- | --- |
+| `view` | `pg_get_viewdef` returns the bare `SELECT` and NOTHING else: no column alias list, no `WITH CHECK OPTION`, no `security_barrier`. A `CREATE OR REPLACE VIEW` header assembled from it would silently remove a write constraint and a row-security control. |
+| `materialized_view` | The same missing header, and there is no statement to put it in: `CREATE OR REPLACE MATERIALIZED VIEW` is `42601 syntax error at or near "MATERIALIZED"`. Replacing one means `DROP` plus `CREATE`, which ruling 1b forbids on every engine at every scope. |
+| `trigger` | DEFERRED and cheap. `CREATE OR REPLACE TRIGGER` does exist on 18.4, so this is the first kind a later phase adds. The listing join it depends on is unpinned (D64), and that pin is owed with the kind. |
+| `table`, `sequence` | No definition text at all, so there is nothing to edit. PostgreSQL publishes no `pg_get_tabledef` and no `pg_get_sequencedef`, which is the same fact that keeps both out of the Source tab. |
+
+**Strategy: `guarded-atomic-batch`, and it is atomic because the engine makes it so.**
+The whole apply is ONE parameterless `client.query()` carrying four statements, and PostgreSQL wraps a multi-statement simple query in its own implicit transaction.
+Measured: a `DO` block raising `42P13` in front of the CREATE left `pg_proc` untouched, and a failing CREATE after a DROP left the same `oid` and the same `xmin`.
+This provider opens NO transaction of its own, deliberately: `txActive` is one flag per connection id (D72) and a dangling `BEGIN` poisons one pooled client for the whole process (D71), and the implicit transaction already gives this strategy every guarantee it claims.
+
+**The read, and why the oid is passed rather than cast.**
+The build re-reads the object through the same statement the Source tab uses, extended with five columns: `md5(pg_get_functiondef(p.oid))`, `pg_get_userbyid(p.proowner)`, `pg_has_role(current_user, p.proowner, 'USAGE')`, `current_setting('search_path')` and `current_setting('check_function_bodies')`.
+The oid is handed to `pg_get_functiondef` and no `::regprocedure` cast is used, for the reason [§3.1.5](#315-object-source-789) gives and measured again here: the cast resolves a NAME, name resolution needs `USAGE` on the schema, and a provider that casts manufactures a `42501` the engine never made.
+`pg_has_role(current_user, proowner, 'USAGE')` is ONE expression rather than an owner comparison plus a membership query, because a role is a member of itself, so it is true for the owner and for every member of the owning role, which is exactly the population `CREATE OR REPLACE` accepts.
+
+**The ownership pre-flight, answered on the READ.**
+`CREATE OR REPLACE` on somebody else's function is an OWNERSHIP check and not a privilege check.
+Measured with the `src_probe` role that `docker/postgres-init/03-object-fixture.sql` creates, holding `GRANT USAGE` and `GRANT CREATE` on the schema: the read carries `edit: { offered: false }` with the sentence naming the owner, and the build refuses `privilege` before the reader types anything.
+The CONTROL is in the same session: that same role creating a function OF ITS OWN in that same schema succeeds, so the refusal is about ownership and no grant can make the apply work.
+The engine's own sentence is `must be owner of function order_total`, SQLSTATE `42501`, and the shipped error mapper turns it into HTTP 500 because the message matches none of its substrings, which is why this answer is given before a statement is sent.
+
+**The five build refusals, in the order they are answered.**
+
+| Class | When | The sentence, or its shape |
+| --- | --- | --- |
+| `guard` | The definition is longer than the Source pane's bound | "this definition is N characters and the Source pane is bounded at 1,000,000 characters, so the text you edited is a truncation of it and submitting it back would delete everything past the bound" |
+| `privilege` | This connection does not own the routine | "this connection's database account does not own \"app.order_total(integer)\", which is owned by \"postgres\", and PostgreSQL checks ownership rather than privilege for CREATE OR REPLACE" |
+| `guard` | `check_function_bodies` is not `on` | "this connection's session has check_function_bodies = off, and PostgreSQL then accepts a body it would otherwise reject, so an apply would report success and store a definition that cannot run" |
+| `definition` | The text is byte-identical to the server's | "this text is identical to the definition on the server" |
+| `identity` | The header changed | "this text declares \"...\" and the object being edited is \"...\", and LibreDB refuses an edited header rather than sending it. CREATE OR REPLACE with a different name or a different argument list creates a SECOND routine and leaves this one untouched, after which every call site fails 42725 is not unique. A changed parameter DEFAULT is rendered inside this same header and PostgreSQL replaces that one in place, so it is refused here as well: make it with a CREATE OR REPLACE of your own in the SQL editor" |
+
+The identity comparison is everything up to and including the parenthesis that CLOSES THE PARAMETER LIST, found by a left-to-right scan that counts nesting and skips single-quoted and double-quoted text, and the comparison itself needs no parser, because both sides are `pg_get_functiondef` output: the reader started from it and the build re-read it, so the question is whether they are the same bytes the engine wrote.
+It read the FIRST `)` until #789 task 31, and that ended the header early for every routine whose header carries a parenthesis before the parameter list closes, after which a change to a LATER parameter was never compared at all.
+SEVEN such shapes were measured on 18.4 by creating the object and reading `pg_get_functiondef` back, re-measured on 2026-09-15 on a `postgres:18` container answering `PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1)` where every one of those renderings and their `md5(pg_get_functiondef(oid))` came back byte for byte, and all of them are ordinary PostgreSQL: a parameter `DEFAULT` holding a call, rendered `DEFAULT abs('-1'::integer)`; a `DEFAULT` holding a `)` and a `DEFAULT` holding a `(` inside a string literal; a quoted function NAME as in `app."we)ird"(a integer, b integer)`; a quoted PARAMETER name as in `app.pn("a)b" integer, c integer)`; and the two mixed-quote shapes `app.mix("a')b" integer, c integer)` and `app.mix2(a text DEFAULT '")'::text, b integer DEFAULT 1)`, which are why the scan tracks both quote kinds and has each ignore the other.
+That numeral is the only count of this population in this document and it is not maintained by hand: `PAREN_HEADER_FIXTURES` in `tests/integration/db/postgres-provider.test.ts` is the population, and a test in that file reads the sentence above out of this file and asserts the word against the array's length, so adding an eighth shape without correcting this paragraph is a RED and not a silent drift.
+A second test in that file refuses any numeral written directly in front of the word `shapes` in this document or in its own, which is the drift the paragraph below carried until 2026-09-15: it stated the count a second time in prose with nothing bound to it, so an eighth shape would have been caught here and left that sentence wrong.
+The shape a reader expects to be the dangerous one is NOT in that population and cannot be: `pg_get_functiondef` renders parameter types through `format_type(t, NULL)` and DROPS the type modifier, so a function declared `(a numeric(10,2), b varchar(9), c char(5), d time(3), e timestamp(3), f decimal(8,4), g interval hour to second(2), h bit(4))` is rendered `(a numeric, b character varying, c character, d time without time zone, e timestamp without time zone, f numeric, g interval, h bit)`, with every parenthesis gone.
+A typmod therefore only ever reaches this comparison from the text the READER submitted.
+It has a limit in EACH direction and both are stated rather than left to be found.
+
+In the FALSE-ACCEPT direction there is no case left on the server's side, and that sentence is an ARGUMENT and not a measurement, said so here because it is a universal claim over every rendering `pg_get_functiondef` can produce and no run enumerates those.
+The argument is that the CURRENT text is always the engine's own rendering and is cut at the right place, so an accept requires the submitted text to cut to exactly those bytes, and any mis-cut of the submitted text produces different bytes and refuses.
+Its one named exception is a shape `pg_get_functiondef` never renders, a dollar-quoted DEFAULT being the one to expect, which is therefore a possible false REFUSE and never a false accept.
+What WAS measured, on 2026-09-15 on the same 18.4 container, is an attack on it: seven renderings outside the measured population above were created and read back, `VARIADIC a integer[]`, a `DEFAULT` holding nested arithmetic parentheses, a `DEFAULT ARRAY[1, 2]`, a function name holding a DOUBLED double quote and a `)`, a `DEFAULT` holding a doubled single quote and a `)`, a pair of `OUT` parameters, and a `RETURNS TABLE(...)` whose parenthesis sits after the header, and the scan cut every one of them to exactly the parameter list's close.
+Seven that did not break it is evidence and not a proof, so the post-condition below is still the control on this one, and it is what caught the case this reading used to let through.
+
+In the FALSE-REFUSE direction: `pg_get_functiondef` renders parameter DEFAULTS inside the header, so a CHANGED DEFAULT is refused as an identity change although PostgreSQL would have replaced the routine in place.
+Measured: `CREATE OR REPLACE FUNCTION app.f_def(a integer DEFAULT 1)` re-created as `DEFAULT 2` left `count(*) = 1` and `oid = 16787` with `xmin` moving 857 to 858, and `pg_get_functiondef` then rendered `DEFAULT 2`.
+The refusal stays, because telling a changed DEFAULT from a changed argument list inside the rendered header needs a parser for the header and this design has none: to a byte comparison they are the same bytes.
+What the refusal does NOT do any more is claim the engine would fork the object, which is a fact that is false for this population.
+Change a default with a `CREATE OR REPLACE` of your own in the SQL editor.
+
+**What #789 task 31 NARROWED, which is a cost this fix accepted rather than a defect.**
+Reading the header to the parameter list's real end means a change to a LATER parameter's `DEFAULT` is now compared too, and it is refused.
+Until that fix it was accepted, and the two halves of that sentence rest on different evidence, so both are named.
+The BUILD accepting it is measured by re-running the replaced reading, `text.indexOf(")")` as `c2437ec1`'s own diff carries it, over the two texts: it cuts both to `CREATE OR REPLACE FUNCTION app.dc(a integer DEFAULT abs('-1'::integer)` and has nothing left to compare.
+The APPLY then performing it follows from the engine measurement below rather than from a run of the old code end to end: the addressed row is rewritten, so the post-condition's `xmin` comparison finds it moved and raises nothing.
+MEASURED on 2026-09-15 on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1), in ONE database on ONE container, with the shapes above created in the order `PAREN_HEADER_FIXTURES` in `tests/integration/db/postgres-provider.test.ts` holds them plus `app.np()`, then this edit, then the two below: `CREATE OR REPLACE FUNCTION app.dc(a integer DEFAULT abs(-1), b integer DEFAULT 3)` over the `DEFAULT 2` form of the same routine left ONE `pg_proc` row with its `oid` unmoved at 16392 and `xmin` moving 763 to 771, and `pg_get_functiondef` then rendered `b integer DEFAULT 3`, so this is an ordinary in-place replace the engine performs and the apply would have reported `applied`.
+An `oid` is allocated from a counter that is global to the cluster and an `xmin` from one global to the database, so neither numeral reproduces on a differently populated cluster and neither is the claim: the claim is ONE row, the `oid` unmoved and the `xmin` moved, and the numerals are here only so that this measurement and the two below can be read as the one session they are.
+It is refused for the reason above and no other: inside the rendered header a changed DEFAULT and a changed argument list are the same bytes to a byte comparison, and the one is a replace while the other is a silent fork.
+A type modifier the reader types onto a parameter the server renders without one is in that same class: MEASURED in that same database and session, `CREATE OR REPLACE FUNCTION app.tmn(a numeric(10,2), b integer)` over `app.tmn(a numeric, b integer)` left ONE row with its `oid` unmoved at 16400 and `xmin` moving 772 to 773, and `pg_get_functiondef` still rendered `a numeric`, so the engine performs the replace and the typmod never reaches the catalog.
+A parameter RENAME is NOT in that class, and an earlier revision of this paragraph said it was without ever running it.
+MEASURED in that same database and session: `CREATE OR REPLACE FUNCTION app.tmn(zzz numeric(10,2), b integer)` answers `ERROR: cannot change name of input parameter "a"`, SQLSTATE `42P13`, with `HINT: Use DROP FUNCTION app.tmn(numeric,integer) first.`, and leaves the row untouched, one row with its `oid` still 16400 and `xmin` still 773.
+So on a rename this build's refusal costs the reader nothing: PostgreSQL refuses it too, and `CREATE OR REPLACE` in the SQL editor is refused the same way, the engine's only route being `DROP FUNCTION` and a fresh `CREATE`, which drops the routine's grants and its dependents.
+The changed DEFAULT and the reader-typed typmod are refused with the same sentence, which names the SQL editor as the way to make the edit, and that way works for those two.
+For a rename it does not, and no change to this comparison can make it, because the engine and not the build is the one refusing.
+
+The byte-identical case is a refusal and not a no-op apply because an apply that cannot change anything spends a write path, an audit row and a lock on nothing.
+It was documented here as emptying the post-condition's false-positive population, and that claim was MEASURED FALSE and withdrawn: see the post-condition below.
+
+A sixth refusal, `unsupported`, exists for a server that answers no `md5(pg_get_functiondef(oid))` at all.
+A guarded batch with no token to guard on is not this strategy, so it is refused rather than downgraded in silence to an unguarded write.
+
+**The emitted unit, and its three private SQLSTATEs.**
+Four statements in one round trip:
+
+```
+SET LOCAL search_path = "app", pg_catalog;
+DO $lb...$ <the pre-condition block> $lb...$;
+<the reader's text>
+;
+DO $lb...$ <the post-condition block> $lb...$;
+```
+
+The terminator that ends the reader's text is on a LINE OF ITS OWN, and that is a repair rather than a style.
+Until this was fixed the terminator was the first character after the reader's last one, on the same line, and PostgreSQL discards a `--` comment to the end of the line: an edit ending in a line comment, which is how a person ends one, had its terminator swallowed, the post-condition `DO` became part of the CREATE, and the apply answered `syntax error at or near "DO"`, SQLSTATE `42601`, with the reported position inside the text LibreDB added, so the pane placed no marker and told the reader the error was in text they cannot see.
+Measured through this provider on 18.4 with ` -- edited by task 22` appended to `app.order_total(integer)`: `syntax error at or near "DO"` before, `applied` after, with the emitted bytes differing by exactly one newline.
+A trailing terminator of the reader's own is left alone rather than detected: a doubled semicolon is accepted, measured, `SELECT 1;;SELECT 2;` in one parameterless query answers both rows.
+A comment written after the body's closing `$function$` is not part of the definition, so the engine discards it and the next read of the Source tab does not show it; the apply itself succeeds, measured on 18.4 both with the comment on the `$function$` line and on a line of its own after it.
+
+Every interpolated value is dollar-quoted with a randomly tagged delimiter, and there is NO literal escaping anywhere in the apply.
+That is deliberate: a dollar-quoted string ignores every escape, so the statement does not depend on `standard_conforming_strings`, another session GUC a previous borrower of the pooled connection can change and which single-quote doubling would depend on.
+A value that happens to contain its own generated tag is refused rather than emitted.
+
+The pre-condition compares the routine's current `md5(pg_get_functiondef(oid))` against the token the plan carries and raises `LB001` if it moved, then compares `check_function_bodies` against the value read at build and raises `LB002` if that moved, then captures the addressed row's `pg_proc.xmin` into a transaction-local setting.
+The post-condition raises `LB003` when that row's `xmin` is UNCHANGED, which means the CREATE wrote some other row: a fork.
+
+**The post-condition asks whether the addressed ROW was rewritten, and never whether its rendering moved.**
+It compared the md5 until the difference was measured, on the premise that the byte-identical refusal left it no false positives.
+It had one: `pg_get_functiondef` is a CANONICAL rendering, so an edit that differs from the server's bytes and re-renders to the same bytes passes the build.
+Measured through this provider on 18.4, `app.order_total(integer)` re-indented with `sql` upper-cased answered `applied-elsewhere` and was rolled back, a legitimate edit reported as somebody else's object and taken back.
+`xmin` moves on EVERY rewrite of the row including a byte-identical one, which is the same property that makes it a bad revision TOKEN and the right post-condition.
+It is captured inside the apply rather than carried from the build, because a value read at build time is stale by any `GRANT EXECUTE` in between and that would make a real fork invisible.
+Measured after the repair: the same canonicalized edit answers `applied`, and a unit whose text creates a DIFFERENT routine answers `LB003` and leaves `count(*) = 0` for the forked name.
+The setting the capture travels in is transaction-local: a new session answers `unrecognized configuration parameter`, and the same pooled session keeps the name and reads it back as the empty string, so the captured value does not survive the round trip.
+
+Three private codes and not one, because they mean three different outcomes, a `conflict`, a `refused` and an `applied-elsewhere`, and one shared code would force the classifier back onto reading messages.
+All three are in the range PostgreSQL documents for user-defined conditions.
+The classifier maps SQLSTATE as DATA: `LB001` to `conflict`, `LB002` to a `guard` refusal, `LB003` to `applied-elsewhere`, `42501` to `privilege`, and `42601`, `42P13`, `42809` and `42P16` to `definition`.
+One message is read and only one: `tuple concurrently updated` arrives under `XX000`, the catch-all internal-error class, so the code cannot distinguish it from any other internal error and there is nothing else to read. It is consulted only for a code the table does not carry.
+
+**The pinned `search_path`, its cost and its repair.**
+The apply pins `search_path` to the object's own container schema plus `pg_catalog`, and the preview shows the pinned value as a line the reader sees before confirming.
+
+The `SET LOCAL` and the statement MUST travel in ONE round trip, and splitting them fails in silence.
+Measured: `SET LOCAL search_path = app, pg_catalog` sent as its own round trip answers `WARNING: SET LOCAL can only be used in transaction blocks` and the value does not take effect, `SHOW search_path` still reading `"$user", public`; the same `SET LOCAL` in one round trip with the CREATE answers `SET` then `CREATE FUNCTION` with no warning; and the CONTROL, the identical CREATE without the pin, answers `ERROR: relation "t" does not exist`.
+`pg` does not surface that warning as a rejection, so a split pin would leave the apply running under whatever the previous borrower of the pooled connection left, with nothing downstream able to see it.
+A new session reads the default, so the pin does not leak, and the explicit `BEGIN`/`COMMIT` form behaves identically.
+
+Why it is pinned at all: with `check_function_bodies` at its default `on`, a `LANGUAGE plpgsql` body creates under ANY path, while a `LANGUAGE sql` body and a `BEGIN ATOMIC` body are name-resolved at CREATE time and fail under the wrong one.
+A `SET` issued by one Studio user's request is read back by every later request on the same connection id, so without the pin the same edit would succeed or fail depending on who used the connection last.
+
+THE COST, accepted and stated rather than discovered: a previously-working body that reads ANOTHER schema unqualified IS refused by this pin.
+Measured, a function whose body read `other.u` rewritten to read `u` answers `relation "u" does not exist`, `42P01`, pointed at the reader's own line and column.
+`pg_proc.proconfig` is NULL for a function that does not declare its own `SET search_path`, so the value the object was created under is not recoverable from the catalog and there is nothing else to pin to.
+THE REPAIR is either of two things the reader can do: qualify the name, or give the function its own `SET search_path`, which `pg_get_functiondef` then emits and which round trips untouched.
+
+**`check_function_bodies` is asserted and never set.**
+Measured: with it `off`, `CREATE OR REPLACE FUNCTION` over a body naming a table that does not exist answers `CREATE FUNCTION` and a BROKEN FUNCTION IS CREATED AND SUCCESS IS REPORTED.
+`SET LOCAL check_function_bodies = on` in the apply's own round trip refuses the same statement with `ERROR: relation "totally_absent_table" does not exist`.
+It is session-scoped and session state is measured persisting across Studio users on the cached provider, so the population this assertion exists for is reachable by a previous borrower rather than hypothetical.
+The plan reads it at build and the pre-condition compares it at apply; the build refuses outright when it is anything but `on`.
+
+**The revision, and the four candidates that were measured and rejected.**
+The revision is `md5(pg_get_functiondef(oid))`, computed SERVER SIDE, with `check: "guarded"` and `scope: "server"`.
+
+| Candidate | Why not |
+| --- | --- |
+| `xmin` | Moves on a byte-identical replace and on a `GRANT EXECUTE`, so it produces FALSE conflicts. That same property is what makes it the POST-CONDITION above: a revision answers "is the text still the one I read", where a move that changed nothing is a false conflict, and the post-condition answers "was the row I addressed the row that got written", where it is the whole signal. |
+| `ctid` | Moves on a plain `VACUUM FULL` while `xmin` survives. |
+| A frozen row's `xmin` | Reports 1, which is not a version of anything. |
+| `proconfig` | Records nothing about the body at all. |
+
+The md5 of the engine's own rendering did not move on `COMMENT ON` or on `GRANT EXECUTE` and did move on a real body change, on all five measured rows.
+
+**The failure behaviour.**
+A raise anywhere in the round trip rolls the whole thing back.
+A failed apply leaves the routine with the same `oid` and the same `xmin`, so nothing that depends on it, no `GRANT` and no comment, is disturbed.
+That is also what lets `applied-elsewhere` report `undone: true` here: the post-condition detects the fork AND takes it back in the same round trip, which an engine without a transaction cannot do.
+An error carrying no SQLSTATE at all is not a verdict the engine reached: the statement was sent and its answer never arrived, so it is `interrupted` with `committed: "unknown"`, and a client that retried on it would apply twice.
+
+**The apply refuses a pooled client somebody else left in a transaction.**
+Before it sends anything, `applyObjectEdit` reads the borrowed client's ReadyForQuery transaction status, the same server-sent byte `endOpenQueryTransaction()` reads, and refuses with class `guard` when it is anything but `I`.
+No round trip is spent on the check and nothing is sent when it fires.
+Measured through this provider on 18.4: a lone `BEGIN` on the ordinary query path releases its pooled client in status `T`, `pg`'s idle list is LIFO so the next acquire hands back the same client, and before the guard the apply ran inside that foreign transaction and answered `applied` with a `guarded` revision token, while the write was uncommitted; a later `endOpenQueryTransaction()` on the same connection then rolled it away, `xmin` 856 back to 825 and the definition byte-identical to the pre-image.
+Two more measured consequences of that path: the revision handed back was whichever image the re-read's own borrowed client happened to see, and the `SET LOCAL search_path` pin survived into the rest of the foreign transaction, `SHOW search_path` reading `app, pg_catalog`.
+With the guard, the same sequence answers `refused` with class `guard`, `xmin` does not move and `SHOW search_path` reads `"$user", public`; the control, the identical apply on an idle client, still answers `applied` and its write survives the later rollback.
+Neither a rollback nor a retry: rolling the foreign transaction back destroys work this user was never shown, and `POSTGRES_POOL_MAX=1`, which a single-slot PgBouncer also produces, has no other client to retry on.
+
+**A position is converted into the reader's own coordinates.**
+PostgreSQL's `position` is a 1-based CHARACTER offset into the text that was SENT, and it arrives from `pg` as a string although `QueryError.position` is typed `number`.
+The plan carries a segment map, so an offset inside the provider's guard block is reported as `outside` rather than as a number, and an offset in the reader's text is converted to the line and column of THEIR text.
+Measured end to end: a syntax error introduced into the body of `app.order_total` answered `position` in the assembled statement and landed on line 6, column 3 of the reader's own text.
+An uncorrected coordinate would not be caught anywhere downstream: Monaco silently CLAMPS an out-of-range marker rather than rejecting it.
+
+**The doubled semicolon.**
+`SELECT 1;;SELECT 2;` in one parameterless query is ACCEPTED and answers both rows, so the terminator after the reader's text is appended unconditionally rather than conditionally on their last character.
+
+**The limit every claim on this page carries (D62).**
+Every PostgreSQL row above is a claim about 18.4.
+This type id also serves CockroachDB and Materialize, and neither was probed for any of it.
+That is why the classifier answers `definition` with THE ENGINE'S OWN SENTENCE for a code it does not recognise, rather than guessing at a class, and why a server answering no md5 gets an `unsupported` refusal rather than an unguarded write.
+
+**Reproducing all of it.**
+`docker/postgres-init/03-object-fixture.sql` creates the population every claim here needs: `app.over_limit_fn(integer)`, whose definition measured 1,215,122 characters and which the read bound refuses; `app.huge_fn(integer)`, its control at 945,116 characters, which builds; and the two grants that make the ownership refusal non-vacuous.
+
+#### 3.1.6.1 The measured acceptance run (#789)
+
+Everything in this subsection was driven through `POST /api/db/objects/source`, `POST /api/db/objects/edit-plan` and `POST /api/db/objects/edit-apply` against a running Studio, on a container created for the run from `docker/postgres-init/` through the mount.
+The server named itself `PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit`.
+The fixture's own numbers on that server: `app.over_limit_fn(integer)` renders 1,215,122 characters, `app.huge_fn(integer)` renders 945,116, and every routine in `app` is owned by `postgres`, so the ownership refusal names `postgres`.
+
+**A FAILED APPLY LEAVES THE ROUTINE BYTE IDENTICAL, and `oid` and `xmin` say so.**
+Byte equality alone cannot tell a rollback from a write that happened to store the same bytes, so `oid`, `xmin` and `md5(pg_get_functiondef(oid))` were read out of band before and after each one.
+FOUR of the five failures below were driven against `app.order_total(integer)`, whose row is `oid = 16763` on a container built from this fixture, and none of the four moved that `oid` or that `xmin` across the apply.
+Read each row for what it actually compares, because two of the five are not "unmoved since the case began":
+
+- In the second-writer case the `xmin` DID move, and a second writer is what moved it: `16763|888` before the case and `16763|889` after the second writer's own `CREATE OR REPLACE`, with the md5 moving with it. What is unmoved there is the state ACROSS THE APPLY, so the comparison is against the row the second writer left and never against the pre-case row. The apply wrote nothing, which is the claim.
+- The last case was driven against a DIFFERENT object at a different row, `app.r19f1_paren(text,integer)`, because the fixture holds nothing that can reach the post-condition. It read `16793|879` before the apply and `16793|879` after it. That `oid` is not stable: the object is created by the probe rather than by the fixture, and two re-runs on the same image read `16789` and then `16793`.
+
+`oid = 16763` for `app.order_total(integer)` is what a container built from this fixture assigns, and it held across every run. The `xmin` counters are not: they advance with every write the container has seen, so read the pairs above as before-and-after of one run rather than as constants.
+
+| What was sent | What the apply answered | The object afterwards |
+| --- | --- | --- |
+| A syntax error in the body | `refused`, `definition`, `syntax error at or near "SELEKT"`, `42601`, at line 6 column 3 of the reader's own text | unchanged |
+| `RETURNS integer` in place of `RETURNS numeric` | `refused`, `definition`, `cannot change return type of existing function`, `42P13`, with the engine's own hint | unchanged |
+| A relation that does not exist under the pinned path | `refused`, `definition`, `relation "no_such_table_t19" does not exist`, `42P01`, at line 6 column 55 | unchanged |
+| A second writer changed the routine between the build and the apply | `conflict`, `object-changed`, carrying the server's CURRENT text for the diff | left as the second writer wrote it, and the apply wrote nothing |
+| A changed argument list past a parameter `DEFAULT` holding a `)` | `applied-elsewhere` with `undone: true` | unchanged, and the second `pg_proc` row the CREATE had made was gone |
+
+The last row is the only case here where the engine ACCEPTED the statement.
+`CREATE OR REPLACE` created a second row, the post-condition saw that the addressed row's `xmin` had not moved, raised `LB003`, and the implicit transaction took the fork back inside the same round trip.
+That object is NOT in the committed fixture: at the time of the run the identity check cut the rendered header at the first `)`, so only a parameter `DEFAULT` holding a `)` inside a string literal let a changed argument list past it, and the fixture has no such object.
+It was created for the run as `CREATE FUNCTION app.<name>(a text DEFAULT 'x)y', b integer DEFAULT 1) RETURNS text LANGUAGE sql AS $b$ SELECT a $b$` and the edit changed `b integer` to `b bigint`.
+Re-measured under the name `app.r19f1_paren` on the same 18.4 image: `edit-plan` built, `edit-apply` answered `applied-elsewhere` with `undone: true`, and `oid|xmin|argument types` read `16793|879|text,integer` both before and after with one row left, so the fork was made and taken back inside the round trip.
+
+THAT PATH IS CLOSED since #789 task 31, and the row above stays because it is what the acceptance run measured rather than what a reader can reproduce today.
+The same edit is now refused at build time as `identity`, with both whole headers in the sentence, so the `applied-elsewhere` outcome recorded here is an outcome the build no longer lets a reader reach through a changed argument list.
+Whether ANY text that passes the identity comparison can still fork the routine was not measured, so the post-condition stays as the second line and `applied-elsewhere` stays in this provider's outcome set: a guard is not removed because nobody could name a case for it.
+What is measured is that the byte-identical re-render, which used to trip this post-condition and is recorded above, no longer does, because the guard compares `xmin` and not the rendering.
+
+**A SUCCESSFUL APPLY CAN DESTROY AN OBJECT THE PLAN NEVER NAMED, and that is open (`docs/BACKLOG.md` D76).**
+The reader's text is spliced into the emitted unit as a whole segment of one parameterless simple query, and PostgreSQL runs every statement in such a query, so a text that carries a second statement after its terminator runs that statement too.
+Nothing above the wire is a single-statement check: the build's identity comparison reads the rendered HEADER, and the post-condition asks whether the addressed row was rewritten, which a `CREATE OR REPLACE` followed by a rider answers yes to.
+MEASURED end to end through the two routes on the same 18.4 image: `app.order_total(integer)`'s own definition followed by `;` and `DROP FUNCTION app.r19f1_victim();` built with `consequences: []`, applied at HTTP 200 with a plain `"outcome": "applied"`, and `count(*)` for `app.r19f1_victim` went 1 to 0.
+The bytes ARE in the sealed preview, so the seal holds and the user was shown them: in the shipped re-run the step measured 2,473 characters, the reader's own 268-character segment ran from 1,506 to 1,774, and the rider sat at offset 1,741, between a 1,506-character provider prefix and a 699-character provider suffix.
+Those three offsets move with the reader's own text and the prefix's random dollar-quote tags; the prefix and suffix lengths are what the reader has to scroll past either way.
+What is missing is everything above the bytes.
+The plan's consequence model reported nothing lost, no acknowledgement was asked for, and the two `object_edit` audit events name `target: "function:app/order_total(integer):definition"` and carry the string `r19f1_victim` nowhere at all.
+So a definition pasted out of a migration script that carries a trailing statement is applied, reported `applied`, and the routine it dropped is named in no answer, no consequence and no audit row.
+This is ruling 1b clause (ii), a SUCCESS destroying something the user was not SHOWN in any surface that speaks about consequences, and it is unfixed here: this subsection is a measurement of the shipped code, and the repair belongs in the emitted unit above it.
+
+**A TRUNCATED PART CANNOT BE EDITED, and the two bounds are two different refusals.**
+The read of `app.over_limit_fn(integer)` carries `truncated: { limit: 1000000, ... }` and carries NO `edit` key at all, and 1,000,000 characters of text.
+An edit that grows that text past the bound never reaches the provider: the route answers HTTP 413, `this edit is 1000012 characters and this route carries at most 1000000`.
+An edit that stays inside the route's bound reaches the build, which answers `built: false` with the `guard` class naming the server's own 1,215,122 characters.
+The CONTROL in the same run, `app.huge_fn(integer)`, carries no `truncated`, carries `edit: { offered: true }`, and builds a plan for both texts.
+
+**THE OWNERSHIP PRE-FLIGHT, PRODUCED BY THE ENGINE, in all three of the places it is read.**
+Driven on a second seed connection identical to the first except `user: src_probe`.
+
+- The read answers `edit: { offered: false, reason: "this connection's database account does not own \"app.order_total(integer)\", which is owned by \"postgres\", and PostgreSQL checks ownership rather than privilege for CREATE OR REPLACE" }`, against `edit: { offered: true }` on the owning connection.
+- The Source pane renders that same sentence verbatim and unprefixed, under the `provider-refused` arm and not `not-offered`, and draws no Edit control. The owning connection draws the Edit control and no refusal.
+- The build answers HTTP 200 with `{ built: false, refusal: { refusal: "privilege", ... } }` carrying the same sentence, against `built: true` on the owning connection.
+
+No HTTP 401 and no `Authentication failed` appears anywhere in those transcripts, which is the shipped defect this pre-flight replaces.
+The sentence is LibreDB's and not the engine's, and that is the point of a pre-flight: nothing is sent, so `42501` is never produced.
+The engine's own `must be owner of function order_total` is not reachable through these routes at all, because the plan seal frames `connection.user` into the fingerprint: a plan built on the owning connection and applied on the `src_probe` connection is refused `this preview was built against a different connection` at HTTP 400, before any provider is called.
+
+**THE APPLY LEAVES THE SESSION UNCHANGED, on the same pooled backend.**
+`current_setting('search_path')` read through `POST /api/db/query` answered `"$user", public` on backend pid 957 before a successful apply and `"$user", public` on backend pid 957 after it, and `check_function_bodies` answered `on` both times.
+The transaction-local GUC the pre block writes reads back as the empty string on that same session and its captured value does not survive, so no later apply can read a stale row version.
+
+**THE ONE ROUND TRIP IS LOAD-BEARING, and both halves of that were measured by mutation.**
+The probe edits `app.order_total(integer)` to name `order_items` UNQUALIFIED, so the body resolves only under the pinned `search_path = "app", pg_catalog`.
+At the shipped code that apply answers `applied` and the object is rewritten.
+With the `SET LOCAL` sent as its OWN `client.query()` and the rest as a second one, the same apply answers `refused`, `definition`, `relation "order_items" does not exist`, `42P01`, the object is unchanged, and the server log carries `WARNING: SET LOCAL can only be used in transaction blocks`.
+Nothing in the product's own answer says the pin evaporated: the refusal reads as an ordinary bad edit, which is why splitting them is the failure mode that produces no error at all.
+With `SET LOCAL search_path` changed to a plain `SET search_path`, the apply succeeds and every subsequent read on the same connection id answers `app, pg_catalog` on the apply's own backend, so the next Studio user to borrow that pooled client inherits the pinned path.
+That is D73's leak, and it is why the pin is `SET LOCAL` and why it travels with the statement.
+
+**`check_function_bodies = off` IS A REACHABLE POPULATION and not a hypothetical.**
+Measured on the same server through `pg`: with the GUC at `off`, `CREATE OR REPLACE FUNCTION` over a body naming a table that does not exist answers `CREATE` and A BROKEN FUNCTION IS CREATED WITH SUCCESS REPORTED.
+`SET LOCAL check_function_bodies = on` in the apply's own round trip refuses the same body with `ERROR: relation "totally_absent_table" does not exist`, and the session is still `off` afterwards, so the pin is local and a previous borrower's plain `SET` survives it.
+
+**THE AUDIT, read out of the ring and off stdout.**
+One successful apply added exactly two `object_edit` events under one `correlationId`, the plan's own id: an `action: "PLAN"` decision event with `result: "success"`, and an `action: "guarded-atomic-batch"` outcome event with `result: "success"` and a duration.
+A sentinel planted in the submitted body appears in neither event, in no field, and nowhere in the process's stdout.
+
 ### 3.2 Schema SQL hoisted to module scope
 
 The object surface's statements are module-level `const`s, not inline template literals inside the
