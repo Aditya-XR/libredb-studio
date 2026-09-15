@@ -105,11 +105,14 @@ export async function handleObjectRequest(
  * The wire body for one `ObjectRouteError`, `{ error }` plus `code` when the refusal carries one.
  *
  * A named function rather than an object literal inside the catch above, and the reason is
- * measurement rather than tidiness: the `code` arm has NO PRODUCER IN THIS REPOSITORY YET. The one
- * code that uses it, `EDIT_PLAN_INVALID`, is thrown by the two edit routes, which are a later
- * task's, so a ternary buried in the catch would be a branch nothing in this phase's own suite can
- * reach, covered by line count and unexercised in fact. Exported, so the test drives BOTH arms
- * directly and the shape is asserted rather than assumed.
+ * measurement rather than tidiness. The one code that uses the `code` arm, `EDIT_PLAN_INVALID`, has
+ * exactly ONE producer: `src/app/api/db/objects/edit-apply/route.ts` raises
+ * `ObjectRouteError(verdict.reason, 400, ApiErrorCode.EDIT_PLAN_INVALID)` for a plan that no longer
+ * verifies. A ternary buried in the catch would therefore be a branch one route reaches and
+ * everything else in this file's own suite cannot, covered by line count and unexercised in fact.
+ * Exported, so the test drives BOTH arms directly and the shape is asserted rather than assumed.
+ * An earlier revision of this paragraph said the arm had no producer at all and that the edit
+ * routes were a later task's, which was true before they landed.
  *
  * The key is OMITTED rather than sent as `undefined`. `JSON.stringify` drops an undefined value, so
  * the two spellings reach a client identically, and a reader of this line should not have to know
@@ -644,9 +647,9 @@ function boundText(part: ObjectSourcePart, limit: number): ObjectSourcePart {
  * was the only engine that had landed; the day-one set is now three and the count was re-measured
  * rather than the digit bumped, because what it counts is what the paragraph is for.
  *
- * There are THREE producers of `edit`: `providers/sql/postgres.ts:2799`, gated on
- * `kindAcceptsSourceEdits(capabilities, kind)`; `providers/sql/trino/index.ts:1249` and
- * `providers/keyvalue/redis.ts:1657`, both gated on `spec.acceptsSourceEdits === true`, which is the
+ * There are THREE producers of `edit`: `providers/sql/postgres.ts:3145`, gated on
+ * `kindAcceptsSourceEdits(capabilities, kind)`; `providers/sql/trino/index.ts:1257` and
+ * `providers/keyvalue/redis.ts:1780`, both gated on `spec.acceptsSourceEdits === true`, which is the
  * same fact read through the same declaration. All three sit on the READABLE arm, verified rather
  * than assumed: no producer attaches `edit` to a part carrying `unavailable`.
  *
@@ -658,20 +661,40 @@ function boundText(part: ObjectSourcePart, limit: number): ObjectSourcePart {
  * Rule 2's producer set GREW and its character changed, which is the part a bumped digit would have
  * hidden. On PostgreSQL it is a by-product: that site spreads `truncated` and `edit` from a single
  * read, so a routine over `SOURCE_CHARACTER_LIMIT` reaches it. On Redis it is a DECIDED POSITION,
- * stated at `redis.ts:1649-1656`: the affordance is offered on a truncated part deliberately, because
+ * stated at `redis.ts:1773-1779`: the affordance is offered on a truncated part deliberately, because
  * the bound is the CALLER's and the same object read without one is whole, so a provider that withheld
  * it there would be answering a property of the REQUEST as a property of the object. Rule 2 is what
  * makes that position safe on the standalone path, and the pane's predicate and `buildObjectEdit`'s
  * re-read are what make it safe on the other two.
  *
- * THE WRITE PATH IS NOT COVERED HERE AT ALL, and it is the larger gap. Deleting a field from a READ
+ * THE WRITE PATH IS NOT COVERED HERE AT ALL, and it never can be. Deleting a field from a READ
  * response cannot bind a caller: a client that never calls `/api/db/objects/source`, or that simply
  * ignores the field that was deleted, can POST the truncated prefix straight to the edit routes.
- * MEASURED by grep at this commit, nothing on the write path enforces either fact: `object-edit.ts`
- * names neither `truncated` nor `acceptsSourceEdits`. That is an obligation ON THE EDIT-PLAN ROUTE,
- * stated here by name so it is not read as already discharged: that route must REFUSE a plan whose
- * part is truncated, and REFUSE a kind that fails `kindAcceptsSourceEdits` on the CONNECTED provider.
- * Until it does, this function decides what the UI is OFFERED and never what the server ACCEPTS.
+ * That was an obligation ON THE EDIT-PLAN ROUTE and BOTH HALVES OF IT HAVE LANDED, so what follows
+ * names the enforcer of each half and where it sits, MEASURED by grep at this commit.
+ *
+ * THE KIND, at `src/app/api/db/objects/edit-plan/route.ts:89`: that route calls
+ * `requireEditableKind(provider.getCapabilities(), kind, ...)` before it reaches the builder, on the
+ * CONNECTED provider and never on the client's copy of the declaration, and its comment there cites
+ * this docblock by name as the reason. `src/app/api/db/objects/edit-apply/route.ts:141` asks the same
+ * question of the plan's kind, so neither half of the write path takes a caller's word for it.
+ *
+ * THE BOUND, on both sides of the same constant. `edit-plan/route.ts:74` refuses a SUBMITTED text
+ * longer than `EDIT_CHARACTER_LIMIT`, and all three day-one providers refuse a READ definition longer
+ * than it inside `buildObjectEdit`: `providers/sql/postgres.ts:3302`, `providers/keyvalue/redis.ts:1870`
+ * and `providers/sql/trino/index.ts:1451`. The second is what closes the class rather than narrowing
+ * it: a plan is minted only from the build's own read, so a definition the pane could only have shown
+ * truncated never reaches a plan at all, whatever the client POSTs.
+ *
+ * EVERY `path:line` ABOVE IS PINNED BY A TEST, because "measured at this commit" is a claim that
+ * expires at the next one and nothing in CI reads a code comment. One of these pointers rotted by
+ * twelve lines inside the very branch that wrote this paragraph, from an insertion above it in the
+ * provider file it names. `tests/unit/lib/api/object-route-edit.test.ts` greps the anchor each citation
+ * means, derives the number this docblock must be writing and fails with it, so a correct
+ * renumbering costs nothing here and a stale one cannot reach `main`.
+ *
+ * So this function decides what the UI is OFFERED, and the two edit routes decide what the server
+ * ACCEPTS.
  *
  * WHAT THIS CANNOT COVER ON THE READ PATH ITSELF, said out loud rather than left for a reader to
  * assume the opposite.
