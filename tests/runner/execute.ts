@@ -147,6 +147,7 @@ export async function runTestFiles(input: RunTestFilesInput): Promise<RunSummary
       const index = next;
       next += 1;
       const file = files[index] as string;
+      // oxlint-disable-next-line no-await-in-loop -- one file at a time per worker; the jobs come from the workers.
       const spawned = await runFile({ file, index, coverageDir: coverageDirFor(file, index, input), timeoutMs });
       const outcome = toOutcome(file, spawned);
       outcomes.push(outcome);
