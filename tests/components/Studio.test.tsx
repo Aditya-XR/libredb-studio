@@ -82,6 +82,8 @@ const mockStorageDeleteConnection = mock(() => {});
 const mockStorageSaveQuery = mock(() => {});
 const mockStorageGetFavoriteConnectionIds = mock(() => [] as string[]);
 const mockStorageToggleFavoriteConnection = mock(() => [] as string[]);
+const mockStorageGetConnectionOrder = mock(() => [] as string[]);
+const mockStorageSetConnectionOrder = mock(() => {});
 // Data Masking
 const mockSaveMaskingConfig = mock(() => {});
 // URL (for export tests)
@@ -243,6 +245,8 @@ mock.module("@/lib/storage", () => ({
     getActiveConnectionId: mock(() => null),
     getFavoriteConnectionIds: mockStorageGetFavoriteConnectionIds,
     toggleFavoriteConnection: mockStorageToggleFavoriteConnection,
+    getConnectionOrder: mockStorageGetConnectionOrder,
+    setConnectionOrder: mockStorageSetConnectionOrder,
   },
 }));
 
@@ -583,6 +587,9 @@ describe("Studio", () => {
     mockStorageGetFavoriteConnectionIds.mockClear();
     mockStorageGetFavoriteConnectionIds.mockReturnValue([]);
     mockStorageToggleFavoriteConnection.mockClear();
+    mockStorageGetConnectionOrder.mockClear();
+    mockStorageGetConnectionOrder.mockReturnValue([]);
+    mockStorageSetConnectionOrder.mockClear();
     mockSaveMaskingConfig.mockClear();
     // Set rather than restored: one test turns masking on, and `mockRestore` in bun
     // drops the implementation entirely instead of returning it to this default.
@@ -1141,6 +1148,30 @@ describe("Studio", () => {
       act(() => (props.onToggleFavoriteConnection as (id: string) => void)("conn-1"));
 
       expect(mockStorageToggleFavoriteConnection).toHaveBeenCalledWith("conn-1");
+    },
+  );
+
+  test("loads connectionOrder from storage and forwards it to Sidebar", () => {
+    mockStorageGetConnectionOrder.mockReturnValue(["conn-2", "conn-1"]);
+
+    render(<Studio />);
+
+    expect(mockStorageGetConnectionOrder).toHaveBeenCalled();
+    expect(capturedSidebarProps.connectionOrder).toEqual(["conn-2", "conn-1"]);
+  });
+
+  test.each(["desktop", "mobile"] as const)(
+    "onReorderConnections (%s) calls storage.setConnectionOrder with the new order",
+    (surface) => {
+      render(<Studio />);
+      if (surface === "mobile") {
+        act(() => (capturedMobileNavProps.onTabChange as (tab: string) => void)("database"));
+      }
+      const props = surface === "mobile" ? capturedConnectionsListProps : capturedSidebarProps;
+
+      act(() => (props.onReorderConnections as (order: string[]) => void)(["conn-2", "conn-1"]));
+
+      expect(mockStorageSetConnectionOrder).toHaveBeenCalledWith(["conn-2", "conn-1"]);
     },
   );
 

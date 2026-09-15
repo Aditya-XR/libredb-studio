@@ -6,6 +6,8 @@ import { mock } from "bun:test";
 let capturedDuplicateHandler: unknown;
 let capturedFavoriteIds: unknown;
 let capturedToggleFavoriteHandler: unknown;
+let capturedConnectionOrder: unknown;
+let capturedReorderHandler: unknown;
 
 // Mock child components to isolate Sidebar logic
 mock.module("@/components/sidebar/ConnectionsList", () => ({
@@ -13,6 +15,8 @@ mock.module("@/components/sidebar/ConnectionsList", () => ({
     capturedDuplicateHandler = props.onDuplicateConnection;
     capturedFavoriteIds = props.favoriteConnectionIds;
     capturedToggleFavoriteHandler = props.onToggleFavoriteConnection;
+    capturedConnectionOrder = props.connectionOrder;
+    capturedReorderHandler = props.onReorderConnections;
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const React = require("react");
     const connections = props.connections as Array<Record<string, unknown>> | undefined;
@@ -350,6 +354,17 @@ describe("Sidebar", () => {
 
     expect(capturedFavoriteIds).toBe(favoriteConnectionIds);
     expect(capturedToggleFavoriteHandler).toBe(onToggleFavoriteConnection);
+  });
+
+  test("passes connectionOrder and onReorderConnections through to ConnectionsList", () => {
+    const connectionOrder = [mockMySQLConnection.id, mockPostgresConnection.id];
+    const onReorderConnections = mock(() => {});
+    const props = createDefaultProps({ connectionOrder, onReorderConnections });
+
+    render(<Sidebar {...props} />);
+
+    expect(capturedConnectionOrder).toBe(connectionOrder);
+    expect(capturedReorderHandler).toBe(onReorderConnections);
   });
 
   /**

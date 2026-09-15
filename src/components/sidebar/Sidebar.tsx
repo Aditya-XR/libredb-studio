@@ -22,6 +22,9 @@ interface SidebarProps {
   /** Connection ids the user has starred. Renders as a "Favorites" group above the rest. */
   favoriteConnectionIds?: Set<string>;
   onToggleFavoriteConnection?: (id: string) => void;
+  /** The user's saved custom order (#748). Absent means reordering is not wired up. */
+  connectionOrder?: string[];
+  onReorderConnections?: (order: string[]) => void;
   onAddConnection: () => void;
   /** A row the reader activated, handed over whole: path, kind and the fields the tree loaded. */
   onObjectClick?: (object: DatabaseObject) => void;
@@ -80,6 +83,8 @@ export function Sidebar({
   onDuplicateConnection,
   favoriteConnectionIds,
   onToggleFavoriteConnection,
+  connectionOrder,
+  onReorderConnections,
   onAddConnection,
   onObjectClick,
   onShowDiagram,
@@ -141,6 +146,8 @@ export function Sidebar({
           onDuplicateConnection={onDuplicateConnection}
           favoriteConnectionIds={favoriteConnectionIds}
           onToggleFavoriteConnection={onToggleFavoriteConnection}
+          connectionOrder={connectionOrder}
+          onReorderConnections={onReorderConnections}
           onAddConnection={onAddConnection}
         />
       </ScrollArea>

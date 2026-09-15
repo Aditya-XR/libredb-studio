@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useCallback, useState } from "react";
 import { DatabaseConnection } from "@/lib/types";
+import { applyConnectionOrder } from "@/lib/connection-order";
 import { Button } from "@/components/ui/button";
 import { ConnectionItem } from "./ConnectionItem";
 
@@ -13,6 +14,10 @@ interface ConnectionsListProps {
   /** Connection ids the user has starred. Renders as a "Favorites" group above the rest. */
   favoriteConnectionIds?: Set<string>;
   onToggleFavoriteConnection?: (id: string) => void;
+  /** The user's saved custom order (#748). Absent means reordering is not wired up. */
+  connectionOrder?: string[];
+  /** Persists a new full order after a drag-and-drop completes. */
+  onReorderConnections?: (order: string[]) => void;
   onAddConnection: () => void;
 }
 
@@ -26,6 +31,11 @@ function SectionHeader({ label }: { label: string }) {
   );
 }
 
+/** Whether two connections render in the same section: both favorited, or neither. */
+function inSameSection(favoriteConnectionIds: Set<string> | undefined, a: string, b: string): boolean {
+  return (favoriteConnectionIds?.has(a) ?? false) === (favoriteConnectionIds?.has(b) ?? false);
+}
+
 export function ConnectionsList({
   connections,
   activeConnection,
@@ -35,17 +45,47 @@ export function ConnectionsList({
   onDuplicateConnection,
   favoriteConnectionIds,
   onToggleFavoriteConnection,
+  connectionOrder,
+  onReorderConnections,
   onAddConnection,
 }: ConnectionsListProps) {
-  // Favorited connections render together, above the rest, in their existing relative
-  // order. The non-favorited group keeps exactly the order and behaviour it always has -
-  // this only ever pulls entries out of it, never reorders or filters what remains.
-  const favorites = favoriteConnectionIds?.size ? connections.filter((conn) => favoriteConnectionIds.has(conn.id)) : [];
-  const rest = favoriteConnectionIds?.size
-    ? connections.filter((conn) => !favoriteConnectionIds.has(conn.id))
-    : connections;
+  const ordered = applyConnectionOrder(connections, connectionOrder ?? []);
+  const reorderable = onReorderConnections !== undefined;
 
-  const renderItem = (conn: DatabaseConnection) => (
+  // Favorited connections render together, above the rest. Both sections are cut from the
+  // one saved order, so each keeps the user's order within itself.
+  const favorites = favoriteConnectionIds?.size ? ordered.filter((conn) => favoriteConnectionIds.has(conn.id)) : [];
+  const rest = favoriteConnectionIds?.size ? ordered.filter((conn) => !favoriteConnectionIds.has(conn.id)) : ordered;
+
+  // Drag state lives here, not in ConnectionItem: a drop needs the full ordered list to
+  // compute the new order, and only this component holds it.
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+
+  const clearDragState = useCallback(() => {
+    setDraggedId(null);
+    setDragOverId(null);
+  }, []);
+
+  const handleDrop = (targetId: string) => {
+    // A drop across the Favorites/Connections boundary is ignored. The dragged row stays in
+    // its own section either way, so accepting it would only change the saved order in a way
+    // nothing on screen shows.
+    if (draggedId !== null && draggedId !== targetId && inSameSection(favoriteConnectionIds, draggedId, targetId)) {
+      const ids = ordered.map((c) => c.id);
+      const fromIndex = ids.indexOf(draggedId);
+      const toIndex = ids.indexOf(targetId);
+      if (fromIndex !== -1 && toIndex !== -1) {
+        const reordered = [...ids];
+        const [moved] = reordered.splice(fromIndex, 1);
+        reordered.splice(toIndex, 0, moved);
+        onReorderConnections?.(reordered);
+      }
+    }
+    clearDragState();
+  };
+
+  const renderItem = (conn: DatabaseConnection, section: DatabaseConnection[]) => (
     <ConnectionItem
       key={conn.id}
       connection={conn}
@@ -56,6 +96,18 @@ export function ConnectionsList({
       onDuplicate={onDuplicateConnection}
       isFavorite={favoriteConnectionIds?.has(conn.id) ?? false}
       onToggleFavorite={onToggleFavoriteConnection}
+      draggable={reorderable && section.length > 1}
+      isDragging={draggedId === conn.id}
+      isDragOver={
+        dragOverId === conn.id &&
+        draggedId !== null &&
+        draggedId !== conn.id &&
+        inSameSection(favoriteConnectionIds, draggedId, conn.id)
+      }
+      onDragStart={() => setDraggedId(conn.id)}
+      onDragEnter={() => setDragOverId(conn.id)}
+      onDragEnd={clearDragState}
+      onDrop={() => handleDrop(conn.id)}
     />
   );
 
@@ -64,7 +116,7 @@ export function ConnectionsList({
       {favorites.length > 0 && (
         <section className="mb-4">
           <SectionHeader label="Favorites" />
-          <div className="space-y-0.5">{favorites.map(renderItem)}</div>
+          <div className="space-y-0.5">{favorites.map((conn) => renderItem(conn, favorites))}</div>
         </section>
       )}
 
@@ -83,7 +135,7 @@ export function ConnectionsList({
                 </Button>
               </div>
             ) : (
-              rest.map(renderItem)
+              rest.map((conn) => renderItem(conn, rest))
             )}
           </div>
         </section>

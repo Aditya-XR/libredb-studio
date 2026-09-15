@@ -29,6 +29,15 @@ export interface StorageData {
    * new id) does not inherit the original's favorite status for free.
    */
   favorite_connections: string[];
+  /**
+   * Connection ids in the user's preferred display order (#748), kept separate from
+   * `connections` rather than as a field on `DatabaseConnection`: a `managed:true`
+   * connection is always taken fresh from the server on every load (see
+   * `mergeManagedConnections` in `use-connection-manager.ts`), so a field on the connection
+   * object itself would be silently discarded on reload for exactly the connections a user
+   * is most likely to have reordered.
+   */
+  connection_order: string[];
 }
 
 /** Collection names that can be synced to server storage */
@@ -47,6 +56,7 @@ export const STORAGE_COLLECTIONS: StorageCollection[] = [
   "threshold_config",
   "dismissed_seeds",
   "favorite_connections",
+  "connection_order",
 ];
 
 /**

@@ -319,4 +319,94 @@ describe("ConnectionItem", () => {
       expect(onToggleFavorite).toHaveBeenCalledWith(mockPostgresConnection.id);
     });
   });
+
+  describe("drag reordering (#748)", () => {
+    test("not draggable and no drag handle when draggable is not passed", () => {
+      const { container, queryByTestId } = render(
+        <ConnectionItem
+          connection={mockPostgresConnection}
+          isActive={false}
+          onSelect={defaultOnSelect}
+          onDelete={defaultOnDelete}
+        />,
+      );
+
+      expect(queryByTestId(`drag-handle-${mockPostgresConnection.id}`)).toBeNull();
+      expect(container.querySelector('[class*="cursor-pointer"]')?.getAttribute("draggable")).toBe("false");
+    });
+
+    test("draggable renders a drag handle and fires the drag callbacks", () => {
+      const onDragStart = mock(() => {});
+      const onDragEnter = mock(() => {});
+      const onDragEnd = mock(() => {});
+      const onDrop = mock(() => {});
+      const { container, getByTestId } = render(
+        <ConnectionItem
+          connection={mockPostgresConnection}
+          isActive={false}
+          onSelect={defaultOnSelect}
+          onDelete={defaultOnDelete}
+          draggable
+          onDragStart={onDragStart}
+          onDragEnter={onDragEnter}
+          onDragEnd={onDragEnd}
+          onDrop={onDrop}
+        />,
+      );
+
+      expect(getByTestId(`drag-handle-${mockPostgresConnection.id}`)).not.toBeNull();
+      const item = container.querySelector('[class*="cursor-pointer"]')!;
+      expect(item.getAttribute("draggable")).toBe("true");
+
+      fireEvent.dragStart(item);
+      fireEvent.dragEnter(item);
+      fireEvent.dragOver(item);
+      fireEvent.drop(item);
+      fireEvent.dragEnd(item);
+
+      expect(onDragStart).toHaveBeenCalledTimes(1);
+      expect(onDragEnter).toHaveBeenCalledTimes(1);
+      expect(onDrop).toHaveBeenCalledTimes(1);
+      expect(onDragEnd).toHaveBeenCalledTimes(1);
+    });
+
+    test("isDragging dims the row and isDragOver highlights it", () => {
+      const { container, rerender } = render(
+        <ConnectionItem
+          connection={mockPostgresConnection}
+          isActive={false}
+          onSelect={defaultOnSelect}
+          onDelete={defaultOnDelete}
+          draggable
+        />,
+      );
+      const item = () => container.querySelector('[class*="cursor-pointer"]')!;
+      expect(item().className).not.toContain("opacity-40");
+      expect(item().className).not.toContain("ring-brand-solid");
+
+      rerender(
+        <ConnectionItem
+          connection={mockPostgresConnection}
+          isActive={false}
+          onSelect={defaultOnSelect}
+          onDelete={defaultOnDelete}
+          draggable
+          isDragging
+        />,
+      );
+      expect(item().className).toContain("opacity-40");
+
+      rerender(
+        <ConnectionItem
+          connection={mockPostgresConnection}
+          isActive={false}
+          onSelect={defaultOnSelect}
+          onDelete={defaultOnDelete}
+          draggable
+          isDragOver
+        />,
+      );
+      expect(item().className).toContain("ring-brand-solid");
+    });
+  });
 });

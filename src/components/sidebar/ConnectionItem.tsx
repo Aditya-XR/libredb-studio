@@ -1,6 +1,6 @@
 import React from "react";
 import { DatabaseConnection, ENVIRONMENT_LABELS } from "@/lib/types";
-import { Lock, Trash2, Pencil, Copy, Star } from "lucide-react";
+import { Lock, Trash2, Pencil, Copy, Star, GripVertical } from "lucide-react";
 import { getDBIcon } from "@/lib/db-ui-config";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -15,6 +15,19 @@ interface ConnectionItemProps {
   onDuplicate?: (conn: DatabaseConnection) => void;
   isFavorite?: boolean;
   onToggleFavorite?: (id: string) => void;
+  /**
+   * Reordering is opt-in per render: the handle and the `draggable` wiring appear only when
+   * a parent hands over a drag id, so a caller that has not wired reordering (or a list of
+   * exactly one connection, which `ConnectionsList` withholds it for) gets the pre-#748
+   * markup unchanged.
+   */
+  draggable?: boolean;
+  isDragging?: boolean;
+  isDragOver?: boolean;
+  onDragStart?: () => void;
+  onDragEnter?: () => void;
+  onDragEnd?: () => void;
+  onDrop?: () => void;
 }
 
 export const ConnectionItem = React.memo(function ConnectionItem({
@@ -26,16 +39,47 @@ export const ConnectionItem = React.memo(function ConnectionItem({
   onDuplicate,
   isFavorite = false,
   onToggleFavorite,
+  draggable = false,
+  isDragging = false,
+  isDragOver = false,
+  onDragStart,
+  onDragEnter,
+  onDragEnd,
+  onDrop,
 }: ConnectionItemProps) {
   return (
     <motion.div
       initial={false}
+      draggable={draggable}
+      onDragStart={draggable ? () => onDragStart?.() : undefined}
+      onDragEnter={draggable ? () => onDragEnter?.() : undefined}
+      onDragOver={draggable ? (e) => e.preventDefault() : undefined}
+      onDragEnd={draggable ? () => onDragEnd?.() : undefined}
+      onDrop={
+        draggable
+          ? (e) => {
+              e.preventDefault();
+              onDrop?.();
+            }
+          : undefined
+      }
       className={cn(
         "group flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer transition-all duration-200 text-xs relative overflow-hidden",
         isActive ? "bg-brand-solid/10 text-brand" : "hover:bg-accent/50 text-muted-foreground hover:text-foreground",
+        isDragging && "opacity-40",
+        isDragOver && "ring-1 ring-inset ring-brand-solid/50",
       )}
       onClick={() => onSelect(conn)}
     >
+      {draggable && (
+        <span
+          data-testid={`drag-handle-${conn.id}`}
+          className="cursor-grab active:cursor-grabbing text-muted-foreground/50 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+          title="Drag to reorder"
+        >
+          <GripVertical strokeWidth={1.5} className="w-3 h-3" />
+        </span>
+      )}
       {isActive && (
         <motion.div
           layoutId="active-indicator"
