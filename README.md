@@ -177,8 +177,9 @@ what comes back, and finishes by composing a report whose every claim cites the 
   never executes what it recommends. Applying a statement is your click.
 - **Evidence or nothing.** A claim with no citation cannot be composed, and the run states its own
   verdict — *"Run answered"* or *"Run did not answer"* — beside how it ended.
-- **Bounded, and the meter is on screen**: 20 statements, 60 s of database time, 200 rows per read,
-  a 5-minute run deadline.
+- **Bounded, and the meter is on screen**: 18 to 45 statements and a 360 s to 900 s run deadline
+  depending on workflow, 200 rows per read. See [docs/AGENT.md](docs/AGENT.md) for the exact figures
+  per workflow.
 - **Your own model.** Gemini (the default), OpenAI, Ollama, or any OpenAI-compatible endpoint.
   **Agent** mode needs a model that can call tools — on Ollama, a live probe, not the vendor's page,
   is what establishes that, and the guide says how to run one. **Plan** mode needs no tools and is
