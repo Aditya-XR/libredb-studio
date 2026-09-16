@@ -54,4 +54,4 @@ Log in with the admin credentials you set above.
   run `fly deploy` again.
 - Optional features (AI assistance, OIDC login) are configured the same
   way as everywhere else — set the extra env vars with `fly secrets set`.
-  See the [README](../README.md#configuration) for the list.
+  See the [README](../README.md#environment-variables) for the list.
