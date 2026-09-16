@@ -617,6 +617,14 @@ describe("TableItem", () => {
       expect(toggle.className).toContain("py-1.5");
       expect(toggle.parentElement?.className).not.toContain("py-1.5");
     });
+
+    test("table actions button is named for the table and exposes the same tooltip", () => {
+      const { getByRole } = render(
+        <TableItem table={largeTable} isExpanded={false} onToggle={mock(() => {})} isAdmin={false} />,
+      );
+      const actions = getByRole("button", { name: "Actions for users" });
+      expect(actions.getAttribute("title")).toBe("Actions for users");
+    });
   });
   // ── Derived-grouping rows and declared maintenance (#427) ─────────────────
 
