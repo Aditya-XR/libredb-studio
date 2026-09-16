@@ -122,6 +122,14 @@ request time, and `GET /api/agent/config` reports which one is missing:
    With an unreachable `WORKFLOW_POSTGRES_URL` the rail still appears and the first Start still
    fails (see [HTTP surface](#http-surface)).
 
+**A third condition, not covered by `/api/agent/config`, gates the Start button itself:** the
+connection being investigated must be one the server can resolve on its own, which needs
+`STORAGE_PROVIDER` to be `sqlite` or `postgres`. With the default `STORAGE_PROVIDER=local`,
+connection metadata lives only in the browser, so `resolveAgentRunConnectionId` (in
+[`src/hooks/use-connection-payload.ts`](../src/hooks/use-connection-payload.ts)) never has a
+server-known connection to hand back, and Start stays disabled no matter what the two conditions
+above report.
+
 The owner ratified this in
 [#331](https://github.com/libredb/libredb-studio/issues/331#issuecomment-5277689616), and the reason
 is the removal that came with it: once the NL2SQL and Autopilot panels were gone,
