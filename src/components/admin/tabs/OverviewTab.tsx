@@ -530,7 +530,7 @@ function HeroStatusBanner({
                   )}
                   {errorCount > 0 && (
                     <Badge variant="outline" className="border-danger-tint/30 text-danger h-5 text-[0.625rem]">
-                      {errorCount} error
+                      {errorCount} error{errorCount === 1 ? "" : "s"}
                     </Badge>
                   )}
                 </div>

@@ -567,6 +567,48 @@ describe("OverviewTab", () => {
       expect(queryByText("PG Prod")).not.toBeNull();
       expect(queryByText("timeout")).not.toBeNull();
       expect(queryByText("Connection refused")).not.toBeNull();
+      // one failing connection: singular badge
+      expect(queryByText("1 error")).not.toBeNull();
+    });
+  });
+
+  test("fleet status badge pluralizes the error count", async () => {
+    fetchMock = mockGlobalFetch({
+      "/api/admin/audit": { json: { events: [] } },
+      "/api/admin/fleet-health": {
+        json: {
+          results: [
+            {
+              connectionId: "c1",
+              connectionName: "PG Prod",
+              type: "postgres",
+              status: "error",
+              latencyMs: 999,
+              error: "Connection refused",
+            },
+            {
+              connectionId: "c2",
+              connectionName: "PG Prod Replica",
+              type: "postgres",
+              status: "error",
+              latencyMs: 999,
+              error: "Connection refused",
+            },
+          ],
+        },
+      },
+    });
+
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OverviewTab user={{ username: "admin", role: "admin" }} />);
+    });
+    const { queryByText } = renderResult!;
+
+    await waitFor(() => {
+      // two failing connections: plural badge, not the unpluralized singular text
+      expect(queryByText("2 errors")).not.toBeNull();
+      expect(queryByText("2 error")).toBeNull();
     });
   });
 
