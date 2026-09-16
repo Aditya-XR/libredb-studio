@@ -68,7 +68,7 @@ packer build -var "version=0.14.1" .
 
 - [ ] `packer validate` → clean
 - [ ] Fresh test Droplet from the snapshot ($6) → MOTD shows up
-- [ ] `http://<IP>:3000` loads; `/api/db/health` → `{"status":"ok"}`
+- [ ] `http://<IP>:3000` loads; `/api/db/health` → `{"status":"healthy",…}`
 - [ ] Login works with the credentials from `/etc/libredb-studio.env`
 - [ ] `sudo grep AUTH_COOKIE_SECURE /etc/libredb-studio.env` → `false`. The
       Droplet is plain HTTP on a public address, so without it the browser
