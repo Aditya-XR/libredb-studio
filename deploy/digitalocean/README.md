@@ -70,6 +70,9 @@ packer build -var "version=0.14.1" .
 - [ ] Fresh test Droplet from the snapshot ($6) → MOTD shows up
 - [ ] `http://<IP>:3000` loads; `/api/db/health` → `{"status":"ok"}`
 - [ ] Login works with the credentials from `/etc/libredb-studio.env`
+- [ ] `sudo grep AUTH_COOKIE_SECURE /etc/libredb-studio.env` → `false`. The
+      Droplet is plain HTTP on a public address, so without it the browser
+      discards the auth cookie and login loops while health probes still pass
 - [ ] SQLite data survives a Droplet restart (`/app/data`)
 - [ ] `ufw status` → active (only 22/tcp LIMIT; port 3000 is published via
       Docker's iptables rules and intentionally absent from the ufw list)
