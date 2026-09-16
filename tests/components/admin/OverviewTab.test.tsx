@@ -74,7 +74,9 @@ import React from "react";
 
 import { mockGlobalFetch, restoreGlobalFetch } from "../../helpers/mock-fetch";
 
-import { OverviewTab } from "@/components/admin/tabs/OverviewTab";
+import { OverviewTab, DB_TYPES_PREVIEW } from "@/components/admin/tabs/OverviewTab";
+import { EXTERNAL_DATABASE_TYPES } from "@/lib/db/compatibility";
+import { getDBConfig } from "@/lib/db-ui-config";
 
 // =============================================================================
 // OverviewTab Tests
@@ -190,6 +192,30 @@ describe("OverviewTab", () => {
 
     // The empty state shows "Welcome to Command Center"
     expect(queryByText("Welcome to Command Center")).not.toBeNull();
+  });
+
+  test("empty state DB Types card is derived from EXTERNAL_DATABASE_TYPES, not hand-typed", async () => {
+    mockGetConnections.mockImplementation(() => []);
+
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OverviewTab user={{ username: "admin", role: "admin" }} />);
+    });
+    const { queryByText } = renderResult!;
+
+    // The count matches the real external-engine catalog, not a stale literal.
+    expect(queryByText(`${EXTERNAL_DATABASE_TYPES.length} DB Types`)).not.toBeNull();
+    expect(queryByText("7 DB Types")).toBeNull();
+
+    // The description previews the hand-picked DB_TYPES_PREVIEW labels and names the rest as
+    // "+N more". getDBConfig is mocked to "PostgreSQL" for every type in this file, so this
+    // only pins the join/count mechanics; DB_TYPES_PREVIEW's real, category-spanning labels
+    // and its membership in EXTERNAL_DATABASE_TYPES are checked unmocked in
+    // tests/unit/components/overview-tab-db-types-preview.test.ts.
+    const labels = DB_TYPES_PREVIEW.map((type) => getDBConfig(type).label);
+    const hidden = EXTERNAL_DATABASE_TYPES.length - DB_TYPES_PREVIEW.length;
+    const expectedDescription = `${labels.join(", ")}, +${hidden} more`;
+    expect(queryByText(expectedDescription)).not.toBeNull();
   });
 
   test("shows hero section when connections exist", async () => {

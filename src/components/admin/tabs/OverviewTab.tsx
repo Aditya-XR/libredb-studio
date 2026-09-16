@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { storage } from "@/lib/storage";
 import { useAllConnections } from "@/hooks/use-all-connections";
-import { getDBIcon, getDBColor } from "@/lib/db-ui-config";
+import { getDBIcon, getDBColor, getDBConfig } from "@/lib/db-ui-config";
+import { EXTERNAL_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { formatBytes } from "@/lib/db/utils/pool-manager";
 import {
   type DatabaseType,
@@ -1108,12 +1109,31 @@ function QuickActionsSection() {
 
 // ─── Empty State ─────────────────────────────────────────────────────────────
 
+// Keeps the card's second line short: name a handful of engines, not the whole catalog.
+// Picked by hand rather than sliced off registry order, so the seven shown span the product's
+// range (relational, document, key-value, wide-column, search, analytics) instead of reading
+// as "six flavours of SQL" — every id here must still be in EXTERNAL_DATABASE_TYPES.
+export const DB_TYPES_PREVIEW: readonly DatabaseType[] = [
+  "postgres",
+  "mysql",
+  "mongodb",
+  "redis",
+  "cassandra",
+  "elasticsearch",
+  "clickhouse",
+];
+
 function EmptyState() {
+  const previewEngineLabels = DB_TYPES_PREVIEW.map((type) => getDBConfig(type).label);
+  const hiddenEngineCount = EXTERNAL_DATABASE_TYPES.length - DB_TYPES_PREVIEW.length;
+  const dbTypesDescription =
+    previewEngineLabels.join(", ") + (hiddenEngineCount > 0 ? `, +${hiddenEngineCount} more` : "");
+
   const features = [
     {
       icon: Database,
-      label: "7 DB Types",
-      description: "PostgreSQL, MySQL, SQLite, MongoDB, Redis, Oracle, MSSQL",
+      label: `${EXTERNAL_DATABASE_TYPES.length} DB Types`,
+      description: dbTypesDescription,
     },
     {
       icon: Sparkles,
