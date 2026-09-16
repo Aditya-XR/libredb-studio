@@ -78,7 +78,7 @@ Test instance में [Seed Connections](docs/SEED_CONNECTIONS.md) के ज�
 
 ## एक और डेटाबेस टूल क्यों
 
-आप किसी managed platform पर Postgres बनाते हैं। चालीस सेकंड में वह तैयार है।
+आप किसी managed platform पर चालीस सेकंड के अंदर Postgres बना सकते हैं।
 
 फिर आप देखना चाहते हैं कि उसके अंदर क्या है। तो आप port को public internet पर खोलते हैं, SSH tunnel बनाते हैं, या हर उस machine पर desktop client install करते हैं जिसे उसकी ज़रूरत है। डेटाबेस को चालीस सेकंड लगे, पर उसमें झाँकने की खिड़की बनाने में आपकी पूरी दोपहर चली गई।
 
