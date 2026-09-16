@@ -5,7 +5,7 @@
 <h1 align="center">LibreDB Studio</h1>
 
 <p align="center">
-  <strong>ऐसा डेटाबेस एडिटर जो आपके डेटा के पास deploy होता है, आपके laptop पर नहीं।</strong>
+  <strong>डेटाबेस एडिटर जो आपके laptop पर नहीं, आपके डेटा के क़रीब deploy होता है।</strong>
 </p>
 
 <p align="center">
@@ -59,17 +59,28 @@ docker run -p 3000:3000 ghcr.io/libredb/libredb-studio:latest
 npx @libredb/studio
 ```
 
-फिर **http://localhost:3000** खोलें। पहली बार चालू होने पर admin password log में print होता है। कोई config file नहीं चाहिए।
+फिर **http://localhost:3000** खोलें। पहली बार चालू होने पर Studio admin password को log में print करता है। किसी config file की ज़रूरत नहीं है।
 
 > अगर browser Studio को localhost या HTTPS के बजाय किसी और पते से खोलता है (जैसे LAN पर `http://192.168.x.x:3000`), तो `AUTH_COOKIE_SECURE=false` भी set करें। वरना health check ठीक दिखेगा, पर login चुपचाप fail होगा और आप बार-बार login page पर लौटते रहेंगे।
 
 Helm, Homebrew, Snap, winget या deb/rpm चाहिए? नीचे [इंस्टॉल करने के तरीके](#इंस्टॉल-करने-के-तरीके) देखें।
 
+## Live Test
+
+> **LibreDB Studio को बिना कुछ install किए अभी आज़माएँ।**
+
+| Test | URL | Credentials |
+|------|-----|-------------|
+| **OIDC के साथ public test** | [app.libredb.org](https://app.libredb.org) | SSO |
+| **JWT के साथ public test** | [trial.libredb.org](https://trial.libredb.org) | admin@libredb.org / Admin!2026  user@libredb.org / User!2026 |
+
+Test instance में [Seed Connections](docs/SEED_CONNECTIONS.md) के ज़रिए एक PostgreSQL डेटाबेस पहले से configured है। कोई setup नहीं चाहिए।
+
 ## एक और डेटाबेस टूल क्यों
 
 आप किसी managed platform पर Postgres बनाते हैं। चालीस सेकंड में वह तैयार है।
 
-फिर आप देखना चाहते हैं कि उसके अंदर क्या है। तो आप port को public internet पर खोलते हैं, या desktop client install करके SSH tunnel बनाते हैं, या हार मानकर command line पर लौट जाते हैं। डेटाबेस को चालीस सेकंड लगे, पर उसमें झाँकने की खिड़की बनाने में आपकी पूरी दोपहर चली गई।
+फिर आप देखना चाहते हैं कि उसके अंदर क्या है। तो आप port को public internet पर खोलते हैं, SSH tunnel बनाते हैं, या हर उस machine पर desktop client install करते हैं जिसे उसकी ज़रूरत है। डेटाबेस को चालीस सेकंड लगे, पर उसमें झाँकने की खिड़की बनाने में आपकी पूरी दोपहर चली गई।
 
 अब इसे बड़े पैमाने पर सोचिए। App के लिए Postgres, documents के लिए Mongo, cache के लिए Redis, events के लिए ClickHouse। चार डेटाबेस, चार clients, चार तरह के credentials। सोमवार को एक नया साथी join करता है। पहली line का code लिखने से पहले उसे पता करना पड़ता है कि कौन सा डेटा कहाँ है, wiki और तीन private chats में connection strings ढूँढनी पड़ती हैं, VPN access का इंतज़ार करना पड़ता है, और हर engine के लिए अलग tool install करना पड़ता है।
 
