@@ -302,6 +302,7 @@ function LoginFormInner({ authProvider }: { authProvider: string }) {
                         <Input
                           id="email"
                           type="email"
+                          autoComplete="username"
                           placeholder="Enter your email"
                           className="pl-10 h-11 transition-all focus:ring-2 focus:ring-primary/20"
                           value={email}
@@ -320,6 +321,7 @@ function LoginFormInner({ authProvider }: { authProvider: string }) {
                         <Input
                           id="password"
                           type="password"
+                          autoComplete="current-password"
                           placeholder="Enter your password"
                           className="pl-10 h-11 transition-all focus:ring-2 focus:ring-primary/20"
                           value={password}

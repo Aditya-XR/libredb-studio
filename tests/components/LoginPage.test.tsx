@@ -53,6 +53,12 @@ describe("LoginPage", () => {
     expect(passwordInput.type).toBe("password");
   });
 
+  test("email and password inputs carry autoComplete hints for password managers", () => {
+    const { emailInput, passwordInput } = renderLogin();
+    expect(emailInput.autocomplete).toBe("username");
+    expect(passwordInput.autocomplete).toBe("current-password");
+  });
+
   test("renders Sign In button", () => {
     const { getByText } = renderLogin();
     expect(getByText("Sign In")).not.toBeNull();
