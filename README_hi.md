@@ -47,7 +47,7 @@
   <a href="https://artifacthub.io/packages/helm/libredb-studio/libredb-studio"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/libredb-studio" alt="Artifact Hub"></a>
 </p>
 
-## तीव्रता से उपयोग शुरू करने की विधि
+## जल्दी शुरू करें
 
 एक ही command से पूरा SQL IDE चालू करें। न clone करना है, न build:
 
@@ -64,17 +64,6 @@ npx @libredb/studio
 > अगर browser Studio को localhost या HTTPS के बजाय किसी और पते से खोलता है (जैसे LAN पर `http://192.168.x.x:3000`), तो `AUTH_COOKIE_SECURE=false` भी set करें। वरना health check ठीक दिखेगा, पर login चुपचाप fail होगा और आप बार-बार login page पर लौटते रहेंगे।
 
 Helm, Homebrew, Snap, winget या deb/rpm चाहिए? नीचे [इंस्टॉल करने के तरीके](#इंस्टॉल-करने-के-तरीके) देखें।
-
-## Live Test
-
-> **LibreDB Studio को बिना कुछ install किए अभी आज़माएँ।**
-
-| Test | URL | Credentials |
-|------|-----|-------------|
-| **OIDC के साथ public test** | [app.libredb.org](https://app.libredb.org) | SSO |
-| **JWT के साथ public test** | [trial.libredb.org](https://trial.libredb.org) | admin@libredb.org / Admin!2026  user@libredb.org / User!2026 |
-
-Test instance में [Seed Connections](docs/SEED_CONNECTIONS.md) के ज़रिए एक PostgreSQL डेटाबेस पहले से configured है। कोई setup नहीं चाहिए।
 
 ## एक और डेटाबेस टूल क्यों
 
