@@ -47,7 +47,7 @@
   <a href="https://artifacthub.io/packages/helm/libredb-studio/libredb-studio"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/libredb-studio" alt="Artifact Hub"></a>
 </p>
 
-## जल्दी शुरू करें
+## तीव्रता से उपयोग शुरू करने की विधि
 
 एक ही command से पूरा SQL IDE चालू करें। न clone करना है, न build:
 
