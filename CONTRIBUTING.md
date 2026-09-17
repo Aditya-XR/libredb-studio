@@ -156,7 +156,7 @@ labels above are how this repository welcomes contributors in any month.
 ### The contributor ladder
 
 Every change here lands with its tests in the same pull request, under a hard 100% line-coverage
-gate and six required checks. Clearing that bar says something about you, so we write down who
+gate and every check `main` requires. Clearing that bar says something about you, so we write down who
 cleared it and what it earns.
 
 **There is no threshold on this page, and that is deliberate.** We do not count merged pull
