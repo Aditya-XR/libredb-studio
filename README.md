@@ -248,6 +248,7 @@ Standalone application only: the embedded `@libredb/studio` package carries no a
 ### Authentication & SSO
 - **Dual Auth Modes**: Local email/password login or OpenID Connect (OIDC) Single Sign-On; switchable via environment variable.
 - **Vendor-Agnostic OIDC**: Works with any OIDC-compliant provider — Auth0, Keycloak, Okta, Azure AD, Zitadel, Google, and more.
+- **One-Command SSO Demo**: `docker compose -f docker-compose.oidc-demo.yml up` starts Studio with a preconfigured Keycloak so you can try SSO and role mapping locally ([walkthrough](docs/OIDC.md#try-it-locally-with-keycloak)).
 - **PKCE Security**: Authorization Code Flow with Proof Key for Code Exchange (S256) for secure authentication.
 - **Auto Role Mapping**: Configurable claim-based role mapping with dot-notation for nested claims (e.g., `realm_access.roles`).
 - **Provider Logout**: Logout clears both the local JWT session and identity provider session.
