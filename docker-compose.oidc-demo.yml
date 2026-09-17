@@ -1,0 +1,219 @@
+# =============================================================================
+# LibreDB Studio — OIDC demo stack (Keycloak single sign-on)
+# =============================================================================
+# NOT A PRODUCTION CONFIGURATION. This file exists so SSO login and role mapping
+# can be tried with one command:
+#
+#   docker compose -f docker-compose.oidc-demo.yml up
+#
+# then open https://demo.127.0.0.1.nip.io:8443 and log in as
+#   admin / admin   (realm role "admin" -> Studio admin)
+#   user  / user    (realm role "user"  -> Studio user)
+#
+# What makes it unfit for production, deliberately:
+#   - Keycloak runs `start-dev` with its embedded H2 store; everything is lost
+#     when the container is removed.
+#   - TLS comes from Caddy's own local CA (`tls internal`): self-signed, and the
+#     leaf certificate is short-lived (12 hours by default).
+#   - The OIDC client secret and both user passwords are committed in this file.
+#
+# Requirements: Docker with Compose v2.23.1 or newer (inline `configs` content),
+# network access to pull three images, and a DNS resolver that answers
+# demo.127.0.0.1.nip.io with 127.0.0.1. Walkthrough: docs/OIDC.md, "Try it
+# locally with Keycloak".
+#
+# Layout: one TLS origin, https://demo.127.0.0.1.nip.io:8443, served by Caddy.
+#   /auth/*  -> keycloak:8080 (plain http inside the network)
+#   /*       -> libredb-studio:3000 (plain http inside the network)
+# Caddy carries the public name as a network alias, so Studio's server-side
+# discovery request and the browser both reach the issuer at the same URL.
+# Production OIDC setup for Keycloak and other providers: docs/OIDC.md.
+# =============================================================================
+
+name: libredb-oidc-demo
+
+services:
+  proxy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy-data:/data
+    networks:
+      default:
+        aliases:
+          - demo.127.0.0.1.nip.io
+    healthcheck:
+      # Caddy writes its local CA the first time it issues the site certificate.
+      test: ["CMD", "test", "-s", "/data/caddy/pki/authorities/local/root.crt"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  # Caddy stores its CA as root, mode 0600, next to the CA private key. Studio
+  # drops to uid 1001 and Node silently ignores an unreadable NODE_EXTRA_CA_CERTS,
+  # so copy only the public root certificate, world-readable, into its own volume.
+  ca-export:
+    image: caddy:2.10-alpine
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+      - caddy-data:/caddy:ro
+      - demo-ca:/ca
+    entrypoint:
+      - sh
+      - -c
+      - install -m 0644 /caddy/caddy/pki/authorities/local/root.crt /ca/root.crt
+    restart: "no"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.7
+    restart: unless-stopped
+    command:
+      - start-dev
+      - --import-realm
+      - --http-relative-path=/auth
+      # Without this Keycloak answers plain-http requests with 403 "HTTPS required".
+      - --proxy-headers=xforwarded
+      # Pins the issuer (iss claim and discovery URLs) to the public origin.
+      - --hostname=https://demo.127.0.0.1.nip.io:8443/auth
+      - --health-enabled=true
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: kcadmin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: kcadmin
+    configs:
+      - source: keycloak-realm
+        target: /opt/keycloak/data/import/libredb-realm.json
+    healthcheck:
+      # The image has no curl; ask the management port's readiness endpoint over bash.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /auth/health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  libredb-studio:
+    image: ghcr.io/libredb/libredb-studio:latest
+    restart: unless-stopped
+    depends_on:
+      ca-export:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_AUTH_PROVIDER: oidc
+      OIDC_ISSUER: https://demo.127.0.0.1.nip.io:8443/auth/realms/libredb
+      OIDC_CLIENT_ID: libredb-studio
+      OIDC_CLIENT_SECRET: libredb-demo-secret-not-for-production
+      OIDC_ROLE_CLAIM: realm_access.roles
+      OIDC_ADMIN_ROLES: admin
+      NODE_EXTRA_CA_CERTS: /ca/root.crt
+    volumes:
+      - demo-ca:/ca:ro
+
+configs:
+  caddyfile:
+    content: |
+      {
+      	# Nothing to trust inside a container; skip the attempt and its warning.
+      	skip_install_trust
+      }
+
+      demo.127.0.0.1.nip.io:8443 {
+      	tls internal
+
+      	# reverse_proxy forwards the original Host, :8443 included, as
+      	# X-Forwarded-Host. Studio's origin check, OIDC redirect URI and
+      	# post-logout URI all compare against host:port.
+      	handle /auth* {
+      		reverse_proxy keycloak:8080
+      	}
+      	handle {
+      		reverse_proxy libredb-studio:3000
+      	}
+      }
+
+  keycloak-realm:
+    content: |
+      {
+        "realm": "libredb",
+        "enabled": true,
+        "sslRequired": "external",
+        "roles": {
+          "realm": [
+            { "name": "admin", "description": "LibreDB Studio admin" },
+            { "name": "user", "description": "LibreDB Studio user" }
+          ]
+        },
+        "clients": [
+          {
+            "clientId": "libredb-studio",
+            "name": "LibreDB Studio",
+            "enabled": true,
+            "protocol": "openid-connect",
+            "publicClient": false,
+            "clientAuthenticatorType": "client-secret",
+            "secret": "libredb-demo-secret-not-for-production",
+            "standardFlowEnabled": true,
+            "directAccessGrantsEnabled": false,
+            "rootUrl": "https://demo.127.0.0.1.nip.io:8443",
+            "redirectUris": ["https://demo.127.0.0.1.nip.io:8443/api/auth/oidc/callback"],
+            "webOrigins": ["https://demo.127.0.0.1.nip.io:8443"],
+            "attributes": {
+              "post.logout.redirect.uris": "https://demo.127.0.0.1.nip.io:8443/login"
+            },
+            "protocolMappers": [
+              {
+                "name": "realm roles in ID token",
+                "protocol": "openid-connect",
+                "protocolMapper": "oidc-usermodel-realm-role-mapper",
+                "consentRequired": false,
+                "config": {
+                  "claim.name": "realm_access.roles",
+                  "jsonType.label": "String",
+                  "multivalued": "true",
+                  "id.token.claim": "true",
+                  "access.token.claim": "true",
+                  "userinfo.token.claim": "true"
+                }
+              }
+            ]
+          }
+        ],
+        "users": [
+          {
+            "username": "admin",
+            "enabled": true,
+            "email": "admin@example.com",
+            "emailVerified": true,
+            "firstName": "Demo",
+            "lastName": "Admin",
+            "credentials": [{ "type": "password", "value": "admin", "temporary": false }],
+            "realmRoles": ["admin", "default-roles-libredb"]
+          },
+          {
+            "username": "user",
+            "enabled": true,
+            "email": "user@example.com",
+            "emailVerified": true,
+            "firstName": "Demo",
+            "lastName": "User",
+            "credentials": [{ "type": "password", "value": "user", "temporary": false }],
+            "realmRoles": ["user", "default-roles-libredb"]
+          }
+        ]
+      }
+
+volumes:
+  caddy-data:
+  demo-ca:

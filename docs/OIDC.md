@@ -17,6 +17,7 @@ Browser → Redirect to app (/ or /admin based on role)
 
 - [Part 1 — Setup Guide](#part-1--setup-guide)
   - [Quick Start](#quick-start)
+  - [Try it locally with Keycloak](#try-it-locally-with-keycloak)
   - [Provider-Specific Setup](#provider-specific-setup)
     - [Auth0](#auth0)
     - [Keycloak](#keycloak)
@@ -81,6 +82,42 @@ bun dev
 Navigate to `/login` and click **"Login with SSO"**.
 
 ---
+
+## Try it locally with Keycloak
+
+To see SSO login and role mapping before configuring your own provider, start the demo stack. It runs LibreDB Studio, a preconfigured Keycloak and a TLS proxy from one file, with no source checkout, `.env` file or second command:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/libredb/libredb-studio/main/docker-compose.oidc-demo.yml
+docker compose -f docker-compose.oidc-demo.yml up
+```
+
+When the stack is up, open **https://demo.127.0.0.1.nip.io:8443**.
+
+**Before you start**
+
+- **Docker Compose v2.23.1 or newer.** The Caddyfile and the Keycloak realm are inline in the compose file.
+- **Network access.** A cold start pulls three images.
+- **A resolver that answers `demo.127.0.0.1.nip.io`.** The name is served by the public [nip.io](https://nip.io) wildcard DNS and resolves to `127.0.0.1`. Check it first:
+
+  ```bash
+  getent hosts demo.127.0.0.1.nip.io              # Linux
+  dscacheutil -q host -a name demo.127.0.0.1.nip.io   # macOS
+  ```
+
+  It should print `127.0.0.1  demo.127.0.0.1.nip.io`. If it prints nothing (`getent` exits with status 2) or an address other than `127.0.0.1`, your resolver filters wildcard DNS names, and the stack will start but the browser cannot reach it. Some corporate networks do this. The demo is meant for evaluating the product on a networked machine, not for air-gapped ones.
+
+**Expected first step: one certificate warning.** The proxy serves the demo's own self-signed certificate, from Caddy's local CA, so your browser warns once on `https://demo.127.0.0.1.nip.io:8443`. Proceed past it. Every page, Keycloak included, is on that one origin, so there is no second warning. The certificate is short-lived (12 hours): if you leave the stack running longer, the browser warns once more after it renews.
+
+**The walkthrough (about a minute)**
+
+1. On the login page, click **Login with SSO** and sign in as `admin` / `admin`. You land on the admin dashboard.
+2. Click **Logout**. Keycloak asks **Do you want to log out?**; confirm it, and you are back on the login page.
+3. Click **Login with SSO** again. Keycloak asks for credentials again rather than signing you straight back in. Sign in as `user` / `user`. You land on the editor, and the admin surfaces are gone: `/admin` sends you back to `/`.
+
+The difference is the realm role (`admin` or `user`), mapped through `OIDC_ROLE_CLAIM=realm_access.roles` exactly as in the [Keycloak](#keycloak) setup below. The realm already has the roles in the ID token, so nothing needs changing in the Keycloak admin console.
+
+**Not a production setup.** Keycloak runs `start-dev` with an embedded store that is lost when the container is removed, the certificate is self-signed, and the client secret and passwords are committed in the file. Use the provider sections below for real deployments. `docker compose -f docker-compose.oidc-demo.yml down -v` removes the stack and its volumes.
 
 ## Provider-Specific Setup
 
