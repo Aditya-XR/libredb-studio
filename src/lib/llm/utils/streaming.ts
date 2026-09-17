@@ -125,10 +125,16 @@ export function streamFromAsyncIterable<T>(
   iterable: AsyncIterable<T>,
   transform: (item: T) => Uint8Array | null,
 ): ReadableStream<Uint8Array> {
+  let cancelled = false;
   return new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelled = true;
+    },
     async start(controller) {
       try {
         for await (const item of iterable) {
+          // Null transforms never enqueue, so cancellation must stop them explicitly.
+          if (cancelled) return;
           const chunk = transform(item);
           if (chunk) {
             controller.enqueue(chunk);
