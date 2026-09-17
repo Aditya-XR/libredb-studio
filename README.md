@@ -83,6 +83,8 @@ npx @libredb/studio
 
 Then open **http://localhost:3000**. On first run, the admin password is printed to the log (zero-config).
 
+> If the browser reaches Studio at anything other than localhost or HTTPS (`http://192.168.x.x:3000` on a LAN, for example), also set `AUTH_COOKIE_SECURE=false`. Without it the health check passes while login fails silently and sends you back to the login page.
+
 > Need Helm, Homebrew, Snap, winget, or deb/rpm? See [all install options](#getting-started).
 
 ---

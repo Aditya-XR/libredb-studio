@@ -11,13 +11,21 @@
  * that added a repo without installing anything; the next provider to land will
  * leave both translations claiming the old engine count.
  *
- * Two invariants, chosen so that abridgement stays legal and errors do not:
+ * Three invariants, chosen so that abridgement stays legal and errors do not:
  *
  *   1. The engine name set is identical in all three files. A translation that
  *      omits an engine is wrong, and so is one that invents an engine.
  *   2. Every command in a localized install table appears verbatim in
  *      README.md's. Localized files may list fewer channels - they deliberately
  *      drop Chocolatey and the portable zip - but may not paraphrase a command.
+ *   3. Every README carries the plain-HTTP login warning as a blockquote. This
+ *      one drifted the other way: all five translations warned that a browser
+ *      reaching Studio over plain http on a non-loopback host needs
+ *      AUTH_COOKIE_SECURE=false, and README.md carried the variable only as a
+ *      row of its environment table, hundreds of lines below the quickstart.
+ *      A reader who follows the quickstart hits a silent login loop while the
+ *      health check passes - the same failure four deployment channels have
+ *      now shipped (#232, Unraid, #307, #901).
  *
  * Tables are located structurally (the table holding the PostgreSQL row, the
  * table holding `docker run`) rather than by heading text, because the headings
@@ -32,6 +40,12 @@ import { fileURLToPath } from "node:url";
 
 const CANONICAL = "README.md";
 const LOCALIZED = ["README_zh.md", "README_ja.md", "README_es.md", "README_ur.md", "README_hi.md"];
+
+/** The variable the quickstart warning must name. */
+const WARNING_VARIABLE = "AUTH_COOKIE_SECURE";
+
+/** Shared wording so the canonical and localized violations read identically. */
+const MISSING_WARNING = `no plain-HTTP login warning (expected a blockquote naming ${WARNING_VARIABLE} under the quickstart)`;
 
 /** Splits a markdown row into trimmed cells, dropping the leading/trailing empties. */
 function cells(line) {
@@ -109,6 +123,20 @@ export function commandSpans(table, columnIndex = 1) {
 }
 
 /**
+ * Whether a README carries the plain-HTTP login warning as a blockquote.
+ *
+ * Keyed on the blockquote marker plus the variable name, because that pair is the only
+ * part of the warning that survives translation: the surrounding prose is in Chinese,
+ * Japanese, Spanish, Urdu and Hindi, and the Urdu file wraps its text in a `<span
+ * dir="rtl">`, so nothing else is shared. A mention anywhere else in the file - the
+ * environment-variable table, a deployment section - does not count: the warning has to be
+ * where a reader following the quickstart will actually meet it.
+ */
+export function hasPlainHttpWarning(text) {
+  return text.split("\n").some((line) => line.trimStart().startsWith(">") && line.includes(WARNING_VARIABLE));
+}
+
+/**
  * Returns violation messages (empty = in sync). `localized` is a list of
  * { name, text }; a file that could not be read is simply not passed in.
  */
@@ -125,6 +153,9 @@ export function checkReadmes({ canonical, localized }) {
   }
   const canonicalEngines = engineNames(canonicalEngineTable);
   const canonicalCommands = new Set(commandSpans(canonicalInstallTable));
+  if (!hasPlainHttpWarning(canonical)) {
+    violations.push(`${CANONICAL}: ${MISSING_WARNING}`);
+  }
 
   for (const { name, text } of localized) {
     const tables = parseTables(text);
@@ -137,6 +168,9 @@ export function checkReadmes({ canonical, localized }) {
     if (!installTable) {
       violations.push(`${name}: no install table found (expected a table containing 'docker run')`);
       continue;
+    }
+    if (!hasPlainHttpWarning(text)) {
+      violations.push(`${name}: ${MISSING_WARNING}`);
     }
     const engines = engineNames(engineTable);
     const missing = canonicalEngines.filter((e) => !engines.includes(e));
@@ -176,7 +210,9 @@ function main(argv) {
   }
   const engineCount = engineNames(findEngineTable(parseTables(fs.readFileSync(canonicalPath, "utf8")))).length;
   const names = localized.map((l) => l.name).join(", ") || "none";
-  console.log(`OK: ${engineCount} engines and the install commands match ${CANONICAL} in ${names}`);
+  console.log(
+    `OK: ${engineCount} engines and the install commands match ${CANONICAL} in ${names}; every README carries the plain-HTTP login warning`,
+  );
 }
 
 // CLI entry only when executed directly (the unit test imports this module).
