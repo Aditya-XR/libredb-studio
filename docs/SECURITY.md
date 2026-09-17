@@ -69,6 +69,16 @@ prerendered and its hydration scripts are inline and nonce-less. What the policy
 (a runtime variable, no rebuild) if an upgrade blocks a resource you need while you identify the
 directive.
 
+**1.1, HSTS.** `Strict-Transport-Security` is sent with a 180-day `max-age` (15 552 000 s) and has no
+off switch: a browser that has cached the pin keeps enforcing HTTPS-only until it expires, whatever
+the server sends next. Browsers ignore the header when it arrives over plain HTTP. `includeSubDomains`
+is off unless `HSTS_INCLUDE_SUBDOMAINS=true`, and it is left to the operator because its reach is a
+property of the hostname rather than of Studio: it extends the pin to every host *below* the one
+serving Studio, for the full 180 days, with no server-side way to withdraw it. On a dedicated host
+such as `studio.example.com` that usually covers nothing else; served from a registrable domain that
+other services sit under, it makes each of those services HTTPS-only in every browser that visited
+Studio. See [`.env.example`](../.env.example) under Security Headers.
+
 **1.1, the subresource half.** The row says *document* response for a reason: the two delivery
 paths do not carry the same set. [`src/proxy.ts`](../src/proxy.ts)'s matcher deliberately skips
 `_next/static`, `_next/image` and every path containing a dot — so a file under `public/` or
