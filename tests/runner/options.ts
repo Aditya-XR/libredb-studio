@@ -58,8 +58,15 @@ export const DEFAULT_FILE_TIMEOUT_MS = 300_000;
  * sit just under what that machine costs. Raising it here does not hide a hang: a file
  * that genuinely stops is still killed and reported by DEFAULT_FILE_TIMEOUT_MS above,
  * which is an order of magnitude larger again.
+ *
+ * Raised from 30 000ms after the same thing happened one order of magnitude up: the
+ * runner's own coverage test, which spawns a second runner that spawns bun with coverage
+ * and then merges the report, died at 30 671ms on windows-latest (CI run 35242402285)
+ * against 16.3s for that whole file on linux-x64. Nothing about the test changed; it is
+ * the same temp I/O and process spawning, measured on the same machine that made 5000ms
+ * too small.
  */
-export const WINDOWS_PER_TEST_TIMEOUT_MS = 30_000;
+export const WINDOWS_PER_TEST_TIMEOUT_MS = 60_000;
 
 /**
  * The `--timeout` a child is started with, or nothing at all.

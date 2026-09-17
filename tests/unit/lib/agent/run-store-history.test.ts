@@ -6,6 +6,7 @@ import { createLocalWorld, type LocalWorld } from "@workflow/world-local";
 import { type AgentHistoryEntry, decodeHistoryCursor } from "@/lib/agent/history";
 import { AgentRunStore } from "@/lib/agent/run-store";
 import { AgentStateError } from "@/lib/agent/state-guard";
+import { platformTimeoutMs } from "../../../helpers/platform-timeout";
 
 /**
  * The history index over a REAL `@workflow/world-local`, for the same reason
@@ -15,6 +16,20 @@ import { AgentStateError } from "@/lib/agent/state-guard";
  */
 
 const dataDirs: string[] = [];
+
+/**
+ * The time the listing over 10 000 entries is held to, and the kill bound the test and its
+ * cleanup get.
+ *
+ * On linux-x64 the whole file runs in 2.1s, so both are slack by two orders of magnitude and
+ * catch only a catastrophic regression. On windows-latest the same file took 141.7s and this
+ * test alone 128.6s, over the 120 000ms it used to be given (CI run 35242402285): writing and
+ * then deleting 10 000 chunk files is an order of magnitude dearer there. So the measured
+ * claim below is raised on Windows only, through `platformTimeoutMs`, and the kill bound is
+ * the Windows-sized one for everyone, because a kill bound is a backstop and the claim is
+ * what has to stay tight on the leg that runs in 2.1s.
+ */
+const LISTING_BUDGET_MS = platformTimeoutMs(120_000);
 
 function freshDataDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-run-history-"));
@@ -52,7 +67,7 @@ afterEach(() => {
   // The 10 000-entry test leaves 10 000 chunk files behind, and deleting them
   // all on a Windows runner exceeds bun's default hook timeout — the hook is the
   // slow part, not the test, so it gets the same generous bound as the test.
-}, 120_000);
+}, 240_000);
 
 describe("AgentRunStore — the history index", () => {
   test("records a finished run and lists it back as one conversation", async () => {
@@ -278,6 +293,6 @@ describe("AgentRunStore — the history index", () => {
     // a handful of directory walks rather than a re-walk per 100-chunk page; the
     // bound below catches a catastrophic regression, not a fast path.
     expect(page.conversations).toHaveLength(50);
-    expect(elapsed).toBeLessThan(120_000);
-  }, 120_000);
+    expect(elapsed).toBeLessThan(LISTING_BUDGET_MS);
+  }, 240_000);
 });

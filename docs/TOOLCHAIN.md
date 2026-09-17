@@ -326,11 +326,12 @@ Forwarding a flag to `bun test` works only when the runner is invoked directly a
 Measured on 1.4.2: `bun run test -- --bail` reaches the script as `["--bail"]`, because `bun run` removes the first `--`, and bun removes one that sits straight after the script path too, so `bun tests/run-tests.ts -- --bail` loses it as well.
 `bun tests/run-tests.ts tests/unit -- --bail` is the form that arrives whole, and it is what the runner's unknown-option error names when it refuses a flag it does not own.
 
-One flag the runner supplies itself: on Windows, and only there, every child is started with `--timeout=30000` in place of bun's own 5000ms per-test default.
+One flag the runner supplies itself: on Windows, and only there, every child is started with `--timeout=60000` in place of bun's own 5000ms per-test default.
 Measured across three CI runs on windows-latest, six tests in four unrelated files died between 5003ms and 5522ms: the flat-zip packer, the agent run store, the SQLite provider and the agent investigation.
 Every one of them was doing filesystem work under the user's temp directory or spawning a process, and the failures came with transient Windows sharing violations (`EPERM`, `EBUSY`, `ENOENT` on a rename) that the libraries doing the work retry internally.
 The retries are correct and they are not free, so 5000ms is not a budget chosen for that machine, it is a default that happens to sit just under what it costs; the same files pass in 2.5s on a run where the machine is not loaded.
 Raising it hides no hang, because a file that genuinely stops is still killed and reported by the runner's own per-file budget, which is 300 seconds.
+The same thing happened one order of magnitude up, which is why the flag says 60000 and not the 30000 it said first: the runner's own coverage test, which spawns a second runner that spawns bun with coverage and then merges the report, died at 30671ms on windows-latest against 16.3s for that whole file on linux-x64.
 Linux and macOS are left on bun's default on purpose: Linux is the leg the coverage gate and every contributor run on, and it is where a test that really did get slow has to stay visible.
 The flag is placed before the forwarded arguments, so `-- --timeout=...` still wins, bun taking the last of a repeated option; `tests/unit/test-runner-cli.test.ts` measures that precedence against the real bun binary rather than assuming it.
 
