@@ -2406,6 +2406,36 @@ PostgreSQL database — its own, not one of the databases you connect Studio to.
 availability probe does not, and cannot cheaply (B31), so an unreachable one leaves the rail rendered
 and the first Start failing — the one place this feature's central promise does not hold.
 
+**Transient Windows ledger locks (#900).** The pinned `@workflow/world-local` 4.2.4 does not retry
+the `fs.access` existence probe preceding a stream chunk write, reported upstream in
+[vercel/workflow#4203](https://github.com/vercel/workflow/issues/4203). This path is reachable without
+concurrent writes: measured on Windows with Node 24.16.0, `STORAGE_PROVIDER=sqlite`,
+`WORKFLOW_TARGET_WORLD=local`, a writable `WORKFLOW_LOCAL_DATA_DIR`, and an enabled Ollama model
+configuration. The availability probe reported `available=true, ledgerVerified=true`. Injecting
+one `EPERM` at that probe during sequential service calls caused start, narrative append, and
+EOF publication to reject; an index-write failure was logged and left the completed run absent
+from history. The production API error mapper returned HTTP 500, `INTERNAL_ERROR`, and the
+original `EPERM` message including its file path; the start hook uses that message as its error
+state. This measures the service and response boundary, not an authenticated browser request.
+It is fault-injection evidence of reachability, not a measurement of Defender lock frequency
+or a live model run.
+
+Studio retries only Windows `EPERM`, `EBUSY`, or `EACCES` from `access` to the current stream's
+`streams/chunks/<stream>-chnk_*.bin` file. The probe precedes publication, so replaying that
+append cannot duplicate a committed entry. Write and rename failures, other paths, and other
+platforms are not retried. Ledger entries, history entries, and EOF use the same handling; each
+retry is logged, and five retries with exponential backoff bound the wait to approximately
+310–360 ms. Exhaustion raises `LEDGER_WRITE_FAILED` with the file, error code, attempt count,
+and original cause. The existing history failure boundary still logs an exhausted index write
+without discarding the run's already-persisted ending.
+
+Windows writes are queued per stream within one `AgentRunStore`, including EOF, so a new chunk
+ID allocated by a retry cannot move an earlier entry behind a later one. Different streams
+remain independent; this is not a cross-process ownership mechanism. Sequential service calls
+with the same four injected faults all succeeded after the fix, including history listing.
+`tests/unit/lib/agent/run-store-windows-retry.test.ts` pins recovery, write-ahead ordering,
+single tool execution, EOF ordering, bounded failure, and refusal to replay uncertain writes.
+
 **Where run state lands matters, because it decides whether the agent exists at all — so the image
 sets it rather than leaving it to the SDK.** The local backend's directory is
 `WORKFLOW_LOCAL_DATA_DIR`, and the SDK's own default is `.workflow-data` resolved against the

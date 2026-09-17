@@ -57,6 +57,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { logger } from "@/lib/logger";
 import { getAgentRuntimeConfig } from "./config";
 import {
   type AgentHistoryCursor,
@@ -228,13 +230,14 @@ export type AgentRunStoreReason =
   | "RUN_ALREADY_OPEN"
   | "RUN_ALREADY_CLOSED"
   | "MALFORMED_LEDGER"
+  | "LEDGER_WRITE_FAILED"
   | "RUNTIME_DISABLED";
 
 export class AgentRunStoreError extends Error {
   readonly reasonCode: AgentRunStoreReason;
 
-  constructor(reasonCode: AgentRunStoreReason, message: string) {
-    super(message);
+  constructor(reasonCode: AgentRunStoreReason, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "AgentRunStoreError";
     this.reasonCode = reasonCode;
     Object.setPrototypeOf(this, AgentRunStoreError.prototype);
@@ -440,12 +443,67 @@ const closedStreams = new Set<string>();
 const STREAM_CHUNK_PAGE_SIZE = 1000;
 
 /**
+ * world-local 4.2.4 does not retry write()'s fs.access existence probe (#900).
+ * Its stream registration happens first, and this probe runs BEFORE publishing
+ * the chunk, so retrying this specific failure cannot duplicate a ledger entry.
+ * Never retry a write/rename failure: the chunk might already have committed.
+ * Match the current stream's chunk path as well as the syscall; a permission
+ * failure elsewhere in the backend does not establish that the append is safe.
+ */
+function isWindowsChunkProbeError(error: unknown, name: string): error is NodeJS.ErrnoException & { path: string } {
+  if (process.platform !== "win32" || !(error instanceof Error)) return false;
+  const fault: NodeJS.ErrnoException = error;
+  if (
+    !["EPERM", "EBUSY", "EACCES"].includes(fault.code ?? "") ||
+    fault.syscall !== "access" ||
+    typeof fault.path !== "string"
+  ) {
+    return false;
+  }
+  const file = fault.path;
+  const directory = path.win32.dirname(file);
+  return (
+    path.win32.basename(directory) === "chunks" &&
+    path.win32.basename(path.win32.dirname(directory)) === "streams" &&
+    path.win32.basename(file).startsWith(`${name}-chnk_`) &&
+    file.endsWith(".bin")
+  );
+}
+
+async function withWindowsChunkProbeRetry(name: string, write: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- each attempt must settle before deciding whether to retry.
+      await write();
+      return;
+    } catch (error) {
+      if (!isWindowsChunkProbeError(error, name)) throw error;
+      if (attempt === 5) {
+        throw new AgentRunStoreError(
+          "LEDGER_WRITE_FAILED",
+          `agent stream "${name}" could not be saved: ${error.code} checking "${error.path}" after 6 attempts; the Windows file lock or permission denial persisted`,
+          { cause: error },
+        );
+      }
+      logger.warn(`agent stream "${name}": retrying ${error.code} existence probe for "${error.path}"`, {
+        attempt: attempt + 1,
+      });
+      // Match the upstream helper's five bounded retries and exponential backoff.
+      const delayMs = 10 * 2 ** attempt + Math.random() * 10;
+      // oxlint-disable-next-line no-await-in-loop -- backoff must finish before the next attempt.
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+/**
  * The run ledger. One instance per process is enough: it holds no run state of
  * its own, only the world it writes through.
  */
 export class AgentRunStore {
   private readonly world: AgentLedgerWorld;
   private readonly clock: () => number;
+  private readonly streamWrites = new Map<string, Promise<void>>();
 
   constructor(options: { readonly world: AgentLedgerWorld; readonly clock?: () => number }) {
     this.world = options.world;
@@ -572,7 +630,8 @@ export class AgentRunStore {
   async close(runId: string): Promise<void> {
     const id = assertRunId(runId);
     closedStreams.add(id);
-    await this.world.closeStream(ledgerStreamName(id), id);
+    const name = ledgerStreamName(id);
+    await this.writeStream(name, () => this.world.closeStream(name, id));
   }
 
   /**
@@ -586,7 +645,8 @@ export class AgentRunStore {
   async recordHistoryFinish(entry: Omit<AgentHistoryEntry, "kind">): Promise<void> {
     assertPersistableState(entry, "agent.history");
     const line = `${JSON.stringify({ kind: "history-finished", ...entry })}\n`;
-    await this.world.writeToStream(historyStreamName(entry.sessionId), entry.runId, line);
+    const name = historyStreamName(entry.sessionId);
+    await this.writeStream(name, () => this.world.writeToStream(name, entry.runId, line));
   }
 
   /**
@@ -617,7 +677,26 @@ export class AgentRunStore {
     // One newline-terminated entry per write. Framing is on newlines rather than
     // on chunk boundaries because a backend is free to coalesce or split chunks;
     // JSON escapes any newline inside the payload, so the framing is unambiguous.
-    await this.world.writeToStream(ledgerStreamName(runId), runId, `${JSON.stringify(entry)}\n`);
+    const name = ledgerStreamName(runId);
+    const line = `${JSON.stringify(entry)}\n`;
+    await this.writeStream(name, () => this.world.writeToStream(name, runId, line));
+  }
+
+  private async writeStream(name: string, write: () => Promise<void>): Promise<void> {
+    if (process.platform !== "win32") return write();
+    // A retry creates a new chunk ULID. Keep later writes (including EOF) behind
+    // it, so backoff cannot reorder a ledger. Different streams stay independent.
+    const previous = this.streamWrites.get(name) ?? Promise.resolve();
+    const operation = () => withWindowsChunkProbeRetry(name, write);
+    // Each caller receives its own failure; a failed entry must not poison the
+    // queue for later operations after its caller has handled that failure.
+    const pending = previous.then(operation, operation);
+    this.streamWrites.set(name, pending);
+    try {
+      await pending;
+    } finally {
+      if (this.streamWrites.get(name) === pending) this.streamWrites.delete(name);
+    }
   }
 
   private async readEntries(runId: string): Promise<readonly AgentLedgerEntry[]> {
