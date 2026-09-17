@@ -140,6 +140,21 @@ domain does get the cookie and can time an authenticated endpoint. That residual
 per replica; multi-replica deployments should enforce the same budgets at the ingress. See
 [`charts/libredb-studio/README.md`](../charts/libredb-studio/README.md).
 
+**1.2, tuning the budgets.** Each bucket takes a request count and a window in seconds from a pair of
+runtime variables, documented in [`.env.example`](../.env.example) under Rate Limiting:
+
+| What it bounds | Variables | Default |
+|---|---|---|
+| Failed logins per client address | `RATE_LIMIT_LOGIN_MAX`, `RATE_LIMIT_LOGIN_WINDOW_SEC` | 5 per 300 s |
+| Failed logins per submitted account | `RATE_LIMIT_LOGIN_ACCOUNT_MAX`, `RATE_LIMIT_LOGIN_ACCOUNT_WINDOW_SEC` | 20 per 300 s |
+| AI and agent-run requests per signed-in user | `RATE_LIMIT_AI_MAX`, `RATE_LIMIT_AI_WINDOW_SEC` | 20 per 60 s |
+| Database-reaching requests per signed-in user | `RATE_LIMIT_QUERY_MAX`, `RATE_LIMIT_QUERY_WINDOW_SEC` | 120 per 60 s |
+| Permission-denied audit lines | `RATE_LIMIT_ANON_MAX`, `RATE_LIMIT_ANON_WINDOW_SEC` | 5 per 300 s |
+
+Setting a `*_MAX` to `0` disables that bucket. A window below one second is raised to one. The last
+bucket bounds how often a refusal is written to the audit log; it never changes whether a request
+is refused.
+
 **1.4.** Marked Partial: sessions and origin failures are audited, role failures are not. Four
 in-handler admin checks and the middleware's `/admin` redirect return their denial with no audit
 line. Tracked in [`docs/BACKLOG.md`](./BACKLOG.md), entry H12.
