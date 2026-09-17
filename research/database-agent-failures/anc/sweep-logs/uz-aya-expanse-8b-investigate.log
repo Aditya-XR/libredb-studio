@@ -1,0 +1,18 @@
+======== aya-expanse:8b | investigate x 5 ========
+server up with aya-expanse:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=aya-expanse:8b
+######## aya-expanse:8b | agent/investigation ########
+---- repeat 1/5 ----
+run=arun_b2e0f151b9c44333a8756a1e8b9cf645
+status=succeeded
+---- repeat 2/5 ----
+run=arun_0a872a538c0047568053fc1f585dcc1a
+status=succeeded
+---- repeat 3/5 ----
+no run started: {"error":"The model \"aya-expanse:8b\" (ollama) cannot drive an agent run: the capability probe could not establish schema-valid tool arguments. Configure a different model and start the run again.","missing":["structuredOutput"],"disproved":["structuredOutput"]}
+---- repeat 4/5 ----
+no run started: {"error":"The model \"aya-expanse:8b\" (ollama) cannot drive an agent run: the capability probe could not establish schema-valid tool arguments. Configure a different model and start the run again.","missing":["structuredOutput"],"disproved":["structuredOutput"]}
+---- repeat 5/5 ----
+no run started: {"error":"The model \"aya-expanse:8b\" (ollama) cannot drive an agent run: the capability probe could not establish schema-valid tool arguments. Configure a different model and start the run again.","missing":["structuredOutput"],"disproved":["structuredOutput"]}
+@@@@ aya-expanse:8b investigate done

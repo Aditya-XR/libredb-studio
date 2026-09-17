@@ -1,0 +1,21 @@
+======== cogito:8b | investigate x 5 ========
+server up with cogito:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=cogito:8b
+######## cogito:8b | agent/investigation ########
+---- repeat 1/5 ----
+run=arun_a9b082f678984837b171fe8771c55dd3
+status=succeeded
+---- repeat 2/5 ----
+run=arun_aaf70412c82f4cbc901ebd7cdaf5ab58
+status=succeeded
+---- repeat 3/5 ----
+run=arun_f51a1011573c4e029066b4f4d089f187
+status=succeeded
+---- repeat 4/5 ----
+run=arun_0de237435f1a403888eb4b8afc6b58be
+status=succeeded
+---- repeat 5/5 ----
+run=arun_bfcf25e3cf304789ad4e2c1d19815ce0
+status=succeeded
+@@@@ cogito:8b investigate done

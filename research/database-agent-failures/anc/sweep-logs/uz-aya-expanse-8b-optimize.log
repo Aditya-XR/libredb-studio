@@ -1,0 +1,19 @@
+======== aya-expanse:8b | optimize x 5 ========
+server up with aya-expanse:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=aya-expanse:8b
+######## aya-expanse:8b | agent/query-optimization ########
+---- repeat 1/5 ----
+run=arun_1c8c167f99594a66a294baa7e55acc9a
+status=succeeded
+---- repeat 2/5 ----
+no run started: {"error":"The model \"aya-expanse:8b\" (ollama) cannot drive an agent run: the capability probe could not establish schema-valid tool arguments. Configure a different model and start the run again.","missing":["structuredOutput"],"disproved":["structuredOutput"]}
+---- repeat 3/5 ----
+run=arun_c2a64e4efd7e435a847468bae108342d
+status=succeeded
+---- repeat 4/5 ----
+no run started: {"error":"The model \"aya-expanse:8b\" (ollama) cannot drive an agent run: the capability probe could not establish schema-valid tool arguments. Configure a different model and start the run again.","missing":["structuredOutput"],"disproved":["structuredOutput"]}
+---- repeat 5/5 ----
+run=arun_a9262a45c2124ff79a43635f953209b9
+status=succeeded
+@@@@ aya-expanse:8b optimize done

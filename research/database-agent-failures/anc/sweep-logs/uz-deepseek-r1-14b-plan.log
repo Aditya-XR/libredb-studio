@@ -1,0 +1,21 @@
+======== deepseek-r1:14b | plan x 5 ========
+server up with deepseek-r1:14b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=deepseek-r1:14b
+######## deepseek-r1:14b | planning/investigation ########
+---- repeat 1/5 ----
+run=arun_a7d56166bab94fda808911583d7a20e7
+status=succeeded
+---- repeat 2/5 ----
+run=arun_579f42f7240146579206af381b95a02c
+status=succeeded
+---- repeat 3/5 ----
+run=arun_443be6de79694c2c941f46dc18fb1443
+status=succeeded
+---- repeat 4/5 ----
+run=arun_20786d26dc72418aa1ec957da323ce71
+status=succeeded
+---- repeat 5/5 ----
+run=arun_8d143047ba8546a7b494ac2c23fa99ee
+status=succeeded
+@@@@ deepseek-r1:14b plan done

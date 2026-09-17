@@ -1,0 +1,21 @@
+======== ministral-3:3b | operate x 5 ========
+server up with ministral-3:3b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=ministral-3:3b
+######## ministral-3:3b | agent/operations ########
+---- repeat 1/5 ----
+run=arun_fc346a3c08ff432e9176a86cd4a997f0
+status=failed
+---- repeat 2/5 ----
+run=arun_16a48786f9f24d4a9e578620df18b497
+status=succeeded
+---- repeat 3/5 ----
+run=arun_7665bb4605e54f7d8741195768b872cd
+status=failed
+---- repeat 4/5 ----
+run=arun_2aed97e9caf2461a927b807f49daf247
+status=failed
+---- repeat 5/5 ----
+run=arun_617c6c69b49d4e4c8855b0bb130dd77f
+status=failed
+@@@@ ministral-3:3b operate done

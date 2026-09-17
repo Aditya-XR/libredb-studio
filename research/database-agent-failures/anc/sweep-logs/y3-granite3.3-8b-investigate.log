@@ -1,0 +1,20 @@
+======== granite3.3:8b | investigate x 5 ========
+server up with granite3.3:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=granite3.3:8b
+######## granite3.3:8b | agent/investigation ########
+---- repeat 1/5 ----
+no run started: {"error":"The model \"granite3.3:8b\" (ollama) cannot drive an agent run: the capability probe could not establish tool calling, schema-valid tool arguments, streaming. Configure a different model and start the run again.","missing":["toolCalling","structuredOutput","streaming"],"disproved":["stream
+---- repeat 2/5 ----
+run=arun_3558028eed3641fe9d21cb30992839f4
+status=succeeded
+---- repeat 3/5 ----
+run=arun_eed80c1865174d1eb3197a241bb97de9
+status=succeeded
+---- repeat 4/5 ----
+run=arun_d7ff04097ed94e818035530fb7cf2a65
+status=succeeded
+---- repeat 5/5 ----
+run=arun_8fd4d29a2fb749f7a8134bd168d97793
+status=succeeded
+@@@@ granite3.3:8b investigate done

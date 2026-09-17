@@ -1,0 +1,20 @@
+======== llama3.1:8b | optimize x 5 ========
+server up with llama3.1:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.1:8b
+######## llama3.1:8b | agent/query-optimization ########
+---- repeat 1/5 ----
+no run started: {"error":"The model \"llama3.1:8b\" (ollama) cannot drive an agent run: the capability probe could not establish schema-valid tool arguments. Configure a different model and start the run again.","missing":["structuredOutput"],"disproved":["structuredOutput"]}
+---- repeat 2/5 ----
+run=arun_c145e85e07e74b1799a9027798a3e648
+status=succeeded
+---- repeat 3/5 ----
+run=arun_ff36c2ff26384fe9a525e2de968ded81
+status=succeeded
+---- repeat 4/5 ----
+run=arun_310ca85d49c14b1d9c84aaf658e8dc2b
+status=succeeded
+---- repeat 5/5 ----
+run=arun_4d2b50466da44f2aa9ee6a0c1b123f11
+status=succeeded
+@@@@ llama3.1:8b optimize done

@@ -1,0 +1,21 @@
+======== deepseek-r1:14b | optimize x 5 ========
+server up with deepseek-r1:14b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=deepseek-r1:14b
+######## deepseek-r1:14b | agent/query-optimization ########
+---- repeat 1/5 ----
+run=arun_82acb0ffe9e2478ebf5dea1793c41523
+status=failed
+---- repeat 2/5 ----
+run=arun_5df49ab780f54ef7b46d89689ceaa3a7
+status=failed
+---- repeat 3/5 ----
+run=arun_9919137dea824f059411c568e014f5c9
+status=failed
+---- repeat 4/5 ----
+run=arun_9228d6a2d7a543ca80a3a4a072d1c85f
+status=failed
+---- repeat 5/5 ----
+run=arun_3e95725c498c4661ba4e36c152026276
+status=failed
+@@@@ deepseek-r1:14b optimize done

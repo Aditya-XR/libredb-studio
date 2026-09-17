@@ -1,0 +1,21 @@
+======== cogito:8b | optimize x 5 ========
+server up with cogito:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=cogito:8b
+######## cogito:8b | agent/query-optimization ########
+---- repeat 1/5 ----
+run=arun_1f24c4c09ab540a69a4007ae0a77bd18
+status=succeeded
+---- repeat 2/5 ----
+run=arun_2e4d7a10e2c9417395b1926f825e09ed
+status=succeeded
+---- repeat 3/5 ----
+run=arun_72ba243fc6f6481c9464c2ab1204d1c1
+status=succeeded
+---- repeat 4/5 ----
+run=arun_5568d3d64d4d461493d04a443486250f
+status=succeeded
+---- repeat 5/5 ----
+run=arun_b1fb7ae31bcc475b857d94f9931b1186
+status=succeeded
+@@@@ cogito:8b optimize done

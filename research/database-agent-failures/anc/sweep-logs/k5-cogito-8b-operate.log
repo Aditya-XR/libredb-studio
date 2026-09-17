@@ -1,0 +1,10 @@
+======== cogito:8b | operate x 5 ========
+server up with cogito:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=cogito:8b
+######## cogito:8b | agent/operations ########
+---- repeat 1/5 ----
+run=arun_22540f822ecd4015888ea7fa7bdaacbc
+status=failed
+---- repeat 2/5 ----
+run=arun_d29adb2850f04b09b344da94c83790fb

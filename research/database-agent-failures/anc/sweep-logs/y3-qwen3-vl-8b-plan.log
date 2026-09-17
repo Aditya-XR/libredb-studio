@@ -1,0 +1,21 @@
+======== qwen3-vl:8b | plan x 5 ========
+server up with qwen3-vl:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3-vl:8b
+######## qwen3-vl:8b | planning/investigation ########
+---- repeat 1/5 ----
+run=arun_95199a3939db49af91a58039b720ed93
+status=failed
+---- repeat 2/5 ----
+run=arun_76933c26c57c490cb79a87869349b111
+status=failed
+---- repeat 3/5 ----
+run=arun_dff1035a6d084030bcef6e8b99fc833f
+status=failed
+---- repeat 4/5 ----
+run=arun_588b129f8fa141d0974f8493b8a53bb2
+status=failed
+---- repeat 5/5 ----
+run=arun_1157011de36545da99a23679e9a47939
+status=failed
+@@@@ qwen3-vl:8b plan done

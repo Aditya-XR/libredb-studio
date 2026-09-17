@@ -1,0 +1,21 @@
+======== qwen3.5:2b | plan x 5 ========
+server up with qwen3.5:2b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3.5:2b
+######## qwen3.5:2b | planning/investigation ########
+---- repeat 1/5 ----
+run=arun_7b42313bce584ab5bc4e5b319b5acebe
+status=failed
+---- repeat 2/5 ----
+run=arun_f6678168de424fc6b180ffbf5bd5140b
+status=failed
+---- repeat 3/5 ----
+run=arun_820427e30bb1498e9ec21ea93b4d2bfd
+status=failed
+---- repeat 4/5 ----
+run=arun_5cf810e9d32643288d57218e189a2b37
+status=failed
+---- repeat 5/5 ----
+run=arun_901f2f0f6368424cb25beb8bf7ca1687
+status=failed
+@@@@ qwen3.5:2b plan done

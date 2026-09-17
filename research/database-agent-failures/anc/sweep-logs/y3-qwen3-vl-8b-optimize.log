@@ -1,0 +1,21 @@
+======== qwen3-vl:8b | optimize x 5 ========
+server up with qwen3-vl:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3-vl:8b
+######## qwen3-vl:8b | agent/query-optimization ########
+---- repeat 1/5 ----
+run=arun_da8ae89b79b8406eba3ce6c329b7ecc4
+status=failed
+---- repeat 2/5 ----
+run=arun_8e10c2f089b546e4a36a87519e97b069
+status=failed
+---- repeat 3/5 ----
+run=arun_3f06dfac8b3a4fd3ad84b10f4a81618f
+status=failed
+---- repeat 4/5 ----
+run=arun_ac105e83444842f0ba562eef6d378d01
+status=failed
+---- repeat 5/5 ----
+run=arun_d1e30cfc07564f048a47d9bf68584fc4
+status=failed
+@@@@ qwen3-vl:8b optimize done

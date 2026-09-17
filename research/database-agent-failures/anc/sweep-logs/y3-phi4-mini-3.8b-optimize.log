@@ -1,0 +1,21 @@
+======== phi4-mini:3.8b | optimize x 5 ========
+server up with phi4-mini:3.8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=phi4-mini:3.8b
+######## phi4-mini:3.8b | agent/query-optimization ########
+---- repeat 1/5 ----
+run=arun_0b58fb9a6dc844c78ec057e094f04d3a
+status=succeeded
+---- repeat 2/5 ----
+run=arun_fae846994ab94802b5fccfee80b4c65c
+status=succeeded
+---- repeat 3/5 ----
+run=arun_98fdb9607d1f4354ae58038af167869e
+status=succeeded
+---- repeat 4/5 ----
+run=arun_d5249142e72f48929553316eb49e8dfd
+status=succeeded
+---- repeat 5/5 ----
+run=arun_65bd4ef77c3849eeb04e4b381540eb13
+status=succeeded
+@@@@ phi4-mini:3.8b optimize done
