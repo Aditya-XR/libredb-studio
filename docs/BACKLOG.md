@@ -34,7 +34,7 @@ None of it is a GitHub issue.
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U21 · 12
 - [Dependencies](#dependencies) — P1–P5 · 5
 - [Documentation](#documentation) — DOC3–DOC4 · 2
-- [Release pipeline](#release-pipeline) — REL1–REL3 · 3
+- [Release pipeline](#release-pipeline) — REL1–REL4 · 4
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H8 · 2
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
@@ -1951,6 +1951,30 @@ the feed within minutes of a push, with no human reviewer recorded — or a deci
 that the moderation lag is accepted permanently and this entry is deleted.
 
 ---
+
+---
+
+### REL4. `backlog-structure.test.ts` scans gitignored files, so a local draft fails a gate CI cannot
+
+The citation scan globs `docs/**/*.md` and reads whatever is on disk. `.gitignore:133` excludes
+`docs/superpowers/`, where plans, specs and run reports are written during a working session, and
+those drafts cite backlog ids freely. So `bun run test` goes red on a maintainer's machine over
+files that are not in the repository, while CI, which checks out only tracked files, is green on the
+same commit.
+
+Measured while cutting 0.16.0: six citations across four untracked report files failed
+`every cited entry exists`, and the whole suite had to be re-run with `docs/superpowers/` moved
+aside to get a coverage number. The failure names the untracked path, so it is diagnosable, but it
+costs a full run to discover and it trains the reader to treat a red suite as noise, which is the
+real damage.
+
+`tests/unit/agent-documentation.test.ts` asks the same question of `docs/AGENT.md` alone and does
+not have the problem, because it names one file rather than a glob.
+
+**Done when:** the scan enumerates tracked files, for example by driving the glob through
+`git ls-files` and intersecting, so a working tree with local drafts under `docs/` gives the same
+verdict as a clean checkout. The scan's own floor assertion (`scanned.length > 200`) stays, so a
+broken enumeration still fails loudly rather than passing vacuously.
 
 ## Chart configuration surface
 

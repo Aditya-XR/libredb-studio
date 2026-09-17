@@ -2460,8 +2460,8 @@ and the agent honestly reported itself absent.
 
 The chart supplies that default itself, and it did so before the image could. `image.tag` defaults to
 the chart's `appVersion`, and the Dockerfile's `WORKFLOW_LOCAL_DATA_DIR` landed after the `0.11.0`
-tag, so only an install pinned below that tag lacks the ENV; `appVersion` now names `0.14.1`, whose
-image sets the same path. Leaning on
+tag, so only an install pinned below that tag lacks the ENV; `appVersion` has named a later release
+ever since, whose image sets the same path. Leaning on
 the image would have left the ledger resolving to `.workflow-data` under `WORKDIR /app` — read-only —
 and the probe answering `LEDGER_UNAVAILABLE` on an install the chart advertises as working. With the
 chart writing it (verified by rendering `charts/libredb-studio` at its defaults), the agent appears as
