@@ -625,6 +625,14 @@ describe("TableItem", () => {
       const actions = getByRole("button", { name: "Actions for users" });
       expect(actions.getAttribute("title")).toBe("Actions for users");
     });
+
+    test("table actions button derives its aria-label from the table name", () => {
+      const { getByRole } = render(
+        <TableItem table={smallTable} isExpanded={false} onToggle={mock(() => {})} isAdmin={false} />,
+      );
+      const actions = getByRole("button", { name: "Actions for settings" });
+      expect(actions.getAttribute("aria-label")).toBe("Actions for settings");
+    });
   });
   // ── Derived-grouping rows and declared maintenance (#427) ─────────────────
 
