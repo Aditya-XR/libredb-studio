@@ -59,9 +59,9 @@ describe("LoginPage", () => {
     expect(passwordInput.autocomplete).toBe("current-password");
   });
 
-  test("renders Sign In button", () => {
-    const { getByText } = renderLogin();
-    expect(getByText("Sign In")).not.toBeNull();
+  test("renders Sign in button", () => {
+    const { getByRole } = renderLogin();
+    expect(getByRole("button", { name: "Sign in" })).not.toBeNull();
   });
 
   test("renders LibreDB Studio title", () => {
@@ -203,7 +203,7 @@ describe("LoginPage", () => {
 
     resolveFetch(new Response(JSON.stringify({ success: false })));
     await waitFor(() => {
-      expect(queryByText("Sign In")).not.toBeNull();
+      expect(queryByText("Sign in")).not.toBeNull();
     });
   });
 });
@@ -626,7 +626,7 @@ describe("LoginPage TOTP step", () => {
     // object graph: 301 ms for a 260-node subtree, measured. waitFor's 5 s budget goes in a few
     // polls, so a machine that is briefly busy reds a healthy test. The boolean costs 0 ms.
     await waitFor(() => expect(codeInput(result.container) === null).toBe(true));
-    expect(result.getByText("Sign In")).not.toBeNull();
+    expect(result.getByRole("button", { name: "Sign in" })).not.toBeNull();
   });
 
   test("drops back to the password step when the password is edited", async () => {

@@ -395,7 +395,7 @@ function LoginFormInner({ authProvider }: { authProvider: string }) {
                       type="submit"
                       disabled={isLoading}
                     >
-                      {isLoading ? "Authenticating..." : mfaRequired ? "Verify code" : "Sign In"}
+                      {isLoading ? "Authenticating..." : mfaRequired ? "Verify code" : "Sign in"}
                     </Button>
                   </form>
                 </>
