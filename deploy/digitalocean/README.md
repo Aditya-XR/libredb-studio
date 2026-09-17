@@ -30,23 +30,50 @@ the pin deliberately, in both places, after reviewing upstream changes.
 
 ## Build
 
-**GitHub Actions (recommended):** Actions → "DO Packer Build" → Run workflow →
-enter a version (semver, e.g. `0.14.1` — must exist as a tag on
-`ghcr.io/libredb/libredb-studio`). The snapshot ID appears in the job summary.
+**GitHub Actions (recommended):** wait for the Docker publish workflow to finish
+for the release, then Actions → "DO Packer Build" → Run workflow → select that
+release tag and enter the same bare semver as `version`. The image tag must exist
+on `ghcr.io/libredb/libredb-studio`; the input has no default. The snapshot ID
+appears in the job summary.
 Requires the `DIGITALOCEAN_TOKEN` repo secret (read+write PAT).
+
+The build stays **manual by design**: it consumes DigitalOcean resources, and a
+snapshot still needs the Droplet checks below and a Vendor Portal submission.
+Every successfully published release adds a **DigitalOcean Marketplace release
+checklist** to the `publish-release` job summary, including the released version
+and the build, test, submission and listing-verification steps. The reminder is
+non-blocking and does not create cloud resources or submit an untested image.
+Do not add only a `release: published` trigger: this repo publishes releases with
+`GITHUB_TOKEN`, whose release events do not start other workflows.
 
 **Local:**
 
+Set `VERSION` to the released bare semver tag you intend to build before running
+these commands; there is no default here either.
+
 ```bash
+: "${VERSION:?Set VERSION to the released semver tag to build}"
 cd deploy/digitalocean/droplet
 MP_SHA=b70878804ca27c01d5f5e882d26485defbaba210  # keep in sync with .github/workflows/do-packer-build.yml
 curl -fsSLo scripts/90-cleanup.sh   "https://raw.githubusercontent.com/digitalocean/marketplace-partners/${MP_SHA}/scripts/90-cleanup.sh"
 curl -fsSLo scripts/99-img-check.sh "https://raw.githubusercontent.com/digitalocean/marketplace-partners/${MP_SHA}/scripts/99-img-check.sh"
 export DIGITALOCEAN_TOKEN=dop_v1_...
 packer init .
-packer validate -var "version=0.14.1" .
-packer build -var "version=0.14.1" .
+packer validate -var "version=$VERSION" .
+packer build -var "version=$VERSION" .
 ```
+
+## Published version check
+
+`bun run distribution:check` (from the repository root) compares
+`package.json.version` with the live listing's `custom_data.version`. It reads the
+public Marketplace page, including its escaped Next.js metadata; it does not
+treat a local Packer version or a successful snapshot build as publication.
+A stale listing reports **DRIFT**; unreadable, missing or ambiguous version
+metadata reports **UNKNOWN**, never a silent **SKIP**. As with other remote
+catalogs, the report is warn-only, including under `--strict`, and runs weekly in
+the Distribution Check workflow. Run it again after DigitalOcean approves an
+update and verify the published version matches the submitted snapshot.
 
 ## Critical build rules
 

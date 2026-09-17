@@ -770,7 +770,13 @@ channels:
       catalog: https://marketplace.digitalocean.com/apps/libredb-studio
       docs: deploy/digitalocean/README.md
     pin:
-      strategy: none
+      strategy: remote_file
+      url: https://marketplace.digitalocean.com/apps/libredb-studio
+      # The listing's custom_data.version is serialized with escaped quotes in
+      # Next.js flight data; also accept unescaped JSON, never generic page versions.
+      extract: 'custom_data(?:\\)?"\s*:\s*\{\s*(?:\\)?"version(?:\\)?"\s*:\s*(?:\\)?"(\d+\.\d+\.\d+)(?:\\)?"'
+      note: Measures the published Marketplace image, not the local Packer input. Builds and Vendor
+        Portal submissions remain manual; each release summary carries the handoff checklist.
 
   - id: gcp-marketplace
     name: Google Cloud Marketplace

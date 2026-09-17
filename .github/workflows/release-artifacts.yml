@@ -1175,6 +1175,29 @@ jobs:
           gh release edit "$TAG" --draft=false --latest
           echo "Release '$TAG' published with the verified asset set."
 
+      # Building a snapshot consumes DO resources and still needs a tested image
+      # and a Vendor Portal submission. Keep it manual, with a handoff on every
+      # release instead of a release:published trigger (GITHUB_TOKEN suppresses it).
+      - name: DigitalOcean Marketplace release checklist
+        if: ${{ !contains(needs.guard.outputs.version, '-') }}
+        continue-on-error: true
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          echo "::notice::DigitalOcean Marketplace is updated manually. Follow the release checklist in this job summary for ${VERSION}."
+          {
+            echo "### DigitalOcean Marketplace release checklist"
+            echo ""
+            echo "Publishing this release does not update the separately reviewed Marketplace snapshot."
+            echo ""
+            echo "- [ ] Wait for the Docker publish workflow to make \`ghcr.io/libredb/libredb-studio:${VERSION}\` available."
+            echo "- [ ] Run [DO Packer Build](https://github.com/${REPOSITORY}/actions/workflows/do-packer-build.yml) on release tag \`${VERSION}\`, with \`version=${VERSION}\`."
+            echo "- [ ] Test a fresh Droplet, including HTTP sign-in and \`AUTH_COOKIE_SECURE=false\`; follow the [pre-submission checks](https://github.com/${REPOSITORY}/blob/${VERSION}/deploy/digitalocean/README.md#pre-submission-checklist)."
+            echo "- [ ] Submit the new snapshot and matching version through the [Vendor Portal](https://cloud.digitalocean.com/vendorportal); wait for approval."
+            echo "- [ ] Run \`bun run distribution:check\` and confirm the [live listing](https://marketplace.digitalocean.com/apps/libredb-studio) reports \`${VERSION}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   dispatch-downstream:
     # The publish above runs under GITHUB_TOKEN, and events created by
     # GITHUB_TOKEN do not trigger other workflows (the 0.9.46 release

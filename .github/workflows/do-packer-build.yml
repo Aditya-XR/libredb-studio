@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag for snapshot name AND image pin — must exist on ghcr.io/libredb/libredb-studio (e.g. 0.14.1)'
+        description: 'Released semver tag for snapshot name AND image pin - must exist on ghcr.io/libredb/libredb-studio'
         required: true
-        default: '0.14.1'
+        type: string
 
 permissions:
   contents: read
