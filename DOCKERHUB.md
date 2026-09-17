@@ -96,7 +96,7 @@ The network route is the one to prefer for a real deployment: put Studio and its
 | Tag | Pushed from | Use |
 |-----|-------------|-----|
 | `latest` | `main` | Latest stable build |
-| `X.Y.Z` | `main` / release | Pin an exact version, e.g. `docker pull libredb/libredb-studio:0.14.1` (recommended for production) |
+| `X.Y.Z` | `main` / release | Pin an exact version, e.g. `docker pull libredb/libredb-studio:0.16.0` (recommended for production) |
 | `dev` | `feat/**`, `fix/**` branches | Bleeding-edge / preview (`linux/amd64` only) |
 | `sha-<commit>` | every build | Exact immutable commit |
 
