@@ -155,7 +155,7 @@ describe("SecurityTab", () => {
   // NEW TESTS
   // ===========================================================================
 
-  test("access tab shows security badges (ENABLED, Supported, Configurable)", async () => {
+  test("access tab shows security badges (Enabled, Supported, Configurable)", async () => {
     let renderResult: ReturnType<typeof render>;
     await act(async () => {
       renderResult = render(<SecurityTab />);
@@ -167,8 +167,10 @@ describe("SecurityTab", () => {
     });
 
     await waitFor(() => {
-      // Admin Access and User Access both have ENABLED badges
-      const enabledBadges = queryAllByText("ENABLED");
+      // Admin Access and User Access both have Enabled badges, matching the sentence
+      // case every other badge in the app uses (not the all-caps "ENABLED" this used to read).
+      expect(queryAllByText("ENABLED").length).toBe(0);
+      const enabledBadges = queryAllByText("Enabled");
       expect(enabledBadges.length).toBe(2);
 
       // SSL/TLS and SSH Tunnel have Supported badges

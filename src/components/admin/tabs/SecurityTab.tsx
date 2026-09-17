@@ -92,11 +92,11 @@ function AccessSummary() {
           <Separator className="bg-fill" />
           <div className="flex items-center justify-between">
             <span className="text-fg-muted">Admin Access</span>
-            <Badge className="bg-success-tint/10 text-success border border-success-tint/20 text-xs">ENABLED</Badge>
+            <Badge className="bg-success-tint/10 text-success border border-success-tint/20 text-xs">Enabled</Badge>
           </div>
           <div className="flex items-center justify-between">
             <span className="text-fg-muted">User Access</span>
-            <Badge className="bg-success-tint/10 text-success border border-success-tint/20 text-xs">ENABLED</Badge>
+            <Badge className="bg-success-tint/10 text-success border border-success-tint/20 text-xs">Enabled</Badge>
           </div>
         </div>
       </div>
