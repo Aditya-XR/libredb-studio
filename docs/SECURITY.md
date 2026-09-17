@@ -327,7 +327,16 @@ These are real, current, and not oversights. Each is a decision with a reason.
   environment variables, so the environment already holds the secret. Rate limiting (1.2) and the
   constant-time comparison (1.5) address the reachable part of the risk.
 - **Rate limiting is per process and every bucket is keyed on something the caller supplies.** See
-  [`docs/BACKLOG.md`](./BACKLOG.md), entries H11 and H13.
+  [`docs/BACKLOG.md`](./BACKLOG.md), entries H11 and H13. Two variables decide what that something
+  is. `TRUST_PROXY_HEADERS` (default `true`) derives the client address from `X-Forwarded-For`,
+  falling back to `X-Real-IP`; set to `false`, every anonymous caller shares one bucket, so a single
+  caller tripping the login limiter locks everyone out until the window closes. `TRUSTED_PROXY_HOPS`
+  (default `0`) picks which `X-Forwarded-For` entry is the client. `0` takes the leftmost entry,
+  which the caller writes, so behind a reverse proxy it should be set to the number of proxies in
+  front of Studio. Set too low, a caller can choose the bucket they land in; set too high, it keys
+  on a proxy and lumps everyone behind it into one bucket. The same derived address is the `ip`
+  field in the audit log, so a wrong value also makes that field unreliable. Both are documented in
+  [`.env.example`](../.env.example) under Forwarded Headers.
 - **Configuring an AI model means database content leaves the machine.** Nothing here is telemetry
   and nothing fires on its own, but an agent run sends the objective you typed, the schema
   inventory, the relations graph and the rows of every read it performs to the model provider you
