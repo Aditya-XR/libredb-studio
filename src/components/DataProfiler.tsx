@@ -2,7 +2,7 @@
 
 import { appFetch } from "@/lib/config/base-path";
 import { useState, useEffect, useMemo } from "react";
-import { LoaderCircle, ChartColumn, X, Hash, CircleAlert, Sparkles, Lock, Download } from "lucide-react";
+import { LoaderCircle, ChartColumn, X, CircleAlert, Sparkles, Lock, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DatabaseConnection } from "@/lib/types";
 import { objectPathLabel, pathKey } from "@/lib/db/object-path";
@@ -327,7 +327,6 @@ export function DataProfiler({
                     <div key={col.name} className="bg-surface rounded-lg p-3 border border-hairline">
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2">
-                          <Hash strokeWidth={1.5} className="w-3 h-3 text-hue-blue" />
                           <span className="text-xs font-medium text-fg">{col.name}</span>
                           {col.type && <span className="text-xs text-fg-muted font-mono">{col.type}</span>}
                           {sensitiveColumnNames.has(col.name) && (
