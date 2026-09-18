@@ -201,7 +201,14 @@ describe("the driver is never loaded at module scope", () => {
   test("the client reaches the driver through a dynamic import inside a function", () => {
     const source = readProviderSource(CLIENT_FILE);
 
-    expect(source).toContain('await import("@duckdb/node-api")');
+    // The import expression is the default argument of `loadDuckDBDriver`, so it
+    // is evaluated per call rather than at module load, and `openDuckDBClient`
+    // goes through that function rather than importing the package itself. The
+    // indirection is what lets a deployment without the driver say so (#840);
+    // the eager-import test above guards the "never at module scope" half, and a
+    // default argument is not module scope.
+    expect(source).toContain('= () => import("@duckdb/node-api")');
+    expect(source).toContain("await loadDuckDBDriver()");
   });
 
   test("the detector allows a type-only import and rejects a value one", () => {

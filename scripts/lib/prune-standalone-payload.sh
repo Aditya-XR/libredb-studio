@@ -74,7 +74,6 @@ PRUNE_LIST=(
   components.json
   CONTRIBUTING.md
   database-compose.yml
-  Dockerfile
   docker-entrypoint.sh
   DOCKERHUB.md
   eslint.config.mjs
@@ -108,12 +107,16 @@ for entry in "${PRUNE_LIST[@]}"; do
   rm -rf "${PAYLOAD_DIR:?}/${entry:?}"
 done
 
-# Pattern entries: deploy manifests (docker-compose.yml,
+# Pattern entries: the image variants (Dockerfile, Dockerfile.alpine,
+# Dockerfile.alpine-slim - #840; a glob rather than three literals, because
+# the literal `Dockerfile` entry covered one of the three the day the other
+# two landed), deploy manifests (docker-compose.yml,
 # docker-compose.example.yml, ...), locally built snap binaries
 # (libredb-studio_<version>_<arch>.snap), packed tarballs, logs, and
 # key/cert files. An unmatched glob stays literal and rm -f ignores it.
 # Leading-dot entries (.gitignore, .github, .npmrc, ...) never get traced
 # into the standalone output in the first place - only non-dot repo-root
 # files need pruning.
-rm -f "$PAYLOAD_DIR"/docker-compose*.yml "$PAYLOAD_DIR"/docker-compose*.yaml \
+rm -f "$PAYLOAD_DIR"/Dockerfile* \
+  "$PAYLOAD_DIR"/docker-compose*.yml "$PAYLOAD_DIR"/docker-compose*.yaml \
   "$PAYLOAD_DIR"/*.snap "$PAYLOAD_DIR"/*.tgz "$PAYLOAD_DIR"/*.log "$PAYLOAD_DIR"/*.pem

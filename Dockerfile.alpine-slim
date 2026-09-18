@@ -15,37 +15,32 @@
 # convention the Docker ecosystem already teaches (node:slim, python:slim,
 # debian:*-slim) - same product, fewer parts - which is exactly this file.
 #
-# Measured, arm64, `docker save | gzip`: 308 MB (Debian, today) -> 142 MB
-# (Alpine) -> 130 MB (Alpine, Oracle addons and build-time payload pruned) ->
-# 51 MB (this file). Every number in the comments below was measured on a real
-# build rather than estimated.
+# Measured with `docker save | gzip`, amd64, 2026-09-18, on builds of this
+# commit: 310 MB for the published Debian image, 128 MB for `-alpine`, 57 MB for
+# this file. (An earlier arm64 pass read 308 / 142 / 51; the 51 was a build that
+# also deleted Monaco's workers, which cost the product its editor - see below.)
+# Every number in the comments here was measured on a real build rather than
+# estimated.
 #
 # WHAT THIS VARIANT GIVES UP, so nobody has to discover it at runtime:
 #
 #   1. DuckDB (-22 MB). The single biggest removable item in the image: the
 #      driver is four packages ending in a ~64 MB `libduckdb.so`. The provider
-#      lazy-imports it (`await import("@duckdb/node-api")` inside
-#      openDuckDBClient), so its absence is inert until somebody opens a DuckDB
-#      connection - and then it is a raw module-resolution error, because that
-#      import sits outside the try/catch that produces this project's friendly
-#      open failures. Honest but blunt; making it graceful is a code change, not
-#      a packaging one.
+#      lazy-imports it (`loadDuckDBDriver` inside `openDuckDBClient`, in
+#      src/lib/db/providers/sql/duckdb/client.ts), so its absence is inert until
+#      somebody opens a DuckDB connection - and then `describeDriverAbsence`
+#      there turns the module-resolution failure into a sentence naming the tags
+#      that do ship the driver. That seam exists FOR this image: without it the
+#      operator got a raw "Cannot find module ... Require stack:
+#      /app/.next/server/chunks/..." in a browser toast. Every other engine is
+#      untouched.
 #   2. sharp / libvips (-8 MB). Next's image optimizer. Nothing in `src` imports
 #      `next/image`; the social-preview URLs in src/app/layout.tsx point at
 #      raw.githubusercontent.com, so `/_next/image` is never reached. Verified:
 #      this image boots and renders /login with sharp absent. If a `<Image>` is
 #      ever added, THIS is the file that breaks - pair the removal with
 #      `images: { unoptimized: true }` in next.config.ts to make that loud.
-#   3. Oracle, entirely - and here this variant goes FURTHER than the -alpine
-#      tag, so the difference is worth stating. On -alpine only the five native
-#      Thick addons are dropped and Next's output tracing still delivers the
-#      pure-JS driver, so Thin mode keeps working there (measured:
-#      `oracledb.thin === true`). This file deletes the traced copy too, which
-#      buys 1.3 MB and costs the whole engine. `createDatabaseProvider` reaches
-#      it through `await import(...)`, so the loss is confined to Oracle
-#      connections; every other engine is untouched. If you want Oracle Thin
-#      back, drop `oracledb` from the prune list below - it is one word.
-#   4. The repo tree itself (-11 MB raw). Next's output file tracing sweeps the
+#   3. The repo tree itself (-11 MB raw). Next's output file tracing sweeps the
 #      repository root, so `.next/standalone` - and therefore every image built
 #      from it, the published Debian one included - carries `src/`, `scripts/`,
 #      `bun.lock`, the playwright/eslint/sonar configs and a stray `testdb`.
@@ -55,15 +50,30 @@
 #      reimplemented, so one deny-list serves both artifact families. Shipping
 #      application source in a production image is a security property before it
 #      is a size one.
-#   5. Monaco's TypeScript and CSS language services (-4 MB). Two copies of the
-#      TS worker ship in `min/vs`, ~13 MB of a language service that a SQL
-#      editor's completions never consult. Syntax highlighting is unaffected -
-#      that lives in the tokenizers, not the worker - which matters because
-#      MongoDB tabs are edited as JavaScript (src/lib/editor/tab-language.ts).
-#      Monaco's UI translations, Turkish included, are deliberately KEPT.
 #
-# WHAT IT DOES NOT GIVE UP: the other sixteen engines, the agent, the embedded
-# LibreDB store, the SQLite sample, RBAC, OIDC, and the bind-address resolver.
+# WHAT IT DOES NOT GIVE UP: every other engine including Oracle Thin, the agent,
+# the embedded LibreDB store, the SQLite sample, RBAC, OIDC, and the
+# bind-address resolver.
+#
+# ORACLE THIN STAYS, unlike the five native Thick addons that `Dockerfile.alpine`
+# drops for having no musl Instant Client to load. The driver is pure JavaScript
+# in Thin mode and Next's output tracing delivers it at 1.3 MB - too little to
+# buy by losing an engine, in an image this size.
+#
+# MONACO'S WORKERS STAY, and this is the one saving that looks free and is not.
+# `min/vs` carries ~16 MB of language workers, ~13 MB of it two copies of the TS
+# worker that a SQL editor's completions never consult. Deleting them was
+# measured on 2026-09-18 to remove the query editor from the product entirely.
+# The language services are not what breaks: `editor.main.js` bundles the json,
+# css, html and typescript contributions, each one's mode chunk declares its
+# worker stub as a HARD AMD dependency (`vs/jsonMode-<hash>` requires
+# `./json.worker-<hash>`), and the loader resolves that graph when the editor
+# loads rather than when a buffer of that language is opened. One missing chunk
+# therefore rejects `loader.init()` and no editor mounts - with a SQL-only model
+# on screen. The image still booted, still served /login and still seeded the
+# sample database, which is why the build stayed green and a browser was what
+# caught it. `e2e/embedded-samples.spec.ts` waits on `.monaco-editor` and the
+# Channel E2E job now runs it against this image.
 # ==============================================================================
 
 FROM oven/bun:1.4.2-alpine AS deps
@@ -114,7 +124,7 @@ RUN node scripts/copy-monaco.mjs && npx next build
 # build went green.
 RUN set -eux; \
     for root in node_modules .next/standalone/node_modules; do \
-      rm -rf "$root/@duckdb" "$root/detect-libc" "$root/@img" "$root/sharp" "$root/oracledb"; \
+      rm -rf "$root/@duckdb" "$root/detect-libc" "$root/@img" "$root/sharp"; \
       rm -rf "$root/better-sqlite3/deps" "$root/better-sqlite3/src" "$root/better-sqlite3/binding.gyp"; \
       true; \
     done; \
@@ -122,12 +132,15 @@ RUN set -eux; \
     find node_modules/better-sqlite3/prebuilds -maxdepth 1 -type f -name '*.node' ! -name "linuxmusl-${ARCH}.node" -delete; \
     rm -rf .next/standalone/node_modules/better-sqlite3 .next/standalone/node_modules/@libredb; \
     rm -rf public/screenshots .next/standalone/public/screenshots; \
-    find public/monaco .next/standalone/public/monaco -name 'ts.worker*.js' -o -name 'css.worker*.js' -o -name 'html.worker*.js' -o -name 'json.worker*.js' 2>/dev/null | xargs -r rm -f; \
     bash scripts/lib/prune-standalone-payload.sh .next/standalone; \
     test -f "node_modules/better-sqlite3/prebuilds/linuxmusl-${ARCH}.node"; \
     test -f .next/standalone/server.js; \
     test ! -e .next/standalone/src; \
+    test ! -e .next/standalone/Dockerfile.alpine-slim; \
     test -f public/monaco/vs/nls/lang/tr.js; \
+    test "$(find public/monaco/vs -maxdepth 1 -name '*.worker-*.js' | wc -l)" \
+         -eq "$(find node_modules/monaco-editor/min/vs -maxdepth 1 -name '*.worker-*.js' | wc -l)"; \
+    test -d .next/standalone/node_modules/oracledb; \
     test ! -e node_modules/@duckdb; \
     du -sh .next/standalone node_modules public
 

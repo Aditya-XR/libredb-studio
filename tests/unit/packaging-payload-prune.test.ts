@@ -94,6 +94,10 @@ const EXTRA_FILES = [
   "CONTRIBUTING.md",
   "database-compose.yml",
   "Dockerfile",
+  // One per published image variant (#840). They are covered by a glob rather
+  // than three literals, and the literal entry covered one of the three.
+  "Dockerfile.alpine",
+  "Dockerfile.alpine-slim",
   "docker-entrypoint.sh",
   "DOCKERHUB.md",
   "eslint.config.mjs",

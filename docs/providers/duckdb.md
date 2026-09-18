@@ -61,6 +61,15 @@ One consequence is sharper than SQLite's, and it is measured rather than inherit
 open by a writer **cannot be opened by a second process at all, not even read-only** (§3.8). Two
 Studio replicas pointed at one file is not a degraded configuration, it is a broken one.
 
+**Not in the `-alpine-slim` image.** The driver is four packages ending in a ~70 MB `libduckdb.so`,
+which makes it the largest removable item in that variant, so it is left out on purpose (issue #840,
+[DISTRIBUTION.md](../DISTRIBUTION.md)). Every other engine is unaffected, because `openDuckDBClient`
+reaches the driver through `await import(...)` and nothing else in the process touches it. Opening a
+DuckDB connection there fails with a `ConnectionError` naming the tags that do ship the driver —
+`describeDriverAbsence` in [client.ts](../../src/lib/db/providers/sql/duckdb/client.ts) — rather
+than a raw module-resolution stack. The default and `-alpine` tags ship it, and so does every
+non-Docker channel.
+
 ### 1.2 Concept mapping
 
 | DuckDB | This product | Note |
