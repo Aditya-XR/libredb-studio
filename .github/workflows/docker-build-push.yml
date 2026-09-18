@@ -23,6 +23,16 @@ on:
         required: false
         default: false
         type: boolean
+      variant:
+        description: 'Rebuild one image variant instead of all three. Use this when a single leg failed beside two that already published: re-running all of them would re-push version tags the Docker Hub mirror has frozen, and buildx exports every tag in one step, so one rejected tag fails the whole job.'
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - debian
+          - alpine
+          - alpine-slim
 
 # Cancel an in-progress build when a newer commit is pushed to the same ref,
 # so rapid pushes to a feature/fix branch don't stack multi-arch builds.
@@ -54,6 +64,7 @@ jobs:
       version: ${{ steps.extract-version.outputs.version }}
       platforms: ${{ steps.platforms.outputs.list }}
       dockerhub: ${{ steps.dockerhub.outputs.enabled }}
+      variants: ${{ steps.variants.outputs.matrix }}
 
     steps:
       - name: Checkout code
@@ -121,6 +132,37 @@ jobs:
             echo "list=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
           fi
 
+      # The image variants, and the one place they are listed (#840). The build
+      # and Channel E2E jobs both consume this output, so they cannot drift into
+      # "built three, browser-tested one".
+      #
+      # A table in a script rather than a literal `strategy.matrix`, for one
+      # reason: a workflow_dispatch may ask for a single variant, and GitHub
+      # cannot filter a literal matrix by an input.
+      # tests/unit/packaging-image-variants.test.ts reads this table back out and
+      # checks it against the Dockerfiles at the repo root.
+      - name: Resolve the variant matrix
+        id: variants
+        env:
+          # Empty on every event except workflow_dispatch, where the input
+          # defaults to "all".
+          REQUESTED: ${{ inputs.variant }}
+        run: |
+          set -euo pipefail
+          VARIANTS='[{"variant":"debian","dockerfile":"Dockerfile","suffix":""},{"variant":"alpine","dockerfile":"Dockerfile.alpine","suffix":"-alpine"},{"variant":"alpine-slim","dockerfile":"Dockerfile.alpine-slim","suffix":"-alpine-slim"}]'
+          if [ -z "${REQUESTED:-}" ] || [ "$REQUESTED" = "all" ]; then
+            selected="$VARIANTS"
+          else
+            selected=$(printf '%s' "$VARIANTS" | jq -c --arg v "$REQUESTED" '[.[] | select(.variant == $v)]')
+            # A typo must stop the run rather than build nothing and report success.
+            if [ "$(printf '%s' "$selected" | jq 'length')" -ne 1 ]; then
+              echo "Unknown variant '$REQUESTED' - expected all, debian, alpine or alpine-slim" >&2
+              exit 1
+            fi
+          fi
+          printf 'matrix={"include":%s}\n' "$selected" >> "$GITHUB_OUTPUT"
+          echo "Building: $(printf '%s' "$selected" | jq -r '[.[].variant] | join(", ")')"
+
       # Docker Hub is an optional secondary mirror for discoverability. It is
       # only used when DOCKER_HUB_TOKEN is configured (so forks without the
       # secret still build/push to GHCR cleanly).
@@ -152,8 +194,10 @@ jobs:
   # `fail-fast: false` on purpose: an -alpine-slim that will not build must not
   # cancel the default image every user pulls.
   #
-  # tests/unit/packaging-image-variants.test.ts asserts this matrix lists every
-  # Dockerfile at the repo root, so a fourth variant cannot land unpublished.
+  # The matrix comes from `prepare` so that a workflow_dispatch can rebuild one
+  # variant on its own; tests/unit/packaging-image-variants.test.ts asserts the
+  # table it is built from lists every Dockerfile at the repo root, so a fourth
+  # variant cannot land unpublished.
   build-and-push:
     needs: prepare
     name: Build and Push (${{ matrix.variant }})
@@ -173,17 +217,7 @@ jobs:
       image: ${{ steps.meta.outputs.tags }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - variant: debian
-            dockerfile: Dockerfile
-            suffix: ""
-          - variant: alpine
-            dockerfile: Dockerfile.alpine
-            suffix: "-alpine"
-          - variant: alpine-slim
-            dockerfile: Dockerfile.alpine-slim
-            suffix: "-alpine-slim"
+      matrix: ${{ fromJSON(needs.prepare.outputs.variants) }}
 
     steps:
       - name: Checkout code
@@ -346,17 +380,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - variant: debian
-            dockerfile: Dockerfile
-            suffix: ""
-          - variant: alpine
-            dockerfile: Dockerfile.alpine
-            suffix: "-alpine"
-          - variant: alpine-slim
-            dockerfile: Dockerfile.alpine-slim
-            suffix: "-alpine-slim"
+      matrix: ${{ fromJSON(needs.prepare.outputs.variants) }}
     # Deliberately NOT run inside Playwright's container image (unlike the two
     # jobs in ci.yml): this channel drives `docker pull` / `docker run`, and a
     # container job has no daemon. scripts/channel-embedded-sample-e2e.sh would
@@ -423,7 +447,14 @@ jobs:
     # fails the packaged-artifact browser test must not fan out to the chart.
     name: Dispatch Helm chart release
     needs: [build-and-push, channel-e2e]
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_latest == true)
+    # The variant clause is the recovery path's guard, not part of the release
+    # condition: a dispatch that rebuilt ONE leg beside two that already
+    # published must not re-release a chart whose contents did not change, and
+    # #167 then blocks the retry a real chart change needs.
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_latest == true &&
+       (inputs.variant == '' || inputs.variant == 'all'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

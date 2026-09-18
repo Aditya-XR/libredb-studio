@@ -77,6 +77,37 @@ function commands(dockerfile: string): string[] {
     .filter(Boolean);
 }
 
+interface DockerWorkflow {
+  on: unknown;
+  jobs: Record<
+    string,
+    {
+      if?: string;
+      strategy?: { matrix?: unknown };
+      steps?: { id?: string; run?: string }[];
+    }
+  >;
+}
+
+const dockerWorkflow = parseYaml(
+  readFileSync(join(ROOT, ".github/workflows/docker-build-push.yml"), "utf8"),
+) as DockerWorkflow;
+
+/**
+ * The variant table the build matrix is generated from.
+ *
+ * It lives in the `prepare` job's shell rather than in `strategy.matrix`,
+ * because a workflow_dispatch may ask for one variant and GitHub cannot filter
+ * a literal matrix by an input. Read back out of that script here, so the guard
+ * that this list matches the repo root survives the indirection.
+ */
+function matrixVariants(): { variant: string; dockerfile: string; suffix: string }[] {
+  const step = (dockerWorkflow.jobs["prepare"]?.steps ?? []).find((entry) => entry.id === "variants");
+  const table = /VARIANTS='(\[[^']*\])'/.exec(step?.run ?? "")?.[1];
+  if (!table) throw new Error("prepare has no `variants` step declaring a VARIANTS='[...]' table");
+  return JSON.parse(table) as { variant: string; dockerfile: string; suffix: string }[];
+}
+
 describe("published image variants", () => {
   test("the repo root holds exactly the three variants that are published", () => {
     // Pinned so a new Dockerfile is a conscious edit: it has to be added to the
@@ -185,31 +216,27 @@ describe("published image variants", () => {
   });
 
   test("the Docker build matrix builds every variant, and only those", () => {
-    const workflow = parseYaml(readRepoFile(".github/workflows/docker-build-push.yml")) as {
-      jobs: Record<string, { strategy?: { matrix?: { include?: { dockerfile?: string }[] } } }>;
-    };
-    const included = workflow.jobs["build-and-push"]?.strategy?.matrix?.include ?? [];
-
-    expect(included.map((entry) => entry.dockerfile).sort()).toEqual(VARIANTS);
+    expect(
+      matrixVariants()
+        .map((entry) => entry.dockerfile)
+        .sort(),
+    ).toEqual(VARIANTS);
   });
 
-  test("the Channel E2E runs against every variant the build matrix pushes", () => {
-    const workflow = parseYaml(readRepoFile(".github/workflows/docker-build-push.yml")) as {
-      jobs: Record<string, { strategy?: { matrix?: { include?: { dockerfile?: string }[] } } }>;
-    };
-    const built = workflow.jobs["build-and-push"]?.strategy?.matrix?.include ?? [];
-    const tested = workflow.jobs["channel-e2e"]?.strategy?.matrix?.include ?? [];
+  test("the Channel E2E runs against exactly the matrix the build job used", () => {
+    // Not "the same list" but the same OUTPUT: a single-variant re-dispatch must
+    // browser-test the variant it rebuilt, and no other. The browser test is
+    // what would have caught the editor defect above, and it only catches it on
+    // the image it is pointed at.
+    const built = String(dockerWorkflow.jobs["build-and-push"]?.strategy?.matrix ?? "");
+    const tested = String(dockerWorkflow.jobs["channel-e2e"]?.strategy?.matrix ?? "");
 
-    // The browser test is what would have caught the editor defect above, and it
-    // only catches it on the image it is pointed at.
-    expect(tested.map((entry) => entry.dockerfile).sort()).toEqual(built.map((entry) => entry.dockerfile).sort());
+    expect(built).toContain("needs.prepare.outputs.variants");
+    expect(tested).toBe(built);
   });
 
   test("each variant publishes under its own tag suffix, cached in its own scope", () => {
-    const workflow = parseYaml(readRepoFile(".github/workflows/docker-build-push.yml")) as {
-      jobs: Record<string, { strategy?: { matrix?: { include?: { variant?: string; suffix?: string }[] } } }>;
-    };
-    const included = workflow.jobs["build-and-push"]?.strategy?.matrix?.include ?? [];
+    const included = matrixVariants();
     const suffixes = included.map((entry) => entry.suffix ?? "");
 
     // The default image keeps the bare tag; the others must differ from it and
@@ -218,6 +245,30 @@ describe("published image variants", () => {
     expect(suffixes).toContain("");
     // A shared gha cache scope makes three builds evict each other's layers.
     expect(new Set(included.map((entry) => entry.variant)).size).toBe(included.length);
+  });
+
+  test("one variant can be rebuilt on its own, without touching the others' tags", () => {
+    // The recovery this exists for: `fail-fast: false` means a failed leg can sit
+    // beside two that published, and re-dispatching all three would re-push
+    // version tags the Docker Hub mirror has already frozen (its immutability
+    // rule is semver-scoped, and `0.16.1-alpine` matches it). buildx exports
+    // every tag in one step, so one rejected mirror tag fails the whole job.
+    const input = (dockerWorkflow.on as { workflow_dispatch?: { inputs?: Record<string, unknown> } })?.workflow_dispatch
+      ?.inputs?.variant;
+    const resolve = (dockerWorkflow.jobs["prepare"]?.steps ?? []).find((step) => step.id === "variants");
+
+    expect(input).toBeDefined();
+    // An unrecognized variant must stop the run rather than silently build none.
+    expect(resolve?.run).toContain("exit 1");
+  });
+
+  test("a single-variant rebuild does not re-release the chart", () => {
+    // helm-release deploys the image; dispatching it again for a re-pushed
+    // -alpine tag would republish a chart whose contents did not change, and
+    // #167 then blocks the retry that a real chart change needs.
+    const dispatch = dockerWorkflow.jobs["dispatch-helm-release"];
+
+    expect(String(dispatch?.if)).toContain("variant");
   });
 
   test("the payload deny-list drops every root Dockerfile, not just the default one", () => {
