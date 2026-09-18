@@ -50,6 +50,36 @@ ENV USER_PASSWORD=$USER_PASSWORD_BUILD
 # origin (issue #247). Explicit here: this bypasses the package.json build script.
 RUN node scripts/copy-monaco.mjs && npx next build
 
+# Drop the repo-root extras Next's output file tracing swept into the payload
+# (issue #124). Tracing walks the repository root, so `.next/standalone` carries
+# `src/`, `scripts/`, the lockfile, the tooling configs and this file - and the
+# runner below unpacks all of it onto /app. Shipping application source in a
+# production image is a security property before it is a size one.
+#
+# The deny-list is not reimplemented here: `prune-standalone-payload.sh` is the
+# one the release tarballs, .deb/.rpm, snap and the npx cache already use, so a
+# new root file leaves every artifact family through one edit. The script refuses
+# to run against anything that is not an assembled payload, and the asserts below
+# are what turn an over-eager future entry into a failed build rather than a
+# provider failing at runtime. `seed-assets/` is not on the list and is COPYed
+# explicitly below in any case; nothing else under /app is read at runtime
+# (src/lib/seed/sqlite-sample.ts is the only `process.cwd()` reader).
+#
+# HERE rather than in the runner: an `rm` after a COPY deletes the files in a
+# later layer while leaving every byte of them in the layer the COPY created.
+#
+# `public/screenshots` goes with it: 4.4 MB of README and marketing artwork that
+# no running container ever serves, because src/app/layout.tsx points social
+# previews at raw.githubusercontent.com. It is not a payload-root entry, so the
+# deny-list cannot reach it.
+RUN set -eux; \
+    bash scripts/lib/prune-standalone-payload.sh .next/standalone; \
+    rm -rf public/screenshots .next/standalone/public/screenshots; \
+    test -f .next/standalone/server.js; \
+    test -d .next/standalone/node_modules; \
+    test ! -e .next/standalone/src; \
+    test ! -e .next/standalone/Dockerfile
+
 # Production image - use Node.js slim for lower memory footprint
 # trixie-slim: glibc must match the stage where native modules were built (see builder).
 FROM node:26.8.2-trixie-slim AS runner

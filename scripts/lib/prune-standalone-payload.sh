@@ -56,6 +56,9 @@ PRUNE_LIST=(
   conductor
   deploy
   desktop
+  # The channel inventory. Scripts and the showcase generator read it; the
+  # server reads src/lib/distribution/channels.generated.ts, never this.
+  distribution
   docker
   docs
   e2e
@@ -70,6 +73,7 @@ PRUNE_LIST=(
   bun.lock
   bunfig.toml
   CLAUDE.md
+  codecov.yml
   CODE_OF_CONDUCT.md
   components.json
   CONTRIBUTING.md
@@ -80,7 +84,6 @@ PRUNE_LIST=(
   fly.toml
   knip.json
   next.config.ts
-  playwright.config.ts
   postcss.config.mjs
   render.yaml
   SECURITY.md
@@ -110,13 +113,15 @@ done
 # Pattern entries: the image variants (Dockerfile, Dockerfile.alpine,
 # Dockerfile.alpine-slim - #840; a glob rather than three literals, because
 # the literal `Dockerfile` entry covered one of the three the day the other
-# two landed), deploy manifests (docker-compose.yml,
+# two landed), the Playwright harnesses (the bare `playwright.config.ts` was
+# a literal while base-path, channel and smoke shipped), deploy manifests
+# (docker-compose.yml,
 # docker-compose.example.yml, ...), locally built snap binaries
 # (libredb-studio_<version>_<arch>.snap), packed tarballs, logs, and
 # key/cert files. An unmatched glob stays literal and rm -f ignores it.
 # Leading-dot entries (.gitignore, .github, .npmrc, ...) never get traced
 # into the standalone output in the first place - only non-dot repo-root
 # files need pruning.
-rm -f "$PAYLOAD_DIR"/Dockerfile* \
+rm -f "$PAYLOAD_DIR"/Dockerfile* "$PAYLOAD_DIR"/playwright*.config.ts \
   "$PAYLOAD_DIR"/docker-compose*.yml "$PAYLOAD_DIR"/docker-compose*.yaml \
   "$PAYLOAD_DIR"/*.snap "$PAYLOAD_DIR"/*.tgz "$PAYLOAD_DIR"/*.log "$PAYLOAD_DIR"/*.pem

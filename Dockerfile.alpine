@@ -59,6 +59,9 @@ RUN bun install --frozen-lockfile
 # safe: the package this image keeps is the package this image loads.
 FROM node:26.8.2-alpine3.23 AS builder
 WORKDIR /usr/src/app
+# bash for scripts/lib/prune-standalone-payload.sh below: it is the deny-list the
+# release artifacts share, and it is a bash script (arrays), not a POSIX one.
+RUN apk add --no-cache bash
 COPY --from=deps /usr/src/app/node_modules ./node_modules
 COPY . .
 
@@ -79,8 +82,17 @@ ENV USER_PASSWORD=$USER_PASSWORD_BUILD
 # origin (issue #247). Explicit here: this bypasses the package.json build script.
 RUN node scripts/copy-monaco.mjs && npx next build
 
-# Drop the native payloads this image can never load, BEFORE the runner copies
-# them.
+# Drop the native payloads this image can never load, and the repo-root extras
+# nothing in it reads, BEFORE the runner copies them.
+#
+# The second half is `prune-standalone-payload.sh`, invoked rather than
+# reimplemented: it is the deny-list the release tarballs, .deb/.rpm, snap and
+# the npx cache already share (issue #124), so a new root file leaves every
+# artifact family through one edit. Next's output file tracing walks the
+# repository root, so without it `.next/standalone` carries `src/`, `scripts/`,
+# the lockfile, the tooling configs and this file, and the runner unpacks all of
+# it onto /app. Shipping application source in a production image is a security
+# property before it is a size one.
 #
 # TWO TREES, and the second one is the one that is easy to miss. `next build`
 # runs its own output file tracing and writes a SECOND copy of some packages
@@ -134,10 +146,14 @@ RUN set -eux; \
       true; \
     done; \
     rm -rf public/screenshots .next/standalone/public/screenshots; \
+    bash scripts/lib/prune-standalone-payload.sh .next/standalone; \
     ARCH="$(node -p 'process.arch')"; \
     test -f "node_modules/@duckdb/node-bindings-linux-${ARCH}-musl/libduckdb.so"; \
     test -d "node_modules/@img/sharp-libvips-linuxmusl-${ARCH}"; \
     test -f "node_modules/better-sqlite3/prebuilds/linuxmusl-${ARCH}.node"; \
+    test -f .next/standalone/server.js; \
+    test ! -e .next/standalone/src; \
+    test ! -e .next/standalone/Dockerfile.alpine; \
     echo "--- native payload surviving the prune ---"; \
     find node_modules .next/standalone/node_modules \( -name '*.node' -o -name '*.so' -o -name '*.so.*' \) | sort | xargs -r ls -lh | awk '{print $5, $9}'
 

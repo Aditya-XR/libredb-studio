@@ -128,6 +128,29 @@ describe("published image variants", () => {
     expect(dockerfile).toContain('ENV HOSTNAME=""');
   });
 
+  test.each(VARIANTS)("%s prunes the repo tree out of the payload it ships", (variant) => {
+    // Next's output file tracing sweeps the repository root into
+    // `.next/standalone`, which the runner unpacks onto /app, so without this
+    // step every image carries `src/`, `scripts/`, the lockfile, the tooling
+    // configs and its own Dockerfiles. Shipping application source in a
+    // production image is a security property before it is a size one, and the
+    // deny-list already exists for the release tarballs (issue #124) - the
+    // images invoke it rather than reimplementing it, so one list serves both
+    // artifact families.
+    const prunes = commands(readRepoFile(variant)).some((line) => line.includes("prune-standalone-payload.sh"));
+
+    expect(prunes).toBe(true);
+  });
+
+  test.each(VARIANTS)("%s drops the README artwork no running container serves", (variant) => {
+    // 4.4 MB of screenshots for the README and the marketing pages.
+    // src/app/layout.tsx points social previews at raw.githubusercontent.com, so
+    // nothing ever requests them from the app's own origin.
+    const drops = commands(readRepoFile(variant)).some((line) => /rm -rf[^;]*public\/screenshots/.test(line));
+
+    expect(drops).toBe(true);
+  });
+
   test.each(VARIANTS)("%s names no per-arch native package", (variant) => {
     // The deps stage installs only the package matching the build arch, so a
     // hardcoded platform name silently breaks the arm64 leg of the manifest.

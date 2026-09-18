@@ -302,9 +302,9 @@ for the same reason `latest` and `dev` do.
 | `-alpine-slim` | `Dockerfile.alpine-slim` | `alpine:3.23` with Alpine's own `nodejs` package | all except **DuckDB** | smallest; see the trade below |
 
 `-alpine-slim` trades features for size and is the only variant that does. It drops the DuckDB
-driver (four packages ending in a ~70 MB `libduckdb.so`), sharp/libvips, and the repo tree that
-output file tracing sweeps into `.next/standalone`; it runs Alpine's packaged Node rather than the
-official image's unstripped binary, which is the single largest saving. Opening a DuckDB connection
+driver (four packages ending in a ~70 MB `libduckdb.so`) and sharp/libvips, and it runs Alpine's
+packaged Node rather than the official image's unstripped binary, which is the single largest
+saving. Opening a DuckDB connection
 on it fails with a message naming the tags that do ship the driver, not a module-resolution stack.
 Its Node version follows Alpine's package index rather than a Dependabot-tracked pin, and Alpine
 ships English-only ICU data — safe here because every server-side locale call in `src` passes
@@ -312,6 +312,12 @@ ships English-only ICU data — safe here because every server-side locale call 
 
 Oracle **Thick** mode needs Oracle Instant Client, which has no musl build, so it is reachable on
 the default tag only — see [providers/oracle.md](providers/oracle.md).
+
+**All three prune the payload.** Next's output file tracing sweeps the repository root into
+`.next/standalone`, so every image used to unpack `src/`, `scripts/`, the lockfile and the tooling
+configs onto `/app`. Each Dockerfile now runs `scripts/lib/prune-standalone-payload.sh` in its
+builder stage — the same deny-list the release tarballs, `.deb`/`.rpm`, snap and the npx cache
+already share (#124) — so a new repo-root file leaves every artifact family through one edit.
 
 **Architectures:** every tag published from `main`, a release or a manual dispatch is a
 `linux/amd64` + `linux/arm64` manifest. Branch previews (`dev` and the `sha-` tag of a

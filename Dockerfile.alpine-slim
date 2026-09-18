@@ -15,10 +15,12 @@
 # convention the Docker ecosystem already teaches (node:slim, python:slim,
 # debian:*-slim) - same product, fewer parts - which is exactly this file.
 #
-# Measured with `docker save | gzip`, amd64, 2026-09-18, on builds of this
-# commit: 310 MB for the published Debian image, 128 MB for `-alpine`, 57 MB for
-# this file. (An earlier arm64 pass read 308 / 142 / 51; the 51 was a build that
-# also deleted Monaco's workers, which cost the product its editor - see below.)
+# Measured with `docker save | gzip`, amd64, 2026-09-18, building all three
+# files at this commit: 292 MB Debian, 125 MB `-alpine`, 57 MB this file. The
+# Debian number is 310 MB for the image published today, and the difference is
+# the payload prune all three now run rather than anything this variant does.
+# (An earlier arm64 pass read 308 / 142 / 51; the 51 was a build that also
+# deleted Monaco's workers, which cost the product its editor - see below.)
 # Every number in the comments here was measured on a real build rather than
 # estimated.
 #
@@ -40,16 +42,13 @@
 #      this image boots and renders /login with sharp absent. If a `<Image>` is
 #      ever added, THIS is the file that breaks - pair the removal with
 #      `images: { unoptimized: true }` in next.config.ts to make that loud.
-#   3. The repo tree itself (-11 MB raw). Next's output file tracing sweeps the
-#      repository root, so `.next/standalone` - and therefore every image built
-#      from it, the published Debian one included - carries `src/`, `scripts/`,
-#      `bun.lock`, the playwright/eslint/sonar configs and a stray `testdb`.
-#      That is issue #124, and this project already ships the fix:
-#      `scripts/lib/prune-standalone-payload.sh`, used by the release tarballs
-#      and never wired into a Dockerfile. It is invoked below rather than
-#      reimplemented, so one deny-list serves both artifact families. Shipping
-#      application source in a production image is a security property before it
-#      is a size one.
+#
+# NOT on this list any more: the repo tree (-11 MB raw). Next's output file
+# tracing sweeps the repository root into `.next/standalone`, and this variant
+# was the first to run `scripts/lib/prune-standalone-payload.sh` over it. All
+# three files run it now, so `src/`, `scripts/`, the lockfile and the tooling
+# configs are out of every image rather than out of the smallest one - it was
+# never a size trade, it is issue #124 closing for the container channel.
 #
 # WHAT IT DOES NOT GIVE UP: every other engine including Oracle Thin, the agent,
 # the embedded LibreDB store, the SQLite sample, RBAC, OIDC, and the
