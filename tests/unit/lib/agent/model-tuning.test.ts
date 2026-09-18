@@ -262,7 +262,9 @@ describe("what a document from outside Studio is held to instead", () => {
 
   test("an entry may state an empty sampling object for adaptive-thinking models", () => {
     const emptySampling = {
-      models: [{ id: "claude-sonnet-5", measured: "adaptive thinking; no sampling params", settings: { sampling: {} } }],
+      models: [
+        { id: "claude-sonnet-5", measured: "adaptive thinking; no sampling params", settings: { sampling: {} } },
+      ],
     };
     const tuning = parseOperatorTuning(document(emptySampling), "test");
     expect(tuning.models["claude-sonnet-5"]).toEqual({
