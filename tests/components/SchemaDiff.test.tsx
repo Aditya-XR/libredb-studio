@@ -931,10 +931,17 @@ describe("SchemaDiff", () => {
           fn!("conn:remote-1");
         });
 
-        expect(mockFetch).toHaveBeenCalledTimes(2);
+        // Four requests, not two: the panel reads the CURRENT schema when it opens (#884),
+        // which is the same pair. The two below are the remote selection's, picked out by the
+        // connection they name rather than by position, because the two reads interleave.
+        expect(mockFetch).toHaveBeenCalledTimes(4);
         const calls = mockFetch.mock.calls as unknown[][];
-        expect(calls[0][0]).toBe("/api/db/provider-meta");
-        const [url, options] = calls[1] as [string, RequestInit];
+        const forRemote = calls.filter(([, init]) =>
+          String((init as RequestInit | undefined)?.body ?? "").includes('"id":"remote-1"'),
+        );
+        expect(forRemote).toHaveLength(2);
+        expect(forRemote[0][0]).toBe("/api/db/provider-meta");
+        const [url, options] = forRemote[1] as [string, RequestInit];
         expect(url).toBe("/api/db/objects/inventory");
         const body = JSON.parse(options.body as string);
         expect(body.connection.id).toBe("remote-1");
@@ -947,6 +954,60 @@ describe("SchemaDiff", () => {
         expect(saved.schema).toEqual([
           { name: "users", kind: "table", path: ["public", "users"], columns: [], indexes: [], foreignKeys: [] },
         ]);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    test("Current Schema is read from the database, not from the prop", async () => {
+      // The prop is the copy the explorer last read. Compared against a snapshot taken
+      // before a DDL change, a stale copy answers "No differences found" for a change that
+      // really happened (#884). The remote side always read the database; this is the same
+      // read, for the side that says "current".
+      const origFetch = globalThis.fetch;
+      const mockFetch = mock((url: string) =>
+        Promise.resolve(
+          url.includes("provider-meta")
+            ? {
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    capabilities: {
+                      queryLanguage: "sql",
+                      objectKinds: [{ id: "table", role: "relation", label: "Table", labelPlural: "Tables" }],
+                    },
+                  }),
+              }
+            : {
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    // One object the stale prop does not carry: if the panel is reading the
+                    // prop, the diff below cannot see it.
+                    objects: [
+                      { name: "added_after_the_snapshot", kind: "table", path: ["public", "added_after_the_snapshot"] },
+                    ],
+                    details: [
+                      {
+                        path: ["public", "added_after_the_snapshot"],
+                        columns: [],
+                        indexes: [],
+                        foreignKeys: [],
+                      },
+                    ],
+                  }),
+              },
+        ),
+      );
+      globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+      try {
+        await act(async () => {
+          renderDiff();
+        });
+
+        const urls = (mockFetch.mock.calls as unknown[][]).map(([url]) => url);
+        expect(urls).toEqual(["/api/db/provider-meta", "/api/db/objects/inventory"]);
       } finally {
         globalThis.fetch = origFetch;
       }

@@ -1,7 +1,7 @@
 "use client";
 
 import { appFetch } from "@/lib/config/base-path";
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   GitCompare,
   Plus,
@@ -36,6 +36,47 @@ interface SchemaDiffProps {
   connection: DatabaseConnection | null;
 }
 
+/**
+ * Read one connection's objects from the database.
+ *
+ * Two reads of the object surface, where this used to be one call to
+ * `POST /api/db/schema-snapshot` (#789). That route read the flat schema, which no longer
+ * exists, and the two things it hand-rolled around that read are things `getOrCreateProvider`
+ * does for every object route already: it opens the SSH tunnel (#457), and it returns the
+ * handle this connection already holds rather than opening a second one, which is what #498
+ * needed on an engine that admits only one writer to its file.
+ *
+ * `provider-meta` decides which kinds are asked for, exactly as the object browser's own read
+ * does, and for the same measured reason: a diff is over relations, and asking for every
+ * declared kind would list routines and triggers this comparison cannot use.
+ *
+ * It sits outside the component because BOTH sides of a diff need it. The remote side always
+ * called it; the "Current Schema" side read a prop instead, so a diff taken right after a DDL
+ * change compared the database against a copy of itself from before the change and reported
+ * no differences (#884).
+ */
+async function readLiveSchema(conn: DatabaseConnection): Promise<DetailedObject[]> {
+  const payload = conn.managed && conn.seedId ? { connectionId: `seed:${conn.seedId}` } : { connection: conn };
+  const post = (path: string, body: unknown) =>
+    appFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const metaRes = await post("/api/db/provider-meta", payload);
+  const meta = await metaRes.json();
+  if (!metaRes.ok) throw new Error(meta.error);
+  const kinds = relationKindIds(meta.capabilities as ProviderCapabilities);
+  if (kinds.length === 0) throw new Error(`${conn.name} declares no object kinds a schema diff can compare`);
+
+  const res = await post("/api/db/objects/inventory", { ...payload, kinds, includeColumns: true });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+
+  return [...detailedObjects(data.objects ?? [], data.details ?? [])];
+}
+
 export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
   const [snapshots, setSnapshots] = useState<SchemaSnapshot[]>(() => storage.getSchemaSnapshots());
   const [sourceId, setSourceId] = useState<string>("current");
@@ -45,6 +86,42 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
   const [snapshotLabel, setSnapshotLabel] = useState("");
   const [showLabelInput, setShowLabelInput] = useState(false);
 
+  /**
+   * The objects the database holds right now, read when this panel opens.
+   *
+   * `schema` is the prop the explorer already had, and it is what "Current Schema" used to
+   * mean — so a diff taken right after a DDL change compared a copy of the schema from
+   * before the change and answered "No differences found" (#884). The panel is mounted when
+   * the user opens it, so reading here is the moment that matters for that sequence.
+   *
+   * `null` until the read lands, and the prop stands in meanwhile: an empty side would
+   * report every object as removed, which is worse than being briefly out of date.
+   */
+  const [liveSchema, setLiveSchema] = useState<readonly DetailedObject[] | null>(null);
+
+  useEffect(() => {
+    if (!connection) return;
+    let cancelled = false;
+    readLiveSchema(connection)
+      .then((objects) => {
+        if (!cancelled) setLiveSchema(objects);
+      })
+      .catch((err) => {
+        // The prop stays in use. Saying so in the log and not on screen is deliberate: the
+        // panel still works, it is just comparing against what the explorer last read.
+        logger.warn("Failed to read the current schema for a diff; falling back to the explorer's copy", {
+          route: "SchemaDiff",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connection]);
+
+  /** What "Current Schema" means on both sides of the diff, and in a new snapshot. */
+  const currentSchema = liveSchema ?? schema;
+
   // Take snapshot of current schema
   const takeSnapshot = useCallback(() => {
     if (!connection) return;
@@ -53,7 +130,9 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
       connectionId: connection.id,
       connectionName: connection.name,
       databaseType: connection.type,
-      schema: JSON.parse(JSON.stringify(schema)),
+      // The live read, not the prop: a snapshot taken from a stale copy is stale for as
+      // long as it is kept, and it is kept to be compared against later (#884).
+      schema: JSON.parse(JSON.stringify(currentSchema)),
       createdAt: new Date(),
       label: snapshotLabel.trim() || undefined,
     };
@@ -61,7 +140,7 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
     setSnapshots(storage.getSchemaSnapshots());
     setSnapshotLabel("");
     setShowLabelInput(false);
-  }, [schema, connection, snapshotLabel]);
+  }, [currentSchema, connection, snapshotLabel]);
 
   // Delete snapshot
   const deleteSnapshot = useCallback(
@@ -78,14 +157,16 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
   const diff = useMemo<SchemaDiffType | null>(() => {
     if (!targetId) return null;
 
-    const sourceSchema = sourceId === "current" ? schema : snapshots.find((s) => s.id === sourceId)?.schema || [];
+    const sourceSchema =
+      sourceId === "current" ? currentSchema : snapshots.find((s) => s.id === sourceId)?.schema || [];
 
-    const targetSchema = targetId === "current" ? schema : snapshots.find((s) => s.id === targetId)?.schema || [];
+    const targetSchema =
+      targetId === "current" ? currentSchema : snapshots.find((s) => s.id === targetId)?.schema || [];
 
     if (sourceId === targetId) return null;
 
     return diffSchemas(sourceSchema, targetSchema);
-  }, [sourceId, targetId, schema, snapshots]);
+  }, [sourceId, targetId, currentSchema, snapshots]);
 
   // Generate migration SQL
   const migrationSQL = useMemo(() => {
@@ -106,36 +187,7 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
 
       setFetchingRemote(true);
       try {
-        /*
-          Two reads of the object surface, where this used to be one call to
-          `POST /api/db/schema-snapshot` (#789). That route read the flat schema, which no longer
-          exists, and the two things it hand-rolled around that read are things
-          `getOrCreateProvider` does for every object route already: it opens the SSH tunnel
-          (#457), and it returns the handle this connection already holds rather than opening a
-          second one, which is what #498 needed on an engine that admits only one writer to its
-          file. So the route is deleted rather than ported.
-
-          `provider-meta` decides which kinds are asked for, exactly as the object browser's own
-          read does, and for the same measured reason: a diff is over relations, and asking for
-          every declared kind would list routines and triggers this comparison cannot use.
-        */
-        const payload = conn.managed && conn.seedId ? { connectionId: `seed:${conn.seedId}` } : { connection: conn };
-        const post = (path: string, body: unknown) =>
-          appFetch(path, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          });
-
-        const metaRes = await post("/api/db/provider-meta", payload);
-        const meta = await metaRes.json();
-        if (!metaRes.ok) throw new Error(meta.error);
-        const kinds = relationKindIds(meta.capabilities as ProviderCapabilities);
-        if (kinds.length === 0) throw new Error(`${conn.name} declares no object kinds a schema diff can compare`);
-
-        const res = await post("/api/db/objects/inventory", { ...payload, kinds, includeColumns: true });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
+        const objects = await readLiveSchema(conn);
 
         // Auto-save as snapshot
         const snapshot: SchemaSnapshot = {
@@ -143,7 +195,7 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
           connectionId: conn.id,
           connectionName: conn.name,
           databaseType: conn.type,
-          schema: [...detailedObjects(data.objects ?? [], data.details ?? [])],
+          schema: objects,
           createdAt: new Date(),
           label: `Live: ${conn.name}`,
         };
