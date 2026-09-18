@@ -107,7 +107,7 @@ bare `qwen3.8` does not find `qwen3.8:latest`. Write the tag you run.
 
 ## The settings
 
-Every one is optional. What you do not state resolves to the compiled default in the last column.
+Every one is optional. What you do not state resolves to the compiled default in the last column, with one exception: entry-level `sampling` is read as a complete statement, so a key left out of it does not fall back to the default (for example, `sampling: { temperature: 0 }` omits `topP`, and `sampling: {}` sends neither parameter).
 
 | setting | type and bounds | what it decides | default |
 | --- | --- | --- | --- |
