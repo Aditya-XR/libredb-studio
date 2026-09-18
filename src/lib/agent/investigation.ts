@@ -2392,8 +2392,8 @@ async function takeTurn(
     mode === "agent" ? suppressesAgentReasoning(agentModel.modelId) : suppressesPlanReasoning(agentModel.modelId);
   const stream = streamText({
     model: agentModel.model,
-    temperature: sampling.temperature,
-    topP: sampling.topP,
+    ...(sampling.temperature !== undefined ? { temperature: sampling.temperature } : {}),
+    ...(sampling.topP !== undefined ? { topP: sampling.topP } : {}),
     // Constrained decoding, where a shape was asked for. `Output.object` is what makes the
     // SDK send `response_format`, and it composes here precisely because this branch offers
     // no tools.

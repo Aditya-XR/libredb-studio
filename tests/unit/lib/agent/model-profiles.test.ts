@@ -1,19 +1,24 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AGENT_THREAD_CONTEXT_MAX_CHARS } from "@/lib/agent/execution-policy";
+import { resetTuning } from "@/lib/agent/model-tuning";
 import {
-  modelProfiles,
+  answersUnreadStop,
   ceilingFor,
+  modelProfiles,
+  planStatementRetriesFor,
   presentReminderLimitFor,
+  reportReminderLimitFor,
   retriesEmptyTurn,
   retriesUnreadStop,
-  answersUnreadStop,
-  turnTimeoutMsFor,
-  planStatementRetriesFor,
-  reportReminderLimitFor,
   samplingFor,
   threadContextMaxCharsFor,
+  turnTimeoutMsFor,
   verdictHoldLimitFor,
 } from "@/lib/agent/models";
-import { AGENT_THREAD_CONTEXT_MAX_CHARS } from "@/lib/agent/execution-policy";
+import { DEFAULT_SAMPLING } from "@/lib/agent/models/profile";
 import type { AgentRunWorkflowType } from "@/lib/agent/types";
 
 /**
@@ -43,6 +48,12 @@ const WORKFLOWS: readonly AgentRunWorkflowType[] = [
   "data-analysis",
 ];
 
+const writeDocument = (body: unknown): string => {
+  const path = join(mkdtempSync(join(tmpdir(), "libredb-tuning-")), "models.json");
+  writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
+  return path;
+};
+
 describe("sampling is decided per model, defaulting to deterministic", () => {
   test("a model nobody has measured gets the default, on every workflow", () => {
     for (const workflow of WORKFLOWS) {
@@ -54,7 +65,9 @@ describe("sampling is decided per model, defaulting to deterministic", () => {
     // A cell locks only at 5/5, so the bar is a variance test as much as a capability one,
     // and choosing a tool is a structural task with nothing for a sample to explore. This is
     // the setting that won five cells.
+    expect(DEFAULT_SAMPLING).toEqual({ temperature: 0, topP: 1 });
     expect(samplingFor("gemma4:26b", "database-assessment")).toEqual({ temperature: 0, topP: 1 });
+    expect(samplingFor("qwen3:8b", "database-assessment")).toEqual({ temperature: 0, topP: 1 });
   });
 
   test("qwen3:8b is sampled on query-optimization, and nowhere else", async () => {
@@ -64,8 +77,39 @@ describe("sampling is decided per model, defaulting to deterministic", () => {
       the override is scoped to the one cell that needs it rather than to the model.
     */
     expect(samplingFor("qwen3:8b", "query-optimization").temperature).toBeGreaterThan(0);
-    expect(samplingFor("qwen3:8b", "database-assessment")).toEqual({ temperature: 0, topP: 1 });
     expect(samplingFor("qwen3:8b", "investigation")).toEqual({ temperature: 0, topP: 1 });
+  });
+
+  test("samplingFor over an operator-supplied temperature-only entry resolves without topP", () => {
+    // Verified against Anthropic/Claude endpoint compatibility: sending both temperature and topP
+    // causes Claude models to reject with 400.
+    const path = writeDocument({
+      schemaVersion: 1,
+      models: [
+        { id: "claude-haiku-4-5", measured: "temp only", settings: { sampling: { temperature: 0 } } },
+        {
+          id: "claude-custom-workflow",
+          measured: "workflow with entry sampling",
+          settings: { sampling: { temperature: 0 }, perWorkflow: { investigation: { temperature: 0.5 } } },
+        },
+        {
+          id: "claude-per-workflow-only",
+          measured: "workflow only inherits default topP",
+          settings: { perWorkflow: { investigation: { temperature: 0.5 } } },
+        },
+      ],
+    });
+    process.env.AGENT_MODEL_TUNING_PATH = path;
+    resetTuning();
+    try {
+      expect(samplingFor("claude-haiku-4-5", "investigation")).toEqual({ temperature: 0 });
+      expect(samplingFor("claude-haiku-4-5", undefined)).toEqual({ temperature: 0 });
+      expect(samplingFor("claude-custom-workflow", "investigation")).toEqual({ temperature: 0.5 });
+      expect(samplingFor("claude-per-workflow-only", "investigation")).toEqual({ temperature: 0.5, topP: 1 });
+    } finally {
+      delete process.env.AGENT_MODEL_TUNING_PATH;
+      resetTuning();
+    }
   });
 
   test("a model id is matched case-insensitively, and its TAG is not stripped", () => {
