@@ -54,8 +54,13 @@ partner contact.
 > than a count, and check it by grepping `explainFormat:` under `src/lib/db/providers/` rather
 > than by trusting this line. Alongside it is the read-only agent rail
 > ([`docs/AGENT.md`](https://github.com/libredb/libredb-studio/blob/main/docs/AGENT.md)),
-> which executes statements on PostgreSQL and SQLite only (`queryReadOnly` exists on those
-> two providers alone) in a session the database enforces as read-only. "Executes nothing it
+> which executes statements on PostgreSQL, SQLite, DuckDB and SQL Server only (`queryReadOnly`
+> exists on those four providers alone), with the database and not the IDE refusing the write. Do
+> NOT write "in a read-only session": that is true of three of the four and false of SQL Server,
+> which has no read-only transaction and no session-level read-only switch, and bounds the run by
+> a principal verified at open to be unable to write plus an optimizer admission per statement
+> (`docs/providers/mssql.md`). "Never writes" is engine-independent and is the sentence to use.
+> "Executes nothing it
 > recommends" is an overclaim this product already rejected: the consented editor hand-over
 > runs exactly the recommended statement
 > (`src/app/api/agent/runs/[runId]/handover/route.ts` calls `queryReadOnly(answer.sql, …)`).
@@ -131,10 +136,10 @@ failed — Elasticsearch SQL has no mutation in its grammar at all, OpenSearch's
 mutation (`DELETE`) is off by default, and Druid SQL has no `UPDATE`, no `DELETE` and no
 `CREATE TABLE`. An optional AI assistant (bring your own key: Gemini, OpenAI, or a local
 model) writes up a query in plain English from the engine's own EXPLAIN plan, on
-PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid and Apache Trino —
-the engines that return one — and runs a read-only investigation agent on PostgreSQL,
-SQLite and DuckDB whose every claim cites the result it came from, and that never writes: the session
-is read-only and the database, not the IDE, refuses writes and DDL. It stays off unless
+PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid and Apache Trino,
+the engines that return one. It also runs a read-only investigation agent on PostgreSQL,
+SQLite, DuckDB and SQL Server whose every claim cites the result it came from, and that never writes:
+the database, not the IDE, is what refuses writes and DDL. It stays off unless
 configured.
 
 The Helm chart installs from the Rancher Apps catalog with default values: first-run
@@ -154,9 +159,9 @@ versions are documented and validated for every release.
   zero configuration required
 - Optional AI assistance (Gemini, OpenAI, or a self-hosted model; off by default):
   plain-English query explanation on the engines that return an EXPLAIN plan (PostgreSQL,
-  MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Apache Trino), and a
-  read-only investigation agent on PostgreSQL, SQLite and DuckDB that never writes — the database enforces
-  the read-only session, not the IDE
+  MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Apache Trino). Plus a
+  read-only investigation agent on PostgreSQL, SQLite, DuckDB and SQL Server that never writes — the
+  database, not the IDE, is what refuses the write
 - Hardened chart defaults: non-root, read-only root filesystem, NetworkPolicy, PDB,
   HPA, Ingress/TLS
 - Self-hosted and air-gap friendly: no external services required to operate the IDE

@@ -601,6 +601,25 @@ export interface ReadOnlyStatementBudget {
   maxResultBytes: number;
 }
 
+/**
+ * What the caller wants out of the one statement it is sending: the statement's own
+ * result, or the engine's ESTIMATE of how it would be run.
+ *
+ * It exists because an estimating plan is not the same KIND of thing on every engine.
+ * On PostgreSQL, SQLite and DuckDB it is a statement prefix, so the agent composes
+ * `EXPLAIN …` and the provider never has to know; on SQL Server there is no prefix and
+ * no `EXPLAIN` keyword at all: the estimating plan is a SESSION MODE
+ * (`SET SHOWPLAN_ALL ON`), which must be its own batch and must be turned off again on
+ * the same connection. A prefix cannot express that, and a private marker smuggled
+ * inside the statement text would be a protocol between two modules that nothing checks.
+ * So the caller says which of the two it wants, and each provider answers it the way
+ * its engine can.
+ *
+ * `"execute"` is the default everywhere, including for a provider that ignores the
+ * argument entirely: a provider written before this existed keeps its behaviour.
+ */
+export type ReadOnlyStatementMode = "execute" | "estimate-plan";
+
 export interface PreparedQuery {
   query: string;
   wasLimited: boolean;
@@ -706,7 +725,7 @@ export interface DatabaseProvider {
    * (`acquireExecutionProfileProvider` in factory.ts) refuses provider types
    * that lack it rather than falling back to `query()` (fail closed).
    */
-  queryReadOnly?(sql: string, budget: ReadOnlyStatementBudget): Promise<QueryResult>;
+  queryReadOnly?(sql: string, budget: ReadOnlyStatementBudget, mode?: ReadOnlyStatementMode): Promise<QueryResult>;
 
   /**
    * End a transaction that a statement run through `query()` left open on the session
@@ -1019,9 +1038,14 @@ export interface ProviderOptions {
 export interface ProviderExecutionContext {
   /**
    * Open the connection under the database's own read-only enforcement.
-   * Only providers whose read-only boundary is established at OPEN time read
-   * this (SQLite); PostgreSQL establishes it per transaction inside
-   * `queryReadOnly` instead, so its provider ignores the context.
+   *
+   * Every provider that implements `queryReadOnly` reads it, and what each one
+   * ESTABLISHES with it differs: SQLite and DuckDB open the file read-only, so the
+   * boundary is the handle; PostgreSQL and SQL Server open an ordinary connection and
+   * use the flag to (a) verify at connect that the session's own role or principal is
+   * least-privilege and (b) refuse `queryReadOnly` outright on a provider that was not
+   * opened this way, so agent semantics are never served without the layer that makes
+   * them true.
    */
   readOnly?: boolean;
 }

@@ -1168,7 +1168,7 @@ could arrive twice.
 { "error": "An agent run needs a server-resolvable connectionId; an inline connection cannot be resumed" }
 { "error": "previousRunId must be a non-empty string when provided" }
 {
-  "error": "Agent mode executes only where the provider implements a database-native read-only statement path — PostgreSQL and SQLite. On MySQL a run whose workflow sends a statement is refused when it is started, before a run is opened. The operations workflow still runs here, because it sends no statement at all: it calls the curated reporting methods every provider implements. Plan mode drafts on every engine.",
+  "error": "Agent mode executes only where the provider implements a database-native read-only statement path — PostgreSQL, SQLite, DuckDB and SQL Server. On MySQL a run whose workflow sends a statement is refused when it is started, before a run is opened. The operations workflow still runs here, because it sends no statement at all: it calls the curated reporting methods every provider implements. Plan mode drafts on every engine.",
   "refused": "engine-unsupported"
 }
 
@@ -1249,7 +1249,10 @@ correlation id. `410` when it does but the rows are gone:
 #### POST /api/agent/runs/{runId}/handover
 
 Runs the statement that run answered with, in the user's editor, under the **engine's own read-only
-boundary** — `BEGIN READ ONLY` on PostgreSQL, `PRAGMA query_only` on SQLite — at the editor's default
+boundary** — `BEGIN READ ONLY` on PostgreSQL, `PRAGMA query_only` on SQLite, a `READ_ONLY` engine
+handle plus an SQL-level guard on DuckDB, and on SQL Server a verified least-privilege principal, an
+optimizer admission that compiles the statement without running it, a server-side row bound and a
+transaction that is always rolled back — at the editor's default
 500-row limit and with no statement timeout. It exists because the alternative is the ordinary
 `POST /api/db/query`, a read-write session where a `SELECT` calling a VOLATILE function that writes
 succeeds; no inspection of the statement's text can tell the two apart.

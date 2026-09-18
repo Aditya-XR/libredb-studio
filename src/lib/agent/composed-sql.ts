@@ -38,10 +38,25 @@
  */
 
 import { quoteLiteral } from "@/lib/sql/values";
+import type { ReadOnlyStatementMode } from "@/lib/db/types";
 import type { DatabaseType } from "@/lib/types";
 
+/**
+ * An estimating plan request: the statement to send, and what the provider is being
+ * asked to do with it. See `ReadOnlyStatementMode` for why the second field exists.
+ */
+export interface AgentEstimatingExplain {
+  readonly sql: string;
+  readonly mode: ReadOnlyStatementMode;
+}
+
 export type AgentComposedSqlDenyCode =
-  /** This milestone has verified a composition for PostgreSQL and SQLite only. */
+  /**
+   * This dialect has no verified composition. `CATALOG_COMPOSERS` is the list, and it
+   * is the four engines of `AGENT_EXECUTION_ENGINES`: PostgreSQL, SQLite, DuckDB and
+   * SQL Server. Anything else is refused rather than served a statement nobody ran
+   * against that engine's catalog.
+   */
   | "UNSUPPORTED_DIALECT"
   /** Blank, over-long, or carrying a character that cannot be safely quoted. */
   | "INVALID_SELECTOR"
@@ -761,6 +776,171 @@ function composeDuckdbStatistics(selector: AgentCatalogSelector): string {
   );
 }
 
+// ─── SQL Server (T-SQL) ───────────────────────────────────────────────────
+
+/**
+ * The schemas a SQL Server grounding read must not treat as user data, and why the
+ * list is only two names long.
+ *
+ * `sys` and `INFORMATION_SCHEMA` can hold NOTHING a person wrote: `CREATE TABLE
+ * sys.probe` answers Msg 2760 on SQL Server 2022 CU26, measured. So excluding them by
+ * name excludes nothing a user could have created. The nine fixed-role schemas
+ * (`db_owner`, `db_datareader`, …) are NOT excluded here, and that is deliberate rather
+ * than an omission: the provider's schema listing drops them only when they are empty,
+ * because `CREATE TABLE db_owner.t` succeeds, and every read below already filters on
+ * `is_ms_shipped = 0`, which is the engine's own answer for "shipped with the product".
+ * A name list would have had to be right about nine schemas; this is right by
+ * construction.
+ */
+const MSSQL_SCHEMA_EXCLUSION = "s.name NOT IN ('sys', 'INFORMATION_SCHEMA')";
+
+/**
+ * The column inventory, ONE ROW PER OBJECT, symmetric with the PostgreSQL arm (B52).
+ *
+ * The per-object column list is built by a correlated `FOR JSON PATH` subquery rather
+ * than by `STRING_AGG`, because `FOR JSON` is the engine's own serialiser and quotes
+ * a column name containing a quote, a bracket or a newline correctly without this
+ * layer having to know how. Measured on AdventureWorks2022: 92 rows, and
+ * `Person.Person`'s list arrives as one `nvarchar(max)` value rather than split across
+ * rows: the 2033-character chunking `FOR JSON` does applies to a TOP-LEVEL `FOR JSON`
+ * query, not to one used as a scalar subquery.
+ *
+ * `o.type` is `char(2)` and arrives padded (`'U '`), so it is trimmed: the value rides
+ * along as this engine's own word for what the entry IS, the way `pg_class.relkind`
+ * does on PostgreSQL, and a trailing space would make `'U '` and `'U'` two kinds.
+ *
+ * `system_type_id` and NOT `user_type_id`, which is the obvious spelling and the wrong
+ * one. SQL Server ALIAS types are ordinary in a real schema and everywhere in this
+ * fixture: measured, `Person.PersonPhone.PhoneNumber` answers `Phone` for the alias and
+ * `nvarchar` for the base, and `Person.Person.FirstName` answers `Name` over `nvarchar`.
+ * Nothing downstream knows an alias: `table-profile.ts` decides which columns get a text
+ * SHAPE test and which are excluded from `count(DISTINCT …)` by matching this string
+ * against base-type spellings, so with the alias name `profile_table` emitted no shape
+ * test at all for `PhoneNumber` - the one column in that table the PII shapes exist to
+ * find - and an alias over `text` would have failed the whole table's profile. The base
+ * spelling is also the more useful of the two to a model writing SQL, which is what this
+ * inventory is for; the object browser reads its own catalog and still shows the alias.
+ *
+ * COALESCE'd, because `system_type_id` alone is NULL for the system CLR types. They all
+ * share id 240 and `TYPE_NAME(240)` answers NULL: measured, `Person.Address.SpatialLocation`
+ * answers NULL for the base and `geography` for the alias, and `Production.Document.DocumentNode`
+ * the same with `hierarchyid`. `FOR JSON PATH` omits a NULL property, so those columns would
+ * have reached the snapshot with NO type at all, and a column with no type matches none of
+ * `table-profile.ts`'s exclusions: `count(DISTINCT [SpatialLocation])` would then be composed
+ * and the whole table's profile would fail with Msg 8117, "Operand data type geography is
+ * invalid for count operator". So the base spelling where there is one, and the type's own
+ * name where the base is NULL.
+ *
+ * `sys.objects` rather than `INFORMATION_SCHEMA.TABLES`, for the reason the provider
+ * gives for its own reads: `INFORMATION_SCHEMA` is permission-filtered in a way that
+ * silently drops rows, and `is_ms_shipped` has no counterpart there at all.
+ */
+function composeMssqlCatalog(selector: AgentCatalogSelector): string {
+  return (
+    "SELECT s.name AS table_schema, o.name AS table_name, RTRIM(o.type) AS relkind, " +
+    "(SELECT c.name AS [name], COALESCE(TYPE_NAME(c.system_type_id), TYPE_NAME(c.user_type_id)) AS [type], " +
+    "CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END AS [nullable] " +
+    "FROM sys.columns c WHERE c.object_id = o.object_id ORDER BY c.column_id FOR JSON PATH) AS columns " +
+    "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id " +
+    `WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0 AND ${MSSQL_SCHEMA_EXCLUSION}` +
+    equalsClause("s.name", selector.schema, "schema", "mssql") +
+    equalsClause("o.name", selector.table, "table", "mssql") +
+    " ORDER BY s.name, o.name"
+  );
+}
+
+/**
+ * The foreign-key inventory, one row per KEY COLUMN PAIR.
+ *
+ * `sys.foreign_key_columns` and not `INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS`, and
+ * the reason is the same one that moved the PostgreSQL arm off `information_schema`:
+ * a composite key has to pair position with position. That view exposes no ordinal and
+ * the referencing and referenced column lists would come back as their cross-product;
+ * `sys.foreign_key_columns` carries `constraint_column_id` on the row itself, so
+ * position 1 of one side meets position 1 of the other and nothing else. It also
+ * carries both object ids, so two constraints sharing a name in different schemas are
+ * never matched to each other.
+ *
+ * Measured on AdventureWorks2022: 91 rows.
+ */
+function composeMssqlRelations(selector: AgentCatalogSelector): string {
+  return (
+    "SELECT s.name AS table_schema, o.name AS table_name, pc.name AS column_name, " +
+    "rs.name AS referenced_schema, ro.name AS referenced_table, rc.name AS referenced_column " +
+    "FROM sys.foreign_key_columns fkc " +
+    "JOIN sys.objects o ON o.object_id = fkc.parent_object_id " +
+    "JOIN sys.schemas s ON s.schema_id = o.schema_id " +
+    "JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id " +
+    "JOIN sys.objects ro ON ro.object_id = fkc.referenced_object_id " +
+    "JOIN sys.schemas rs ON rs.schema_id = ro.schema_id " +
+    "JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id " +
+    `WHERE o.is_ms_shipped = 0 AND ${MSSQL_SCHEMA_EXCLUSION}` +
+    equalsClause("s.name", selector.schema, "schema", "mssql") +
+    equalsClause("o.name", selector.table, "table", "mssql") +
+    " ORDER BY s.name, o.name, fkc.constraint_object_id, fkc.constraint_column_id"
+  );
+}
+
+/**
+ * The index inventory, one row per indexed KEY POSITION.
+ *
+ * `i.type <> 0` drops the heap, which is `sys.indexes`' row for a table that has no
+ * clustered index and is not an index at all. `ic.is_included_column = 0` keeps a
+ * covering index's INCLUDE columns out of its key list. The PostgreSQL arm cannot make
+ * that distinction on older servers and documents the resulting imprecision; SQL Server
+ * publishes it on every supported version, so this arm is exact.
+ *
+ * Measured on AdventureWorks2022, with no selector: 228 rows, one per (index, key column)
+ * pair across the database's user tables and views. It is a count of KEY POSITIONS and not
+ * of indexes: an index on two columns contributes two rows.
+ */
+function composeMssqlIndexes(selector: AgentCatalogSelector): string {
+  return (
+    "SELECT s.name AS table_schema, o.name AS table_name, i.name AS index_name, " +
+    "i.is_unique AS is_unique, i.is_primary_key AS is_primary, c.name AS column_name " +
+    "FROM sys.indexes i " +
+    "JOIN sys.objects o ON o.object_id = i.object_id " +
+    "JOIN sys.schemas s ON s.schema_id = o.schema_id " +
+    "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id " +
+    "JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id " +
+    `WHERE i.type <> 0 AND ic.is_included_column = 0 AND o.is_ms_shipped = 0 AND ${MSSQL_SCHEMA_EXCLUSION}` +
+    equalsClause("s.name", selector.schema, "schema", "mssql") +
+    equalsClause("o.name", selector.table, "table", "mssql") +
+    " ORDER BY s.name, o.name, i.name, ic.key_ordinal"
+  );
+}
+
+/**
+ * The statistics inventory: one row per table, carrying the engine's own row estimate.
+ *
+ * `sys.partitions.rows` for `index_id IN (0, 1)` is the heap's or the clustered index's
+ * row count, which is what SQL Server itself reports as a table's size and what the
+ * optimizer's estimates are built from. It is summed because a PARTITIONED table has
+ * one such row per partition, and reporting the first would understate every partitioned
+ * table by however many partitions it has.
+ *
+ * It carries the TABLE half and says nothing about columns, the same shape the SQLite
+ * and DuckDB arms produce and the reason `AgentTableEstimate.columns` is allowed to be
+ * empty. SQL Server does publish per-column distributions, but only through `DBCC
+ * SHOW_STATISTICS`, which is a DBCC command rather than a read and would be refused by
+ * the admission step and by the shared statement guard alike.
+ *
+ * Nothing here scans: it is a catalog read like every other statistics composition,
+ * which is what lets a plan run be pointed at production. Measured on
+ * AdventureWorks2022: 72 rows.
+ */
+function composeMssqlStatistics(selector: AgentCatalogSelector): string {
+  return (
+    "SELECT s.name AS table_schema, o.name AS table_name, SUM(p.rows) AS estimated_rows " +
+    "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id " +
+    "JOIN sys.partitions p ON p.object_id = o.object_id AND p.index_id IN (0, 1) " +
+    `WHERE o.type = 'U' AND o.is_ms_shipped = 0 AND ${MSSQL_SCHEMA_EXCLUSION}` +
+    equalsClause("s.name", selector.schema, "schema", "mssql") +
+    equalsClause("o.name", selector.table, "table", "mssql") +
+    " GROUP BY s.name, o.name ORDER BY s.name, o.name"
+  );
+}
+
 /**
  * Per dialect, per kind. SQLite's relation read IS its object read: foreign keys
  * are declared inside `CREATE TABLE` and the only structured alternative
@@ -768,7 +948,12 @@ function composeDuckdbStatistics(selector: AgentCatalogSelector): string {
  * both and the DDL text is parsed for the edges.
  *
  * EVERY ENGINE IN `AGENT_EXECUTION_ENGINES` MUST HAVE AN ENTRY HERE, and
- * `tests/unit/lib/agent/engine-support.test.ts` fails if one does not. An engine that
+ * `tests/unit/lib/agent/composed-sql.test.ts` fails if one does not: it walks that list
+ * and demands all four kinds plus an estimating plan for each name in it. The invariant was
+ * asserted in this docblock long before anything enforced it, and it named the wrong file:
+ * `engine-support.test.ts` compares the engine list against the DRIVERS and has never read
+ * this map, so a fourth engine could have been added to the list with no composer and every
+ * gate would have passed. An engine that
  * reaches the factory's read-only gate but no composer is an engine on which
  * `inspect_schema`, `profile_table` and `inspect_plan` can only ever refuse — which is
  * how DuckDB shipped into `AGENT_EXECUTION_ENGINES`: `POST /api/agent/runs` accepted
@@ -795,6 +980,12 @@ const CATALOG_COMPOSERS: Partial<
     relations: composeDuckdbRelations,
     indexes: composeDuckdbIndexes,
     statistics: composeDuckdbStatistics,
+  },
+  mssql: {
+    columns: composeMssqlCatalog,
+    relations: composeMssqlRelations,
+    indexes: composeMssqlIndexes,
+    statistics: composeMssqlStatistics,
   },
 };
 
@@ -843,6 +1034,23 @@ const ESTIMATING_EXPLAIN_PREFIX: Partial<Record<DatabaseType, string>> = {
 };
 
 /**
+ * The engines whose estimating plan is a SESSION MODE rather than a statement prefix,
+ * and which therefore compose no prefix at all.
+ *
+ * SQL Server is the only one, and it is not an oversight of its dialect: T-SQL has no
+ * `EXPLAIN` keyword. Its estimating plan is `SET SHOWPLAN_ALL ON`, which must be the
+ * only statement in its batch and has to be turned off again on the SAME connection,
+ * neither of which a prefix can say. So the statement travels unchanged and the MODE
+ * says what to do with it (`ReadOnlyStatementMode`), which is a contract the provider
+ * layer already has to honour rather than a marker hidden in the text.
+ *
+ * Kept as a separate set rather than as a sentinel VALUE in the map above, so that the
+ * refusal below still means what it says: a dialect absent from BOTH is a dialect whose
+ * estimating plan nobody has verified, and it is refused rather than guessed at.
+ */
+const ESTIMATING_EXPLAIN_SESSION_MODE: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mssql"]);
+
+/**
  * The catalog statement for this dialect and selector.
  *
  * The result is a bounded read like any other: it carries no LIMIT, so a schema
@@ -875,10 +1083,13 @@ export function composeCatalogRead(dialect: DatabaseType, selector: AgentCatalog
  * and letting the guard refuse it is deliberate — one place decides what a
  * statement may be.
  */
-export function composeEstimatingExplain(dialect: DatabaseType, sql: string): string {
+export function composeEstimatingExplain(dialect: DatabaseType, sql: string): AgentEstimatingExplain {
   const statement = typeof sql === "string" ? sql.trim() : "";
   if (statement.length === 0) {
     throw new AgentComposedSqlError("there is no statement to explain", "INVALID_STATEMENT");
+  }
+  if (ESTIMATING_EXPLAIN_SESSION_MODE.has(dialect)) {
+    return { sql: withoutEstimatingPrefix(statement), mode: "estimate-plan" };
   }
   if (!Object.hasOwn(ESTIMATING_EXPLAIN_PREFIX, dialect)) {
     throw new AgentComposedSqlError(
@@ -886,7 +1097,7 @@ export function composeEstimatingExplain(dialect: DatabaseType, sql: string): st
       "UNSUPPORTED_DIALECT",
     );
   }
-  return `${ESTIMATING_EXPLAIN_PREFIX[dialect]} ${withoutEstimatingPrefix(statement)}`;
+  return { sql: `${ESTIMATING_EXPLAIN_PREFIX[dialect]} ${withoutEstimatingPrefix(statement)}`, mode: "execute" };
 }
 
 /**

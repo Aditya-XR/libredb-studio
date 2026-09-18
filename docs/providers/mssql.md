@@ -87,7 +87,7 @@ default (SQL Server 2022+ and the `mssql` v12 driver require encryption), and
 `trustServerCertificate = !isAzure` — i.e. for **non-Azure** hosts it encrypts but **trusts a
 self-signed certificate** (so on-prem dev servers connect without a CA), while **Azure**
 (`*.database.windows.net`) validates the certificate. See [§4.3](#43-encryption--ssl) for the
-explicit-`ssl` overrides and the [security caveat](#14-known-limitations--future-work).
+explicit-`ssl` overrides and the [security caveat](#15-known-limitations--future-work).
 
 ### 3.2 T-SQL pagination: `TOP` and `OFFSET … FETCH`
 
@@ -296,7 +296,7 @@ not deliver the CA pinning their names promise. Pinned by
 `tests/integration/db/mssql-provider.test.ts` ("the TLS options handed to tedious"), so a future
 mode cannot fall through to the trusting branch unnoticed.
 
-See the [non-Azure trust caveat](#14-known-limitations--future-work).
+See the [non-Azure trust caveat](#15-known-limitations--future-work).
 
 ### 4.4 Connection-string nuance ⚠️
 
@@ -1015,16 +1015,16 @@ in parallel. Each sub-query is independently privilege-guarded (DMVs need `VIEW 
 
 | Method | Primary source | Notes |
 |--------|----------------|-------|
-| `getHealth()` | `dm_exec_sessions`, `database_files`, `dm_os_performance_counters`, `dm_exec_query_stats` | connections (**omitted**, never `0`, when the DMV is denied — [§7.2](#72-when-the-connection-count-is-not-measurable)), size, buffer-cache-hit % (`N/A`, never `0%`, when unreadable — [§7.1](#71-when-the-cache-hit-ratio-is-not-measurable)), top-5 slow queries, 10 sessions; each block guarded → absent/`N/A`/`[]` |
-| `getOverview()` | `@@VERSION`, `dm_os_sys_info`, `dm_exec_sessions`, `sys.configurations`, `database_files`, `sys.tables`/`indexes` | `user connections = 0` → reported as 32767 (unlimited); `databaseSizeBytes` is **omitted** and `databaseSize` stays `N/A`, never a `0`, when the size statement fails — [§7.3](#73-when-the-database-size-is-not-measurable) |
-| `getPerformanceMetrics()` | `dm_os_performance_counters` | **only** the cache-hit ratio, and it is **omitted** when the DMV cannot be read (no QPS/deadlocks/buffer-pool) — [§7.1](#71-when-the-cache-hit-ratio-is-not-measurable) |
+| `getHealth()` | `dm_exec_sessions`, `database_files`, `dm_os_performance_counters`, `dm_exec_query_stats` | connections (**omitted**, never `0`, when the DMV is denied — [§8.2](#82-when-the-connection-count-is-not-measurable)), size, buffer-cache-hit % (`N/A`, never `0%`, when unreadable — [§8.1](#81-when-the-cache-hit-ratio-is-not-measurable)), top-5 slow queries, 10 sessions; each block guarded → absent/`N/A`/`[]` |
+| `getOverview()` | `@@VERSION`, `dm_os_sys_info`, `dm_exec_sessions`, `sys.configurations`, `database_files`, `sys.tables`/`indexes` | `user connections = 0` → reported as 32767 (unlimited); `databaseSizeBytes` is **omitted** and `databaseSize` stays `N/A`, never a `0`, when the size statement fails — [§8.3](#83-when-the-database-size-is-not-measurable) |
+| `getPerformanceMetrics()` | `dm_os_performance_counters` | **only** the cache-hit ratio, and it is **omitted** when the DMV cannot be read (no QPS/deadlocks/buffer-pool) — [§8.1](#81-when-the-cache-hit-ratio-is-not-measurable) |
 | `getSlowQueries()` | `dm_exec_query_stats` ⋈ `dm_exec_sql_text` | `sharedBlksHit`=logical reads, `sharedBlksRead`=physical reads; `[]` on failure |
 | `getActiveSessions()` | `dm_exec_sessions` ⋈ `dm_exec_requests` ⋈ `dm_exec_sql_text` | **`blocked` is real** (`blocking_session_id > 0`); wait types; `[]` on failure |
 | `getTableStats()` | `sys.tables`/`partitions`/`allocation_units` | sizes + `lastAnalyze` (`STATS_DATE`); no live/dead tuples; `[]` on failure |
 | `getIndexStats()` | `sys.indexes`/`allocation_units` + `dm_db_index_usage_stats` | **`scans` is real** (seeks+scans+lookups); `[]` on failure |
 | `getStorageStats()` | `sys.database_files` | per-file name/path/size; `[]` on failure |
 
-### 7.1 When the cache hit ratio is not measurable
+### 8.1 When the cache hit ratio is not measurable
 
 Two states, both ordinary:
 
@@ -1065,7 +1065,7 @@ Postgres/Oracle/MySQL report `blocked: false`). For **index scan counts** it joi
 `dm_db_index_usage_stats` — real usage data, the same calibre as Postgres's `pg_stat_user_indexes.idx_scan`
 (whereas Oracle reports `0` and MySQL substitutes `CARDINALITY`).
 
-### 7.2 When the connection count is not measurable
+### 8.2 When the connection count is not measurable
 
 `sys.dm_exec_sessions` is server-scoped, so reading every session needs the server-state grant, and
 which grant that is depends on the version. Microsoft's reference for the view states it directly:
@@ -1079,10 +1079,10 @@ be granted in `master`
 ([GRANT Server Permissions](https://learn.microsoft.com/en-us/sql/t-sql/statements/grant-server-permissions-transact-sql)),
 so granting it still works, and it is the coarser choice.
 
-On SQL Server 2022 CU26 - the instance the §7.1 refusal was measured on 2026-08-23, against a login
+On SQL Server 2022 CU26 - the instance the §8.1 refusal was measured on 2026-08-23, against a login
 with nothing beyond `CONNECT` - that makes the session DMV's requirement the **same** permission as
 the performance-counter DMV's, not a sibling. The refusal shape we measured there
-([§7.1](#71-when-the-cache-hit-ratio-is-not-measurable)) is therefore what a denied session count
+([§8.1](#81-when-the-cache-hit-ratio-is-not-measurable)) is therefore what a denied session count
 looks like too:
 
 ```
@@ -1179,7 +1179,7 @@ A count that really is `0` - an instance with no user sessions - is a reading an
 in `getOverview()` as in `getHealth()`.
 The absence is spelled `measuredNumber(...)` plus a conditional spread, never `|| undefined`.
 
-### 7.3 When the database size is not measurable
+### 8.3 When the database size is not measurable
 
 `getOverview()` sizes the database with one statement over a **database-scoped catalog view**:
 
@@ -1187,8 +1187,8 @@ The absence is spelled `measuredNumber(...)` plus a conditional spread, never `|
 SELECT SUM(CAST(size AS BIGINT)) * 8 * 1024 AS size_bytes FROM sys.database_files
 ```
 
-That is a different story from [§7.1](#71-when-the-cache-hit-ratio-is-not-measurable) and
-[§7.2](#72-when-the-connection-count-is-not-measurable), and the difference is the point.
+That is a different story from [§8.1](#81-when-the-cache-hit-ratio-is-not-measurable) and
+[§8.2](#82-when-the-connection-count-is-not-measurable), and the difference is the point.
 `sys.database_files` is a catalog view scoped to the connected database
 ([sys.database_files](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-database-files-transact-sql)),
 not one of the server-scoped DMVs those sections turn on, so the `Msg 300` refusal measured there is
@@ -1282,7 +1282,7 @@ render those words and send an operation SQL Server declares (#496).
 | Capability | Value |
 |------------|-------|
 | `queryLanguage` | `sql` |
-| `supportsExplain` | **`false`** (intentionally disabled — see [Known limitations](#14-known-limitations--future-work)) |
+| `supportsExplain` | **`false`** (the editor's Explain action only; the agent's estimating plan is [§12.2](#122-admission-by-the-optimizer-which-executes-nothing), see [Known limitations](#15-known-limitations--future-work)) |
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `supportsCreateTable` | `true` (from base) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core T-SQL DML |
@@ -1330,9 +1330,259 @@ though it's driver-enforced rather than server-side — an overrunning query gen
 
 ---
 
-## 12. Testing
+## 12. Agent read-only execution profile (#328)
 
-### 12.1 How the tests work
+The agent programme (epic #325) never talks to the shared, writable provider.
+It acquires a **dedicated provider keyed by (connection id, execution profile)** via
+`acquireExecutionProfileProvider` ([factory.ts](../../src/lib/db/factory.ts)) and runs every statement
+through `queryReadOnly()` ([`mssql.ts`](../../src/lib/db/providers/sql/mssql.ts)).
+See [postgres.md §12](./postgres.md#12-agent-read-only-execution-profile-328) for the acquisition,
+credential and caching rules, which are provider-independent; this section is the SQL Server half.
+
+Everything below was measured on **SQL Server 2022 (RTM-CU26) 16.0.4265.3** against AdventureWorks2022
+(71 tables, about 760,000 rows) through `mssql` 12.7.2 / tedious 20.3.0, as the login and user
+`libredb_agent` holding exactly the grants in [§12.1](#121-the-principal-is-the-first-layer-because-there-is-no-read-only-transaction).
+
+### 12.1 The principal is the first layer, because there is no read-only transaction
+
+PostgreSQL opens `BEGIN READ ONLY` and the transaction itself refuses the write, with the
+least-privilege role as the backstop.
+SQL Server has neither half of that: there is no `BEGIN TRANSACTION READ ONLY` and no session-level
+read-only switch of any kind.
+So the ordering inverts here, and the principal's permissions are the FIRST layer rather than the
+backstop, which is what makes verifying the principal load-bearing rather than advisory.
+
+Measured as `libredb_agent`, every one of these was refused by the server with no help from this
+provider: `INSERT` / `UPDATE` / `DELETE` (Msg 229), `CREATE TABLE` (Msg 262), `DROP` (Msg 3701),
+`xp_cmdshell`, `sp_OACreate`, `OPENROWSET(BULK …)`, `sp_execute_external_script`, `xp_regread`,
+`sp_configure` + `RECONFIGURE`, `EXECUTE AS`, `ALTER SERVER ROLE`, and every read of another user
+database.
+`sa` is the positive control on the same instance and the same statements: it did all of them.
+
+The principal a target needs, and nothing beyond it:
+
+```sql
+CREATE LOGIN libredb_agent WITH PASSWORD = '<secret>';
+USE <database>;
+CREATE USER libredb_agent FOR LOGIN libredb_agent;   -- CONNECT comes with the user
+ALTER ROLE db_datareader ADD MEMBER libredb_agent;
+GRANT VIEW DEFINITION TO libredb_agent;              -- the catalog reads
+GRANT VIEW DATABASE STATE TO libredb_agent;          -- the DMV reads
+GRANT SHOWPLAN TO libredb_agent;                     -- the admission step in §12.2
+-- Grant nothing else. In particular do NOT add this principal to sysadmin,
+-- securityadmin, serveradmin, setupadmin, processadmin, diskadmin, dbcreator,
+-- bulkadmin, db_owner, db_accessadmin, db_securityadmin, db_ddladmin,
+-- db_backupoperator or db_datawriter, and do not grant it CONTROL SERVER or
+-- ADMINISTER BULK OPERATIONS.
+```
+
+The last three grants are not tidiness: measured, a user whose only membership is `db_datareader`
+answers `0` to `HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'SHOWPLAN')` and `0` to the same call for
+`VIEW DEFINITION`, so a reader-only principal cannot run this profile's own admission step and cannot
+read a module's text.
+
+**What the profile refuses at open.** `connect()` runs one statement (`AGENT_PRINCIPAL_SQL`) and
+`assertAgentPrincipalIsUnprivileged` refuses the provider unless all sixteen forbidden answers read
+back `0` and `showplan` reads back `1`.
+The refusal is an `ExecutionProfileError` carrying `PROFILE_PRIVILEGES_TOO_BROAD`
+([errors.ts](../../src/lib/db/errors.ts)), named so the message says which privilege was held, and
+`connect()` deliberately does not wrap it into a generic `ConnectionError`: a caller branches on the
+code, never on a message.
+**`sa` is refused**, because it holds `sysadmin`, which is the whole point of the check: an admin can
+point `agentUser` at a privileged login exactly as easily as a connection's own user can already be
+one.
+
+Every forbidden answer is read fail-closed, `ISNULL(…, 1)`, and `SHOWPLAN` fail-closed the other way,
+`ISNULL(…, 0)`.
+`IS_SRVROLEMEMBER` and `IS_ROLEMEMBER` answer NULL rather than `0` for a principal or a role name the
+server cannot resolve, measured, so a typo in that list, or a contained-database user whose server
+principal cannot be resolved, reads as HELD and the profile is refused.
+The probe runs once, at open, so a principal granted new privileges afterwards keeps serving from the
+already-verified pool until the idle sweep or `removeProvider` evicts it, the same property the
+PostgreSQL role probe has.
+
+Impersonation was considered as the boundary and rejected on a measurement:
+`EXEC sp_executesql N'REVERT; …'` escapes an `EXECUTE AS` sandbox, with the session context going from
+the sandbox user to `dbo`, while `EXEC('…')` does not.
+That is also why the admission allowlist below refuses `EXECUTE PROC` and `EXECUTE STRING` rather than
+reasoning about what a procedure might contain.
+
+### 12.2 Admission by the optimizer, which executes nothing
+
+PostgreSQL gets its single-statement rule from the extended query protocol, where the server refuses a
+multi-command string in a Parse message.
+T-SQL has no such refusal and no `EXPLAIN` keyword either, so the rule is asked of the optimizer:
+`SET SHOWPLAN_ALL ON` makes SQL Server compile the batch and return one row per plan node instead of
+running it (`admitReadStatement`).
+Measured: a `DROP TABLE` sent under that mode left the table in place.
+
+The rows whose `Parent` is `0` are the batch's ROOT rows, and **statements are counted by DISTINCT
+`StmtId` among them, never by root count** (`assertSingleReadStatement`).
+The difference is measured rather than defensive: `SELECT TOP 5 * FROM dbo.ufnGetContactInformation(1)`
+compiles to TWO roots, a `SELECT` and a `TEXT` row reading `UDF: [db].[dbo].[fn]` whose children are the
+multi-statement function's own body, and BOTH carry `StmtId` 1, so it is one statement and is admitted.
+The same read with `; EXEC master.dbo.xp_cmdshell 'id'` appended carries ids 1 and 12, so it is refused.
+A `TEXT` root is therefore admissible only alongside an admitted statement of the same id, never as one
+in its own right.
+
+| Compiles to | Admitted | Measured on |
+|---|---|---|
+| `SELECT` | Yes | `SELECT TOP 1 …`, and `WITH cte AS (…) SELECT … ORDER BY …`, which is ONE root and not one per CTE |
+| `SELECT WITHOUT QUERY` | Yes | `SELECT 1`, a SELECT with no table reference |
+| `JSON SELECT` / `XML SELECT` | No, and the refusal names the clause | `… FOR JSON PATH` / `… FOR XML PATH` |
+| `TEXT` | Only beside an admitted statement of the same `StmtId` | the inlined body of a multi-statement table-valued function |
+| `INSERT` / `UPDATE` / `DELETE` | No | the statements of those names |
+| `SELECT INTO` | No | `SELECT … INTO t` |
+| `CREATE TABLE` | No | `CREATE TABLE t (…)` |
+| `EXECUTE PROC` | No | `EXEC sp_executesql N'…'` |
+| `EXECUTE STRING` | No | `EXEC('…')` |
+| `COMMIT TRANSACTION` | No | `SELECT 1; COMMIT; SELECT 2`, which compiles to three roots and three `StmtId`s |
+
+A serialised read is the one refusal on that list that is not about what the statement DOES.
+`FOR JSON` and `FOR XML` are pure reads, and they were admitted for exactly that reason until the row
+bound below was measured against them: the clause turns the rows a statement produced into ONE result
+row, so `SET ROWCOUNT` cuts the rows UNDERNEATH the serialiser and the document that comes back is
+complete-looking and short.
+Measured with the budget's 200-row cap, `SELECT TOP 5000 SalesOrderID, OrderQty FROM
+Sales.SalesOrderDetail FOR JSON PATH` returned one row of well-formed JSON holding 201 objects, and the
+`FOR XML PATH` form returned 201 `<row>` elements.
+Both parse, and neither budget check can fire, because the result really is one row and 7 KB.
+A model handed that document reports 201 where the answer is 5000, and nothing anywhere says otherwise,
+so the refusal names the clause and tells it to ask for the rows instead.
+
+It is an allowlist rather than a denylist because that right-hand column is what "everything else"
+turned out to be, and a denylist would still have been wrong about the next one.
+
+One measured caveat is left standing deliberately: a `DECLARE` compiles to NO root row at all, so root
+rows are not a complete statement inventory.
+It is harmless here, because every statement class that DOES anything emits a root of its own, and
+anything past a terminator is refused before it reaches this provider by the shared statement guard
+([statement-guard.ts](../../src/lib/db/operations/statement-guard.ts)) with `MULTIPLE_STATEMENTS`.
+
+Two things follow the admission on the same connection.
+`assertPlanModeIsOff` sends `SELECT 1 AS libredb_plan_mode_probe` and refuses unless the session answers
+with that row: a connection still in plan mode answers every statement with optimizer rows, and a
+caller cannot tell, because a plan IS a result set.
+And when the caller asked for `mode: "estimate-plan"` ([types.ts](../../src/lib/db/types.ts)) the
+admission's own plan rows ARE the answer, so the plan a caller reads is the plan that admitted the
+statement rather than a second compilation of it.
+
+That mode is how the agent's plan reading reaches this engine at all.
+`composeEstimatingExplain` ([composed-sql.ts](../../src/lib/agent/composed-sql.ts)) hands every other
+dialect a prefix and hands this one the statement unchanged with the MODE set, because `SET SHOWPLAN_ALL
+ON` must be the only statement in its batch and has to be turned off again on the same connection, and a
+prefix can say neither.
+
+### 12.3 The row bound is the server's, and the deadline is this provider's
+
+`SET ROWCOUNT` is set to ONE MORE than the budget allows before the statement is sent, so the server
+stops the result there and the extra row is what distinguishes "the statement returned exactly the
+budget" from "the server cut it off".
+
+That is not post-hoc caution, and the measurement is why: without it, one 20-million-row cross join
+took the Node process down with an **out-of-memory crash** before any result-side cap could look at the
+rows, and `requestTimeout` did not prevent it.
+With `SET ROWCOUNT 1001` the same statement returned 1001 rows in 6 ms.
+
+`requestTimeout` cannot be the deadline either, for the reason that crash exposed: tedious stops the
+request timer on the first data packet (`connection.js`, "request timer is stopped on first data
+package"), so it bounds time-to-FIRST-ROW and not statement time.
+Measured, a 20-million-row read whose first row arrived in 4 ms ran for 9564 ms against a 3000 ms budget
+and was never cancelled.
+So `runWithDeadline` owns its own timer and calls `request.cancel()`, which does end the request
+server-side: measured, the SPID held no running request afterwards, the rollback then succeeded and the
+connection stayed reusable.
+The rejection is AWAITED rather than raced, because `rollback()` called with a request still in flight
+throws "There is a request in progress", leaves the transaction OPEN and does not stop the statement.
+A rollback on a transaction the server has already aborted also throws, with `@@TRANCOUNT` already `0`,
+so that throw is swallowed.
+
+Two more session settings ride with the statement, and neither is a result bound.
+`SET LOCK_TIMEOUT` at the statement budget bounds WAITING for a lock (error 1222), and
+`SET DEADLOCK_PRIORITY LOW` makes this session the victim when the agent's read deadlocks with a user's
+write.
+Neither bounds HOLDING a lock, which a `SELECT` can do without writing anything, and the admission step
+cannot see it: `SELECT TOP 1 … WITH (TABLOCKX, HOLDLOCK)` compiles to ONE root of type `SELECT`, and
+executing it took twenty `X` object locks and blocked an independent writer for the life of the
+transaction, against a control of 30 ms for the same UPDATE with no lock held and 2523 ms with it.
+No isolation level refuses the hint, `SNAPSHOT` and `READ COMMITTED` both measured, so the T-SQL locking
+hints are refused by the shared statement guard beside PostgreSQL's `LOCK`.
+
+The same guard refuses `NOLOCK`, `READUNCOMMITTED` and `READPAST`, which are the opposite kind of hint
+and are refused for the opposite reason.
+They take FEWER locks, so they harm no other session; what they cost is the answer.
+Measured against a second session holding an uncommitted `UPDATE`, `WITH (NOLOCK)` and
+`WITH (READUNCOMMITTED)` both returned the value of a transaction that then rolled back, and
+`WITH (READPAST)` answered `count(*) = 2` over three committed rows, short by the locked one and with no
+error.
+A run's claims cite the result they came from and the report states those numbers as facts about the
+database, so a read whose number no citation can vouch for is refused rather than reported on: the same
+class as the `FOR JSON` refusal above, a wrong answer nothing downstream can tell from a right one.
+The control is what makes that cheap: the same read with no hint is bounded by the `SET LOCK_TIMEOUT`
+this profile already issues, measured as error 1222 after 1.5 s on a database with read-committed
+snapshot OFF, and where it is ON, as the fixture database is, the read does not wait at all.
+
+Finally, the whole call runs inside a `mssql.Transaction`, which pins ONE pooled connection for its
+duration, and it is always rolled back and never committed.
+SQL Server rolls DDL back too, so anything transactional that reached the server anyway is undone.
+
+### 12.4 Every session mode leaks, so a failed reset ends the pool
+
+`SET SHOWPLAN_ALL`, `SET ROWCOUNT` and `SET LOCK_TIMEOUT` all **survive the ROLLBACK** and reach the next
+borrower of the pooled connection, because node-mssql validates a connection without resetting its
+session (the same `_poolValidate` behaviour [§6.1](#61-endopenquerytransaction-is-not-implemented-here-because-the-driver-cannot-be-asked)
+records for an open transaction).
+Measured: after a rollback, the next borrow of that connection returned plan rows (`StmtText`, `NodeId`,
+`Parent`) where the caller expected data, and a leaked `SET ROWCOUNT 3` cut an unrelated `TOP 10` to
+three rows.
+
+So `resetProfiledSession` puts each one back on the same pinned connection in a `finally`, and the order
+is load-bearing: `SET SHOWPLAN_ALL OFF` goes first and alone, because while that mode is on a `SET` is
+COMPILED rather than run, and every reset after it would be a no-op that looked like a success.
+It is re-asserted here rather than trusted from `admitReadStatement`'s own `finally`, because that
+`finally` does not always run: a batch-aborting error dooms the transaction, measured with
+`SELECT * FROM OPENROWSET(BULK '/etc/hostname', SINGLE_CLOB) x` (Msg 4834), after which the OFF fails with
+`ENOTBEGUN` and the rollback with `EABORT` while the connection still carries the mode.
+A plain compile error (Msg 208) does not do that: there the OFF runs and the next borrow is clean.
+
+**When the reset fails, the POOL IS ENDED** rather than the connection returned.
+A connection carrying `SHOWPLAN_ALL ON` answers its next caller with a query plan where that caller
+expects rows, which is a WRONG ANSWER rather than an error, and nothing downstream can tell the two
+apart.
+
+### 12.5 What the profile does NOT bound
+
+- **What a single admitted SELECT may READ.** A least-privilege principal cannot reach another user
+  database or the file system, but server-level metadata readable by `public` (`master.sys.databases`,
+  `master.sys.server_principals`, `master.dbo.spt_values`) is inside the boundary. That is the same
+  class of gap [BACKLOG](../BACKLOG.md) A3 records for the other engines, not a SQL Server property.
+- **The byte budget's TOTAL is still post-hoc**, though each VALUE is now bounded by the server.
+  `SET TEXTSIZE` is set to one byte past the budget alongside `SET ROWCOUNT`, so no single large value
+  arrives whole: without it, `SELECT REPLICATE(CAST('a' AS varchar(max)), 700000000)` is one row of one
+  column that every other layer admits and that arrives in full. A cut value is refused rather than
+  served, and it is detected in the SERVER's unit rather than in the budget's, because the two differ:
+  `SET TEXTSIZE` counts WIRE bytes, and measured with the ceiling at 262145, a `varchar(max)` came back
+  as 262145 characters while the same value as `nvarchar(max)` came back as 131072, since nvarchar
+  travels as UTF-16 at two bytes each. 131072 ASCII characters are 131072 UTF-8 bytes, half the budget,
+  so measuring the cut in UTF-8 would have passed it silently. What remains post-hoc is the TOTAL: rows
+  times values can still exceed `maxResultBytes` before the sum is taken, which is the property every
+  engine with a byte budget has and is filed as [BACKLOG](../BACKLOG.md) A7.
+- **A linked server is outside layer 4.** `SELECT * FROM OPENQUERY(<linked server>, '…')` compiles to a
+  single `SELECT` root, so admission accepts it, and the pass-through executes on the OTHER server under
+  that server's own credential mapping: the local principal's grants do not reach it and the local
+  rollback only covers it where the linked server promotes to a distributed transaction. It needs a
+  linked server to have been configured with a write-capable mapping, so it is a residual rather than a
+  default-open path, and it is the one write class in this section that was NOT measured refused.
+- **`queryReadOnly()` on a provider opened outside the profile.** It refuses outright rather than
+  falling back to `query()`: such a provider has had no principal verification, so its session may be
+  able to write, and serving agent semantics without the layer that makes them true is the one thing
+  this path must not do.
+
+---
+
+## 13. Testing
+
+### 13.1 How the tests work
 
 Integration tests live in
 [`tests/integration/db/mssql-provider.test.ts`](../../tests/integration/db/mssql-provider.test.ts).
@@ -1345,7 +1595,7 @@ canned `{ recordset, rowsAffected }` results, exercising the same code paths as 
 > own bun process, so a single file is safe and so is the whole suite, which is the same command CI
 > runs. `bun run test:coverage` is that runner with coverage on. See [`CLAUDE.md`](../../CLAUDE.md).
 
-### 12.2 Coverage
+### 13.2 Coverage
 
 The suite covers: validation, connect/disconnect, query, capabilities, **labels override**,
 **`prepareQuery` TOP / OFFSET-FETCH**, the object surface (columns/PKs/FKs/indexes), health,
@@ -1360,7 +1610,7 @@ listing, and the detail row. The object-surface mock answers per READ rather tha
 text, and it takes its schema filter from the statement rather than from the bound parameter:
 a mock that filtered on the bind kept passing for a listing that had lost its `WHERE` clause.
 
-### 12.3 Run it
+### 13.3 Run it
 
 ```bash
 bun test tests/integration/db/mssql-provider.test.ts   # just this file (single process — safe)
@@ -1368,7 +1618,7 @@ bun run test                                            # the whole suite, one p
 bun run test:coverage                                   # CI coverage workflow: the same runner, with coverage
 ```
 
-### 12.4 Optional: verifying against a live SQL Server
+### 13.4 Optional: verifying against a live SQL Server
 
 ```bash
 docker run --rm -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='Str0ng!Passw0rd' \
@@ -1403,7 +1653,7 @@ one, so the rows are what makes the click measurable at all.
 
 ---
 
-## 13. Usage examples
+## 14. Usage examples
 
 ```ts
 import { createDatabaseProvider } from '@/lib/db/factory';
@@ -1426,18 +1676,25 @@ Over the API: `POST /api/db/query`, `POST /api/db/transaction`, `POST /api/db/ca
 
 ---
 
-## 14. Known limitations & future work
+## 15. Known limitations & future work
 
 - **`connectionString` is ignored by the provider.** `getCapabilities().supportsConnectionString` is
   `true` and the UI accepts `mssql://`/`sqlserver://`, but `buildConfig()` builds only from discrete
   fields and never reads `config.connectionString` ([§4.4](#44-connection-string-nuance)). A
   config carrying only a raw connection string would connect to `localhost`. *Future:* pass a raw
   connection string through to the driver, or set the capability honestly.
-- **`EXPLAIN` is intentionally disabled for SQL Server until a dialect wrapper exists.**
-  `supportsExplain` is `false`, so the UI hides the *Explain* action. The UI's EXPLAIN builder only
-  handles Postgres/MySQL; before the flag was flipped, the *Explain* action silently ran the
-  **unmodified** query instead of a plan. *Future:* `SET SHOWPLAN_XML ON` (or `SET STATISTICS
-  XML ON`) around the statement, then re-enable the capability.
+- **The EDITOR has no Explain button here; the AGENT has an estimating plan.** `supportsExplain` is
+  `false`, so the UI hides the *Explain* action, and that half is unchanged: every strategy in
+  `src/lib/explain` builds a single-statement PREFIX around the query
+  ([select-prefix.ts](../../src/lib/explain/select-prefix.ts)), and SQL Server's estimating plan is a
+  SESSION MODE that must be the only statement in its batch and turned off again on the same
+  connection, which a prefix cannot express. Before the flag was flipped the *Explain* action silently
+  ran the **unmodified** query instead of a plan. The agent path does have one, and it is not a
+  workaround for that: `queryReadOnly()` compiles every candidate under `SET SHOWPLAN_ALL` to admit it
+  at all, so `mode: "estimate-plan"` returns the plan that admitted the statement
+  ([§12.2](#122-admission-by-the-optimizer-which-executes-nothing)). *Future:* a query path that can
+  hold one connection for several statements, which is what would let the editor ask the same
+  question (see also D90, [§6.1](#61-endopenquerytransaction-is-not-implemented-here-because-the-driver-cannot-be-asked)).
 - **Non-Azure default trusts the server certificate.** With no explicit `connection.ssl`, non-Azure
   hosts use `encrypt: true` + `trustServerCertificate: true` — encrypted but **not** authenticated
   (MITM-exposed). For verified TLS, set `connection.ssl` mode `verify-system` (or `verify-ca`/
@@ -1478,7 +1735,7 @@ Over the API: `POST /api/db/query`, `POST /api/db/transaction`, `POST /api/db/ca
 - **Azure SQL caveats.** Some server-scoped DMVs and `DBCC CHECKDB` behave differently or are
   restricted on Azure SQL Database, so parts of monitoring/maintenance silently degrade there:
   `N/A`/`[]` where the shape can say "not measured", and, for the health connection count, nothing
-  at all ([§7.2](#72-when-the-connection-count-is-not-measurable)). The monitoring Overview's
+  at all ([§8.2](#82-when-the-connection-count-is-not-measurable)). The monitoring Overview's
   `getOverview()` connection count is the exception and still degrades to `0`.
 - **The Azure SQL Database container list is UNVERIFIED against Azure.** `EngineEdition = 5` lists
   exactly the connected database ([§7](#the-object-surface-789)), which is implemented from the
@@ -1497,16 +1754,16 @@ Over the API: `POST /api/db/query`, `POST /api/db/transaction`, `POST /api/db/ca
   engine would then have to answer for.
 - **SQL authentication only** — Windows Integrated / Azure AD auth is not wired.
 - **DMV monitoring needs `VIEW SERVER STATE`** (`VIEW SERVER PERFORMANCE STATE` on SQL Server 2022
-  and later, which `VIEW SERVER STATE` implies — [§7.2](#72-when-the-connection-count-is-not-measurable));
+  and later, which `VIEW SERVER STATE` implies — [§8.2](#82-when-the-connection-count-is-not-measurable));
   a least-privilege user silently gets `N/A`/`[]` and,
-  for the health connection count, nothing at all ([§7.2](#72-when-the-connection-count-is-not-measurable)).
+  for the health connection count, nothing at all ([§8.2](#82-when-the-connection-count-is-not-measurable)).
   `getPerformanceMetrics()` reports only the cache-hit ratio (no QPS, deadlocks, or buffer-pool
   usage), and **omits even that** when `dm_os_performance_counters` is unreadable rather than
-  substituting a figure — [§7.1](#71-when-the-cache-hit-ratio-is-not-measurable).
+  substituting a figure — [§8.1](#81-when-the-cache-hit-ratio-is-not-measurable).
 
 ---
 
-## 15. References
+## 16. References
 
 - Driver: [`node-mssql`](https://github.com/tediousjs/node-mssql) (Tedious / TDS)
 - Source: [`src/lib/db/providers/sql/mssql.ts`](../../src/lib/db/providers/sql/mssql.ts)

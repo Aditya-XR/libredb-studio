@@ -478,6 +478,11 @@ const FAILURE_SENTENCES = {
   // not at fault: this refusal reaches PostgreSQL and SQLite too (B47).
   "agent-credential-unusable":
     "This connection's agent credential cannot be used: check that both the agent user and password are set, that the password still decrypts under the current secret key, and that no connection string is set beside it.",
+  // Names the database user, because the engine is supported and the credential was
+  // applied: the profile refused the principal it opened as. Folded into the engine
+  // sentence, an operator connected as `sa` was told to change engines.
+  "agent-principal-refused":
+    "The database user this run would execute as was refused by the read-only execution profile, not by the engine: it holds privileges the boundary cannot contain, or it cannot ask for the plan that admits a statement. Point the connection's agent credential at a least-privilege user.",
   "connection-unresolvable": "This run's database connection no longer resolves on the server.",
   internal: "The server could not carry this run. The reason is in the server log.",
 } as const satisfies Record<AgentRunFailureReason, string>;

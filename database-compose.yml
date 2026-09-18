@@ -89,6 +89,10 @@ services:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: libredb-mssql
     restart: unless-stopped
+    # No init-script mount, and that is the image rather than an omission: this one has no
+    # init-script directory at all. `docker/mssql-init/` holds two scripts to apply by hand,
+    # each carrying its own `docker cp` + `sqlcmd` line - the object-browser fixture, and the
+    # least-privilege principal the agent read-only execution profile requires.
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: Password123!

@@ -73,7 +73,11 @@ export type AgentStatementViolation =
   | "NO_STATEMENT"
   /** The keyword that operates the statement is not a bounded read. */
   | "NON_READ_STATEMENT"
-  /** A read-shaped statement carrying a side effect (a writing CTE, a setter function). */
+  /**
+   * A read-shaped statement carrying a word no bounded read may: a side effect (a
+   * writing CTE, a setter function), a lock it takes and holds, or a hint whose answer
+   * is not a fact about the committed database.
+   */
   | "SIDE_EFFECT_KEYWORD";
 
 /**
@@ -132,6 +136,64 @@ const SIDE_EFFECT_WORDS: ReadonlySet<string> = new Set([
   // legitimate read on either supported engine, since `INSERT INTO` and
   // `MERGE INTO` are already refused by the rules above.
   "INTO",
+  // T-SQL table hints that take or HOLD a restrictive lock, which is the one thing
+  // a SELECT can do to a database without writing to it. `LOCK` above already
+  // refuses PostgreSQL's spelling of the same act; these are SQL Server's, and they
+  // ride INSIDE a SELECT rather than heading a statement of their own, so nothing
+  // else sees them.
+  //
+  // Measured on SQL Server 2022 CU26, as the least-privilege agent principal:
+  // `SELECT TOP 1 … FROM Person.Person WITH (TABLOCKX, HOLDLOCK)` compiles to ONE
+  // root statement of type `SELECT`, so the provider's own admission step admits it,
+  // and executing it inside the agent's transaction took twenty `X` object locks on
+  // `Person.Person` and blocked an independent writer for as long as the transaction
+  // lived (control: the same UPDATE completed in 30ms with no lock held, 2523ms with
+  // it). No isolation level refuses the hint: `SNAPSHOT` and `READ COMMITTED` both
+  // accepted it, measured. So this layer is where it has to be refused.
+  "TABLOCK",
+  "TABLOCKX",
+  "XLOCK",
+  "UPDLOCK",
+  "HOLDLOCK",
+  "REPEATABLEREAD",
+  "SERIALIZABLE",
+  // The OPPOSITE kind of T-SQL hint, refused for the opposite reason. These take FEWER
+  // locks, so they harm no other session at all; what they cost is the ANSWER. Under
+  // either dirty-read spelling the statement reads rows from transactions that may never
+  // commit, and `READPAST` silently omits rows another session has locked.
+  //
+  // That is refused because of what this path is FOR. Every claim an agent composes
+  // cites the result it came from, and the run reports those numbers to a user as facts
+  // about their database. A dirty read passes every citation check there is - the
+  // artifact is real, the correlation id resolves - while the number in it is not a fact
+  // about the committed database, and re-running the read gives a different one with
+  // neither looking wrong. It is the same class as the `FOR JSON` refusal in
+  // `providers/sql/mssql.ts`: a wrong answer nothing downstream can tell from a right
+  // one, arriving by another door.
+  //
+  // Measured on SQL Server 2022 CU26 as the least-privilege agent principal, against a
+  // second session holding an uncommitted UPDATE. `WITH (NOLOCK)` and
+  // `WITH (READUNCOMMITTED)` both returned the uncommitted value of a transaction that
+  // then ROLLED BACK (`Person.Person` row 1 came back `DIRTYVALUE` where the committed
+  // value is `Ken`), and `WITH (READPAST)` answered `count(*) = 2` over three committed
+  // rows, short by the locked one and with no error. As with the seven above, the
+  // provider's admission step cannot see any of them: a hinted SELECT compiles to ONE
+  // root of class `SELECT`, measured.
+  //
+  // Nothing honest is lost by refusing. The same read without the hint is bounded by the
+  // `SET LOCK_TIMEOUT` the profile already issues per statement: measured as error 1222
+  // after 1.5s on a database with read-committed snapshot OFF, and where it is ON, as the
+  // fixture database is, the read does not wait at all and answered the committed value
+  // immediately. An error a model can report and repair is worth more here than a number
+  // that is quietly wrong.
+  //
+  // They share the `SIDE_EFFECT_KEYWORD` code, which under-names them: this set is
+  // "words no bounded read may contain", and a code of their own would put a new word in
+  // the vocabulary the model and the rail both read for a refusal whose repair is the
+  // same one, dropping the hint.
+  "NOLOCK",
+  "READUNCOMMITTED",
+  "READPAST",
 ]);
 
 /**

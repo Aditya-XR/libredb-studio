@@ -68,8 +68,11 @@ the DRIVEN columns is inferred from the code.
 The third column was driven on 2026-08-17 against the #414 build, **every engine, one at a time**, each
 on a server seeded for it. What each cell records is the inventory that reached the run and the thing
 the run then wrote, because those are the two facts that decide whether grounding is worth anything.
-The last column is unchanged and was NOT re-driven: agent mode still needs a database-native read-only
-statement path, which only three engines have.
+The last column was re-driven for ONE engine and is otherwise unchanged. Agent mode still needs a
+database-native read-only statement path, and SQL Server gained one: its four SQL workflows were
+driven on 2026-09-18 with `gemini-3.5-flash-lite` against AdventureWorks2022 on SQL Server 2022
+(RTM-CU26) 16.0.4265.3, and that row records what those runs did rather than what the code allows.
+Every other row's last column is as it was driven on 2026-08-15/17.
 
 | Engine | Plan mode, as driven 2026-08-15/17 | Plan grounding after #414, driven 2026-08-17 | Operate | Investigate · Analyze · Optimize · Assess |
 | --- | --- | --- | --- | --- |
@@ -77,7 +80,7 @@ statement path, which only three engines have.
 | **SQLite** | Verified, grounded | Unchanged, composed catalog read: 8 tables, correct join | Verified | Verified |
 | **MySQL** 9 | Expected to work | **Verified grounded**, provider inventory: 3 tables, correct join | Expected to work | Refused |
 | **Oracle** XE 21 | Expected to work | **Verified grounded**, provider inventory: 3 tables, correct join | Expected to work | Refused |
-| **SQL Server** 2022 | Verified, ungrounded | **Verified grounded**, provider inventory: 3 tables, correct `TOP 10` T-SQL | Verified | Refused |
+| **SQL Server** 2022 | Verified, ungrounded | **Verified grounded**, provider inventory: 3 tables, correct `TOP 10` T-SQL | Verified | **Verified**, driven 2026-09-18: all four answered. Analyze counted 121,317 rows and averaged 905.45 (the engine answers 121317 and 905.449206) and returned a 4-row bar-chart spec; Optimize completed `inspect_plan` and recommended a nonclustered index on `Sales.SalesOrderDetail(CarrierTrackingNumber)` off the Clustered Index Scan in the plan; Assess produced a `table-profiled` event and ten grounded reads; Investigate answered |
 | **MongoDB** 8 | Verified, ungrounded | **Verified grounded**, provider inventory: 5 collections then 6 with a view; `$group`/`$lookup` aggregation | Verified | Refused, verified |
 | **ClickHouse** 26 | Verified, ungrounded | **Verified grounded**, provider inventory: 5 tables, correct join | Verified | Refused |
 | **Couchbase** 8 | Expected to work | **Verified grounded**, provider inventory: 3 collections with their indexes, correct SQL++ | Expected to work | Refused |
@@ -96,7 +99,7 @@ no inventory and refuses to invent one.
 real objects reached the run and the run wrote something in that engine's own language that the editor
 accepts. It does NOT say the draft is good, and on one engine it demonstrably is not — see Redis. It
 says nothing at all about agent mode, which still ends `engine-unsupported` everywhere but PostgreSQL,
-SQLite and DuckDB; that is pinned by a test rather than by this table, because a run that fails at its first
+SQLite, DuckDB and SQL Server; that is pinned by a test rather than by this table, because a run that fails at its first
 read is not a thing worth driving eleven times.
 
 **Two runs that refused, and both refusals were right.** A Couchbase run asked "how many documents of
@@ -111,7 +114,9 @@ statement against their own real objects. *Do MongoDB's sampled field names matc
 name?* Yes: `customerId`, `name` and `email` were inferred from documents and the aggregation joined on
 them. *Is the drafted statement one the editor actually runs?* Yes on every engine driven, including
 the two that speak no SQL. What #414 does **not** change: the four SQL workflows in the last column
-still need `provider.queryReadOnly`, so their refusals stand as written.
+still need `provider.queryReadOnly`, so their refusals stand as written, except on SQL Server, where
+the refusal ended for a reason of its own: that provider gained a `queryReadOnly` in 2026-09, and the
+row above records the runs that were then driven on it.
 
 **Read the table this way.** Plan mode opens on every engine and runs no statement of yours on any of
 them. Since #414 it is also *grounded* on ten of the eleven — it is handed that database's real objects
@@ -140,8 +145,8 @@ is not. That sentence is unchanged by #414 and is the reason it was written this
 is where the condition holds, not the rule — and it now holds on ten engines rather than two, which is
 a demo you can give rather than a caveat you have to make. Operate reads what the engine reports about itself, so it needs no SQL and reaches
 everything. The other four workflows write SQL and need a database-native read-only statement path,
-which today only PostgreSQL, SQLite and DuckDB provide; everywhere else the run ends with *"The agent cannot
-run on this database engine: it offers no read-only execution profile."*
+which today only PostgreSQL, SQLite, DuckDB and SQL Server provide; everywhere else the run ends with
+*"The agent cannot run on this database engine: it offers no read-only execution profile."*
 
 **Grounding was engine-dependent and nothing else**, in every workflow — until #414, after which the
 engine decides only HOW a run is grounded and not whether. That much was not true even when this
@@ -402,8 +407,8 @@ is blocked, and which commands those clients are running. Verified against `redi
 figures match.
 
 **This is the case to show a sceptic.** Redis has no SQL at all, and agent mode's other workflows
-cannot reach it: they need a database-native read-only statement path, which only PostgreSQL, SQLite and
-DuckDB provide. Operate does not write SQL — it reads what the engine already reports about itself —
+cannot reach it: they need a database-native read-only statement path, which only PostgreSQL, SQLite,
+DuckDB and SQL Server provide. Operate does not write SQL — it reads what the engine already reports about itself —
 so it answers the same operational questions on every provider Studio supports. Run case 9 against
 PostgreSQL and this one against Redis back to back, and the point makes itself.
 
@@ -554,7 +559,8 @@ name. It has never seen a row — the grounding reads the catalog and the engine
 never a value out of a column.
 
 *Bounds, worth stating before someone finds them:* on the build this was driven against, grounding
-served **PostgreSQL and SQLite only**, because those are the dialects the catalog composer serves.
+served **PostgreSQL and SQLite only**, because those are the dialects grounding composes a catalog
+read for (`CATALOG_PLANS`).
 That bound is the one #414 removed — a dialect the composer does not serve now reads its schema
 through its own provider — and the table at the top of this file records that being driven on
 2026-08-17: ten of the eleven engines grounded, LibreDB the exception and for a reason that has
@@ -799,7 +805,7 @@ grounding says so in words.
 
 **"Which databases?"** See the table at the top, and its #414 note. The short version: Operate works
 everywhere and was driven live on six engines including Redis, which has no SQL at all; the four SQL
-workflows need PostgreSQL, SQLite or DuckDB; plan mode has no engine limit and since
+workflows need PostgreSQL, SQLite, DuckDB or SQL Server; plan mode has no engine limit and since
 #414 no grounding limit either — it composes catalog statements on those two and asks every other
 engine's own provider to describe itself, in every workflow, Operate included since #411 on a reduced
 inventory of table and index names.
@@ -820,7 +826,7 @@ would close it, so "not yet" means deferred with a reason, not overlooked.
 | **A verdict that fits an optimization run** | Every Optimize run ends `unanswered`, however good its plans and index recommendation were | B45 — a plan artifact is not an empty result, the same exemption the Operate template already has |
 | **Causal questions** — "why are sales down?" | Answered from the schema alone, which cannot know which decomposition of a metric is the business one | A per-connection business note, held server-side; sketched in `docs/AGENT_ANALYST_DESIGN.md` §5 |
 | **"This database cannot answer that"** | It does say so, but has to run a throwaway query to be scored as having answered — case 21 spends 5 tool invocations to report that an employees database holds no customer data | A second arm on the verdict, so a schema-only conclusion counts |
-| **Agent mode on MySQL, Oracle, MongoDB, Redis…** | Only Operate. The other four workflows refuse, correctly and clearly | A database-native read-only statement path per engine — the same `queryReadOnly` PostgreSQL, SQLite and DuckDB implement |
+| **Agent mode on MySQL, Oracle, MongoDB, Redis…** | Only Operate. The other four workflows refuse, correctly and clearly | A database-native read-only statement path per engine — the same `queryReadOnly` PostgreSQL, SQLite, DuckDB and SQL Server implement |
 | **A run you can watch from your own stack** | Everything is in the run's ledger and on the rail; nothing is exported | B33 — OpenTelemetry spans, designed in #332 and deliberately not built while the event model is still moving |
 | **Resuming a run after a restart** | A drive that dies leaves a durable ledger, but nothing picks it up | B9 — a queue and a re-attach path for the stream |
 | **A budget you can trust to the minute** | The ceilings are real and enforced; the *numbers* are a starting point nobody has measured | One instrumented long run per workflow |

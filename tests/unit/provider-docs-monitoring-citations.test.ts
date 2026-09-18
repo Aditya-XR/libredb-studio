@@ -74,6 +74,9 @@ const NAMED_CITATIONS = [
       "prepareQuery",
       "beginTransaction",
       "queryInTransaction",
+      // The agent read-only execution profile (#328). The doc's §12 is the only prose in the fleet
+      // describing a boundary whose first layer is the PRINCIPAL, so a rename here would strand it.
+      "queryReadOnly",
       "describeObject",
       "runMaintenance",
       "getPoolStats",

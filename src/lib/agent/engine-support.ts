@@ -7,9 +7,16 @@ import type { DatabaseType } from "@/lib/types";
  * refused unless the provider exposes a database-native read-only statement path
  * (`acquisition.requiresReadOnlyStatements && typeof provider.queryReadOnly !== "function"`,
  * `src/lib/db/factory.ts`), which throws `PROFILE_UNSUPPORTED_BY_PROVIDER` and ends the run
- * `engine-unsupported`. `queryReadOnly` exists on exactly three providers today
- * (`providers/sql/postgres.ts`, `providers/sql/sqlite.ts`, `providers/sql/duckdb/`), and that probe stays the real
- * rule: replacing it with this list would let the list go stale against the drivers.
+ * `engine-unsupported`. `queryReadOnly` exists on exactly four providers today
+ * (`providers/sql/postgres.ts`, `providers/sql/sqlite.ts`, `providers/sql/duckdb/`,
+ * `providers/sql/mssql.ts`), and that probe stays the real rule: replacing it with this list would
+ * let the list go stale against the drivers.
+ *
+ * The four do not draw the boundary the same way, and the list deliberately says nothing about that.
+ * PostgreSQL refuses the write inside `BEGIN READ ONLY`, SQLite and DuckDB open the file read-only,
+ * and SQL Server, which has no read-only transaction of any kind, verifies at open that the session's
+ * principal cannot write, then admits one statement at a time by asking the optimizer to compile it
+ * without running it. Each provider's own `queryReadOnly` argues its own case.
  * `tests/unit/lib/agent/engine-support.test.ts` is what keeps the two equal - it walks EVERY
  * id in the `DatabaseType` union, reads `queryReadOnly` off the real provider class the
  * factory would construct (`mongodb` excepted: its module cannot be imported under Bun, so
@@ -26,7 +33,7 @@ import type { DatabaseType } from "@/lib/types";
  * Imports nothing but the type union on purpose. It is read by the unauthenticated login
  * hero, and a provider module here would drag `oracledb`/`mssql` toward that bundle.
  */
-export const AGENT_EXECUTION_ENGINES: readonly DatabaseType[] = ["postgres", "sqlite", "duckdb"];
+export const AGENT_EXECUTION_ENGINES: readonly DatabaseType[] = ["postgres", "sqlite", "duckdb", "mssql"];
 
 /**
  * Names, joined the way a sentence joins them: `a`, `a and b`, `a, b and c`.

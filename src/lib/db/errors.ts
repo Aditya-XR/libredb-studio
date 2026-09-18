@@ -167,6 +167,16 @@ export type ExecutionProfileDenyCode =
   | "PROFILE_UNSUPPORTED_TARGET"
   /** The role the profile would run as holds privileges no read-only boundary can contain. */
   | "PROFILE_PRIVILEGES_TOO_BROAD"
+  /**
+   * The role the profile would run as is missing a privilege the BOUNDARY ITSELF needs.
+   *
+   * The opposite of the code above, and its own because the two are repaired in opposite
+   * directions. SQL Server is where they came apart: its admission step asks the optimizer
+   * to compile a candidate without running it, which needs `SHOWPLAN`, so a principal that
+   * is merely a reader cannot be admitted at all. Reported as `PROFILE_PRIVILEGES_TOO_BROAD`
+   * it told an operator to narrow a principal that needed one more grant.
+   */
+  | "PROFILE_PRIVILEGES_TOO_NARROW"
   | "AGENT_CREDENTIAL_UNRESOLVABLE"
   | "AGENT_CREDENTIAL_WITH_CONNECTION_STRING";
 

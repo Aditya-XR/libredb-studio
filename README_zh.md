@@ -144,14 +144,17 @@ PostgreSQL · MySQL · Oracle · SQL Server · SQLite · libSQL · DuckDB · Mon
 - **只读，而且由数据库本身来保证**：Agent 执行的每条语句都走 **Agent 自己的受审计管线**——在碰到驱动
   之前先做策略判定、写审计事件、记账预算（`executeAuditedOperation`，
   `src/lib/db/operations/execution.ts:129`）——并使用只读执行档案（PostgreSQL 上是只读事务，SQLite 上
-  每条语句都重新声明 `PRAGMA query_only`，DuckDB 上是 `READ_ONLY` 引擎句柄外加一层 SQL 守卫，因为仅靠该标志仍然放行 `COPY … TO`、`EXPORT DATABASE` 和读取本地文件的表函数）。写入和 DDL 在到达数据库之前就被拒绝，`EXPLAIN ANALYZE`
+  每条语句都重新声明 `PRAGMA query_only`，DuckDB 上是 `READ_ONLY` 引擎句柄外加一层 SQL 守卫，因为仅靠该标志仍然放行 `COPY … TO`、`EXPORT DATABASE` 和读取本地文件的表函数；SQL Server 上没有任何形式的只读事务，因此改由四层保证：开启连接时先核验会话主体确实无法写入，再由优化器只编译不执行地放行每条语句，并在服务端限定返回行数，最后把语句放进一个总是回滚的事务里）。写入和 DDL 在到达数据库之前就被拒绝，`EXPLAIN ANALYZE`
   因为会真正执行语句而默认禁止。这条管线只属于 Agent：你自己在编辑器里执行的语句是直接调用 provider 的
   （`src/app/api/db/query/route.ts:44`），不会经过这里的策略判定，也不会产生这类审计记录。
-- **Agent 模式只支持 PostgreSQL、SQLite 和 DuckDB**：只读档案由数据库原生保证，因此只在实现了它的
-  provider 上存在——只有 `postgres.ts:915`、`sqlite.ts:537` 和 `duckdb/index.ts:525` 上的
-  `queryReadOnly`，别无其他。在其他引擎上，
-  Agent 模式的运行会以 `engine-unsupported` 结束（`src/lib/agent/runtime.ts:199`）。**Plan** 模式不使用
-  任何工具，完全不访问数据库，因此对所有连接都可用。
+- **Agent 模式只支持 PostgreSQL、SQLite、DuckDB 和 SQL Server**：只读档案由数据库原生保证，因此只在实现了它的
+  provider 上存在——只有 `postgres.ts`、`sqlite.ts`、`duckdb/index.ts` 和 `mssql.ts` 上的 `queryReadOnly`，别无其他。
+  在其他引擎上，会发送语句的 Agent 模式工作流在启动时就被拒绝，运行还没有建立；万一有请求走到 provider 工厂，
+  也会以 `engine-unsupported` 结束。**Plan** 模式对所有连接都可用——那里的模型不使用任何工具，不执行你的任何语句，
+  不做任何写入，只为你起草一条由你自己去执行的语句。它的 GROUNDING 覆盖全部引擎：PostgreSQL 和 SQLite 上由服务端
+  自己组装目录查询，其他连接则请该连接自己的 provider 描述其 schema——也就是侧边栏本来就在做的那次读取——这不需要
+  只读语句通道。所以两条限制是分开的：Agent 模式是这四种引擎，GROUNDING 是全部引擎，而读取失败的运行会直接说明，
+  不会凭空编造表名。
 - **三种工作流**：**Investigate**（回答问题）、**Optimize**（比较预估执行计划，提出索引或改写）、
   **Assess**（做表画像——只有计数，永远不含具体值）。
 - **不会自己动手**：Agent 不会替你开始运行，不会写入编辑器，也不会执行它建议的语句。是否采用由你点击决定。

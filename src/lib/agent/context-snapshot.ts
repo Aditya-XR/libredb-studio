@@ -90,7 +90,7 @@ import type {
   AgentRunEvent,
 } from "./types";
 import { fenceUntrustedContent, quoteIdentifierForPrompt } from "./untrusted-content";
-import { DatabaseError, ExecutionProfileError } from "@/lib/db/errors";
+import { DatabaseError, ExecutionProfileError, type ExecutionProfileDenyCode } from "@/lib/db/errors";
 import { declaredKinds } from "@/lib/db/object-kinds";
 import type { ColumnSchema, DatabaseConnection, DatabaseType, ForeignKeySchema, IndexSchema } from "@/lib/types";
 
@@ -949,11 +949,46 @@ function displayName(object: AgentInventoryObject): string {
  * Neither sentence carries the error's own message: `detail` is spliced into a note the
  * run reads as the server's own voice, and a driver message is text the database wrote.
  */
+/**
+ * What an operator can DO about each way the execution profile refuses, in the server's
+ * own words.
+ *
+ * The sentence above it deliberately carries no driver message, because a driver message
+ * is text the DATABASE wrote and this note is read as the server's voice. An
+ * `ExecutionProfileError` is not that: it is raised by this repository, and its
+ * `reasonCode` is a closed vocabulary declared in `db/errors.ts`. So the CODE is safe to
+ * speak in, and speaking in it is the difference between a refusal somebody can act on
+ * and one they cannot.
+ *
+ * Measured, and the reason this exists: a SQL Server connection saved as `sa`, which is
+ * how most SQL Server connections are saved, is refused by the profile, correctly,
+ * because that principal can write from inside any envelope. What the run reported was
+ * "could not open a connection ... under the execution profile", which names no cause and
+ * suggests the server is down. The operator's actual next step is one `CREATE LOGIN`.
+ *
+ * A total record, so a reason code added later is a compile error here rather than a
+ * silently missing sentence.
+ */
+const PROFILE_REFUSAL_ADVICE: Readonly<Record<ExecutionProfileDenyCode, string>> = Object.freeze({
+  PROFILE_PRIVILEGES_TOO_BROAD:
+    "The connection's own user holds privileges no read-only boundary can contain, so the profile refused it rather than run as that user. Point the connection's agent credential at a least-privilege principal, or connect as one.",
+  PROFILE_PRIVILEGES_TOO_NARROW:
+    "The user this connection would run the agent as is missing a privilege the read-only boundary itself needs, so the profile refused it rather than run without that layer. Grant the missing privilege named in the server log to that user; this is the opposite repair to the one above, and the two are separate codes for that reason.",
+  PROFILE_UNSUPPORTED_BY_PROVIDER:
+    "This engine has no database-native read-only statement path, so the profile cannot be granted on it at all.",
+  PROFILE_UNSUPPORTED_TARGET: "This engine can grant the profile, but not against this target.",
+  UNSUPPORTED_PROFILE: "The execution profile asked for is not one this server vends.",
+  AGENT_CREDENTIAL_UNRESOLVABLE:
+    "The connection configures an agent credential that could not be resolved: both a user and a password are required, and a sealed password must be decryptable.",
+  AGENT_CREDENTIAL_WITH_CONNECTION_STRING:
+    "The connection configures an agent credential alongside a connection string, which would silently drop the credential, so acquisition was refused.",
+});
+
 function environmentFailure(error: unknown, context: AgentToolContext): AgentContextCapture | null {
   if (error instanceof ExecutionProfileError) {
     return unavailable(
       "CATALOG_READ_REFUSED",
-      `This server could not open a connection to this ${context.connection.type} database under the execution profile a grounding read takes, so its schema was not read for this run.`,
+      `This server could not open a connection to this ${context.connection.type} database under the execution profile a grounding read takes, so its schema was not read for this run. ${PROFILE_REFUSAL_ADVICE[error.reasonCode]}`,
     );
   }
   if (error instanceof DatabaseError) {
