@@ -54,8 +54,8 @@ partner contact.
 > than a count, and check it by grepping `explainFormat:` under `src/lib/db/providers/` rather
 > than by trusting this line. Alongside it is the read-only agent rail
 > ([`docs/AGENT.md`](https://github.com/libredb/libredb-studio/blob/main/docs/AGENT.md)),
-> which executes statements on PostgreSQL and SQLite only (`queryReadOnly` exists on those
-> two providers alone) in a session the database enforces as read-only. "Executes nothing it
+> which executes statements on PostgreSQL, SQLite, DuckDB and SQL Server only (`queryReadOnly`
+> exists on those four providers alone) in a session the database enforces as read-only. "Executes nothing it
 > recommends" is an overclaim this product already rejected: the consented editor hand-over
 > runs exactly the recommended statement
 > (`src/app/api/agent/runs/[runId]/handover/route.ts` calls `queryReadOnly(answer.sql, …)`).
@@ -154,9 +154,9 @@ versions are documented and validated for every release.
   zero configuration required
 - Optional AI assistance (Gemini, OpenAI, or a self-hosted model; off by default):
   plain-English query explanation on the engines that return an EXPLAIN plan (PostgreSQL,
-  MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Apache Trino), and a
-  read-only investigation agent on PostgreSQL, SQLite and DuckDB that never writes — the database enforces
-  the read-only session, not the IDE
+  MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Apache Trino). Plus a
+  read-only investigation agent on PostgreSQL, SQLite, DuckDB and SQL Server that never writes — the
+  database enforces the read-only session, not the IDE
 - Hardened chart defaults: non-root, read-only root filesystem, NetworkPolicy, PDB,
   HPA, Ingress/TLS
 - Self-hosted and air-gap friendly: no external services required to operate the IDE

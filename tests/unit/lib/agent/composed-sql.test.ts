@@ -9,6 +9,7 @@ import {
   withoutExtensionOwnershipTest,
 } from "@/lib/agent/composed-sql";
 import { agentReadSqlInput, inspectAgentStatement } from "@/lib/db/operations/statement-guard";
+import { AGENT_EXECUTION_ENGINES } from "@/lib/agent/engine-support";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -504,7 +505,7 @@ describe("composeCatalogRead — the statistics inventory", () => {
   });
 
   test("an unserved dialect is refused with UNSUPPORTED_DIALECT rather than composed on a guess", () => {
-    for (const dialect of ["mysql", "oracle", "mssql", "mongodb", "redis"] as const) {
+    for (const dialect of ["mysql", "oracle", "mongodb", "redis"] as const) {
       try {
         composeCatalogRead(dialect, { kind: "statistics" });
         throw new Error(`expected a refusal for ${dialect}`);
@@ -658,7 +659,7 @@ describe("composeCatalogRead — a hostile selector becomes a literal, never sta
 
 describe("composeCatalogRead — dialects this milestone does not serve", () => {
   test("refuses rather than composing SQL it has not verified", () => {
-    for (const dialect of ["mysql", "oracle", "mssql", "mongodb", "redis"] as const) {
+    for (const dialect of ["mysql", "oracle", "mongodb", "redis"] as const) {
       expect(() => composeCatalogRead(dialect, {}), dialect).toThrow(AgentComposedSqlError);
     }
   });
@@ -675,7 +676,7 @@ describe("composeCatalogRead — dialects this milestone does not serve", () => 
 
 describe("composeEstimatingExplain", () => {
   test("PostgreSQL gets the estimating form, never the executing one", () => {
-    const sql = composeEstimatingExplain("postgres", "SELECT id FROM orders");
+    const sql = composeEstimatingExplain("postgres", "SELECT id FROM orders").sql;
 
     expect(sql).toBe("EXPLAIN (FORMAT JSON) SELECT id FROM orders");
     expect(sql.toUpperCase()).not.toContain("ANALYZE");
@@ -683,27 +684,27 @@ describe("composeEstimatingExplain", () => {
   });
 
   test("SQLite gets EXPLAIN QUERY PLAN, which describes without running", () => {
-    expect(composeEstimatingExplain("sqlite", "SELECT id FROM orders")).toBe(
+    expect(composeEstimatingExplain("sqlite", "SELECT id FROM orders").sql).toBe(
       "EXPLAIN QUERY PLAN SELECT id FROM orders",
     );
   });
 
   test("both composed forms are accepted by the plan-inspection input contract", () => {
     for (const dialect of ["postgres", "sqlite"] as const) {
-      const sql = composeEstimatingExplain(dialect, "SELECT id FROM orders");
+      const sql = composeEstimatingExplain(dialect, "SELECT id FROM orders").sql;
       expect(agentReadSqlInput.safeParse({ sql }).success, dialect).toBe(true);
     }
   });
 
   test("a CTE is explainable on both engines", () => {
     for (const dialect of ["postgres", "sqlite"] as const) {
-      const sql = composeEstimatingExplain(dialect, "WITH t AS (SELECT 1 AS n) SELECT n FROM t");
+      const sql = composeEstimatingExplain(dialect, "WITH t AS (SELECT 1 AS n) SELECT n FROM t").sql;
       expect(agentReadSqlInput.safeParse({ sql }).success, dialect).toBe(true);
     }
   });
 
   test("a write the model smuggled in is refused by the guard rather than explained", () => {
-    const sql = composeEstimatingExplain("postgres", "DROP TABLE users");
+    const sql = composeEstimatingExplain("postgres", "DROP TABLE users").sql;
     const parsed = agentReadSqlInput.safeParse({ sql });
 
     expect(parsed.success).toBe(false);
@@ -711,7 +712,7 @@ describe("composeEstimatingExplain", () => {
   });
 
   test("an ANALYZE the model wrote itself is still refused for the estimating descriptor", () => {
-    const sql = composeEstimatingExplain("sqlite", "SELECT id FROM orders; ANALYZE");
+    const sql = composeEstimatingExplain("sqlite", "SELECT id FROM orders; ANALYZE").sql;
 
     expect(agentReadSqlInput.safeParse({ sql }).success).toBe(false);
   });
@@ -743,16 +744,16 @@ describe("composeEstimatingExplain", () => {
     trims whitespace without asking.
   */
   test("a statement the model already prefixed with the estimating EXPLAIN is not double-prefixed", () => {
-    expect(composeEstimatingExplain("sqlite", "EXPLAIN QUERY PLAN SELECT id FROM orders")).toBe(
+    expect(composeEstimatingExplain("sqlite", "EXPLAIN QUERY PLAN SELECT id FROM orders").sql).toBe(
       "EXPLAIN QUERY PLAN SELECT id FROM orders",
     );
-    expect(composeEstimatingExplain("sqlite", "EXPLAIN SELECT id FROM orders")).toBe(
+    expect(composeEstimatingExplain("sqlite", "EXPLAIN SELECT id FROM orders").sql).toBe(
       "EXPLAIN QUERY PLAN SELECT id FROM orders",
     );
-    expect(composeEstimatingExplain("postgres", "EXPLAIN SELECT id FROM orders")).toBe(
+    expect(composeEstimatingExplain("postgres", "EXPLAIN SELECT id FROM orders").sql).toBe(
       "EXPLAIN (FORMAT JSON) SELECT id FROM orders",
     );
-    expect(composeEstimatingExplain("postgres", "EXPLAIN (FORMAT JSON) SELECT id FROM orders")).toBe(
+    expect(composeEstimatingExplain("postgres", "EXPLAIN (FORMAT JSON) SELECT id FROM orders").sql).toBe(
       "EXPLAIN (FORMAT JSON) SELECT id FROM orders",
     );
   });
@@ -761,11 +762,60 @@ describe("composeEstimatingExplain", () => {
     // A different request, and one this run may not make. Stripping it would quietly turn a
     // refused execution into an accepted estimate — the guard that refuses it must still see
     // it. Composing here is what puts the word in front of the policy layer.
-    expect(composeEstimatingExplain("postgres", "EXPLAIN ANALYZE SELECT id FROM orders")).toContain("ANALYZE");
+    expect(composeEstimatingExplain("postgres", "EXPLAIN ANALYZE SELECT id FROM orders").sql).toContain("ANALYZE");
+  });
+
+  /*
+    SQL Server has no `EXPLAIN` keyword and no statement prefix that produces an estimating
+    plan: its plan is a SESSION MODE (`SET SHOWPLAN_ALL ON`), which must be its own batch
+    and has to be turned off again on the same connection. So this dialect composes NO
+    prefix and says so in the mode instead, and the provider answers it. The plan that
+    comes back is the one the admission step compiled, which is a stronger pairing than a
+    separately composed statement.
+  */
+  test("SQL Server composes no prefix and asks for the plan as a session mode", () => {
+    const plan = composeEstimatingExplain("mssql", "SELECT id FROM orders");
+
+    expect(plan).toEqual({ sql: "SELECT id FROM orders", mode: "estimate-plan" });
+    expect(agentReadSqlInput.safeParse({ sql: plan.sql }).success).toBe(true);
+  });
+
+  test("the prefix engines ask for execution, because their prefix IS the plan request", () => {
+    for (const dialect of ["postgres", "sqlite", "duckdb"] as const) {
+      expect(composeEstimatingExplain(dialect, "SELECT id FROM orders").mode, dialect).toBe("execute");
+    }
+  });
+
+  test("a prefix the model wrote is still stripped on SQL Server, which has no prefix of its own", () => {
+    // The strip is about what the MODEL wrote, not about what this layer adds: a model
+    // that prefixed `EXPLAIN` on an engine whose grammar has no such word would otherwise
+    // send it to the server as part of the statement.
+    expect(composeEstimatingExplain("mssql", "EXPLAIN SELECT id FROM orders").sql).toBe("SELECT id FROM orders");
+  });
+
+  test("a write the model smuggled in is refused by the guard on SQL Server too", () => {
+    const plan = composeEstimatingExplain("mssql", "DROP TABLE users");
+
+    expect(agentReadSqlInput.safeParse({ sql: plan.sql }).success).toBe(false);
+    // A DIFFERENT refusal from the prefix engines', and an earlier one: with no prefix in
+    // front of it the statement's own operative keyword is `DROP`, so the guard stops at
+    // "this is not a read" instead of reaching the side-effect scan the prefixed form
+    // leaves it to. The composition is what decides which of the two fires.
+    expect(inspectAgentStatement(plan.sql)).toBe("NON_READ_STATEMENT");
+  });
+
+  test("a locking table hint is refused, because no engine-side control refuses it", () => {
+    // Measured on SQL Server 2022: `WITH (TABLOCKX, HOLDLOCK)` compiles to ONE root of
+    // type SELECT, so the provider's admission admits it, and it then blocks every writer
+    // on the table for the life of the agent's transaction. No isolation level refuses it.
+    const plan = composeEstimatingExplain("mssql", "SELECT id FROM orders WITH (TABLOCKX, HOLDLOCK)");
+
+    expect(agentReadSqlInput.safeParse({ sql: plan.sql }).success).toBe(false);
+    expect(inspectAgentStatement(plan.sql)).toBe("SIDE_EFFECT_KEYWORD");
   });
 
   test("a statement that merely mentions explain in a value is untouched", () => {
-    expect(composeEstimatingExplain("sqlite", "SELECT 'EXPLAIN' AS word FROM orders")).toBe(
+    expect(composeEstimatingExplain("sqlite", "SELECT 'EXPLAIN' AS word FROM orders").sql).toBe(
       "EXPLAIN QUERY PLAN SELECT 'EXPLAIN' AS word FROM orders",
     );
   });
@@ -1058,7 +1108,7 @@ describe("composeEstimatingExplain — DuckDB", () => {
    * hazard worse, not better.
    */
   test("gets the estimating form, and it describes without running", async () => {
-    const sql = composeEstimatingExplain("duckdb", "SELECT id FROM sales.orders");
+    const sql = composeEstimatingExplain("duckdb", "SELECT id FROM sales.orders").sql;
 
     expect(sql).toBe("EXPLAIN (FORMAT JSON) SELECT id FROM sales.orders");
     expect(sql.toUpperCase()).not.toContain("ANALYZE");
@@ -1071,7 +1121,7 @@ describe("composeEstimatingExplain — DuckDB", () => {
   });
 
   test("an INSERT the model smuggled in is refused by the guard rather than explained", () => {
-    const sql = composeEstimatingExplain("duckdb", "INSERT INTO child VALUES (9, 9, 'x')");
+    const sql = composeEstimatingExplain("duckdb", "INSERT INTO child VALUES (9, 9, 'x')").sql;
 
     expect(agentReadSqlInput.safeParse({ sql }).success).toBe(false);
     expect(inspectAgentStatement(sql)).toBe("SIDE_EFFECT_KEYWORD");
@@ -1084,12 +1134,21 @@ describe("the composers are reachable, which is the defect that put this file he
    * so they were dead code that typecheck, lint and the whole test suite all passed
    * over - only the 100% line-coverage gate saw them. This test fails if the
    * registration is removed again, whatever the functions themselves still say.
+   *
+   * It is driven from `AGENT_EXECUTION_ENGINES` rather than from a name, because the
+   * defect was never about DuckDB: `CATALOG_COMPOSERS`' own docblock asserts that every
+   * engine in that list has an entry here, and until this loop existed NOTHING enforced
+   * it - a hardcoded `"duckdb"` passes for ever while a FIFTH engine joins the list with
+   * no composer and `inspect_schema`, `profile_table` and `inspect_plan` can only refuse
+   * on it. Adding an engine to that list is what makes this test demand its composers.
    */
-  test("every kind composes rather than refusing UNSUPPORTED_DIALECT", () => {
-    for (const kind of ["columns", "relations", "indexes", "statistics"] as const) {
-      expect(() => composeCatalogRead("duckdb", { kind }), kind).not.toThrow(AgentComposedSqlError);
+  test("every execution engine composes every kind rather than refusing UNSUPPORTED_DIALECT", () => {
+    for (const dialect of AGENT_EXECUTION_ENGINES) {
+      for (const kind of ["columns", "relations", "indexes", "statistics"] as const) {
+        expect(() => composeCatalogRead(dialect, { kind }), `${dialect}/${kind}`).not.toThrow(AgentComposedSqlError);
+      }
+      expect(() => composeEstimatingExplain(dialect, "SELECT 1"), dialect).not.toThrow(AgentComposedSqlError);
     }
-    expect(() => composeEstimatingExplain("duckdb", "SELECT 1")).not.toThrow(AgentComposedSqlError);
   });
 });
 

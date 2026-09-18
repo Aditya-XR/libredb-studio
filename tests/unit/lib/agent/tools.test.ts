@@ -3069,15 +3069,57 @@ describe("inspectPlanTool — the estimating variant only", () => {
     expect(h.queryReadOnly.mock.calls[0][0]).toBe("EXPLAIN QUERY PLAN SELECT id FROM orders");
   });
 
-  test("a provider without EXPLAIN support is denied on the capability stage", async () => {
+  /**
+   * What bounds this tool is the DIALECT, not the editor's Explain capability, and the
+   * two came apart on SQL Server: it has a verified estimating plan for the agent
+   * (`SET SHOWPLAN_ALL`, which its read-only profile compiles for every statement it
+   * admits) and no editor Explain at all, so `supportsExplain` is honestly false. While
+   * the descriptor required that flag, a `query-optimization` run there had
+   * `inspect_plan` denied `CAPABILITY_UNSUPPORTED` and finished `unanswered` with
+   * `no-plan-evidence`, measured on SQL Server 2022 before the descriptor was changed.
+   */
+  test("the editor's EXPLAIN capability does not bound this tool, because the agent composes its own", async () => {
     const h = harness({ capabilities: { ...capabilities, supportsExplain: false } });
 
     const outcome = await inspectPlanTool(h.context, { sql: "SELECT 1" });
 
-    if (outcome.kind !== "refused") throw new Error("expected refused");
-    expect(outcome.refusal).toEqual({ class: "policy-denied", reasonCode: "CAPABILITY_UNSUPPORTED" });
-    expect(h.queryReadOnly).not.toHaveBeenCalled();
+    expect(outcome.kind).not.toBe("refused");
+    expect(h.queryReadOnly).toHaveBeenCalled();
+  });
+
+  test("a dialect with no verified estimating form is refused before any provider is acquired", async () => {
+    const h = harness({ connection: { ...connection, type: "mysql" } });
+
+    const outcome = await inspectPlanTool(h.context, { sql: "SELECT 1" });
+
+    if (outcome.kind !== "unavailable") throw new Error("expected unavailable");
+    expect(outcome.reasonCode).toBe("INVALID_TOOL_INPUT");
+    expect(outcome.detail).toBe("UNSUPPORTED_DIALECT");
     expect(h.acquireProvider).not.toHaveBeenCalled();
+  });
+
+  /**
+   * SQL Server composes NO prefix and asks for the plan as a session mode instead, so
+   * the statement reaching the provider is the model's own and the MODE is what says
+   * what to do with it. A test that only looked at the statement could not tell this
+   * apart from an engine that was sent no plan request at all.
+   */
+  test("SQL Server sends the statement unprefixed and asks for the plan as a mode", async () => {
+    const h = harness({ connection: { ...connection, type: "mssql" } });
+
+    await inspectPlanTool(h.context, { sql: "SELECT id FROM orders" });
+
+    expect(h.queryReadOnly.mock.calls[0][0]).toBe("SELECT id FROM orders");
+    expect(h.queryReadOnly.mock.calls[0][2]).toBe("estimate-plan");
+  });
+
+  test("the prefix engines are sent no mode, because their prefix is the request", async () => {
+    const h = harness();
+
+    await inspectPlanTool(h.context, { sql: "SELECT id FROM orders" });
+
+    expect(h.queryReadOnly.mock.calls[0][0]).toBe("EXPLAIN (FORMAT JSON) SELECT id FROM orders");
+    expect(h.queryReadOnly.mock.calls[0][2]).toBe("execute");
   });
 
   test("a write smuggled into a plan request is refused at the input stage", async () => {

@@ -24,15 +24,50 @@ let mockQueryFn: (sql: string, inputs?: Record<string, unknown>) => Promise<unkn
 let capturedInputs: Array<{ name: string; value: unknown }> = [];
 let cancelShouldThrow = false;
 /** The pool handed to the most recently constructed provider. */
-let lastPool: EventEmitter | undefined;
+let lastPool: MockConnectionPool | undefined;
+
+/**
+ * What a `request.batch(sql)` answers, which is a SEPARATE channel from `mockQueryFn`.
+ *
+ * `batch()` is reached by exactly one surface in the provider - the agent read-only
+ * execution profile (#328) - and by nothing else, so it gets its own dispatcher rather
+ * than being folded into the query one: the profile's engine model below is stateful
+ * (`SET SHOWPLAN_ALL` decides what the NEXT batch answers) and a handler shared with the
+ * ~170 stateless query tests would have to carry that state through all of them.
+ *
+ * The default refuses loudly. A batch reaching this without a test having installed an
+ * engine is a call nothing has modeled, and answering it with an empty result would let
+ * such a call pass as a success.
+ */
+let mockBatchFn: (sql: string, request: MockRequest) => Promise<unknown> = async (sql) => {
+  throw new Error(`No batch handler installed for: ${sql}`);
+};
+
+/**
+ * `begin`/`commit`/`rollback` on the Transaction the provider constructs itself.
+ *
+ * The provider does `new mssql.Transaction(this.pool!)` inside `queryReadOnly`, so a test
+ * cannot hand it a double: these hooks are how the engine model below observes the
+ * transaction's lifecycle and how it makes `rollback()` throw the way an already-aborted
+ * transaction really does. Default no-ops, so every transaction test written before this
+ * sees the behaviour it always saw.
+ */
+let mockTransactionHooks: { begin(): void; commit(): void; rollback(): void } = {
+  begin() {},
+  commit() {},
+  rollback() {},
+};
 
 class MockRequest {
-  private _transaction: unknown;
+  /** The Transaction this request was made on, `undefined` for a pool request. */
+  readonly boundTo: unknown;
   /** What THIS request bound, as `mssql` hands it to the driver. */
   private readonly inputs: Record<string, unknown> = {};
+  /** Installed by whatever is answering a batch, so `cancel()` can end that batch. */
+  private readonly cancelListeners: Array<() => void> = [];
 
   constructor(transaction?: unknown) {
-    this._transaction = transaction;
+    this.boundTo = transaction;
   }
 
   input(name: string, val: unknown) {
@@ -45,21 +80,47 @@ class MockRequest {
     return mockQueryFn(sql, this.inputs);
   }
 
+  async batch(sql: string) {
+    return mockBatchFn(sql, this);
+  }
+
+  /** How an in-flight batch learns it was cancelled, which is what `cancel()` does here. */
+  onCancel(listener: () => void) {
+    this.cancelListeners.push(listener);
+  }
+
   cancel() {
     if (cancelShouldThrow) throw new Error("cancel failed");
+    for (const listener of this.cancelListeners.splice(0)) listener();
   }
 }
 
+/**
+ * The Transaction the provider most recently constructed for itself.
+ *
+ * `queryReadOnly` builds its own (`new mssql.Transaction(this.pool!)`) because that is
+ * what pins ONE pooled connection for the whole call, so the only way to assert that
+ * every batch of a call travelled on that pinned connection is to capture it here and
+ * compare it with what each request was bound to.
+ */
+let lastTransaction: MockTransaction | undefined;
+
 class MockTransaction {
-  private _pool: unknown;
+  readonly pool: unknown;
 
   constructor(pool: unknown) {
-    this._pool = pool;
+    this.pool = pool;
   }
 
-  async begin() {}
-  async commit() {}
-  async rollback() {}
+  async begin() {
+    mockTransactionHooks.begin();
+  }
+  async commit() {
+    mockTransactionHooks.commit();
+  }
+  async rollback() {
+    mockTransactionHooks.rollback();
+  }
 }
 
 /**
@@ -79,11 +140,16 @@ class MockConnectionPool extends EventEmitter {
     this._config = config;
   }
 
+  /** How many times this pool was closed, which is how "the pool is ENDED" is observed. */
+  public closeCount = 0;
+
   async connect() {
     return this;
   }
 
-  async close() {}
+  async close() {
+    this.closeCount++;
+  }
 
   request() {
     return new MockRequest();
@@ -104,11 +170,18 @@ function ConnectionPoolFactory(config: unknown): MockConnectionPool {
   return pool;
 }
 
+/** The same recording trick `ConnectionPoolFactory` uses, for the same reason. */
+function TransactionFactory(pool: unknown): MockTransaction {
+  const transaction = new MockTransaction(pool);
+  lastTransaction = transaction;
+  return transaction;
+}
+
 mock.module("mssql", () => {
   return {
     default: {
       ConnectionPool: ConnectionPoolFactory,
-      Transaction: MockTransaction,
+      Transaction: TransactionFactory,
       Request: MockRequest,
     },
   };
@@ -116,10 +189,16 @@ mock.module("mssql", () => {
 
 // Now import the provider (after mock is in place)
 import { MSSQLProvider } from "@/lib/db/providers/sql/mssql";
-import { DatabaseConfigError, QueryError } from "@/lib/db/errors";
+import {
+  ConnectionError,
+  DatabaseConfigError,
+  DatabaseError,
+  ExecutionProfileError,
+  QueryError,
+} from "@/lib/db/errors";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 import type { DatabaseConnection } from "@/lib/types";
-import type { DatabaseProvider } from "@/lib/db/types";
+import type { DatabaseProvider, ReadOnlyStatementBudget } from "@/lib/db/types";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -4112,5 +4191,910 @@ describe("endOpenQueryTransaction()", () => {
     expect(doc).not.toContain("a pool cannot be asked");
     expect(doc).toContain("sys.dm_tran_session_transactions");
     expect(ABSENCES.filter((absence) => doc.includes(absence))).toEqual(["the driver cannot be asked"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryReadOnly(): the agent read-only execution profile on SQL Server (#328)
+//
+// SQL Server has no read-only transaction and no `EXPLAIN` keyword, so this profile is
+// shaped differently from PostgreSQL's: the PRINCIPAL is the first layer of the boundary
+// and the admission step is a SESSION MODE (`SET SHOWPLAN_ALL ON`) rather than a
+// statement prefix. Both of those are stateful on the connection, and both LEAK past a
+// rollback, so the fixture below models a SESSION rather than answering statement by
+// statement: what `SET SHOWPLAN_ALL ON` did decides what the NEXT batch answers, and
+// what `SET ROWCOUNT n` did decides how many rows the one after that returns.
+//
+// That statefulness is the whole point. A fixture that answered each batch from a table
+// keyed by its text would make every assertion below a statement about the fixture: the
+// row-budget test would pass whatever `SET ROWCOUNT` the provider issued, and the
+// plan-mode sentinel would pass on a session that really was still emitting plans.
+// ---------------------------------------------------------------------------
+
+/**
+ * One root row of a `SET SHOWPLAN_ALL ON` result: the class SQL Server compiled, and
+ * which STATEMENT of the batch it belongs to.
+ *
+ * Both columns are the optimizer's own (`Type`, `StmtId`), spelled as SQL Server spells
+ * them, because the provider reads them by those names.
+ */
+interface PlanRoot {
+  readonly Type: string;
+  readonly StmtId: number;
+}
+
+/** A statement whose compiled shape was MEASURED on the fixture, and that shape. */
+interface MeasuredStatement {
+  readonly sql: string;
+  readonly roots: readonly PlanRoot[];
+}
+
+// Every fixture below stands for one statement measured on the live fixture: SQL Server
+// 2022 (RTM-CU26) 16.0.4265.3, database AdventureWorks2022, as the least-privilege
+// principal `libredb_agent`. The `Type` and `StmtId` values are the optimizer's answers,
+// not this suite's invention, which is what lets a test about an admission decision be a
+// test about the PROVIDER rather than about the rows it was handed.
+
+/** `SELECT TOP 1 ...` -> ONE root, class `SELECT`. The ordinary admitted read. */
+const READ_SELECT: MeasuredStatement = {
+  sql: "SELECT TOP 1 BusinessEntityID FROM Person.Person",
+  roots: [{ Type: "SELECT", StmtId: 1 }],
+};
+
+/** `SELECT 1` -> `SELECT WITHOUT QUERY`, which is what a SELECT with no table compiles to. */
+const READ_SELECT_WITHOUT_QUERY: MeasuredStatement = {
+  sql: "SELECT 1",
+  roots: [{ Type: "SELECT WITHOUT QUERY", StmtId: 1 }],
+};
+
+/** `... FOR JSON PATH` -> `JSON SELECT`: a read the optimizer gives its own class name. */
+const READ_JSON_SELECT: MeasuredStatement = {
+  sql: "SELECT TOP 1 Name FROM Production.Product FOR JSON PATH",
+  roots: [{ Type: "JSON SELECT", StmtId: 1 }],
+};
+
+/** `... FOR XML PATH` -> `XML SELECT`, the same story as the JSON one. */
+const READ_XML_SELECT: MeasuredStatement = {
+  sql: "SELECT TOP 1 Name FROM Production.Product FOR XML PATH",
+  roots: [{ Type: "XML SELECT", StmtId: 1 }],
+};
+
+/**
+ * A multi-statement table-valued function read -> TWO roots, `SELECT` and `TEXT`, BOTH
+ * carrying `StmtId` 1.
+ *
+ * This is the shape that makes a root COUNT useless as a statement count: the `TEXT` row
+ * is the header SQL Server emits for the function's inlined body, not a second statement,
+ * and counting roots refused this read outright.
+ */
+const READ_TABLE_VALUED_FUNCTION: MeasuredStatement = {
+  sql: "SELECT TOP 5 * FROM dbo.ufnGetContactInformation(1)",
+  roots: [
+    { Type: "SELECT", StmtId: 1 },
+    { Type: "TEXT", StmtId: 1 },
+  ],
+};
+
+/**
+ * The same read with `; EXEC master.dbo.xp_cmdshell 'id'` appended -> StmtIds 1 and 12.
+ *
+ * The control the fixture above needs: the `TEXT` row is still there and the root count
+ * is still greater than one, so what separates this from an admitted read is the second
+ * StmtId and nothing else.
+ */
+const SMUGGLED_EXEC_AFTER_TABLE_VALUED_FUNCTION: MeasuredStatement = {
+  sql: "SELECT TOP 5 * FROM dbo.ufnGetContactInformation(1); EXEC master.dbo.xp_cmdshell 'id'",
+  roots: [
+    { Type: "SELECT", StmtId: 1 },
+    { Type: "TEXT", StmtId: 1 },
+    { Type: "EXECUTE PROC", StmtId: 12 },
+  ],
+};
+
+/**
+ * `SELECT 1; COMMIT; SELECT 2` -> THREE roots with three distinct StmtIds, one of them
+ * `COMMIT TRANSACTION`.
+ *
+ * What was measured is that the three roots carry three DISTINCT ids; the ids written
+ * here are SQL Server's own numbering of a batch's statements, and nothing below asserts
+ * their values.
+ */
+const SMUGGLED_COMMIT: MeasuredStatement = {
+  sql: "SELECT 1; COMMIT; SELECT 2",
+  roots: [
+    { Type: "SELECT WITHOUT QUERY", StmtId: 1 },
+    { Type: "COMMIT TRANSACTION", StmtId: 2 },
+    { Type: "SELECT WITHOUT QUERY", StmtId: 3 },
+  ],
+};
+
+/** An `INSERT` -> a root class of its own. The allowlist refuses it by NAME. */
+const WRITE_INSERT: MeasuredStatement = {
+  sql: "INSERT INTO Sales.Currency (CurrencyCode, Name) VALUES ('ZZZ', 'Probe')",
+  roots: [{ Type: "INSERT", StmtId: 1 }],
+};
+
+/**
+ * `DECLARE @v int` -> NO root row at all, which is the one measured shape that compiles
+ * to zero statements.
+ *
+ * It is not a hostile statement and it is refused before it reaches this provider anyway
+ * (the shared statement guard answers `MULTIPLE_STATEMENTS` for anything past a
+ * terminator). It is here because it is the only text the fixture measured that gives the
+ * admission step nothing to decide about.
+ */
+const NO_COMPILED_STATEMENT: MeasuredStatement = {
+  sql: "DECLARE @v int",
+  roots: [],
+};
+
+/**
+ * The module-body header ALONE, which is the TVF fixture with its `SELECT` root removed.
+ *
+ * DERIVED, NOT MEASURED, and the difference matters: no statement on the fixture compiled
+ * to a lone `TEXT` root. The rule it stands for is the one `AGENT_MODULE_BODY_TYPE`
+ * states - the header is admissible only ALONGSIDE an admitted statement of the same
+ * StmtId, never as one in its own right - so a batch that produced only the header is a
+ * shape the allowlist never classified, and the test below pins that it is refused rather
+ * than admitted by the exemption the TVF read needs.
+ */
+const MODULE_BODY_HEADER_ONLY: MeasuredStatement = {
+  sql: "SELECT TOP 5 * FROM dbo.ufnGetContactInformation(2)",
+  roots: [{ Type: "TEXT", StmtId: 1 }],
+};
+
+/**
+ * The provider's own plan-mode sentinel, which is `SELECT 1` with an alias on it.
+ *
+ * Its class is DERIVED from the measured classification of `SELECT 1`
+ * (`SELECT WITHOUT QUERY`): an alias changes the projection, not the statement class.
+ * What the tests below rest on is not the class but the COLUMNS a plan row carries, which
+ * are the optimizer's and never the caller's - so a session still in plan mode cannot
+ * answer this probe with `libredb_plan_mode_probe = 1`.
+ */
+const PLAN_MODE_PROBE: MeasuredStatement = {
+  sql: "SELECT 1 AS libredb_plan_mode_probe",
+  roots: [{ Type: "SELECT WITHOUT QUERY", StmtId: 1 }],
+};
+
+/**
+ * `SELECT * FROM OPENROWSET(BULK '/etc/hostname', SINGLE_CLOB) x` -> Msg 4834, a
+ * BATCH-ABORTING error, which dooms the transaction.
+ *
+ * Its plan roots are never reached: the compilation itself fails. It is modelled as a
+ * doomed statement below rather than as a plan shape.
+ */
+const BATCH_ABORTING_READ = "SELECT * FROM OPENROWSET(BULK '/etc/hostname', SINGLE_CLOB) x";
+
+/** Msg 4834, as SQL Server words it. */
+const MSG_4834 = "You do not have permission to use the bulk load statement.";
+
+/**
+ * A statement that fails to COMPILE without dooming the transaction: Msg 208.
+ *
+ * The control for the batch-aborting case. Measured on SQL Server 2022 CU26: after Msg 208
+ * the `SET SHOWPLAN_ALL OFF` runs, the rollback succeeds and the next borrow of the
+ * connection is clean, where Msg 4834 leaves every later batch answering ENOTBEGUN. Without
+ * this pair a test that says "the cleanup did not mask the error" is equally satisfied by a
+ * provider that never cleans up at all.
+ */
+const UNKNOWN_OBJECT_READ = "SELECT * FROM dbo.no_such_table";
+
+/** Msg 208, as SQL Server words it. */
+const MSG_208 = "Invalid object name 'dbo.no_such_table'.";
+
+const MEASURED_STATEMENTS: readonly MeasuredStatement[] = [
+  READ_SELECT,
+  READ_SELECT_WITHOUT_QUERY,
+  READ_JSON_SELECT,
+  READ_XML_SELECT,
+  READ_TABLE_VALUED_FUNCTION,
+  SMUGGLED_EXEC_AFTER_TABLE_VALUED_FUNCTION,
+  SMUGGLED_COMMIT,
+  WRITE_INSERT,
+  NO_COMPILED_STATEMENT,
+  MODULE_BODY_HEADER_ONLY,
+  PLAN_MODE_PROBE,
+];
+
+const PLANS_BY_STATEMENT = new Map(MEASURED_STATEMENTS.map((statement) => [statement.sql, statement.roots]));
+
+type ResultRow = Record<string, unknown>;
+/** A `mssql` recordset: an array of rows with the driver's column metadata hung off it. */
+type MockRecordset = ResultRow[] & { columns?: Record<string, unknown> };
+
+function toResult(rows: ResultRow[], columns?: Record<string, unknown>) {
+  const recordset = rows as MockRecordset;
+  if (columns) recordset.columns = columns;
+  return { recordset, recordsets: [recordset], rowsAffected: [rows.length] };
+}
+
+/** A `mssql` TransactionError, which carries its reason in `code` the way node-mssql does. */
+function transactionError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code, name: "TransactionError" });
+}
+
+/**
+ * The `ISNULL(<engine expression>, <default>) ... AS <alias>` columns of the principal
+ * probe, read out of the statement the PROVIDER sent.
+ *
+ * The defaults are taken from the provider's own text rather than restated here, which is
+ * what makes the NULL test below mean something: the fixture answers NULL, and the 1 or
+ * the 0 that a NULL becomes is the one written in the statement under test.
+ */
+const PRINCIPAL_COLUMN_PATTERN = /ISNULL\((.+?),\s*(\d)\)\s*AS int\)\s*AS\s+(\w+)/g;
+
+/**
+ * A SQL Server SESSION as this profile finds it, modelling only the behaviours that were
+ * measured on the fixture and that the profile's correctness rests on.
+ *
+ * - `SET SHOWPLAN_ALL ON` makes the next batch answer with PLAN ROWS instead of running:
+ *   a statement's roots come from the measured table above, and each root carries a child
+ *   operator row, so anything that counted ROWS rather than roots would read a different
+ *   number.
+ * - While SHOWPLAN is on, a `SET` is COMPILED rather than run, so it has no effect. That
+ *   is why the provider turns SHOWPLAN off FIRST in its reset, and modelling it is what
+ *   makes that ordering observable.
+ * - `SET ROWCOUNT n` makes the server stop a result at n rows. The row-budget test rests
+ *   on this: the number of rows the caller sees is decided by the value the PROVIDER set,
+ *   never by the fixture.
+ * - A batch-aborting error dooms the transaction: every later batch fails with ENOTBEGUN
+ *   and the rollback fails with EABORT, both of which are node-mssql's own errors.
+ * - Nothing here resets the session on rollback, because node-mssql's pool does not.
+ */
+class ShowplanSession {
+  showplanAll = false;
+  rowcount = 0;
+  lockTimeout = -1;
+  deadlockPriority = "NORMAL";
+  /** True once a batch-aborting error has doomed the transaction. */
+  aborted = false;
+  /** Every batch, in order, and whether it travelled on the transaction that pins the connection. */
+  readonly batches: Array<{ sql: string; pinned: boolean }> = [];
+  /** Lifecycle and statement events, in the order they really happened. */
+  readonly events: string[] = [];
+  /** What a non-plan statement returns, BEFORE `SET ROWCOUNT` cuts it. */
+  rows: ResultRow[] = [{ ok: 1 }];
+  /** The driver's column metadata, when a test wants the declared types asserted. */
+  columns: Record<string, unknown> | undefined;
+  /** Statements that never answer until the request is cancelled. */
+  readonly hangs = new Set<string>();
+  /** Statements whose compilation is a batch-aborting error. */
+  readonly dooms = new Set<string>([BATCH_ABORTING_READ]);
+  /** Statements that fail to compile WITHOUT dooming the transaction, and what the engine says. */
+  readonly compileFailures = new Map<string, string>([[UNKNOWN_OBJECT_READ, MSG_208]]);
+  /** A session whose `SET SHOWPLAN_ALL OFF` does not take effect. */
+  showplanOffIsIgnored = false;
+  /** Raw server answers, keyed by the engine expression the probe asks them with. */
+  readonly principalAnswers = new Map<string, number | null>();
+  /** What the probe answered with, so a test can prove the fixture read the real statement. */
+  principalColumns: Array<{ expression: string; alias: string }> = [];
+  /** Set to model a server that answers the probe with no row at all. */
+  principalRows: ResultRow[] | null = null;
+  /** Set to model the connection probe itself failing. */
+  connectFailure: Error | null = null;
+
+  /** The measured `libredb_agent`: no forbidden privilege, and SHOWPLAN granted. */
+  private static cleanAnswerFor(expression: string): number {
+    return expression.includes("'SHOWPLAN'") ? 1 : 0;
+  }
+
+  async query(sql: string) {
+    if (this.connectFailure) throw this.connectFailure;
+    if (sql.includes("IS_SRVROLEMEMBER")) return this.answerPrincipalProbe(sql);
+    return defaultQuery(sql);
+  }
+
+  private answerPrincipalProbe(sql: string) {
+    const row: ResultRow = {};
+    this.principalColumns = [];
+    for (const [, expression, fallback, alias] of sql.matchAll(PRINCIPAL_COLUMN_PATTERN)) {
+      this.principalColumns.push({ expression, alias });
+      const answered = this.principalAnswers.has(expression)
+        ? this.principalAnswers.get(expression)
+        : ShowplanSession.cleanAnswerFor(expression);
+      // The ISNULL the STATEMENT wrote, applied to the answer the server gave.
+      row[alias] = answered ?? Number(fallback);
+    }
+    if (this.principalColumns.length < 2) {
+      throw new Error("the principal probe matched no columns: this fixture is not modelling the real statement");
+    }
+    return toResult(this.principalRows ?? [row]);
+  }
+
+  private planFor(sql: string) {
+    const roots = PLANS_BY_STATEMENT.get(sql);
+    if (roots === undefined) {
+      throw new Error(`no measured plan shape for: ${sql}`);
+    }
+    const rows: ResultRow[] = [];
+    roots.forEach((root, index) => {
+      const nodeId = index * 10 + 1;
+      rows.push({ StmtText: sql, StmtId: root.StmtId, NodeId: nodeId, Parent: 0, Type: root.Type });
+      // One operator row per root. `PLAN_ROW` is what SHOWPLAN_ALL puts in `Type` for
+      // everything that is not a statement row, and a non-zero `Parent` is what makes it
+      // a child: anything reading the plan by ROW COUNT would see twice what it should.
+      rows.push({
+        StmtText: "  |--Clustered Index Scan(OBJECT:([Person].[Person]))",
+        StmtId: root.StmtId,
+        NodeId: nodeId + 1,
+        Parent: nodeId,
+        Type: "PLAN_ROW",
+      });
+    });
+    return toResult(rows);
+  }
+
+  async batch(sql: string, request: MockRequest) {
+    this.batches.push({ sql, pinned: request.boundTo === lastTransaction });
+    this.events.push(`batch:${sql}`);
+    if (this.aborted) {
+      // node-mssql cannot make a request on a transaction whose connection it released.
+      throw transactionError("Transaction has not begun. Call begin() first.", "ENOTBEGUN");
+    }
+    if (this.dooms.has(sql)) {
+      this.aborted = true;
+      throw Object.assign(new Error(MSG_4834), { number: 4834 });
+    }
+    const compileFailure = this.compileFailures.get(sql);
+    if (compileFailure !== undefined) {
+      // No `aborted` here, and that is the whole difference: the transaction survives, so
+      // the cleanup that follows really runs.
+      throw Object.assign(new Error(compileFailure), { number: 208 });
+    }
+    const set = /^SET\s+(\S+)\s*(.*)$/i.exec(sql);
+    if (set) {
+      const isShowplanOff = /^SET\s+SHOWPLAN_ALL\s+OFF$/i.test(sql);
+      // Compiled rather than run while the mode is on, so it has no effect. What rows a
+      // compiled SET emits is not something this fixture claims to know, and the provider
+      // reads none: it issues the SHOWPLAN OFF first for exactly this reason.
+      if (this.showplanAll && !isShowplanOff) return toResult([]);
+      this.applySet(set[1].toUpperCase(), set[2].trim());
+      return toResult([]);
+    }
+    if (this.showplanAll) return this.planFor(sql);
+    if (this.hangs.has(sql)) {
+      return new Promise<ReturnType<typeof toResult>>((_resolve, reject) => {
+        request.onCancel(() => {
+          this.events.push("cancelled");
+          // tedious ends a cancelled request by rejecting it. The wording is this
+          // fixture's own and nothing asserts it; what is asserted is that the await
+          // ended because `cancel()` was called, and that it ended before the rollback.
+          reject(new Error("Canceled."));
+        });
+      });
+    }
+    if (sql === PLAN_MODE_PROBE.sql) return toResult([{ libredb_plan_mode_probe: 1 }]);
+    const visible = this.rowcount > 0 ? this.rows.slice(0, this.rowcount) : this.rows;
+    this.events.push("answered");
+    return toResult(visible, this.columns);
+  }
+
+  private applySet(option: string, argument: string) {
+    if (option === "SHOWPLAN_ALL") {
+      const on = argument.toUpperCase() === "ON";
+      if (!on && this.showplanOffIsIgnored) return;
+      this.showplanAll = on;
+      return;
+    }
+    if (option === "ROWCOUNT") this.rowcount = Number(argument);
+    if (option === "LOCK_TIMEOUT") this.lockTimeout = Number(argument);
+    if (option === "DEADLOCK_PRIORITY") this.deadlockPriority = argument.toUpperCase();
+  }
+
+  begin() {
+    this.events.push("begin");
+  }
+
+  rollback() {
+    this.events.push("rollback");
+    // Measured: a rollback on an already-aborted transaction throws, and @@TRANCOUNT is
+    // 0 afterwards. The provider must swallow it.
+    if (this.aborted) throw transactionError("Transaction has been aborted.", "EABORT");
+  }
+
+  /** The batches issued after the statement, which is what the teardown is. */
+  batchesAfter(sql: string): string[] {
+    const index = this.batches.findIndex((batch) => batch.sql === sql);
+    return this.batches.slice(index + 1).map((batch) => batch.sql);
+  }
+}
+
+describe("queryReadOnly() - the agent read-only execution profile (#328)", () => {
+  let engine: ShowplanSession;
+  let provider: MSSQLProvider | undefined;
+
+  /** A budget every field of which is a positive integer, which is what the profile demands. */
+  function budget(overrides: Partial<ReadOnlyStatementBudget> = {}): ReadOnlyStatementBudget {
+    return { statementTimeoutMs: 4500, maxResultRows: 100, maxResultBytes: 1_000_000, ...overrides };
+  }
+
+  /**
+   * A provider opened under the profile, which is the only way `queryReadOnly` serves
+   * anything: the execution context is server-injected, so no caller-supplied option can
+   * reach it.
+   */
+  async function openProfiled(): Promise<MSSQLProvider> {
+    provider = new MSSQLProvider(baseConfig, {}, { readOnly: true });
+    await provider.connect();
+    return provider;
+  }
+
+  beforeEach(() => {
+    engine = new ShowplanSession();
+    capturedInputs = [];
+    cancelShouldThrow = false;
+    lastTransaction = undefined;
+    mockQueryFn = (sql: string) => engine.query(sql);
+    mockBatchFn = (sql: string, request: MockRequest) => engine.batch(sql, request);
+    mockTransactionHooks = {
+      begin: () => engine.begin(),
+      commit: () => {},
+      rollback: () => engine.rollback(),
+    };
+  });
+
+  afterEach(async () => {
+    try {
+      await provider?.disconnect();
+    } catch {
+      /* a test that ended the pool itself has nothing left to close */
+    }
+    provider = undefined;
+    mockQueryFn = async (sql: string) => defaultQuery(sql);
+    mockBatchFn = async (sql: string) => {
+      throw new Error(`No batch handler installed for: ${sql}`);
+    };
+    mockTransactionHooks = { begin() {}, commit() {}, rollback() {} };
+  });
+
+  // -------------------------------------------------------------------------
+  // The profile itself
+  // -------------------------------------------------------------------------
+
+  test("a provider opened WITHOUT the profile refuses to serve read-only execution at all", async () => {
+    // No principal verification has run on this session, so it may be able to write.
+    // Serving agent semantics here would serve them without the layer that makes them
+    // true, which on this engine is the whole first layer of the boundary.
+    provider = new MSSQLProvider(baseConfig);
+    await provider.connect();
+
+    await expect(provider.queryReadOnly(READ_SELECT.sql, budget())).rejects.toThrow(
+      /requires a provider opened under the agent read-only profile/,
+    );
+    // Refused before anything reached the server: no transaction, no admission, no reset.
+    expect(engine.batches).toEqual([]);
+  });
+
+  test("a budget field that is not a positive integer is refused before anything is sent", async () => {
+    const profiled = await openProfiled();
+    const broken: Array<[string, Partial<ReadOnlyStatementBudget>]> = [
+      ["a fractional timeout", { statementTimeoutMs: 4500.5 }],
+      ["a zero row cap", { maxResultRows: 0 }],
+      ["a negative byte cap", { maxResultBytes: -1 }],
+    ];
+
+    for (const [name, override] of broken) {
+      const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget(override));
+      await expect(rejection).rejects.toThrow(/must be a positive integer/);
+      expect(name).toBeTruthy();
+    }
+
+    // Fail closed means the whole call is refused, so nothing opened a transaction and
+    // nothing set a session mode that would then have to be reset.
+    expect(engine.batches).toEqual([]);
+    expect(engine.events).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Layer 1: the principal, verified at open
+  // -------------------------------------------------------------------------
+
+  test("the least-privilege principal the fixture measured is admitted", async () => {
+    const profiled = await openProfiled();
+
+    expect(profiled.isConnected()).toBe(true);
+    // The control every principal assertion below needs: the fixture answered the real
+    // statement rather than a shape of its own, so the aliases it saw are the provider's.
+    const aliases = engine.principalColumns.map((column) => column.alias);
+    expect(aliases).toContain("srv_sysadmin");
+    expect(aliases).toContain("db_datawriter");
+    expect(aliases).toContain("showplan");
+  });
+
+  test("a principal holding ANY one of the forbidden privileges is refused, and the refusal names it", async () => {
+    // The list is read from the provider's own probe rather than restated here: a
+    // privilege added to the statement is covered the day it is added, and one removed
+    // cannot leave a test asserting about a column nobody asks for.
+    await openProfiled();
+    const forbidden = engine.principalColumns.filter((column) => !column.expression.includes("'SHOWPLAN'"));
+    expect(forbidden.length).toBeGreaterThan(10);
+
+    for (const column of forbidden) {
+      const held = new ShowplanSession();
+      held.principalAnswers.set(column.expression, 1);
+      mockQueryFn = (sql: string) => held.query(sql);
+      const refused = new MSSQLProvider(baseConfig, {}, { readOnly: true });
+
+      const rejection = refused.connect();
+      await expect(rejection).rejects.toThrow(ExecutionProfileError);
+      await expect(rejection).rejects.toThrow(new RegExp(`\\b${column.alias}\\b`));
+    }
+  });
+
+  test("an answer of NULL is read as HELD, because a name the server cannot resolve is not proof of absence", async () => {
+    // Measured: IS_SRVROLEMEMBER and IS_ROLEMEMBER answer NULL, not 0, for a role name
+    // the server cannot resolve - a typo in the list, or a contained-database user whose
+    // server principal does not resolve. The statement's own ISNULL(..., 1) turns that
+    // into "held", and this test rests on the default written in the provider's text.
+    engine.principalAnswers.set("IS_ROLEMEMBER('db_owner')", null);
+    provider = new MSSQLProvider(baseConfig, {}, { readOnly: true });
+
+    const rejection = provider.connect();
+    await expect(rejection).rejects.toThrow(ExecutionProfileError);
+    await expect(rejection).rejects.toThrow(/db_owner/);
+  });
+
+  test("a principal without SHOWPLAN is refused, because the profile cannot run its own admission step", async () => {
+    engine.principalAnswers.set("HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'SHOWPLAN')", 0);
+    provider = new MSSQLProvider(baseConfig, {}, { readOnly: true });
+
+    const rejection = provider.connect();
+    await expect(rejection).rejects.toThrow(ExecutionProfileError);
+    await expect(rejection).rejects.toThrow(/requires SHOWPLAN on this database/);
+  });
+
+  test("a server that answers the probe with no row at all is refused, not trusted", async () => {
+    // Fail closed on anything that is not an explicit set of integers: a boundary that
+    // could not be read has not been proven.
+    engine.principalRows = [];
+    provider = new MSSQLProvider(baseConfig, {}, { readOnly: true });
+
+    await expect(provider.connect()).rejects.toThrow(ExecutionProfileError);
+  });
+
+  test("a refused profiled connect CLOSES the pool and rethrows the typed refusal unwrapped", async () => {
+    engine.principalAnswers.set("IS_SRVROLEMEMBER('sysadmin')", 1);
+    provider = new MSSQLProvider(baseConfig, {}, { readOnly: true });
+
+    const error = await provider.connect().then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    // Unwrapped: callers branch on the deny reason code, and wrapping this in a
+    // ConnectionError would strip it.
+    expect(error).toBeInstanceOf(ExecutionProfileError);
+    expect((error as ExecutionProfileError).reasonCode).toBe("PROFILE_PRIVILEGES_TOO_BROAD");
+    // The pool is built before anything that can fail, and a provider whose connect threw
+    // is dropped without disconnect(), so a pool left open here leaks its socket.
+    expect(lastPool?.closeCount).toBe(1);
+    expect(provider.isConnected()).toBe(false);
+  });
+
+  test("an ordinary connect failure is still a ConnectionError, so only the profile refusal is special", async () => {
+    // The control the assertion above needs: if everything that failed at connect came
+    // back typed, "unwrapped" would say nothing about the profile.
+    engine.connectFailure = new Error("socket hang up");
+    provider = new MSSQLProvider(baseConfig, {}, { readOnly: true });
+
+    const rejection = provider.connect();
+    await expect(rejection).rejects.toThrow(ConnectionError);
+    await expect(rejection).rejects.toThrow(/Failed to connect to SQL Server/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Layer 2: admission by the optimizer, having executed nothing
+  // -------------------------------------------------------------------------
+
+  test("one root of each class the optimizer names a read is admitted and runs", async () => {
+    const profiled = await openProfiled();
+
+    for (const admitted of [READ_SELECT, READ_SELECT_WITHOUT_QUERY, READ_JSON_SELECT, READ_XML_SELECT]) {
+      const result = await profiled.queryReadOnly(admitted.sql, budget());
+      expect(result.rows).toEqual([{ ok: 1 }]);
+      expect(result.rowCount).toBe(1);
+      // The statement travelled twice on purpose - once compiled by the admission, once
+      // run - and nothing else did.
+      expect(engine.batches.filter((batch) => batch.sql === admitted.sql)).toHaveLength(2);
+    }
+    // Every batch of every call travelled on the transaction the provider began, which is
+    // what pins ONE pooled connection for the whole call.
+    expect(engine.batches.every((batch) => batch.pinned)).toBe(true);
+    expect(lastTransaction?.pool).toBe(lastPool);
+  });
+
+  test("the multi-statement TVF shape is admitted: two roots, ONE StmtId, one of them the module body", async () => {
+    // Counting ROOTS refused this read outright, and it is an ordinary read of a
+    // table-valued function. What makes it one statement is the StmtId the two roots
+    // share, which is how SQL Server numbers a batch's statements.
+    const profiled = await openProfiled();
+
+    const result = await profiled.queryReadOnly(READ_TABLE_VALUED_FUNCTION.sql, budget());
+
+    expect(result.rows).toEqual([{ ok: 1 }]);
+    expect(engine.batches.filter((batch) => batch.sql === READ_TABLE_VALUED_FUNCTION.sql)).toHaveLength(2);
+  });
+
+  test("the same TVF read with a statement appended is refused: two distinct StmtIds", async () => {
+    const profiled = await openProfiled();
+
+    const rejection = profiled.queryReadOnly(SMUGGLED_EXEC_AFTER_TABLE_VALUED_FUNCTION.sql, budget());
+
+    await expect(rejection).rejects.toThrow(QueryError);
+    await expect(rejection).rejects.toThrow(/admits exactly one statement; SQL Server compiled 2/);
+    // Compiled, never run: the statement went to the server once, under SHOWPLAN.
+    expect(engine.batches.filter((batch) => batch.sql === SMUGGLED_EXEC_AFTER_TABLE_VALUED_FUNCTION.sql)).toHaveLength(
+      1,
+    );
+  });
+
+  test("a batch the optimizer compiled as three statements is refused, and the refusal lists their classes", async () => {
+    const profiled = await openProfiled();
+
+    const rejection = profiled.queryReadOnly(SMUGGLED_COMMIT.sql, budget());
+
+    await expect(rejection).rejects.toThrow(/SQL Server compiled 3 \(/);
+    await expect(rejection).rejects.toThrow(/COMMIT TRANSACTION/);
+  });
+
+  test("a root class outside the allowlist is refused, and the refusal names that class", async () => {
+    const profiled = await openProfiled();
+
+    const rejection = profiled.queryReadOnly(WRITE_INSERT.sql, budget());
+
+    await expect(rejection).rejects.toThrow(/admits read statements only; SQL Server compiled this one as INSERT/);
+    // Nothing was executed: the row budget was never set, because the call never got past
+    // the admission step.
+    expect(engine.rowcount).toBe(0);
+  });
+
+  test("a batch whose ONLY root is the module-body header is refused, not admitted by the TVF exemption", async () => {
+    const profiled = await openProfiled();
+
+    const rejection = profiled.queryReadOnly(MODULE_BODY_HEADER_ONLY.sql, budget());
+
+    await expect(rejection).rejects.toThrow(/compiled no read statement from this text/);
+  });
+
+  test("a text SQL Server compiled no statement from is refused rather than sent", async () => {
+    const profiled = await openProfiled();
+
+    const rejection = profiled.queryReadOnly(NO_COMPILED_STATEMENT.sql, budget());
+
+    await expect(rejection).rejects.toThrow(/compiled no statement from this text/);
+    expect(engine.batches.filter((batch) => batch.sql === NO_COMPILED_STATEMENT.sql)).toHaveLength(1);
+  });
+
+  test("a session still answering with plan rows is refused, rather than handing a plan back as data", async () => {
+    const profiled = await openProfiled();
+    // The control: on a session whose SHOWPLAN OFF takes effect, this same statement
+    // answers with data, so the refusal below is about the session and not the statement.
+    expect((await profiled.queryReadOnly(READ_SELECT.sql, budget())).rows).toEqual([{ ok: 1 }]);
+
+    engine.showplanOffIsIgnored = true;
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget());
+
+    await expect(rejection).rejects.toThrow(/still in plan mode/);
+    // The statement was compiled and never run: a plan is a result set, so a caller could
+    // not have told the difference, which is why this is read back rather than assumed.
+    expect(engine.batches.filter((batch) => batch.sql === READ_SELECT.sql)).toHaveLength(3);
+  });
+
+  // -------------------------------------------------------------------------
+  // estimate-plan: the plan that admitted the statement IS the plan the caller gets
+  // -------------------------------------------------------------------------
+
+  test("estimate-plan answers with the admission's own plan rows and never sends the statement twice", async () => {
+    const profiled = await openProfiled();
+
+    const result = await profiled.queryReadOnly(READ_SELECT.sql, budget(), "estimate-plan");
+
+    expect(result.rows.map((row) => row.Type)).toEqual(["SELECT", "PLAN_ROW"]);
+    expect(result.rows[0]).toMatchObject({ Parent: 0, StmtId: 1 });
+    expect(result.fields).toEqual(["StmtText", "StmtId", "NodeId", "Parent", "Type"]);
+    // ONE trip. On this engine the plan a caller asks for is the plan that admitted the
+    // statement, which is a stronger pairing than composing a second one.
+    expect(engine.batches.filter((batch) => batch.sql === READ_SELECT.sql)).toHaveLength(1);
+    // And the execution path was never entered: the only ROWCOUNT is the teardown's.
+    expect(engine.batches.filter((batch) => /^SET ROWCOUNT/.test(batch.sql)).map((batch) => batch.sql)).toEqual([
+      "SET ROWCOUNT 0",
+    ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Layer 3: the budgets
+  // -------------------------------------------------------------------------
+
+  test("SET ROWCOUNT is the budget plus one, and the extra row REFUSES the call rather than truncating it", async () => {
+    const profiled = await openProfiled();
+    engine.rows = Array.from({ length: 50 }, (_row, index) => ({ n: index }));
+
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultRows: 3 }));
+
+    // 4 rows, and 4 only because the provider asked the SERVER to stop there: without it
+    // a 20-million-row read is materialised in full and takes the process down.
+    await expect(rejection).rejects.toThrow(/exceeded the row budget: 4 rows > 3 allowed/);
+    expect(engine.batches.map((batch) => batch.sql)).toContain("SET ROWCOUNT 4");
+  });
+
+  test("a result that fits the row budget is served, so the refusal above is the cap and not the cut", async () => {
+    const profiled = await openProfiled();
+    engine.rows = Array.from({ length: 3 }, (_row, index) => ({ n: index }));
+
+    const result = await profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultRows: 3 }));
+
+    expect(result.rowCount).toBe(3);
+    expect(result.fields).toEqual(["n"]);
+  });
+
+  test("the byte budget REFUSES rather than truncating, and it is measured on the rows themselves", async () => {
+    const profiled = await openProfiled();
+    engine.rows = [{ blob: "x".repeat(4096) }];
+
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 1024 }));
+
+    await expect(rejection).rejects.toThrow(/exceeded the byte budget: \d+ bytes > 1024 allowed/);
+  });
+
+  test("the same rows under a byte budget that fits are served", async () => {
+    const profiled = await openProfiled();
+    engine.rows = [{ blob: "x".repeat(4096) }];
+
+    const result = await profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 1_000_000 }));
+
+    expect(result.rowCount).toBe(1);
+  });
+
+  test("an admitted read that returns nothing answers no fields, and the declared types travel when the driver sends them", async () => {
+    const profiled = await openProfiled();
+    engine.rows = [];
+
+    expect(await profiled.queryReadOnly(READ_SELECT.sql, budget())).toMatchObject({ rows: [], fields: [] });
+
+    // With column metadata the fields come from the DRIVER rather than from the first
+    // row, which is what keeps a column that is NULL in every row visible.
+    engine.rows = [{ ok: null }];
+    engine.columns = { ok: { type: { declaration: "int" } } };
+    const typed = await profiled.queryReadOnly(READ_SELECT.sql, budget());
+
+    expect(typed.fields).toEqual(["ok"]);
+    expect(typed.columnTypes).toEqual({ ok: "int" });
+  });
+
+  // -------------------------------------------------------------------------
+  // The deadline: cancelled, not abandoned
+  // -------------------------------------------------------------------------
+
+  test("the deadline CANCELS the statement, and the statement is settled before the rollback", async () => {
+    const profiled = await openProfiled();
+    engine.hangs.add(READ_SELECT.sql);
+
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ statementTimeoutMs: 25 }));
+
+    // Mapped through `mapDatabaseError`, so it reaches the caller as this engine's error
+    // rather than as a raw driver rejection.
+    await expect(rejection).rejects.toThrow(DatabaseError);
+    // node-mssql's own requestTimeout could not do this: tedious stops the request timer
+    // on the first data packet, so it bounds time-to-first-row and not statement time.
+    expect(engine.events).toContain("cancelled");
+    // Ordering, which is the half that a raced promise would get wrong: a rollback issued
+    // while the request is still in flight throws, leaves the transaction OPEN and does
+    // not stop the statement.
+    expect(engine.events.indexOf("cancelled")).toBeLessThan(engine.events.indexOf("rollback"));
+    expect(engine.events.indexOf("begin")).toBeLessThan(engine.events.indexOf("cancelled"));
+  });
+
+  // -------------------------------------------------------------------------
+  // Teardown: every session mode this profile sets LEAKS past the rollback
+  // -------------------------------------------------------------------------
+
+  test("every session mode it set is put back, SHOWPLAN first, on the same pinned connection", async () => {
+    const profiled = await openProfiled();
+
+    await profiled.queryReadOnly(READ_SELECT.sql, budget());
+
+    // SHOWPLAN first and on its own: while it is on, a SET is COMPILED rather than run,
+    // so every reset after it would be a no-op that looked like a success.
+    expect(engine.batchesAfter(READ_SELECT.sql).slice(-4)).toEqual([
+      "SET SHOWPLAN_ALL OFF",
+      "SET ROWCOUNT 0",
+      "SET LOCK_TIMEOUT -1",
+      "SET DEADLOCK_PRIORITY NORMAL",
+    ]);
+    // And the session really is back to its defaults, because node-mssql hands this
+    // connection to the next borrower without resetting it.
+    expect(engine.showplanAll).toBe(false);
+    expect(engine.rowcount).toBe(0);
+    expect(engine.lockTimeout).toBe(-1);
+    expect(engine.deadlockPriority).toBe("NORMAL");
+    expect(profiled.isConnected()).toBe(true);
+  });
+
+  test("the lock timeout is the budget's, and the agent is the deadlock victim rather than the winner", async () => {
+    const profiled = await openProfiled();
+
+    await profiled.queryReadOnly(READ_SELECT.sql, budget({ statementTimeoutMs: 1500 }));
+
+    // Bounds WAITING for a lock (error 1222); it does not bound HOLDING one, which is the
+    // shared statement guard's job.
+    const opening = engine.batches.slice(0, 2).map((batch) => batch.sql);
+    expect(opening).toEqual(["SET LOCK_TIMEOUT 1500", "SET DEADLOCK_PRIORITY LOW"]);
+  });
+
+  test("a reset that FAILS ends the pool, because a session still in plan mode answers a wrong ANSWER", async () => {
+    const profiled = await openProfiled();
+
+    // A batch-aborting error dooms the transaction: the reset then fails with ENOTBEGUN
+    // while the connection still carries the mode. Returning it to the pool would answer
+    // the NEXT caller's statement with a query plan where it expects rows, which is a
+    // wrong answer rather than an error.
+    await expect(profiled.queryReadOnly(BATCH_ABORTING_READ, budget())).rejects.toThrow(DatabaseError);
+
+    expect(engine.batches.map((batch) => batch.sql)).toContain("SET SHOWPLAN_ALL OFF");
+    expect(profiled.isConnected()).toBe(false);
+    expect(lastPool?.closeCount).toBe(1);
+  });
+
+  /**
+   * The cleanup must not become the diagnosis.
+   *
+   * `admitReadStatement` turns the plan mode off after compiling the candidate, and on a
+   * batch-aborting error that OFF fails with ENOTBEGUN. Written as a bare `finally` it
+   * threw, REPLACING the reason the candidate was refused: the model was told
+   * "Transaction has not begun. Call begin() first." - a sentence about this provider's
+   * own plumbing, offered as the reason ITS statement failed - and Msg 4834 never reached
+   * it. A model cannot repair a statement from that, and the teardown test above cannot
+   * see it, because both messages are a `DatabaseError`.
+   */
+  test("a batch-aborting error reports what SQL Server refused, not what the cleanup then failed to do", async () => {
+    const profiled = await openProfiled();
+
+    const error = await profiled.queryReadOnly(BATCH_ABORTING_READ, budget()).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect((error as Error).message).toContain(MSG_4834);
+    expect((error as Error).message).not.toContain("Transaction has not begun");
+  });
+
+  test("an ordinary compile failure still reports the engine's own message, and keeps the pool", async () => {
+    const profiled = await openProfiled();
+
+    // The control for the test above: Msg 208 does NOT doom the transaction, so the OFF
+    // runs, the reset succeeds and the provider stays usable. Without it, "the cleanup
+    // did not mask the error" would be satisfied by a provider that never cleans up.
+    const error = await profiled.queryReadOnly(UNKNOWN_OBJECT_READ, budget()).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect((error as Error).message).toContain(MSG_208);
+    expect(profiled.isConnected()).toBe(true);
+  });
+
+  test("a rollback that throws on an already-aborted transaction is swallowed", async () => {
+    const profiled = await openProfiled();
+
+    const error = await profiled.queryReadOnly(BATCH_ABORTING_READ, budget()).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    // The rollback WAS attempted and it DID throw - measured, @@TRANCOUNT is 0 afterwards,
+    // so there is nothing left to roll back and the throw carries no information.
+    expect(engine.events).toContain("rollback");
+    expect(engine.aborted).toBe(true);
+    expect((error as Error).message).not.toContain("Transaction has been aborted");
+  });
+
+  test("a healthy call leaves the pool open, so the ending above is the failure's and not the path's", async () => {
+    const profiled = await openProfiled();
+
+    await profiled.queryReadOnly(READ_SELECT.sql, budget());
+
+    expect(lastPool?.closeCount).toBe(0);
+    expect(engine.events.filter((event) => event === "rollback")).toHaveLength(1);
   });
 });

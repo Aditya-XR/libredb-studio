@@ -95,7 +95,7 @@ const PII_NAME_WORDS: readonly string[] = Object.freeze([
 const TEXTUAL_TYPE = /char|text|string|clob|varying/i;
 
 /** Dialects with a verified profile composition; enforced by `composeTableProfile`. */
-type ProfileDialect = "postgres" | "sqlite";
+type ProfileDialect = "postgres" | "sqlite" | "mssql";
 
 /** Something, an `@`, something, a `.`, something. Both engines spell `LIKE` alike. */
 const EMAIL_SHAPE = "%_@_%._%";
@@ -112,6 +112,9 @@ export const DIGIT_RUN_LENGTH = 9;
 
 /** SQLite has no quantifier, so the run is spelled out one class at a time. */
 const SQLITE_DIGIT_RUN = `*${"[0-9]".repeat(DIGIT_RUN_LENGTH)}*`;
+
+/** The same run as a T-SQL `LIKE` pattern: the class repeated, between two `%`s. */
+const MSSQL_DIGIT_RUN = `%${"[0-9]".repeat(DIGIT_RUN_LENGTH)}%`;
 
 /** One value shape, and how each engine spells the test for it. */
 interface ProfileShape {
@@ -144,6 +147,7 @@ const EMAIL_SHAPE_TEST: ProfileShape = Object.freeze({
   predicate: Object.freeze({
     postgres: (quoted: string) => `${quoted} LIKE '${EMAIL_SHAPE}'`,
     sqlite: (quoted: string) => `${quoted} LIKE '${EMAIL_SHAPE}'`,
+    mssql: (quoted: string) => `${quoted} LIKE '${EMAIL_SHAPE}'`,
   }),
 });
 
@@ -153,6 +157,10 @@ const DIGIT_RUN_SHAPE_TEST: ProfileShape = Object.freeze({
   predicate: Object.freeze({
     postgres: (quoted: string) => `${quoted} ~ '[0-9]{${DIGIT_RUN_LENGTH},}'`,
     sqlite: (quoted: string) => `${quoted} GLOB '${SQLITE_DIGIT_RUN}'`,
+    // T-SQL has no regular expressions and no GLOB. Its `LIKE` DOES take a character
+    // class, so the run is spelled as the class repeated: there is no quantifier, so
+    // nine `[0-9]`s is the shortest faithful spelling of "nine or more digits".
+    mssql: (quoted: string) => `${quoted} LIKE '${MSSQL_DIGIT_RUN}'`,
   }),
 });
 
@@ -246,9 +254,22 @@ const isTextual = (column: ColumnSchema): boolean => TEXTUAL_TYPE.test(column.ty
  * allowlist would refuse to count things it simply had not heard of. This list is
  * the closed set that genuinely has no default equality.
  */
-const INCOMPARABLE_TYPE = /\b(jsonb?|xml|point|line|lseg|box|path|polygon|circle)\b/i;
+const INCOMPARABLE_TYPE: Readonly<Record<ProfileDialect, RegExp>> = Object.freeze({
+  postgres: /\b(jsonb?|xml|point|line|lseg|box|path|polygon|circle)\b/i,
+  sqlite: /\b(jsonb?|xml|point|line|lseg|box|path|polygon|circle)\b/i,
+  // PER DIALECT because the sets genuinely differ, and one shared regex would have to
+  // be wrong about one of them. SQL Server refuses `count(DISTINCT …)` on `xml`
+  // ("Operand data type xml is invalid for count operator", measured on 2022 CU26) and
+  // on the three deprecated large types, while `varbinary(max)` and `uniqueidentifier`
+  // are both fine, also measured. `text` is the reason this cannot be one list:
+  // SQL Server's `text` is incomparable and PostgreSQL's is its ordinary string type,
+  // so a shared entry would silently stop counting distinct values for every
+  // PostgreSQL text column.
+  mssql: /\b(xml|ntext|text|image|geography|geometry|hierarchyid)\b/i,
+});
 
-const isComparable = (column: ColumnSchema): boolean => !INCOMPARABLE_TYPE.test(column.type);
+const isComparable = (column: ColumnSchema, dialect: ProfileDialect): boolean =>
+  !INCOMPARABLE_TYPE[dialect].test(column.type);
 
 /**
  * One statement covering the whole table, rather than one per statistic.
@@ -267,7 +288,7 @@ export function composeTableProfile(
   selector: { readonly segments: readonly string[]; readonly depth: AgentProfileDepth },
   columns: readonly ColumnSchema[],
 ): string {
-  if (dialect !== "postgres" && dialect !== "sqlite") {
+  if (dialect !== "postgres" && dialect !== "sqlite" && dialect !== "mssql") {
     throw new AgentComposedSqlError(
       `no verified profile composition for provider type "${dialect}"`,
       "UNSUPPORTED_DIALECT",
@@ -283,7 +304,7 @@ export function composeTableProfile(
     parts.push(`count(${quoted}) AS ${alias("present", index)}`);
     // A type with no equality operator is skipped rather than counted: its absence
     // reads as "the engine did not report this", which is exactly true.
-    if (selector.depth !== "basic" && isComparable(column)) {
+    if (selector.depth !== "basic" && isComparable(column, dialect)) {
       parts.push(`count(DISTINCT ${quoted}) AS ${alias("distinct", index)}`);
     }
     if (selector.depth === "pattern" && isTextual(column)) {

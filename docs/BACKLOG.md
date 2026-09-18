@@ -39,7 +39,7 @@ None of it is a GitHub issue.
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H8 · 2
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
-- [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A5 · 4
+- [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
 - [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 24
 
 ---
@@ -2303,6 +2303,86 @@ engine in the pipeline is the throwaway PostgreSQL container behind
 **Done when:** a container-backed test proves, against a supported PostgreSQL, that a direct write and
 a multi-command escape are rejected through the profile under the resolved role. Cheapest path is
 extending the functional-smoke container, not adding a service to every CI test job.
+
+### A6. SQL Server's agent plan cannot be weighed, because the editor has no strategy to key it to
+
+The SQL Server agent profile asks the optimizer for an estimating plan as a session MODE - `SET
+SHOWPLAN_ALL ON`, which must be the only statement in its batch and must be turned off again on the
+same connection - and `ReadOnlyStatementMode`'s `"estimate-plan"` exists to carry exactly that.
+`src/lib/explain` cannot express it: every strategy there builds a single-statement PREFIX
+(`select-prefix.ts`), so `MSSQLProvider.getCapabilities` still answers `supportsExplain: false` (#126)
+and the editor's Explain button stays hidden on this engine.
+
+Two agent-side consequences follow from the same missing half, and both are the honest reading rather
+than a defect. `ExplainFormat` has no SQL Server member, so the plan the run holds travels with
+`format: undefined`; `summarisePlan` finds no `PLAN_READINGS` arm and answers `{ access: "unknown" }`;
+and `planRefusal` in `auto-execute.ts` falls through to `unverified-dialect`. So `inspect_plan`
+answers, the model reads the plan and recommends against it - measured, it recommended a nonclustered
+index off a Clustered Index Scan - and auto-execute never hands a result over on the plan's strength.
+DuckDB already ships in that state for the other reason: `duckdb-json` IS an `ExplainFormat` and has
+no reading either.
+
+**Done when:** a SQL Server EXPLAIN strategy exists that a session mode can be expressed through
+(#126's dialect wrapper), and `plan-summary.ts` gains a reading verified against a real
+`SET SHOWPLAN_ALL` result set, in the same change. Either half alone is worse than neither: a button
+with no reading gives the editor a plan the agent still cannot weigh, and a reading with no
+`ExplainFormat` member has nothing to key on.
+
+### A7. The agent's byte budget is measured after the result exists, on every engine that has one
+
+SQL Server is the engine that makes this visible, because it is the first whose ROW budget is the
+SERVER's: `queryReadOnly` issues `SET ROWCOUNT <maxResultRows + 1>` before the statement, so the
+result arrives already bounded in rows and the `+ 1` is what keeps an overrun detectable. That is
+stronger than PostgreSQL and SQLite, which compare `rows.length` against the budget after the driver
+has materialised everything.
+
+The BYTE budget is post-hoc on all three. `resultBytes > budget.maxResultBytes` is measured on a
+result that already exists, and a row budget bounds row COUNT rather than row SIZE, so a small number
+of very large values - `varbinary(max)`, `nvarchar(max)`, a `FOR JSON` document - is materialised in
+the Node process before the cap can refuse it.
+
+Measured while building the SQL Server profile, and the reason the row half was worth doing at all:
+without `SET ROWCOUNT` one 20-million-row cross join took the Node process down with an
+out-of-memory crash before any result-side cap looked at it, and `requestTimeout` did not prevent it,
+because tedious stops the request timer on the first data packet. With `SET ROWCOUNT 1001` the same
+statement returned 1001 rows in 6 ms.
+
+A per-provider fix would be three different truncations of one rule, which is why this is not a SQL
+Server entry: the shape is identical in all three `queryReadOnly` implementations, the ceiling is one
+number in one policy (`ExecutionBudget`), and no two of the engines offer the same server-side lever -
+SQL Server has no byte equivalent of `SET ROWCOUNT`.
+
+**Done when:** the byte ceiling is enforced while the result is read rather than after it is held -
+a streaming read that stops at the ceiling - in every provider that implements `queryReadOnly`, so
+that the budget bounds memory rather than reporting on it.
+
+### A8. SQL Server's admitted SELECT reaches server-level metadata, which is A3 on a third engine
+
+A3 records that neither agent profile bounds what an admitted statement may READ with a
+database-native control. SQL Server joins it, and is the first where the surface left open is the
+SERVER rather than the database.
+
+The least-privilege principal this profile requires - `db_datareader` plus `VIEW DEFINITION`,
+`VIEW DATABASE STATE` and `SHOWPLAN`, which `docker/mssql-init/02-agent-principal.sql` creates -
+cannot reach another user database and cannot reach the file system. Measured on SQL Server 2022
+(16.0.4265.3): a read of a second user database answers "The server principal is not able to access
+the database under the current security context", and `OPENROWSET(BULK …)` is refused outright. What
+it can still read is what `public` can, and every principal is a member of `public`: from the
+connected database, a three-part name reached `master.sys.databases` (9 rows, every database on the
+instance, the same 9 `sa` sees), `master.sys.server_principals` (21 of the 33 rows `sa` sees) and
+`master.dbo.spt_values` (2574 rows). The admission step sees an ordinary one-statement `SELECT` in
+each case, because that is what it is, and the policy layer's declared-target allowlist reads SQL -
+defense in depth, which is A3's own distinction.
+
+Not closable by narrowing the grants in that fixture. `public`'s read of `master` is the instance's
+default rather than something this profile hands out, so the lever is a `DENY` on those views for the
+agent login, and that is an instance-level change belonging to an operator's deployment rather than
+to a provider.
+
+**Done when:** A3's answer covers SQL Server as well - out-of-scope reads refused by something that
+does not read SQL. The per-target grant set A3 proposes is the nearest fit here, generated for the
+agent principal and paired with the `DENY` above, and `docs/providers/mssql.md` is where an operator
+has to meet it.
 
 ---
 

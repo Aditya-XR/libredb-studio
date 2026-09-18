@@ -108,7 +108,7 @@ export async function createDatabaseProvider(
 
     case "mssql": {
       const { MSSQLProvider } = await import("./providers/sql/mssql");
-      return new MSSQLProvider(connection, options);
+      return new MSSQLProvider(connection, options, execution);
     }
 
     case "clickhouse": {

@@ -87,7 +87,7 @@ default (SQL Server 2022+ and the `mssql` v12 driver require encryption), and
 `trustServerCertificate = !isAzure` — i.e. for **non-Azure** hosts it encrypts but **trusts a
 self-signed certificate** (so on-prem dev servers connect without a CA), while **Azure**
 (`*.database.windows.net`) validates the certificate. See [§4.3](#43-encryption--ssl) for the
-explicit-`ssl` overrides and the [security caveat](#14-known-limitations--future-work).
+explicit-`ssl` overrides and the [security caveat](#15-known-limitations--future-work).
 
 ### 3.2 T-SQL pagination: `TOP` and `OFFSET … FETCH`
 
@@ -296,7 +296,7 @@ not deliver the CA pinning their names promise. Pinned by
 `tests/integration/db/mssql-provider.test.ts` ("the TLS options handed to tedious"), so a future
 mode cannot fall through to the trusting branch unnoticed.
 
-See the [non-Azure trust caveat](#14-known-limitations--future-work).
+See the [non-Azure trust caveat](#15-known-limitations--future-work).
 
 ### 4.4 Connection-string nuance ⚠️
 
@@ -1282,7 +1282,7 @@ render those words and send an operation SQL Server declares (#496).
 | Capability | Value |
 |------------|-------|
 | `queryLanguage` | `sql` |
-| `supportsExplain` | **`false`** (intentionally disabled — see [Known limitations](#14-known-limitations--future-work)) |
+| `supportsExplain` | **`false`** (the editor's Explain action only; the agent's estimating plan is [§12.2](#122-admission-by-the-optimizer-which-executes-nothing), see [Known limitations](#15-known-limitations--future-work)) |
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `supportsCreateTable` | `true` (from base) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core T-SQL DML |
@@ -1330,9 +1330,219 @@ though it's driver-enforced rather than server-side — an overrunning query gen
 
 ---
 
-## 12. Testing
+## 12. Agent read-only execution profile (#328)
 
-### 12.1 How the tests work
+The agent programme (epic #325) never talks to the shared, writable provider.
+It acquires a **dedicated provider keyed by (connection id, execution profile)** via
+`acquireExecutionProfileProvider` ([factory.ts](../../src/lib/db/factory.ts)) and runs every statement
+through `queryReadOnly()` ([`mssql.ts`](../../src/lib/db/providers/sql/mssql.ts)).
+See [postgres.md §12](./postgres.md#12-agent-read-only-execution-profile-328) for the acquisition,
+credential and caching rules, which are provider-independent; this section is the SQL Server half.
+
+Everything below was measured on **SQL Server 2022 (RTM-CU26) 16.0.4265.3** against AdventureWorks2022
+(71 tables, about 760,000 rows) through `mssql` 12.7.2 / tedious 20.3.0, as the login and user
+`libredb_agent` holding exactly the grants in [§12.1](#121-the-principal-is-the-first-layer-because-there-is-no-read-only-transaction).
+
+### 12.1 The principal is the first layer, because there is no read-only transaction
+
+PostgreSQL opens `BEGIN READ ONLY` and the transaction itself refuses the write, with the
+least-privilege role as the backstop.
+SQL Server has neither half of that: there is no `BEGIN TRANSACTION READ ONLY` and no session-level
+read-only switch of any kind.
+So the ordering inverts here, and the principal's permissions are the FIRST layer rather than the
+backstop, which is what makes verifying the principal load-bearing rather than advisory.
+
+Measured as `libredb_agent`, every one of these was refused by the server with no help from this
+provider: `INSERT` / `UPDATE` / `DELETE` (Msg 229), `CREATE TABLE` (Msg 262), `DROP` (Msg 3701),
+`xp_cmdshell`, `sp_OACreate`, `OPENROWSET(BULK …)`, `sp_execute_external_script`, `xp_regread`,
+`sp_configure` + `RECONFIGURE`, `EXECUTE AS`, `ALTER SERVER ROLE`, and every read of another user
+database.
+`sa` is the positive control on the same instance and the same statements: it did all of them.
+
+The principal a target needs, and nothing beyond it:
+
+```sql
+CREATE LOGIN libredb_agent WITH PASSWORD = '<secret>';
+USE <database>;
+CREATE USER libredb_agent FOR LOGIN libredb_agent;   -- CONNECT comes with the user
+ALTER ROLE db_datareader ADD MEMBER libredb_agent;
+GRANT VIEW DEFINITION TO libredb_agent;              -- the catalog reads
+GRANT VIEW DATABASE STATE TO libredb_agent;          -- the DMV reads
+GRANT SHOWPLAN TO libredb_agent;                     -- the admission step in §12.2
+-- Grant nothing else. In particular do NOT add this principal to sysadmin,
+-- securityadmin, serveradmin, setupadmin, processadmin, diskadmin, dbcreator,
+-- bulkadmin, db_owner, db_accessadmin, db_securityadmin, db_ddladmin,
+-- db_backupoperator or db_datawriter, and do not grant it CONTROL SERVER or
+-- ADMINISTER BULK OPERATIONS.
+```
+
+The last three grants are not tidiness: measured, a user whose only membership is `db_datareader`
+answers `0` to `HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'SHOWPLAN')` and `0` to the same call for
+`VIEW DEFINITION`, so a reader-only principal cannot run this profile's own admission step and cannot
+read a module's text.
+
+**What the profile refuses at open.** `connect()` runs one statement (`AGENT_PRINCIPAL_SQL`) and
+`assertAgentPrincipalIsUnprivileged` refuses the provider unless all sixteen forbidden answers read
+back `0` and `showplan` reads back `1`.
+The refusal is an `ExecutionProfileError` carrying `PROFILE_PRIVILEGES_TOO_BROAD`
+([errors.ts](../../src/lib/db/errors.ts)), named so the message says which privilege was held, and
+`connect()` deliberately does not wrap it into a generic `ConnectionError`: a caller branches on the
+code, never on a message.
+**`sa` is refused**, because it holds `sysadmin`, which is the whole point of the check: an admin can
+point `agentUser` at a privileged login exactly as easily as a connection's own user can already be
+one.
+
+Every forbidden answer is read fail-closed, `ISNULL(…, 1)`, and `SHOWPLAN` fail-closed the other way,
+`ISNULL(…, 0)`.
+`IS_SRVROLEMEMBER` and `IS_ROLEMEMBER` answer NULL rather than `0` for a principal or a role name the
+server cannot resolve, measured, so a typo in that list, or a contained-database user whose server
+principal cannot be resolved, reads as HELD and the profile is refused.
+The probe runs once, at open, so a principal granted new privileges afterwards keeps serving from the
+already-verified pool until the idle sweep or `removeProvider` evicts it, the same property the
+PostgreSQL role probe has.
+
+Impersonation was considered as the boundary and rejected on a measurement:
+`EXEC sp_executesql N'REVERT; …'` escapes an `EXECUTE AS` sandbox, with the session context going from
+the sandbox user to `dbo`, while `EXEC('…')` does not.
+That is also why the admission allowlist below refuses `EXECUTE PROC` and `EXECUTE STRING` rather than
+reasoning about what a procedure might contain.
+
+### 12.2 Admission by the optimizer, which executes nothing
+
+PostgreSQL gets its single-statement rule from the extended query protocol, where the server refuses a
+multi-command string in a Parse message.
+T-SQL has no such refusal and no `EXPLAIN` keyword either, so the rule is asked of the optimizer:
+`SET SHOWPLAN_ALL ON` makes SQL Server compile the batch and return one row per plan node instead of
+running it (`admitReadStatement`).
+Measured: a `DROP TABLE` sent under that mode left the table in place.
+
+The rows whose `Parent` is `0` are the batch's ROOT rows, and **statements are counted by DISTINCT
+`StmtId` among them, never by root count** (`assertSingleReadStatement`).
+The difference is measured rather than defensive: `SELECT TOP 5 * FROM dbo.ufnGetContactInformation(1)`
+compiles to TWO roots, a `SELECT` and a `TEXT` row reading `UDF: [db].[dbo].[fn]` whose children are the
+multi-statement function's own body, and BOTH carry `StmtId` 1, so it is one statement and is admitted.
+The same read with `; EXEC master.dbo.xp_cmdshell 'id'` appended carries ids 1 and 12, so it is refused.
+A `TEXT` root is therefore admissible only alongside an admitted statement of the same id, never as one
+in its own right.
+
+| Compiles to | Admitted | Measured on |
+|---|---|---|
+| `SELECT` | Yes | `SELECT TOP 1 …`, and `WITH cte AS (…) SELECT … ORDER BY …`, which is ONE root and not one per CTE |
+| `SELECT WITHOUT QUERY` | Yes | `SELECT 1`, a SELECT with no table reference |
+| `JSON SELECT` / `XML SELECT` | Yes | `… FOR JSON PATH` / `… FOR XML PATH` |
+| `TEXT` | Only beside an admitted statement of the same `StmtId` | the inlined body of a multi-statement table-valued function |
+| `INSERT` / `UPDATE` / `DELETE` | No | the statements of those names |
+| `SELECT INTO` | No | `SELECT … INTO t` |
+| `CREATE TABLE` | No | `CREATE TABLE t (…)` |
+| `EXECUTE PROC` | No | `EXEC sp_executesql N'…'` |
+| `EXECUTE STRING` | No | `EXEC('…')` |
+| `COMMIT TRANSACTION` | No | `SELECT 1; COMMIT; SELECT 2`, which compiles to three roots and three `StmtId`s |
+
+It is an allowlist rather than a denylist because that right-hand column is what "everything else"
+turned out to be, and a denylist would still have been wrong about the next one.
+
+One measured caveat is left standing deliberately: a `DECLARE` compiles to NO root row at all, so root
+rows are not a complete statement inventory.
+It is harmless here, because every statement class that DOES anything emits a root of its own, and
+anything past a terminator is refused before it reaches this provider by the shared statement guard
+([statement-guard.ts](../../src/lib/db/operations/statement-guard.ts)) with `MULTIPLE_STATEMENTS`.
+
+Two things follow the admission on the same connection.
+`assertPlanModeIsOff` sends `SELECT 1 AS libredb_plan_mode_probe` and refuses unless the session answers
+with that row: a connection still in plan mode answers every statement with optimizer rows, and a
+caller cannot tell, because a plan IS a result set.
+And when the caller asked for `mode: "estimate-plan"` ([types.ts](../../src/lib/db/types.ts)) the
+admission's own plan rows ARE the answer, so the plan a caller reads is the plan that admitted the
+statement rather than a second compilation of it.
+
+That mode is how the agent's plan reading reaches this engine at all.
+`composeEstimatingExplain` ([composed-sql.ts](../../src/lib/agent/composed-sql.ts)) hands every other
+dialect a prefix and hands this one the statement unchanged with the MODE set, because `SET SHOWPLAN_ALL
+ON` must be the only statement in its batch and has to be turned off again on the same connection, and a
+prefix can say neither.
+
+### 12.3 The row bound is the server's, and the deadline is this provider's
+
+`SET ROWCOUNT` is set to ONE MORE than the budget allows before the statement is sent, so the server
+stops the result there and the extra row is what distinguishes "the statement returned exactly the
+budget" from "the server cut it off".
+
+That is not post-hoc caution, and the measurement is why: without it, one 20-million-row cross join
+took the Node process down with an **out-of-memory crash** before any result-side cap could look at the
+rows, and `requestTimeout` did not prevent it.
+With `SET ROWCOUNT 1001` the same statement returned 1001 rows in 6 ms.
+
+`requestTimeout` cannot be the deadline either, for the reason that crash exposed: tedious stops the
+request timer on the first data packet (`connection.js`, "request timer is stopped on first data
+package"), so it bounds time-to-FIRST-ROW and not statement time.
+Measured, a 20-million-row read whose first row arrived in 4 ms ran for 9564 ms against a 3000 ms budget
+and was never cancelled.
+So `runWithDeadline` owns its own timer and calls `request.cancel()`, which does end the request
+server-side: measured, the SPID held no running request afterwards, the rollback then succeeded and the
+connection stayed reusable.
+The rejection is AWAITED rather than raced, because `rollback()` called with a request still in flight
+throws "There is a request in progress", leaves the transaction OPEN and does not stop the statement.
+A rollback on a transaction the server has already aborted also throws, with `@@TRANCOUNT` already `0`,
+so that throw is swallowed.
+
+Two more session settings ride with the statement, and neither is a result bound.
+`SET LOCK_TIMEOUT` at the statement budget bounds WAITING for a lock (error 1222), and
+`SET DEADLOCK_PRIORITY LOW` makes this session the victim when the agent's read deadlocks with a user's
+write.
+Neither bounds HOLDING a lock, which a `SELECT` can do without writing anything, and the admission step
+cannot see it: `SELECT TOP 1 … WITH (TABLOCKX, HOLDLOCK)` compiles to ONE root of type `SELECT`, and
+executing it took twenty `X` object locks and blocked an independent writer for the life of the
+transaction, against a control of 30 ms for the same UPDATE with no lock held and 2523 ms with it.
+No isolation level refuses the hint, `SNAPSHOT` and `READ COMMITTED` both measured, so the T-SQL locking
+hints are refused by the shared statement guard beside PostgreSQL's `LOCK`.
+
+Finally, the whole call runs inside a `mssql.Transaction`, which pins ONE pooled connection for its
+duration, and it is always rolled back and never committed.
+SQL Server rolls DDL back too, so anything transactional that reached the server anyway is undone.
+
+### 12.4 Every session mode leaks, so a failed reset ends the pool
+
+`SET SHOWPLAN_ALL`, `SET ROWCOUNT` and `SET LOCK_TIMEOUT` all **survive the ROLLBACK** and reach the next
+borrower of the pooled connection, because node-mssql validates a connection without resetting its
+session (the same `_poolValidate` behaviour [§6.1](#61-endopenquerytransaction-is-not-implemented-here-because-the-driver-cannot-be-asked)
+records for an open transaction).
+Measured: after a rollback, the next borrow of that connection returned plan rows (`StmtText`, `NodeId`,
+`Parent`) where the caller expected data, and a leaked `SET ROWCOUNT 3` cut an unrelated `TOP 10` to
+three rows.
+
+So `resetProfiledSession` puts each one back on the same pinned connection in a `finally`, and the order
+is load-bearing: `SET SHOWPLAN_ALL OFF` goes first and alone, because while that mode is on a `SET` is
+COMPILED rather than run, and every reset after it would be a no-op that looked like a success.
+It is re-asserted here rather than trusted from `admitReadStatement`'s own `finally`, because that
+`finally` does not always run: a batch-aborting error dooms the transaction, measured with
+`SELECT * FROM OPENROWSET(BULK '/etc/hostname', SINGLE_CLOB) x` (Msg 4834), after which the OFF fails with
+`ENOTBEGUN` and the rollback with `EABORT` while the connection still carries the mode.
+A plain compile error (Msg 208) does not do that: there the OFF runs and the next borrow is clean.
+
+**When the reset fails, the POOL IS ENDED** rather than the connection returned.
+A connection carrying `SHOWPLAN_ALL ON` answers its next caller with a query plan where that caller
+expects rows, which is a WRONG ANSWER rather than an error, and nothing downstream can tell the two
+apart.
+
+### 12.5 What the profile does NOT bound
+
+- **What a single admitted SELECT may READ.** A least-privilege principal cannot reach another user
+  database or the file system, but server-level metadata readable by `public` (`master.sys.databases`,
+  `master.sys.server_principals`, `master.dbo.spt_values`) is inside the boundary. That is the same
+  class of gap [BACKLOG](../BACKLOG.md) A3 records for the other engines, not a SQL Server property.
+- **The byte budget is still post-hoc.** The ROW budget is enforced by the server, so a result is
+  bounded in rows before it is measured in bytes, but a small number of very large values is
+  materialised before `maxResultBytes` can refuse it.
+- **`queryReadOnly()` on a provider opened outside the profile.** It refuses outright rather than
+  falling back to `query()`: such a provider has had no principal verification, so its session may be
+  able to write, and serving agent semantics without the layer that makes them true is the one thing
+  this path must not do.
+
+---
+
+## 13. Testing
+
+### 13.1 How the tests work
 
 Integration tests live in
 [`tests/integration/db/mssql-provider.test.ts`](../../tests/integration/db/mssql-provider.test.ts).
@@ -1345,7 +1555,7 @@ canned `{ recordset, rowsAffected }` results, exercising the same code paths as 
 > own bun process, so a single file is safe and so is the whole suite, which is the same command CI
 > runs. `bun run test:coverage` is that runner with coverage on. See [`CLAUDE.md`](../../CLAUDE.md).
 
-### 12.2 Coverage
+### 13.2 Coverage
 
 The suite covers: validation, connect/disconnect, query, capabilities, **labels override**,
 **`prepareQuery` TOP / OFFSET-FETCH**, the object surface (columns/PKs/FKs/indexes), health,
@@ -1360,7 +1570,7 @@ listing, and the detail row. The object-surface mock answers per READ rather tha
 text, and it takes its schema filter from the statement rather than from the bound parameter:
 a mock that filtered on the bind kept passing for a listing that had lost its `WHERE` clause.
 
-### 12.3 Run it
+### 13.3 Run it
 
 ```bash
 bun test tests/integration/db/mssql-provider.test.ts   # just this file (single process — safe)
@@ -1368,7 +1578,7 @@ bun run test                                            # the whole suite, one p
 bun run test:coverage                                   # CI coverage workflow: the same runner, with coverage
 ```
 
-### 12.4 Optional: verifying against a live SQL Server
+### 13.4 Optional: verifying against a live SQL Server
 
 ```bash
 docker run --rm -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='Str0ng!Passw0rd' \
@@ -1403,7 +1613,7 @@ one, so the rows are what makes the click measurable at all.
 
 ---
 
-## 13. Usage examples
+## 14. Usage examples
 
 ```ts
 import { createDatabaseProvider } from '@/lib/db/factory';
@@ -1426,18 +1636,25 @@ Over the API: `POST /api/db/query`, `POST /api/db/transaction`, `POST /api/db/ca
 
 ---
 
-## 14. Known limitations & future work
+## 15. Known limitations & future work
 
 - **`connectionString` is ignored by the provider.** `getCapabilities().supportsConnectionString` is
   `true` and the UI accepts `mssql://`/`sqlserver://`, but `buildConfig()` builds only from discrete
   fields and never reads `config.connectionString` ([§4.4](#44-connection-string-nuance)). A
   config carrying only a raw connection string would connect to `localhost`. *Future:* pass a raw
   connection string through to the driver, or set the capability honestly.
-- **`EXPLAIN` is intentionally disabled for SQL Server until a dialect wrapper exists.**
-  `supportsExplain` is `false`, so the UI hides the *Explain* action. The UI's EXPLAIN builder only
-  handles Postgres/MySQL; before the flag was flipped, the *Explain* action silently ran the
-  **unmodified** query instead of a plan. *Future:* `SET SHOWPLAN_XML ON` (or `SET STATISTICS
-  XML ON`) around the statement, then re-enable the capability.
+- **The EDITOR has no Explain button here; the AGENT has an estimating plan.** `supportsExplain` is
+  `false`, so the UI hides the *Explain* action, and that half is unchanged: every strategy in
+  `src/lib/explain` builds a single-statement PREFIX around the query
+  ([select-prefix.ts](../../src/lib/explain/select-prefix.ts)), and SQL Server's estimating plan is a
+  SESSION MODE that must be the only statement in its batch and turned off again on the same
+  connection, which a prefix cannot express. Before the flag was flipped the *Explain* action silently
+  ran the **unmodified** query instead of a plan. The agent path does have one, and it is not a
+  workaround for that: `queryReadOnly()` compiles every candidate under `SET SHOWPLAN_ALL` to admit it
+  at all, so `mode: "estimate-plan"` returns the plan that admitted the statement
+  ([§12.2](#122-admission-by-the-optimizer-which-executes-nothing)). *Future:* a query path that can
+  hold one connection for several statements, which is what would let the editor ask the same
+  question (see also D90, [§6.1](#61-endopenquerytransaction-is-not-implemented-here-because-the-driver-cannot-be-asked)).
 - **Non-Azure default trusts the server certificate.** With no explicit `connection.ssl`, non-Azure
   hosts use `encrypt: true` + `trustServerCertificate: true` — encrypted but **not** authenticated
   (MITM-exposed). For verified TLS, set `connection.ssl` mode `verify-system` (or `verify-ca`/
@@ -1506,7 +1723,7 @@ Over the API: `POST /api/db/query`, `POST /api/db/transaction`, `POST /api/db/ca
 
 ---
 
-## 15. References
+## 16. References
 
 - Driver: [`node-mssql`](https://github.com/tediousjs/node-mssql) (Tedious / TDS)
 - Source: [`src/lib/db/providers/sql/mssql.ts`](../../src/lib/db/providers/sql/mssql.ts)

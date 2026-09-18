@@ -82,6 +82,7 @@ import type {
   ObjectKindSpec,
   ProviderCapabilities,
   ProviderLabels,
+  ReadOnlyStatementMode,
 } from "@/lib/db/types";
 import type { ContainerEnumeration } from "@/lib/db/container-walk";
 import { sessionDefaultContainer } from "@/lib/db/container-walk";
@@ -111,6 +112,7 @@ import {
   AgentComposedSqlError,
   composeCatalogRead,
   composeEstimatingExplain,
+  type AgentEstimatingExplain,
   withoutExtensionOwnershipTest,
 } from "./composed-sql";
 import type { AgentDeadlineDenyCode, AgentRunDeadline } from "./deadline";
@@ -428,6 +430,17 @@ export interface AgentOperationRequest {
   readonly label?: string;
   /** Declared target dimensions, so a scope allowlist can bound them. */
   readonly target?: { readonly catalog?: string; readonly schema?: string };
+  /**
+   * What the provider is being asked to do with `sql`: run it, or answer with the
+   * engine's ESTIMATE of how it would run it. Absent means run it.
+   *
+   * Only `inspect_plan` sets it, and only because an estimating plan is not a
+   * statement prefix on every engine. `ReadOnlyStatementMode` in `db/types.ts`
+   * carries that argument. It rides on the REQUEST rather than on the descriptor
+   * because it is a property of the one call, not of the operation: the same
+   * `sql.explain.estimate` descriptor governs both spellings.
+   */
+  readonly mode?: ReadOnlyStatementMode;
   /**
    * Marks this call as the SERVER's own grounding read rather than a tool the model
    * asked for — the one thing that may reach a database outside agent mode.
@@ -1625,6 +1638,7 @@ async function runStatement(
   validatedInput: unknown,
   budget: ExecutionBudget,
   phase: { statementSent: boolean },
+  mode?: ReadOnlyStatementMode,
 ): Promise<QueryResult> {
   const provider = await context.acquireProvider(context.connection, AGENT_EXECUTION_PROFILE);
   if (typeof provider.queryReadOnly !== "function") {
@@ -1649,11 +1663,15 @@ async function runStatement(
   // separates a wrong agent credential from `permission denied for table secrets`
   // without inspecting message text.
   phase.statementSent = true;
-  return provider.queryReadOnly(sql, {
-    statementTimeoutMs: budget.statementTimeoutMs,
-    maxResultRows: budget.maxResultRows,
-    maxResultBytes: budget.maxResultBytes,
-  });
+  return provider.queryReadOnly(
+    sql,
+    {
+      statementTimeoutMs: budget.statementTimeoutMs,
+      maxResultRows: budget.maxResultRows,
+      maxResultBytes: budget.maxResultBytes,
+    },
+    mode,
+  );
 }
 
 /**
@@ -1677,7 +1695,7 @@ export async function executeAgentOperation(
     ...(request.label === undefined ? {} : { label: request.label }),
     ...(request.target === undefined ? {} : { target: request.target }),
     ...(request.grounding === undefined ? {} : { grounding: request.grounding }),
-    invoke: (validatedInput, budget, phase) => runStatement(context, validatedInput, budget, phase),
+    invoke: (validatedInput, budget, phase) => runStatement(context, validatedInput, budget, phase, request.mode),
   });
 }
 
@@ -3176,13 +3194,18 @@ export async function inspectPlanTool(
 ): Promise<AgentToolOutcome> {
   const parsed = parseToolInput(planStatementSchema, input);
   if (!parsed.ok) return unavailable("INVALID_TOOL_INPUT", parsed.problems);
-  let sql: string;
+  let plan: AgentEstimatingExplain;
   try {
-    sql = composeEstimatingExplain(context.connection.type, parsed.value.sql);
+    plan = composeEstimatingExplain(context.connection.type, parsed.value.sql);
   } catch (error) {
     return composedSqlOutcome(error);
   }
-  return executeAgentOperation(context, { operationId: "sql.explain.estimate", sql, label: "query plan" });
+  return executeAgentOperation(context, {
+    operationId: "sql.explain.estimate",
+    sql: plan.sql,
+    mode: plan.mode,
+    label: "query plan",
+  });
 }
 
 /**

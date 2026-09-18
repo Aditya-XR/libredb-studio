@@ -234,11 +234,14 @@ describe("evaluateOperation — input stage", () => {
 // ─── Stage 4: provider capability ───────────────────────────────────────────
 
 describe("evaluateOperation — capability stage", () => {
-  const estimateRequest: OperationRequest = { ...readRequest, operationId: "sql.explain.estimate" };
+  // The EXECUTING plan variant, because it is the one that still declares a required
+  // capability: the estimating one asks for none, for the reason its descriptor gives
+  // (the agent composes its own estimating form and never reaches src/lib/explain).
+  const capabilityGatedRequest: OperationRequest = { ...readRequest, operationId: "sql.explain.analyze" };
 
   test("denies an operation whose required capability the provider reports false", () => {
     const decision = evaluateOperation(
-      params({ request: estimateRequest, capabilities: { ...capabilities, supportsExplain: false } }),
+      params({ request: capabilityGatedRequest, capabilities: { ...capabilities, supportsExplain: false } }),
     );
     expectDeny(decision, "CAPABILITY_UNSUPPORTED");
   });
@@ -246,7 +249,7 @@ describe("evaluateOperation — capability stage", () => {
   test("an absent capability flag is unsupported — fail closed, never a permissive default", () => {
     const { supportsExplain: _dropped, ...withoutExplain } = capabilities;
     const decision = evaluateOperation(
-      params({ request: estimateRequest, capabilities: withoutExplain as ProviderCapabilities }),
+      params({ request: capabilityGatedRequest, capabilities: withoutExplain as ProviderCapabilities }),
     );
     expectDeny(decision, "CAPABILITY_UNSUPPORTED");
   });
@@ -462,7 +465,11 @@ describe("executeWithPolicy", () => {
     [
       "CAPABILITY_UNSUPPORTED",
       {
-        request: { ...readRequest, operationId: "sql.explain.estimate" },
+        // The EXECUTING plan variant: the estimating one declares no capability, for
+        // the reason its descriptor gives. Its input schema takes the same `{ sql }`
+        // shape, so the request still reaches stage 4 rather than being turned back at
+        // stage 3, which is what this row is here to exercise.
+        request: { ...readRequest, operationId: "sql.explain.analyze" },
         capabilities: { ...capabilities, supportsExplain: false },
       },
     ],

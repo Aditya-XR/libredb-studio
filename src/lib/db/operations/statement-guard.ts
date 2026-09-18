@@ -132,6 +132,27 @@ const SIDE_EFFECT_WORDS: ReadonlySet<string> = new Set([
   // legitimate read on either supported engine, since `INSERT INTO` and
   // `MERGE INTO` are already refused by the rules above.
   "INTO",
+  // T-SQL table hints that take or HOLD a restrictive lock, which is the one thing
+  // a SELECT can do to a database without writing to it. `LOCK` above already
+  // refuses PostgreSQL's spelling of the same act; these are SQL Server's, and they
+  // ride INSIDE a SELECT rather than heading a statement of their own, so nothing
+  // else sees them.
+  //
+  // Measured on SQL Server 2022 CU26, as the least-privilege agent principal:
+  // `SELECT TOP 1 … FROM Person.Person WITH (TABLOCKX, HOLDLOCK)` compiles to ONE
+  // root statement of type `SELECT`, so the provider's own admission step admits it,
+  // and executing it inside the agent's transaction took twenty `X` object locks on
+  // `Person.Person` and blocked an independent writer for as long as the transaction
+  // lived (control: the same UPDATE completed in 30ms with no lock held, 2523ms with
+  // it). No isolation level refuses the hint: `SNAPSHOT` and `READ COMMITTED` both
+  // accepted it, measured. So this layer is where it has to be refused.
+  "TABLOCK",
+  "TABLOCKX",
+  "XLOCK",
+  "UPDLOCK",
+  "HOLDLOCK",
+  "REPEATABLEREAD",
+  "SERIALIZABLE",
 ]);
 
 /**
