@@ -73,7 +73,11 @@ export function setupRechartssMock() {
       Area: () => null,
       Bar: () => null,
       Line: () => null,
-      RadialBar: () => null,
+      // Surfaces `background.fill` for the same reason the Tooltip below surfaces
+      // `contentStyle`: recharts inline-styles the gauge's unfilled track, so there is no
+      // class to assert on and a hardcoded colour is invisible to every test.
+      RadialBar: ({ background }: { background?: { fill?: string } }) =>
+        React.createElement("div", { "data-testid": "mock-radial-bar", "data-track": background?.fill }),
       XAxis: () => null,
       YAxis: () => null,
       CartesianGrid: () => null,

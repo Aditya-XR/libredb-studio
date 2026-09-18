@@ -30,7 +30,7 @@ None of it is a GitHub issue.
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
 - [Drivers and connections](#drivers-and-connections) — D1–D97, U17 · 43
 - [Value interpolation](#value-interpolation) — V1
-- [Row editing](#row-editing) — R1
+- [Row editing](#row-editing) — R1–R2 · 2
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U21 · 12
 - [Dependencies](#dependencies) — P1–P5 · 5
 - [Documentation](#documentation) — DOC3–DOC4 · 2
@@ -1388,6 +1388,22 @@ Two constraints from #269 that do not go away:
 Whether row editing should be universal at all is a product decision. The published
 `WorkspaceFeatures.inlineEditing` flag is deprecated against this entry (#288): it becomes real, or
 goes away in a major, with this work.
+
+### R2. A MySQL index hint refuses an inline edit that the tab title used to write
+
+`resolveUpdateTarget` (`src/lib/sql/update-target.ts`) reads the FROM reference as a name, an
+optional `AS`, and an optional alias, and refuses everything longer through its trailing catch-all.
+A MySQL index hint is longer: measured, `resolveUpdateTarget("SELECT * FROM users USE INDEX (idx)
+WHERE id = 1", "mysql")` answers "This query describes its table in a way this editor cannot read".
+The same applies to `FORCE INDEX` and `IGNORE INDEX`.
+
+It reads exactly one table, and the tab-title reader #881 replaced wrote it correctly, so inline
+editing on such a tab goes from working to refused. It is a refusal rather than a wrong write, which
+is the direction that module chooses everywhere, so it is recorded rather than rushed.
+
+Done looks like: the hint is read and dropped, the table resolves, and a hint naming a second table
+(there is no such form on MySQL, which is what makes this safe) stays refused. Tests belong beside
+the LIMIT case in `tests/unit/sql/update-target.test.ts`, with the engine each shape was measured on.
 
 ---
 

@@ -82,7 +82,8 @@ LibreDB Studio uses JWT (JSON Web Tokens) for authentication. Tokens are stored 
 The middleware (`src/proxy.ts`) gates every route: all of them require a valid `auth-token` cookie **except** the routes below. It is an optimisation rather than the authorization boundary, though — every handler that reaches a database or a model provider verifies the session again itself, through `guardRoute` (`src/lib/api/require-session.ts`), which is also where the rate-limit bucket and the audit line come from.
 
 - `/api/auth/*` — login, logout, me, and OIDC login/callback
-- `/api/db/health` — excluded from the middleware for **both** methods; `GET` is fully public, while `POST` performs its own session check and returns JSON `401` if unauthenticated
+- `/health` and `/api/health` — liveness, fully public, no dependencies
+- `/api/db/health` — excluded from the middleware for **both** methods; `GET` is fully public and answers the same as the two above, while `POST` performs its own session check and returns JSON `401` if unauthenticated
 - `GET /api/storage/config` — storage-mode discovery (returns `{ provider, serverMode }`, no user data)
 
 Unauthenticated requests to any other (middleware-gated) route are redirected to `/login`. A few allowlisted handlers self-check instead and return JSON — e.g. `POST /api/db/health` (`401`) and `GET /api/auth/me` (`{ "authenticated": false }`).
@@ -192,9 +193,19 @@ Get current authenticated user information.
 
 ### Database API
 
-#### GET /api/db/health
+#### GET /health, GET /api/health, GET /api/db/health
 
-Simple health check for load balancers and container orchestration.
+Liveness, for load balancers and container orchestration. All three answer the same body and
+depend on nothing, so a check reads the same whichever path its platform's form defaults to.
+Point a probe at any of them.
+
+They are public in the middleware for a reason worth keeping: an unknown path is redirected
+to `/login`, and a check that follows redirects reads `200` from a login page whether or not
+the app works. A health path that can answer with a redirect is worse than one that 404s.
+
+For a check scoped to one database connection, use `POST /api/db/health` below — that is a
+different question, and a liveness probe that touches a database reports a database outage as
+a dead application.
 
 **Authentication:** Not required
 
@@ -1810,7 +1821,7 @@ async function streamAIExplanation(query: string, explainPlan: string) {
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `JWT_SECRET` | Recommended | JWT signing secret (min 32 chars). Auto-generated at boot if unset unless `AUTH_BOOTSTRAP=off` (see `.env.example`). Set but shorter than 32 chars: the server exits at startup with code 1 rather than serving a deployment whose logins all fail with 503 |
+| `JWT_SECRET` | Recommended | JWT signing secret (min 32 chars). Auto-generated at boot if unset unless `AUTH_BOOTSTRAP=off`, which turns off secret generation as well as credential generation. Unset with bootstrap off **in production**, the server exits at startup rather than serving a deployment whose every login is 503; outside production the development fallback still applies. Set but shorter than 32 chars: the server exits at startup with code 1 rather than serving a deployment whose logins all fail with 503 |
 | `ADMIN_PASSWORD` | Recommended | Admin account password. Auto-generated and printed once at boot if unset unless `AUTH_BOOTSTRAP=off` |
 | `ADMIN_EMAIL` | No | Admin login email (default `admin@libredb.org`) |
 | `USER_PASSWORD` | No | Optional lower-privilege account password; the `user` account exists only when this is set |

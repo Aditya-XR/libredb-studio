@@ -43,7 +43,7 @@ import Link from "next/link";
 import type { FleetHealthItem } from "@/app/api/admin/fleet-health/route";
 import type { AuditEvent } from "@/lib/audit";
 import { useEffectiveTheme } from "@/hooks/use-effective-theme";
-import { chartTooltipStyle } from "@/lib/charts/palette";
+import { chartTheme, chartTooltipStyle } from "@/lib/charts/palette";
 
 // ─── Animation Variants ─────────────────────────────────────────────────────
 
@@ -438,6 +438,14 @@ function HeroStatusBanner({
   const animatedQueries = useAnimatedCounter(queryStats.total);
   const animatedToday = useAnimatedCounter(todayQueries);
 
+  // The unfilled part of the gauge, which is the ring the filled arc is read against.
+  // It was 4% white, so on a light panel there was nothing there and the score read as an
+  // arc floating on its own. Recharts writes `background.fill` straight onto the element
+  // and cannot resolve a CSS token, so the palette is handed to it — the same reason
+  // `chartTooltipStyle` exists a few lines down. `grid` is the palette's recessive line:
+  // it orients without competing, which is exactly what a gauge track is for.
+  const gaugeTrack = chartTheme(useEffectiveTheme()).grid;
+
   const gaugeColor = getGaugeColor(healthScore);
   const gaugeData = [{ value: healthScore, fill: gaugeColor }];
 
@@ -489,7 +497,7 @@ function HeroStatusBanner({
                   startAngle={90}
                   endAngle={-270}
                 >
-                  <RadialBar dataKey="value" cornerRadius={6} background={{ fill: "rgba(255,255,255,0.04)" }} />
+                  <RadialBar dataKey="value" cornerRadius={6} background={{ fill: gaugeTrack }} />
                 </RadialBarChart>
               </ResponsiveContainer>
             </div>
@@ -855,6 +863,8 @@ function MetricGauge({
   const pct = Math.round((value / maxValue) * 100);
   const animatedValue = useAnimatedCounter(value);
   const gaugeData = [{ value: pct, fill: color }];
+  // See `HeroStatusBanner`: the track has to come from the palette, not from a fixed white.
+  const gaugeTrack = chartTheme(useEffectiveTheme()).grid;
 
   return (
     <div className="rounded-xl border border-hairline bg-fill-subtle p-4 flex flex-col items-center">
@@ -868,7 +878,7 @@ function MetricGauge({
             startAngle={90}
             endAngle={-270}
           >
-            <RadialBar dataKey="value" cornerRadius={4} background={{ fill: "rgba(255,255,255,0.03)" }} />
+            <RadialBar dataKey="value" cornerRadius={4} background={{ fill: gaugeTrack }} />
           </RadialBarChart>
         </ResponsiveContainer>
         <div className="absolute inset-0 flex flex-col items-center justify-center">

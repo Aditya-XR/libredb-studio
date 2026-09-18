@@ -106,18 +106,21 @@ When using LibreDB Studio, please follow these security best practices:
 
 #### API Security
 - All API endpoints require authentication except `POST /api/auth/login`, `POST /api/auth/logout`,
-  `GET /api/auth/oidc/login`, `GET /api/auth/oidc/callback`, `GET /api/db/health` (for load
-  balancer probes), and `GET /api/storage/config` (which returns the storage mode only).
+  `GET /api/auth/oidc/login`, `GET /api/auth/oidc/callback`, `GET /health`, `GET /api/health` and
+  `GET /api/db/health` (the three liveness paths, for load balancer probes; they depend on nothing
+  and return a fixed body), and `GET /api/storage/config` (which returns the storage mode only).
   `GET /api/auth/me` and `POST /api/db/health` each check for a session themselves and return 401
   without one, the same as every other endpoint.
 - Running arbitrary SQL against your connected database is the product's purpose, not an
   injection surface. Where the application builds SQL of its own — generated starter queries,
   schema browsing, inline cell edits — values are bound as parameters, and identifiers the
   application knows from schema metadata, column names and table names alike, are quoted for the
-  target dialect, since SQL has no parameter syntax for identifiers. The one identifier it infers
-  rather than knows — the table name behind an inline cell edit, read from a tab title or guessed
-  from the query text — is validated as a bare identifier instead, and the edit is refused when it
-  is not, because a guess cannot be safely quoted
+  target dialect, since SQL has no parameter syntax for identifiers. The one identifier it does not
+  read from schema metadata — the table behind an inline cell edit — is taken from the statement
+  that fetched the rows on screen, read under the connection's own dialect, and is refused
+  whenever that statement's rows have no single table or the reader cannot settle the name. An
+  unquoted name is validated as a bare identifier rather than quoted, because quoting changes its
+  case semantics; a quoted one is copied exactly as the query spells it
 - Login attempts, the AI endpoints and every database-reaching route (query execution, schema
   browsing, maintenance operations, and the admin fleet-health check) are rate limited in the
   application. The counters live in the application process, so with more than one replica the

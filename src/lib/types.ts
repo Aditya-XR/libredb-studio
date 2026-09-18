@@ -450,6 +450,18 @@ export interface QueryTab {
   name: string;
   query: string;
   result: QueryResult | null;
+  /**
+   * The statement that produced `result`, as it was actually sent.
+   *
+   * Not the same thing as `query`, which is the EDITOR BUFFER and is rewritten on every
+   * keystroke — and not always a prefix of it either, since a run takes the editor's
+   * effective query, which may be a selection or the statement under the cursor. Inline
+   * editing writes back to the table the displayed rows came from, so it has to read the
+   * statement that fetched them rather than whatever is in the buffer now (#881).
+   *
+   * Absent on a tab whose result predates this field, and on one that has never run.
+   */
+  resultQuery?: string;
   isExecuting: boolean;
   type: "sql" | "mongodb" | "redis" | "libredb";
   viewMode?: "results" | "explain" | "history" | "saved";

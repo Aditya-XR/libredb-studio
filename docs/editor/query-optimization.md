@@ -550,6 +550,12 @@ POST /api/db/query
 }
 ```
 
+The `sql` of the second request is the statement that produced the rows already on screen -
+`QueryTab.resultQuery` - not whatever is in the editor now. The buffer is rewritten on every
+keystroke, and a run takes the editor's *effective* query, which may be only a selection of
+it; paging the buffer appended another table's rows under these columns and left the tab
+holding rows from two tables while naming one.
+
 ### Response Format
 
 ```typescript
@@ -810,8 +816,9 @@ interface QueryResult {
 interface QueryTab {
   id: string;
   name: string;
-  query: string;
+  query: string;                         // the editor buffer, rewritten on every keystroke
   result: QueryResult | null;
+  resultQuery?: string;                  // the statement that produced `result`, as it was sent
   explainPlan?: any;
   currentOffset?: number;
   isLoadingMore?: boolean;

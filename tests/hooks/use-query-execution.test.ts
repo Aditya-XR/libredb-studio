@@ -2592,6 +2592,32 @@ describe("useQueryExecution", () => {
       expect(cancelCall?.body.queryId).toBe(mainCalls(calls)[0].body.queryId);
     });
 
+    test("a superseded run reports failure, because nothing it fetched is on screen", async () => {
+      // It is not that the engine refused it - the statement may well have been applied.
+      // It is that `commitToTab` dropped the result, so a caller counting applied rows
+      // would be counting one the user never sees. The apply loop is that caller, which is
+      // why what it tells the user is "could not be CONFIRMED as saved": the outcome was
+      // thrown away, and that is a weaker thing than a refusal.
+      const calls = installDeferredFetch();
+      const { params } = statefulParams();
+      const { result } = renderHook(() => useQueryExecution(params));
+
+      let first: Promise<boolean> | undefined;
+      act(() => {
+        first = result.current.executeQuery("SELECT 1") as Promise<boolean>;
+      });
+      await flush();
+
+      // Settle the first run's request and take the tab over before it can commit.
+      mainCalls(calls)[0].settle(mockQueryResult);
+      act(() => {
+        result.current.executeQuery("SELECT 2");
+      });
+      await flush();
+
+      expect(await first).toBe(false);
+    });
+
     test("a superseded run does not disarm the cancel button of the run that replaced it", async () => {
       const calls = installDeferredFetch();
       const { params } = statefulParams();
@@ -3050,6 +3076,178 @@ describe("useQueryExecution", () => {
       });
 
       expect(mockToastError).toHaveBeenCalledWith("Query Error", { description: "Database is starting up" });
+    });
+  });
+
+  // ── The tab remembers the statement its rows came from (#881) ─────────────
+  //
+  // `query` is the editor buffer: it is rewritten on every keystroke, and a run takes the
+  // editor's EFFECTIVE query, which may be only a selection of it. So the buffer is not a
+  // safe name for the rows on screen, and inline editing needs one — it writes back to the
+  // table those rows came from.
+
+  describe("the statement a tab's rows came from", () => {
+    /** A params object whose `setTabs` keeps what the hook commits. */
+    function trackingParams(overrides?: Record<string, unknown>) {
+      let tabs = [createTab()];
+      const setTabs = mock((updater: unknown) => {
+        if (typeof updater === "function") tabs = (updater as (prev: QueryTab[]) => QueryTab[])(tabs);
+      });
+      return { params: createDefaultParams({ setTabs, ...overrides }), readTabs: () => tabs };
+    }
+
+    test("is recorded beside the rows it fetched", async () => {
+      mockGlobalFetch({ "/api/db/query": { ok: true, json: mockQueryResult } });
+      const { params, readTabs } = trackingParams();
+      const { result } = renderHook(() => useQueryExecution(params));
+
+      await act(async () => {
+        await result.current.executeQuery("SELECT * FROM users WHERE id = 1");
+      });
+
+      expect(readTabs()[0].resultQuery).toBe("SELECT * FROM users WHERE id = 1");
+      expect(readTabs()[0].result).not.toBeNull();
+    });
+
+    test("is left alone by an EXPLAIN, which leaves the rows alone too", async () => {
+      mockGlobalFetch({ "/api/db/query": { ok: true, json: mockQueryResult } });
+      const { params, readTabs } = trackingParams();
+      const { result } = renderHook(() => useQueryExecution(params));
+
+      await act(async () => {
+        await result.current.executeQuery("SELECT * FROM users");
+      });
+      await act(async () => {
+        await result.current.executeQuery("SELECT * FROM orders", undefined, true);
+      });
+
+      expect(readTabs()[0].resultQuery).toBe("SELECT * FROM users");
+    });
+
+    test("is still named by the tab after a page is appended", async () => {
+      const paged = { ...mockQueryResult, pagination: { ...mockQueryResult.pagination, hasMore: true } };
+      mockGlobalFetch({ "/api/db/query": { ok: true, json: paged } });
+      const { params, readTabs } = trackingParams();
+      const { result } = renderHook(() => useQueryExecution(params));
+
+      await act(async () => {
+        await result.current.executeQuery("SELECT * FROM users");
+      });
+      await act(async () => {
+        await result.current.executeQuery("SELECT * FROM users", undefined, false, { offset: 2, limit: 500 });
+      });
+
+      expect(readTabs()[0].resultQuery).toBe("SELECT * FROM users");
+      expect(readTabs()[0].result?.rows.length).toBeGreaterThan(mockQueryResult.rows.length);
+    });
+
+    test("is what Load More pages, not whatever has been typed since", async () => {
+      // Paging the buffer appended another table's rows under these columns and left the
+      // tab holding rows from two tables while naming one.
+      const fetchMock = mockGlobalFetch({
+        "/api/db/query": {
+          ok: true,
+          json: { ...mockQueryResult, pagination: { ...mockQueryResult.pagination, hasMore: true } },
+        },
+      });
+      const tab: QueryTab = {
+        ...createTab(),
+        query: "SELECT * FROM orders",
+        resultQuery: "SELECT * FROM users",
+        result: { ...mockQueryResult, pagination: { ...mockQueryResult.pagination, hasMore: true } },
+      };
+      const params = createDefaultParams({ tabs: [tab], currentTab: tab });
+      const { result } = renderHook(() => useQueryExecution(params));
+
+      await act(async () => {
+        result.current.handleLoadMore();
+      });
+
+      const call = fetchMock.mock.calls.find((c) => typeof c[0] === "string" && c[0].includes("/api/db/query"));
+      expect(JSON.parse(call![1]!.body as string).sql).toBe("SELECT * FROM users");
+    });
+  });
+
+  // ── The outcome a caller can read (#882) ───────────────────────────────────
+  //
+  // Every failure below is already reported to the user here — a toast, the tab flags,
+  // a history entry. What was missing was an answer for a caller running statements in
+  // a loop, which cannot see a toast. Applying inline grid edits ran that loop and
+  // reported "Changes Applied" whatever happened, dropping the user's pending edits
+  // after a write the engine had refused.
+
+  describe("the outcome executeQuery reports back", () => {
+    test("is true when the engine accepted the statement", async () => {
+      mockGlobalFetch({ "/api/db/query": { ok: true, json: mockQueryResult } });
+      const { result } = renderHook(() => useQueryExecution(createDefaultParams()));
+
+      let outcome: boolean | undefined;
+      await act(async () => {
+        outcome = await result.current.executeQuery("SELECT * FROM users");
+      });
+
+      expect(outcome).toBe(true);
+    });
+
+    test("is false when the request failed", async () => {
+      mockGlobalFetch({
+        "/api/db/query": { ok: false, status: 400, json: { error: "syntax error at position 1" } },
+      });
+      const { result } = renderHook(() => useQueryExecution(createDefaultParams()));
+
+      let outcome: boolean | undefined;
+      await act(async () => {
+        outcome = await result.current.executeQuery("UPDATE users SET name = 'x' WHERE id = 1", undefined, false, {
+          skipSafety: true,
+        });
+      });
+
+      expect(outcome).toBe(false);
+      expect(mockToastError).toHaveBeenCalled();
+    });
+
+    test("is false when there is no connection to run against", async () => {
+      mockGlobalFetch({});
+      const { result } = renderHook(() => useQueryExecution(createDefaultParams({ activeConnection: null })));
+
+      let outcome: boolean | undefined;
+      await act(async () => {
+        outcome = await result.current.executeQuery("SELECT 1");
+      });
+
+      expect(outcome).toBe(false);
+    });
+
+    test("is false when the safety dialog takes the run over", async () => {
+      // The gate returns WITHOUT executing and waits for the user to confirm, so the
+      // statement has not run — a caller must not read that as applied. (The predicate
+      // is stubbed at the top of this file to answer for DROP/DELETE/TRUNCATE only.)
+      mockGlobalFetch({ "/api/db/query": { ok: true, json: mockQueryResult } });
+      const { result } = renderHook(() => useQueryExecution(createDefaultParams()));
+
+      let outcome: boolean | undefined;
+      await act(async () => {
+        outcome = await result.current.executeQuery("DELETE FROM users WHERE id = 1");
+      });
+
+      expect(outcome).toBe(false);
+      expect(result.current.safetyCheckQuery).toBe("DELETE FROM users WHERE id = 1");
+    });
+
+    test("is false when the engine reported an error inside a successful request", async () => {
+      // A multi-statement run answers 200 while one of the statements inside it failed.
+      // `hasError` is that signal, and it is the same answer as a rejected request.
+      mockGlobalFetch({
+        "/api/db/query": { ok: true, json: { ...mockQueryResult, hasError: true } },
+      });
+      const { result } = renderHook(() => useQueryExecution(createDefaultParams()));
+
+      let outcome: boolean | undefined;
+      await act(async () => {
+        outcome = await result.current.executeQuery("SELECT * FROM users");
+      });
+
+      expect(outcome).toBe(false);
     });
   });
 });

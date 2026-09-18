@@ -203,7 +203,7 @@ import { render, fireEvent, cleanup, act } from "@testing-library/react";
 import { SchemaDiff } from "@/components/SchemaDiff";
 import { logger } from "@/lib/logger";
 import { mockSchema } from "../fixtures/schemas";
-import { mockPostgresConnection } from "../fixtures/connections";
+import { mockMySQLConnection, mockPostgresConnection } from "../fixtures/connections";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -931,10 +931,17 @@ describe("SchemaDiff", () => {
           fn!("conn:remote-1");
         });
 
-        expect(mockFetch).toHaveBeenCalledTimes(2);
+        // Four requests, not two: the panel reads the CURRENT schema when it opens (#884),
+        // which is the same pair. The two below are the remote selection's, picked out by the
+        // connection they name rather than by position, because the two reads interleave.
+        expect(mockFetch).toHaveBeenCalledTimes(4);
         const calls = mockFetch.mock.calls as unknown[][];
-        expect(calls[0][0]).toBe("/api/db/provider-meta");
-        const [url, options] = calls[1] as [string, RequestInit];
+        const forRemote = calls.filter(([, init]) =>
+          String((init as RequestInit | undefined)?.body ?? "").includes('"id":"remote-1"'),
+        );
+        expect(forRemote).toHaveLength(2);
+        expect(forRemote[0][0]).toBe("/api/db/provider-meta");
+        const [url, options] = forRemote[1] as [string, RequestInit];
         expect(url).toBe("/api/db/objects/inventory");
         const body = JSON.parse(options.body as string);
         expect(body.connection.id).toBe("remote-1");
@@ -949,6 +956,141 @@ describe("SchemaDiff", () => {
         ]);
       } finally {
         globalThis.fetch = origFetch;
+      }
+    });
+
+    test("Current Schema is read from the database, not from the prop", async () => {
+      // The prop is the copy the explorer last read. Compared against a snapshot taken
+      // before a DDL change, a stale copy answers "No differences found" for a change that
+      // really happened (#884). The remote side always read the database; this is the same
+      // read, for the side that says "current".
+      const origFetch = globalThis.fetch;
+      const mockFetch = mock((url: string) =>
+        Promise.resolve(
+          url.includes("provider-meta")
+            ? {
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    capabilities: {
+                      queryLanguage: "sql",
+                      objectKinds: [{ id: "table", role: "relation", label: "Table", labelPlural: "Tables" }],
+                    },
+                  }),
+              }
+            : {
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    // One object the stale prop does not carry: if the panel is reading the
+                    // prop, the diff below cannot see it.
+                    objects: [
+                      { name: "added_after_the_snapshot", kind: "table", path: ["public", "added_after_the_snapshot"] },
+                    ],
+                    details: [
+                      {
+                        path: ["public", "added_after_the_snapshot"],
+                        columns: [],
+                        indexes: [],
+                        foreignKeys: [],
+                      },
+                    ],
+                  }),
+              },
+        ),
+      );
+      globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+      try {
+        await act(async () => {
+          renderDiff();
+        });
+
+        const urls = (mockFetch.mock.calls as unknown[][]).map(([url]) => url);
+        expect(urls).toEqual(["/api/db/provider-meta", "/api/db/objects/inventory"]);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    test("drops the previous connection's objects when the connection changes", async () => {
+      // The read runs per connection and the panel stays mounted across a switch, so
+      // without a reset "Current Schema" kept the OLD database's objects until the new
+      // read landed - and for good if it failed. A snapshot taken in that window is
+      // stamped with the new connection and holds the old one's objects, which is the
+      // stale-copy defect #884 is about, kept for as long as the snapshot is.
+      const origFetch = globalThis.fetch;
+      let holdInventory = false;
+      const inventory = (name: string) => ({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            objects: [{ name, kind: "table", path: ["public", name] }],
+            details: [{ path: ["public", name], columns: [], indexes: [], foreignKeys: [] }],
+          }),
+      });
+      globalThis.fetch = mock((url: string) =>
+        url.includes("provider-meta")
+          ? Promise.resolve({
+              ok: true,
+              json: () =>
+                Promise.resolve({
+                  capabilities: {
+                    queryLanguage: "sql",
+                    objectKinds: [{ id: "table", role: "relation", label: "Table", labelPlural: "Tables" }],
+                  },
+                }),
+            })
+          : holdInventory
+            ? new Promise(() => {})
+            : Promise.resolve(inventory("only_on_the_first_connection")),
+      ) as unknown as typeof fetch;
+
+      try {
+        let rendered!: ReturnType<typeof render>;
+        await act(async () => {
+          rendered = renderDiff();
+        });
+        changeTarget("snap-1");
+        const first = (mockDiffSchemas.mock.calls as unknown[][]).at(-1)!;
+        expect((first[0] as { name: string }[])[0].name).toBe("only_on_the_first_connection");
+
+        // The second connection's read never lands, which is the window that matters.
+        holdInventory = true;
+        await act(async () => {
+          rendered.rerender(<SchemaDiff schema={mockSchema} connection={mockMySQLConnection} />);
+        });
+
+        const latest = (mockDiffSchemas.mock.calls as unknown[][]).at(-1)!;
+        const names = (latest[0] as { name: string }[]).map((o) => o.name);
+        expect(names).not.toContain("only_on_the_first_connection");
+        expect(names).toEqual(mockSchema.map((o) => o.name));
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    test("says on screen when the current schema could not be read", async () => {
+      // The panel falls back to the explorer's copy, and that copy is exactly what #884
+      // is about - so a failure that is only a log line lets the panel answer "No
+      // differences found" from a stale side with nothing on screen saying so.
+      const origFetch = globalThis.fetch;
+      const warn = spyOn(logger, "warn").mockImplementation(() => {});
+      globalThis.fetch = mock(() =>
+        Promise.resolve({ ok: false, json: () => Promise.resolve({ error: "permission denied for schema public" }) }),
+      ) as unknown as typeof fetch;
+
+      try {
+        let rendered!: ReturnType<typeof render>;
+        await act(async () => {
+          rendered = renderDiff();
+        });
+        expect(rendered.container.textContent).toContain("permission denied for schema public");
+        expect(rendered.container.textContent).toContain("explorer");
+        expect(warn).toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = origFetch;
+        warn.mockRestore();
       }
     });
 

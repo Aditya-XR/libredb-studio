@@ -28,6 +28,7 @@
  */
 
 import { JWT_SECRET_MIN_LENGTH } from "@/lib/config/auth-env";
+import { isBootstrapEnabled } from "@/lib/auth-bootstrap";
 import { isServerStorageEnabled } from "@/lib/storage/factory";
 
 /**
@@ -72,9 +73,38 @@ function verifyStorageEncryptionKeyAtBoot(): boolean {
 export function verifyAuthEnvAtBoot(): boolean {
   const secret = process.env.JWT_SECRET;
 
-  // Unset or empty is not this check's business: zero-config bootstrap generates
-  // a secret, and with AUTH_BOOTSTRAP=off getJwtSecret owns the missing-secret
-  // path (dev fallback outside production, clear 503 in it).
+  // A missing secret is only this check's business in the one case where nothing
+  // else will produce one: AUTH_BOOTSTRAP=off, which turns off secret generation
+  // along with credential generation, in production, where getJwtSecret has no dev
+  // fallback either. The server then starts, answers the health probe "healthy",
+  // and returns 503 to every login - the monitor stays green and the first report
+  // comes from a user who cannot sign in (#908).
+  //
+  // The reasoning in this file's header applies unchanged: with no secret the
+  // server can sign no session at all, so no working deployment can regress by
+  // stopping here, and the operator gets the same actionable banner the too-short
+  // path already prints.
+  if (!secret && process.env.NODE_ENV === "production" && !isBootstrapEnabled()) {
+    console.error(
+      [
+        "",
+        "============================================================",
+        " LibreDB Studio cannot start: JWT_SECRET is not set",
+        " AUTH_BOOTSTRAP is off, which also turns off secret generation,",
+        " so nothing will produce one. Every login would fail with HTTP 503.",
+        " Fix it either way:",
+        "   1. Set a secret: JWT_SECRET=$(openssl rand -base64 32)",
+        "   2. Leave AUTH_BOOTSTRAP on and let the first run generate one",
+        "============================================================",
+        "",
+      ].join("\n"),
+    );
+    process.exit(1);
+    return false;
+  }
+
+  // Otherwise an unset secret is not this check's business: zero-config bootstrap
+  // generates one, and outside production getJwtSecret has its dev fallback.
   if (!secret || secret.length >= JWT_SECRET_MIN_LENGTH) return verifyStorageEncryptionKeyAtBoot();
 
   // The secret value never reaches the logs — only its length.

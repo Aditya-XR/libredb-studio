@@ -409,4 +409,43 @@ describe("ConnectionItem", () => {
       expect(item().className).toContain("ring-brand-solid");
     });
   });
+
+  // ── Icon-only controls announce their name (#919) ──────────────────────────
+  //
+  // The edit and delete controls sat beside a Duplicate control that already carried its
+  // name, so a screen reader read one of the three and announced the other two as
+  // "button".
+
+  describe("accessible names", () => {
+    test("the edit control has a name, not just a pencil", () => {
+      const onEdit = mock(() => {});
+      const { getByRole } = render(
+        <ConnectionItem
+          connection={mockPostgresConnection}
+          isActive={false}
+          onSelect={defaultOnSelect}
+          onDelete={defaultOnDelete}
+          onEdit={onEdit}
+        />,
+      );
+
+      fireEvent.click(getByRole("button", { name: "Edit connection" }));
+      expect(onEdit).toHaveBeenCalledTimes(1);
+    });
+
+    test("the delete control has a name, not just a bin", () => {
+      const onDelete = mock(() => {});
+      const { getByRole } = render(
+        <ConnectionItem
+          connection={mockPostgresConnection}
+          isActive={false}
+          onSelect={defaultOnSelect}
+          onDelete={onDelete}
+        />,
+      );
+
+      fireEvent.click(getByRole("button", { name: "Delete connection" }));
+      expect(onDelete).toHaveBeenCalledTimes(1);
+    });
+  });
 });

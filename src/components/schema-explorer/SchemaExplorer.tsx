@@ -177,6 +177,8 @@ export function SchemaExplorer({
           {searchQuery && (
             <button
               onClick={() => setSearchQuery("")}
+              aria-label="Clear search"
+              title="Clear search"
               className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
             >
               <Hash strokeWidth={1.5} className="w-3.5 h-3.5 rotate-45" />

@@ -786,6 +786,43 @@ describe("OverviewTab", () => {
     }
   });
 
+  // ── Gauge track ────────────────────────────────────────────────────────────
+
+  /**
+   * The unfilled part of a gauge is the ring its arc is read against. Both gauges painted
+   * it in 4% white, which on a light panel is nothing at all, so the score read as an arc
+   * floating on its own (#856). Recharts inline-styles it, so the palette has to be handed
+   * over the same way the tooltip's is.
+   */
+  async function gaugeTracksUnderTheme(theme: "dark" | "light") {
+    document.documentElement.classList.remove("dark", "light");
+    document.documentElement.classList.add(theme);
+    mockGlobalFetch({ "/api/admin/audit": { ok: true, json: { events: [] } } });
+
+    let result: ReturnType<typeof render>;
+    await act(async () => {
+      result = render(<OverviewTab user={{ username: "admin", role: "admin" }} />);
+    });
+    return Array.from(result!.container.querySelectorAll("[data-testid='mock-radial-bar']")).map((el) =>
+      el.getAttribute("data-track"),
+    );
+  }
+
+  test("the gauge track is the palette's grid line in the dark theme", async () => {
+    const tracks = await gaugeTracksUnderTheme("dark");
+    expect(tracks.length).toBeGreaterThan(0);
+    for (const track of tracks) expect(track).toBe("#222222");
+  });
+
+  test("and turns into the light theme's grid line, not an invisible white", async () => {
+    const tracks = await gaugeTracksUnderTheme("light");
+    expect(tracks.length).toBeGreaterThan(0);
+    for (const track of tracks) {
+      expect(track).toBe("#e4e4e7");
+      expect(track).not.toContain("255, 255, 255");
+    }
+  });
+
   // ── Chart tooltip ──────────────────────────────────────────────────────────
 
   /**
