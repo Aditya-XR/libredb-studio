@@ -129,25 +129,26 @@ RUN node scripts/copy-monaco.mjs && npx next build
 #   screenshots - README artwork. src/app/layout.tsx points social previews at
 #                raw.githubusercontent.com, so no running container serves it.
 #   prebuilds  - better-sqlite3 13 carries eight prebuilds (darwin, win32, linux,
-#                linuxmusl x two arches) and resolves one in the RUNNING process.
-#                Both linuxmusl files are kept rather than the one matching this
-#                build's arch: the extra is ~2.3 MB and an arch-agnostic rule is
-#                worth more than that.
+#                linuxmusl x two arches) and resolves one in the RUNNING process,
+#                so exactly one of the eight is reachable here. The survivor is
+#                keyed on $(node -p process.arch) rather than on the libc alone:
+#                each leg of the manifest is built for its own arch, so keeping
+#                the other one is 2.3 MB no process in THIS image can open.
 #
 # The asserts are the point of the step, not decoration: an over-eager glob that
 # deleted the payload the image actually loads would otherwise surface as a
 # runtime failure in a provider, long after the build went green.
 RUN set -eux; \
+    ARCH="$(node -p 'process.arch')"; \
     for root in node_modules .next/standalone/node_modules; do \
       [ -d "$root/@duckdb" ] && find "$root/@duckdb" -maxdepth 1 -type d -name 'node-bindings-*' ! -name '*-musl' -exec rm -rf {} + ; \
       [ -d "$root/@img" ] && find "$root/@img" -maxdepth 1 -type d -name '*-linux-*' -exec rm -rf {} + ; \
-      [ -d "$root/better-sqlite3/prebuilds" ] && find "$root/better-sqlite3/prebuilds" -maxdepth 1 -type f -name '*.node' ! -name 'linuxmusl-*' -delete ; \
+      [ -d "$root/better-sqlite3/prebuilds" ] && find "$root/better-sqlite3/prebuilds" -maxdepth 1 -type f -name '*.node' ! -name "linuxmusl-${ARCH}.node" -delete ; \
       rm -rf "$root/better-sqlite3/deps" "$root/better-sqlite3/src" "$root/better-sqlite3/binding.gyp"; \
       true; \
     done; \
     rm -rf public/screenshots .next/standalone/public/screenshots; \
     bash scripts/lib/prune-standalone-payload.sh .next/standalone; \
-    ARCH="$(node -p 'process.arch')"; \
     test -f "node_modules/@duckdb/node-bindings-linux-${ARCH}-musl/libduckdb.so"; \
     test -d "node_modules/@img/sharp-libvips-linuxmusl-${ARCH}"; \
     test -f "node_modules/better-sqlite3/prebuilds/linuxmusl-${ARCH}.node"; \

@@ -72,13 +72,56 @@ RUN node scripts/copy-monaco.mjs && npx next build
 # no running container ever serves, because src/app/layout.tsx points social
 # previews at raw.githubusercontent.com. It is not a payload-root entry, so the
 # deny-list cannot reach it.
+#
+# The native payload is pruned in the same step, and it is the larger half.
+# Neither `@duckdb/node-bindings-<platform>-<arch>[-musl]` package declares a
+# libc field, so bun installs the glibc AND the musl one whatever the stage runs
+# on; sharp ships the same way; and better-sqlite3 13 carries eight prebuilds
+# (darwin, win32, linux, linuxmusl x two arches) plus the 9.9 MB SQLite
+# amalgamation it would compile from if it ever had to. Measured in the image
+# published on 2026-09-18: 71 MB of musl DuckDB bindings, 19 MB of musl libvips
+# and six unloadable prebuilds, none of which any process in a glibc image can
+# open. It lands twice, because `next build` writes a second traced copy of
+# those packages into `.next/standalone/node_modules` and the runner unpacks it
+# onto the same /app the explicit COPYs below land in - which is why the loop
+# below walks both trees, and why this step took the image from 892 MB to 649 MB
+# (292 MB to 203 MB compressed, amd64) rather than the ~115 MB one tree holds.
+#
+# GLOBS AND $(node -p process.arch), NEVER A LITERAL. The deps stage installs the
+# bindings package for the BUILD arch, so naming linux-x64 would break the arm64
+# leg of the same manifest (tests/unit/packaging-duckdb-native.test.ts asserts
+# that literal is absent). `*-linux-*` does not match `*-linuxmusl-*`, because
+# "linux-" is not a prefix of "linuxmusl-", so the two sharp patterns below are
+# each other's complement rather than overlapping.
+#
+# The `test` lines are the point of the step: a glob that took the payload this
+# image DOES load would otherwise surface as a provider failing at runtime, long
+# after the build went green.
+#
+# oracledb keeps every platform's addon on purpose. This is the only variant
+# where Thick mode can be turned on at all, the whole build/ directory is ~3 MB,
+# and the package resolves the addon at runtime from its own __dirname.
 RUN set -eux; \
     bash scripts/lib/prune-standalone-payload.sh .next/standalone; \
     rm -rf public/screenshots .next/standalone/public/screenshots; \
+    ARCH="$(node -p 'process.arch')"; \
+    for root in node_modules .next/standalone/node_modules; do \
+      [ -d "$root/@duckdb" ] && find "$root/@duckdb" -maxdepth 1 -type d -name 'node-bindings-*-musl' -exec rm -rf {} + ; \
+      [ -d "$root/@img" ] && find "$root/@img" -maxdepth 1 -type d -name '*-linuxmusl-*' -exec rm -rf {} + ; \
+      [ -d "$root/better-sqlite3/prebuilds" ] && find "$root/better-sqlite3/prebuilds" -maxdepth 1 -type f -name '*.node' ! -name "linux-${ARCH}.node" -delete ; \
+      rm -rf "$root/better-sqlite3/deps" "$root/better-sqlite3/src" "$root/better-sqlite3/binding.gyp"; \
+      true; \
+    done; \
+    test -f "node_modules/@duckdb/node-bindings-linux-${ARCH}/libduckdb.so"; \
+    test -d "node_modules/@img/sharp-libvips-linux-${ARCH}"; \
+    test -f "node_modules/better-sqlite3/prebuilds/linux-${ARCH}.node"; \
+    test -d node_modules/oracledb/build; \
     test -f .next/standalone/server.js; \
     test -d .next/standalone/node_modules; \
     test ! -e .next/standalone/src; \
-    test ! -e .next/standalone/Dockerfile
+    test ! -e .next/standalone/Dockerfile; \
+    echo "--- native payload surviving the prune ---"; \
+    find node_modules .next/standalone/node_modules \( -name '*.node' -o -name '*.so' -o -name '*.so.*' \) | sort | xargs -r ls -lh | awk '{print $5, $9}'
 
 # Production image - use Node.js slim for lower memory footprint
 # trixie-slim: glibc must match the stage where native modules were built (see builder).

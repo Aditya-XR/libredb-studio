@@ -151,6 +151,29 @@ describe("published image variants", () => {
     expect(drops).toBe(true);
   });
 
+  test.each(VARIANTS)("%s ships only the native payload it can load", (variant) => {
+    const cmds = commands(readRepoFile(variant));
+    const removes = (needle: RegExp) => cmds.some((line) => needle.test(line) && /\brm\b|-delete\b/.test(line));
+
+    // Measured in the published Debian image on 2026-09-18: 71 MB of musl
+    // DuckDB bindings, 19 MB of musl libvips and six unloadable better-sqlite3
+    // prebuilds, none of which any process in a glibc image can open. Neither
+    // DuckDB bindings package declares a libc field, so bun installs both
+    // whatever the stage runs on, and sharp ships the same way.
+    expect(removes(/@duckdb/)).toBe(true);
+    expect(removes(/@img/)).toBe(true);
+    expect(removes(/better-sqlite3\/prebuilds/)).toBe(true);
+    // The SQLite amalgamation the package would COMPILE from. better-sqlite3 13
+    // is N-API and loads a prebuild, so it is 9.9 MB of C nothing reads.
+    expect(removes(/better-sqlite3\/deps/)).toBe(true);
+  });
+
+  test.each(VARIANTS)("%s derives the surviving prebuild from the build arch", (variant) => {
+    // A literal arch would silently break the arm64 leg of the manifest, which
+    // is built on the same file by the same job.
+    expect(readRepoFile(variant)).toContain("node -p 'process.arch'");
+  });
+
   test.each(VARIANTS)("%s names no per-arch native package", (variant) => {
     // The deps stage installs only the package matching the build arch, so a
     // hardcoded platform name silently breaks the arm64 leg of the manifest.

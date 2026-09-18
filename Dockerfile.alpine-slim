@@ -16,9 +16,10 @@
 # debian:*-slim) - same product, fewer parts - which is exactly this file.
 #
 # Measured with `docker save | gzip`, amd64, 2026-09-18, building all three
-# files at this commit: 292 MB Debian, 125 MB `-alpine`, 57 MB this file. The
-# Debian number is 310 MB for the image published today, and the difference is
-# the payload prune all three now run rather than anything this variant does.
+# files at this commit: 203 MB Debian, 124 MB `-alpine`, 57 MB this file. The
+# image published today is 310 MB, and the whole of that difference is work the
+# other two files now do as well - the payload prune and the native-payload
+# prune - rather than anything this variant gives up.
 # (An earlier arm64 pass read 308 / 142 / 51; the 51 was a build that also
 # deleted Monaco's workers, which cost the product its editor - see below.)
 # Every number in the comments here was measured on a real build rather than
