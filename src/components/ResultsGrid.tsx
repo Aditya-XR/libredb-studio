@@ -214,6 +214,27 @@ export function ResultsGrid({
     });
   }, [result.rows, columnFilters]);
 
+  /**
+   * Where each visible row sits in `result.rows`.
+   *
+   * The table below is built over `filteredRows`, so TanStack's `row.index` is a position
+   * in the FILTERED array. A `CellChange` carries that number out of this component, and
+   * `useInlineEditing` uses it to read the row's primary key out of `result.rows` — so with
+   * a column filter on, an edit was keyed to whatever row happened to sit at the same
+   * position in the unfiltered result. The engine accepted it and nothing said a word.
+   *
+   * Filtering keeps the row objects themselves, so their identity is the map back. With no
+   * filter the table's data IS `result.rows`, so the two numbers are the same and the map
+   * is not built at all — it is O(rows) on the thread that draws them, and this grid
+   * advertises smooth scrolling through millions.
+   */
+  const sourceRowIndex = useMemo(() => {
+    if (columnFilters.size === 0) return null;
+    const map = new Map<Record<string, unknown>, number>();
+    result.rows.forEach((row, index) => map.set(row, index));
+    return map;
+  }, [result.rows, columnFilters]);
+
   const activeFilterCount = useMemo(() => {
     let count = 0;
     for (const [, v] of columnFilters) {
@@ -379,7 +400,17 @@ export function ResultsGrid({
       cell: ({ row, column, getValue }) => {
         const val = getValue();
         const isEditing = editingCell?.rowIndex === row.index && editingCell?.columnId === column.id;
-        const pendingChange = getCellChange(row.index, column.id);
+        // A pending change is addressed by its position in `result.rows`, not by the one
+        // the filtered table is iterating, so the lookup and the emission below both go
+        // through the map rather than through `row.index`.
+        // `row.index` only where it is provably the same number — no filter, so the table
+        // iterates `result.rows` itself. Under a filter it is the position this map exists
+        // to stop using, and falling back to it there would restore the wrong-row write in
+        // the one path that reaches the database. Filtering keeps the row objects, so a
+        // miss cannot happen — and if it ever did, -1 addresses no row and the apply
+        // refuses rather than writing somewhere.
+        const sourceIndex = sourceRowIndex === null ? row.index : (sourceRowIndex.get(row.original) ?? -1);
+        const pendingChange = getCellChange(sourceIndex, column.id);
 
         if (isEditing) {
           return (
@@ -393,7 +424,7 @@ export function ResultsGrid({
                   if (e.key === "Enter") {
                     if (editValue !== String(val ?? "") && onCellChange && editingEnabled) {
                       onCellChange({
-                        rowIndex: row.index,
+                        rowIndex: sourceIndex,
                         columnId: column.id,
                         originalValue: val,
                         newValue: editValue,
@@ -406,7 +437,7 @@ export function ResultsGrid({
                 onBlur={() => {
                   if (editValue !== String(val ?? "") && onCellChange && editingEnabled) {
                     onCellChange({
-                      rowIndex: row.index,
+                      rowIndex: sourceIndex,
                       columnId: column.id,
                       originalValue: val,
                       newValue: editValue,
@@ -502,6 +533,7 @@ export function ResultsGrid({
     editingEnabled,
     onCellChange,
     getCellChange,
+    sourceRowIndex,
     columnFilters,
     activeFilterCol,
     revealedCells,

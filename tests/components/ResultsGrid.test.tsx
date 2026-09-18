@@ -760,6 +760,58 @@ describe("ResultsGrid", () => {
       expect(findEditInput(container)).toBeUndefined();
     });
 
+    test("a filtered row's edit is addressed to its place in the result, not in the filter", () => {
+      // The table is built over the FILTERED rows, so TanStack's `row.index` is a position
+      // in that array. `useInlineEditing` reads the row's primary key out of
+      // `result.rows[rowIndex]`, so with a filter on, an edit used to be keyed to whatever
+      // row happened to sit at the same position unfiltered — a silent write to the wrong
+      // row, which is #881's harm reached through the grid instead of the tab title.
+      const threeRows: QueryResult = {
+        rows: [
+          { id: 1, name: "Alice" },
+          { id: 2, name: "Bob" },
+          { id: 3, name: "Charlie" },
+        ],
+        fields: ["id", "name"],
+        rowCount: 3,
+        executionTime: 1,
+      };
+      const onCellChange = mock(() => {});
+      const { container } = render(
+        React.createElement(ResultsGrid, {
+          result: threeRows,
+          editingEnabled: true,
+          onCellChange,
+          pendingChanges: [],
+        }),
+      );
+
+      // Filter down to Charlie, who is the only visible row and so sits at filtered index 0.
+      const filterButton = Array.from(container.querySelectorAll("button")).find(
+        (b) =>
+          b.getAttribute("title") === "Filter column" && b.closest(".group\\/header")?.textContent?.includes("name"),
+      );
+      fireEvent.click(filterButton ?? container.querySelectorAll('button[title="Filter column"]')[1]);
+      const filterInput = Array.from(container.querySelectorAll("input")).find((i) =>
+        (i.getAttribute("placeholder") ?? "").startsWith("Filter"),
+      )!;
+      fireEvent.change(filterInput, { target: { value: "Charlie" } });
+
+      const visible = Array.from(container.querySelectorAll(".cursor-text")).filter((c) => c.textContent === "Charlie");
+      expect(visible).toHaveLength(1);
+      fireEvent.doubleClick(visible[0]);
+
+      const editInput = findEditInput(container)!;
+      fireEvent.change(editInput, { target: { value: "Charlize" } });
+      fireEvent.keyDown(findEditInput(container)!, { key: "Enter" });
+
+      expect(onCellChange).toHaveBeenCalledTimes(1);
+      const change = (onCellChange.mock.calls as unknown[][])[0][0] as Record<string, unknown>;
+      expect(change.rowIndex).toBe(2);
+      expect(change.originalValue).toBe("Charlie");
+      expect(change.newValue).toBe("Charlize");
+    });
+
     test("blur commits edit when value changed", () => {
       const onCellChange = mock(() => {});
       const { container } = render(

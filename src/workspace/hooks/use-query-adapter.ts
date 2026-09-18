@@ -149,6 +149,11 @@ export function useQueryAdapter({
                 pagination: result.pagination,
                 ...carriedChannels(result),
               },
+              // The rows and the statement that fetched them are committed together, the way
+              // `use-query-execution` does it: a reader of one must never be handed the other's
+              // (#881). Inline editing is off in this surface, so the wrong-table WRITE cannot
+              // happen here - a tab holding rows from two tables while naming one still can.
+              resultQuery: queryToExecute,
               allRows: result.rows,
               currentOffset: result.rows.length,
               isExecuting: false,
@@ -238,6 +243,7 @@ export function useQueryAdapter({
                   pagination: result.pagination,
                   ...carriedChannels(result),
                 },
+                resultQuery: query,
                 allRows: result.rows,
                 currentOffset: result.rows.length,
                 isExecuting: false,
@@ -308,7 +314,15 @@ export function useQueryAdapter({
       ),
     );
 
-    onQueryExecute(activeConnection.id, currentTab.query, {
+    // The next page of the statement that built this grid, not of whatever has been typed
+    // since - the editor buffer is rewritten on every keystroke.
+    //
+    // Read once, here, and carried into the commit below. Reading it again when the page
+    // arrives would label these rows with whatever statement had started in the meantime,
+    // and this surface has no supersession check to catch that.
+    const pagedStatement = currentTab.resultQuery ?? currentTab.query;
+
+    onQueryExecute(activeConnection.id, pagedStatement, {
       limit: 500,
       offset: currentOffset,
     })
@@ -331,6 +345,7 @@ export function useQueryAdapter({
                 executionTime: t.result?.executionTime || 0,
                 pagination: result.pagination,
               },
+              resultQuery: pagedStatement,
               allRows: newAllRows,
               currentOffset: currentOffset + result.rows.length,
               isExecuting: false,
@@ -396,6 +411,11 @@ export function useQueryAdapter({
                 executionTime: result.executionTime,
                 pagination: result.pagination,
               },
+              // The rows and the statement that fetched them are committed together, the way
+              // `use-query-execution` does it: a reader of one must never be handed the other's
+              // (#881). Inline editing is off in this surface, so the wrong-table WRITE cannot
+              // happen here - a tab holding rows from two tables while naming one still can.
+              resultQuery: query,
               allRows: result.rows,
               currentOffset: result.rows.length,
               isExecuting: false,
