@@ -113,7 +113,11 @@ When the stack is up, open **https://demo.127.0.0.1.nip.io:8443**.
 
 1. On the login page, click **Login with SSO** and sign in as `admin` / `admin`. You land on the admin dashboard.
 2. Click **Logout**. Keycloak asks **Do you want to log out?**; confirm it, and you are back on the login page.
-3. Click **Login with SSO** again. Keycloak asks for credentials again rather than signing you straight back in. Sign in as `user` / `user`. You land on the editor, and the admin surfaces are gone: `/admin` sends you back to `/`.
+3. Click **Login with SSO** again and sign in as `user` / `user`. You land on the editor, and the admin surfaces are gone: `/admin` sends you back to `/`.
+
+> **On image `0.16.0` and earlier, step 2 ends the Studio session only.** The dashboard's Logout returned you to the login page without sending you to Keycloak, so the provider session survived and step 3 signed you straight in as `admin` instead of asking. Fixed after `0.16.0`; the demo pulls `:latest`, so pull again once a newer image is published.
+
+Keycloak asks for a password on that third step whether or not step 2 ended its session, because Studio sends `prompt=login` on every authorization request (`src/lib/oidc.ts`). Treat the prompt as normal, not as proof: what shows the logout worked is that step 2 returns you to the login page and the app stays signed out until you sign in again.
 
 The difference is the realm role (`admin` or `user`), mapped through `OIDC_ROLE_CLAIM=realm_access.roles` exactly as in the [Keycloak](#keycloak) setup below. The realm already has the roles in the ID token, so nothing needs changing in the Keycloak admin console.
 
