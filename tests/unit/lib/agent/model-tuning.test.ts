@@ -38,7 +38,7 @@ const ENV = "AGENT_MODEL_TUNING_PATH";
 
 /** Settings that state every defaulted knob, which is what the document requires of an entry. */
 const COMPLETE = {
-  sampling: { temperature: 0 },
+  sampling: { temperature: 0, topP: 1 },
   unreportedCallCeiling: 12,
   reportReminderLimit: 1,
   planStatementRetries: 0,
@@ -62,7 +62,7 @@ const document = (overrides: Record<string, unknown> = {}): Record<string, unkno
     turnTimeoutMs: 90_000,
     protocol: "six surfaces, five consecutive passing runs each",
     defaults: {
-      sampling: { temperature: 0 },
+      sampling: { temperature: 0, topP: 1 },
       unreportedCallCeiling: 12,
       reportReminderLimit: 1,
       planStatementRetries: 0,
@@ -236,6 +236,7 @@ describe("what a document from outside Studio is held to instead", () => {
     );
     resetTuning();
     expect(ceilingFor("gemma4:26b")).toBe(DEFAULT_UNREPORTED_CALL_CEILING);
+    expect(retriesEmptyTurn("gemma4:26b")).toBe(true);
   });
 
   test("an entry may state temperature without topP, suitable for Claude/Anthropic endpoints", () => {

@@ -49,7 +49,7 @@ const WORKFLOWS: readonly AgentRunWorkflowType[] = [
 ];
 
 /** The sampling every surface gets unless a profile names that surface. */
-const PINNED = { temperature: 0 } as const;
+const PINNED = { temperature: 0, topP: 1 } as const;
 
 interface ResolvedRow {
   readonly id: string;

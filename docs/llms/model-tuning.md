@@ -111,7 +111,7 @@ Every one is optional. What you do not state resolves to the compiled default in
 
 | setting | type and bounds | what it decides | default |
 | --- | --- | --- | --- |
-| `sampling` | `{temperature?: 0–2, topP?: 0–1}` | how every turn of this model is sampled | `{temperature: 0}` |
+| `sampling` | `{temperature?: 0–2, topP?: 0–1}` | how every turn of this model is sampled | `{temperature: 0, topP: 1}` |
 | `perWorkflow` | the same object, per workflow id | sampling for named surfaces only — the narrowest an override gets | — |
 | `unreportedCallCeiling` | integer 1–100 | how many calls it may make without reporting before the run is narrowed to the tools that would finish it | `12` |
 | `reportReminderLimit` | integer 0–5 | how many times a turn with no call and no report may be answered with the report reminder | `1` |
@@ -127,7 +127,10 @@ Every one is optional. What you do not state resolves to the compiled default in
 | `threadContextMaxChars` | integer 200–32000 | how much of a CONVERSATION this model may be handed — the earlier steps' objectives and the most recent step's report, when a follow-up continues a previous run | the product's budget (4000) |
 
 Workflow ids for `perWorkflow`: `investigation`, `query-optimization`, `database-assessment`,
-`operations`, `data-analysis`.
+`operations`, `data-analysis`. Note that `perWorkflow` merges onto the model's entry-level `sampling`
+(or the compiled `{temperature: 0, topP: 1}` default if omitted). For endpoints that require omitting
+`topP` (such as Anthropic/Claude), state `sampling: { temperature: ... }` at the entry level so `topP`
+is not inherited from the default.
 
 **`threadContextMaxChars` is the one setting Studio ships NO measurement for**, and that is
 deliberate rather than an omission: no entry in the shipped document names it, because nobody has
