@@ -40,7 +40,7 @@ helm install libredb libredb/libredb-studio \
 
 ```bash
 helm install libredb oci://ghcr.io/libredb/charts/libredb-studio \
-  --version 0.1.64 \
+  --version 0.1.65 \
   --set secrets.jwtSecret=$(openssl rand -base64 32) \
   --set secrets.adminPassword=MyAdmin123
 ```
@@ -175,7 +175,7 @@ rather than at the login screen.
 Under `authProvider=oidc` the login page shows no password form and MFA belongs to the identity
 provider - but `POST /api/auth/login` stays reachable whenever `secrets.adminPassword` is also set,
 and this guards that route in every mode. Full setup, enrolment and recovery:
-[`docs/MFA.md`](../../docs/MFA.md).
+[`docs/MFA.md`](https://github.com/libredb/libredb-studio/blob/main/docs/MFA.md).
 
 ## OIDC SSO
 
