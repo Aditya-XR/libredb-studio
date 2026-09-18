@@ -113,6 +113,17 @@ commit, treat it as blocking anyway.
 (Run this same query after tagging and `Release Artifacts` joins the list: the tag points at the bump
 commit, so it shares the SHA.)
 
+**`Docker Build and Push` success is not one answer any more.** Since #840 it fans out over three
+image variants, six jobs: `Build and Push (debian|alpine|alpine-slim)` and
+`Channel E2E (docker, debian|alpine|alpine-slim)`. `fail-fast` is off on purpose, so an
+`-alpine-slim` that will not build does not cancel the image every user pulls - which also means a
+red leg can sit beside two that pushed their tags. Count the legs rather than reading the run's
+conclusion:
+
+```bash
+gh run view <docker-run-id> --json jobs --jq '.jobs[] | "\(.name)\t\(.conclusion)"'
+```
+
 `helm repo add bitnami` (eight workflow sites: `ci.yml` x3, `helm-release.yml` x3, `npm-publish.yml`,
 `operator-release.yml`) fetches a 27 MB index with no retry and flakes with
 `connection reset by peer`. Verify the repo really is reachable, then re-run only the failed job:
@@ -183,8 +194,14 @@ skipping, that is an expired credential rather than the designed path.
 gh release view <version> --json isDraft,assets --jq '{isDraft, count: (.assets | length)}'
 gh release list --limit 3        # <version> must hold the "Latest" marker, never a chart release
 npm view @libredb/studio version
-docker buildx imagetools inspect ghcr.io/libredb/libredb-studio:<version> | head -3
-docker buildx imagetools inspect ghcr.io/libredb/libredb-studio:latest | head -3   # same digest
+# Three image variants ship per release (#840), and each needs its own check:
+# `latest<suffix>` must resolve to the digest `<version><suffix>` resolves to, or
+# that variant's users sit on an older image while the release reads as complete.
+for s in "" "-alpine" "-alpine-slim"; do
+  v=$(docker buildx imagetools inspect "ghcr.io/libredb/libredb-studio:<version>$s" --format '{{json .Manifest.Digest}}')
+  l=$(docker buildx imagetools inspect "ghcr.io/libredb/libredb-studio:latest$s" --format '{{json .Manifest.Digest}}')
+  [ "$v" = "$l" ] && echo "OK    latest$s" || echo "DRIFT latest$s=$l vs <version>$s=$v"
+done
 curl -s https://libredb.org/libredb-studio/index.yaml | grep -c "version: <chart-version>"
 bun run distribution:check      # served-state drift table across channels
 ```
@@ -215,6 +232,7 @@ None of these belong in the bump commit or the chain; each needs the release to 
 |---|---|---|
 | Any job BEFORE publish | Draft still exists: `gh release delete <version> --yes`, `git push --delete origin <version>`, `git tag -d <version>`, fix, re-tag | No |
 | A downstream job AFTER publish (npm, docker, helm, operator, choco) | Re-dispatch that workflow pinned to the tag ref | No |
+| ONE image variant's leg, beside two that pushed their tags | Re-dispatch docker with `-f variant=<debian\|alpine\|alpine-slim>`, which rebuilds that leg alone. Never re-dispatch all three here: the two that succeeded already published `<version>` and `<version>-alpine`, the Docker Hub mirror's immutability rule is semver-scoped and matches both, and buildx exports every tag in one step - so the rejected mirror tag fails the whole job with GHCR already written. A single-variant dispatch also skips the chart dispatch by design | No |
 | Snap already pushed to the store, or npm already published | That artifact is immutable at that version | Yes - next patch |
 
 **A published release is never withdrawn.** Every artifact in the chain is immutable at its version -
@@ -227,6 +245,8 @@ Re-dispatch commands, exactly as the chain issues them:
 ```bash
 gh workflow run npm-publish.yml --ref "refs/tags/<version>"                      # NO version input
 gh workflow run docker-build-push.yml --ref "refs/tags/<version>" -f version=<version> -f publish_latest=true
+# ...or one variant alone, when the other legs already published (see Recovery):
+gh workflow run docker-build-push.yml --ref "refs/tags/<version>" -f version=<version> -f publish_latest=true -f variant=alpine
 gh workflow run helm-release.yml --ref "refs/tags/<version>"
 gh workflow run operator-release.yml --ref "refs/tags/<version>" -f version=<version>
 ```

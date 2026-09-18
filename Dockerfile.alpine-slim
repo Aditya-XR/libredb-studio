@@ -1,0 +1,205 @@
+# ==============================================================================
+# LibreDB Studio - Alpine "slim" image  [issue #840, size variant]
+#
+# A THIRD variant, and the only one that trades FEATURES for size. `Dockerfile`
+# (Debian) is the default tag and `Dockerfile.alpine` is the security variant
+# with the full engine set; this one answers a different question - how small
+# can the image get before the product stops being itself.
+#
+# Named `-slim` rather than `-core` deliberately. Each suffix is meant to carry
+# exactly one fact, so a tag reads left to right as base then content:
+# `:X.Y.Z` Debian/full, `:X.Y.Z-alpine` Alpine/full, `:X.Y.Z-alpine-slim`
+# Alpine/reduced. `-core` failed that test in the worst direction: it reads as
+# "the essential one", which would make the REDUCED image sound more central
+# than the complete one, and it says nothing about size. `-slim` is the
+# convention the Docker ecosystem already teaches (node:slim, python:slim,
+# debian:*-slim) - same product, fewer parts - which is exactly this file.
+#
+# Measured with `docker save | gzip`, amd64, 2026-09-18, building all three
+# files at this commit: 203 MB Debian, 124 MB `-alpine`, 57 MB this file. The
+# image published today is 310 MB, and the whole of that difference is work the
+# other two files now do as well - the payload prune and the native-payload
+# prune - rather than anything this variant gives up.
+# (An earlier arm64 pass read 308 / 142 / 51; the 51 was a build that also
+# deleted Monaco's workers, which cost the product its editor - see below.)
+# Every number in the comments here was measured on a real build rather than
+# estimated.
+#
+# WHAT THIS VARIANT GIVES UP, so nobody has to discover it at runtime:
+#
+#   1. DuckDB (-22 MB). The single biggest removable item in the image: the
+#      driver is four packages ending in a ~64 MB `libduckdb.so`. The provider
+#      lazy-imports it (`loadDuckDBDriver` inside `openDuckDBClient`, in
+#      src/lib/db/providers/sql/duckdb/client.ts), so its absence is inert until
+#      somebody opens a DuckDB connection - and then `describeDriverAbsence`
+#      there turns the module-resolution failure into a sentence naming the tags
+#      that do ship the driver. That seam exists FOR this image: without it the
+#      operator got a raw "Cannot find module ... Require stack:
+#      /app/.next/server/chunks/..." in a browser toast. Every other engine is
+#      untouched.
+#   2. sharp / libvips (-8 MB). Next's image optimizer. Nothing in `src` imports
+#      `next/image`; the social-preview URLs in src/app/layout.tsx point at
+#      raw.githubusercontent.com, so `/_next/image` is never reached. Verified:
+#      this image boots and renders /login with sharp absent. If a `<Image>` is
+#      ever added, THIS is the file that breaks - pair the removal with
+#      `images: { unoptimized: true }` in next.config.ts to make that loud.
+#
+# NOT on this list any more: the repo tree (-11 MB raw). Next's output file
+# tracing sweeps the repository root into `.next/standalone`, and this variant
+# was the first to run `scripts/lib/prune-standalone-payload.sh` over it. All
+# three files run it now, so `src/`, `scripts/`, the lockfile and the tooling
+# configs are out of every image rather than out of the smallest one - it was
+# never a size trade, it is issue #124 closing for the container channel.
+#
+# WHAT IT DOES NOT GIVE UP: every other engine including Oracle Thin, the agent,
+# the embedded LibreDB store, the SQLite sample, RBAC, OIDC, and the
+# bind-address resolver.
+#
+# ORACLE THIN STAYS, unlike the five native Thick addons that `Dockerfile.alpine`
+# drops for having no musl Instant Client to load. The driver is pure JavaScript
+# in Thin mode and Next's output tracing delivers it at 1.3 MB - too little to
+# buy by losing an engine, in an image this size.
+#
+# MONACO'S WORKERS STAY, and this is the one saving that looks free and is not.
+# `min/vs` carries ~16 MB of language workers, ~13 MB of it two copies of the TS
+# worker that a SQL editor's completions never consult. Deleting them was
+# measured on 2026-09-18 to remove the query editor from the product entirely.
+# The language services are not what breaks: `editor.main.js` bundles the json,
+# css, html and typescript contributions, each one's mode chunk declares its
+# worker stub as a HARD AMD dependency (`vs/jsonMode-<hash>` requires
+# `./json.worker-<hash>`), and the loader resolves that graph when the editor
+# loads rather than when a buffer of that language is opened. One missing chunk
+# therefore rejects `loader.init()` and no editor mounts - with a SQL-only model
+# on screen. The image still booted, still served /login and still seeded the
+# sample database, which is why the build stayed green and a browser was what
+# caught it. `e2e/embedded-samples.spec.ts` waits on `.monaco-editor` and the
+# Channel E2E job now runs it against this image.
+# ==============================================================================
+
+FROM oven/bun:1.4.2-alpine AS deps
+WORKDIR /usr/src/app
+RUN apk add --no-cache python3 make g++
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+# The BUILD still runs on the official, version-pinned Node: `next build` is the
+# step most sensitive to the toolchain, and pinning it keeps this file's output
+# a function of the lockfile rather than of Alpine's current package index.
+# The RUNTIME below is a different Node on purpose - see that stage.
+FROM node:26.8.2-alpine3.23 AS builder
+WORKDIR /usr/src/app
+RUN apk add --no-cache bash
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+COPY . .
+
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV DOCKER_BUILD=true
+ARG BASE_PATH=""
+ARG JWT_SECRET_BUILD="build-time-placeholder-secret-32ch"
+ARG ADMIN_PASSWORD_BUILD="build"
+ARG USER_PASSWORD_BUILD="build"
+ENV JWT_SECRET=$JWT_SECRET_BUILD
+ENV ADMIN_PASSWORD=$ADMIN_PASSWORD_BUILD
+ENV USER_PASSWORD=$USER_PASSWORD_BUILD
+
+RUN node scripts/copy-monaco.mjs && npx next build
+
+# Prune BOTH module trees, and both for the same reason the -alpine file
+# explains at length: `next build` writes a second, traced copy of some packages
+# into `.next/standalone/node_modules`, the runner unpacks that onto /app, and a
+# prune of the top-level tree alone therefore removes nothing from the image.
+# A `rm` in the runner stage would be worse still - it deletes in a later layer
+# while every byte stays in the layer the COPY created.
+#
+# The same second tree is ALSO why the traced copies of the packages the runner
+# COPYs explicitly are deleted here. An explicit COPY does not replace the traced
+# copy, it LAYERS OVER it: the bytes in `.next/standalone/node_modules/
+# better-sqlite3` stay in the lower layer forever while the upper layer shadows
+# them, so the image pays for the package twice. Measured on this file before
+# the fix: 4.7 MB of a 55 MB image, and the published Debian image carries the
+# same duplication today.
+#
+# `test` lines, not decoration: a glob that deleted the payload this image
+# actually loads would otherwise surface as a provider failure long after the
+# build went green.
+RUN set -eux; \
+    for root in node_modules .next/standalone/node_modules; do \
+      rm -rf "$root/@duckdb" "$root/detect-libc" "$root/@img" "$root/sharp"; \
+      rm -rf "$root/better-sqlite3/deps" "$root/better-sqlite3/src" "$root/better-sqlite3/binding.gyp"; \
+      true; \
+    done; \
+    ARCH="$(node -p 'process.arch')"; \
+    find node_modules/better-sqlite3/prebuilds -maxdepth 1 -type f -name '*.node' ! -name "linuxmusl-${ARCH}.node" -delete; \
+    rm -rf .next/standalone/node_modules/better-sqlite3 .next/standalone/node_modules/@libredb; \
+    rm -rf public/screenshots .next/standalone/public/screenshots; \
+    bash scripts/lib/prune-standalone-payload.sh .next/standalone; \
+    test -f "node_modules/better-sqlite3/prebuilds/linuxmusl-${ARCH}.node"; \
+    test -f .next/standalone/server.js; \
+    test ! -e .next/standalone/src; \
+    test ! -e .next/standalone/Dockerfile.alpine-slim; \
+    test -f public/monaco/vs/nls/lang/tr.js; \
+    test "$(find public/monaco/vs -maxdepth 1 -name '*.worker-*.js' | wc -l)" \
+         -eq "$(find node_modules/monaco-editor/min/vs -maxdepth 1 -name '*.worker-*.js' | wc -l)"; \
+    test -d .next/standalone/node_modules/oracledb; \
+    test ! -e node_modules/@duckdb; \
+    du -sh .next/standalone node_modules public
+
+# Runtime on Alpine's OWN Node, not the official image, and this is the single
+# largest saving in the file: -34 MB compressed.
+#
+# The official node:*-alpine binary is 146 MB and ships WITH debug_info (`file`
+# reports "not stripped"); it costs 53 MB compressed, 48 MB even after a strip,
+# because it statically carries OpenSSL, ICU, zlib and the rest. Alpine's own
+# package is stripped and links those as shared libraries: 19 MB compressed for
+# the binary plus ~7 MB for the libraries it pulls in.
+#
+# TWO REAL COSTS, both measured rather than waved away:
+#   - The version follows Alpine's index (v24.18.1 today), not a Dependabot-
+#     tracked pin. It satisfies package.json `engines` (>=24) and it is the
+#     runtime, not the compiler - the build above is still pinned.
+#   - Alpine ships English-only ICU data, so a default-locale `Intl` call
+#     formats in English. Safe HERE, and that is read off the code: every
+#     server-side locale call in `src` passes "en-US" explicitly, and every
+#     default-locale call is in a React component, formatted by the browser's
+#     own ICU. Add `icu-data-full` if that ever stops being true (~+9 MB).
+#
+# su-exec (20 KB, main) rather than gosu (3 MB, community), exposed under the
+# name the shared docker-entrypoint.sh calls: identical CLI for the
+# `gosu user:group cmd` form, one entrypoint serving all three variants.
+FROM alpine:3.23 AS runner
+WORKDIR /app
+
+RUN set -eux; \
+    apk add --no-cache nodejs su-exec; \
+    ln -s /sbin/su-exec /usr/local/bin/gosu; \
+    addgroup -S -g 1001 nodejs; \
+    adduser -S -u 1001 -G nodejs nextjs; \
+    gosu nobody true; \
+    node --version
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_OPTIONS="--max-old-space-size=384"
+ENV WORKFLOW_LOCAL_DATA_DIR=/app/data/workflow
+
+RUN mkdir -p .next data && chown nextjs:nodejs .next data
+
+# Ownership is written BY the COPY. A `RUN chown -R` afterwards is what makes
+# the published Debian image's single largest layer - 106 MB of a 316 MB
+# artifact - because changing a file's owner copies it into the new layer.
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/public ./public
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/.next/standalone ./
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/.next/static ./.next/static
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/node_modules/@libredb/libredb ./node_modules/@libredb/libredb
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/seed-assets ./seed-assets
+
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/bind-address.mjs /usr/local/lib/libredb-studio/bind-address.mjs
+
+EXPOSE 3000/tcp
+ENV PORT=3000
+ENV HOSTNAME=""
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["node", "server.js"]

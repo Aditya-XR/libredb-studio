@@ -305,6 +305,16 @@ the same string to `tls.createSecureContext()` as `cert`, `key` **and** `ca`.
 ORACLE_CLIENT_LIB_DIR=/opt/oracle/instantclient_19_28
 ```
 
+**Thick mode is reachable on the default image only.** Oracle publishes no musl build of Instant
+Client, so the `-alpine` and `-alpine-slim` tags (issue #840, [DISTRIBUTION.md](../DISTRIBUTION.md))
+can never load it whatever an operator layers on top — `Dockerfile.alpine` therefore does not ship
+node-oracledb's native addons at all, since nothing in those images could load them. Thin mode is
+unaffected and measured working on both: the driver is pure JavaScript there, Next's output file
+tracing carries it into the standalone payload, and `oracledb.thin === true` inside the running
+container. An attempted `initOracleClient()` fails with the driver's own NJS-045, whose text already
+tells the operator to use Thin mode. So an Oracle 12.1+ server works on every tag; an 11.2 server
+needs the default one.
+
 node-oracledb's Thin/Thick choice is a **process-wide singleton** — `initOracleClient()` throws if
 called more than once, or after any connection/pool already exists. This is why the setting is a
 process-level env var rather than a per-connection config field: every `OracleProvider` in the

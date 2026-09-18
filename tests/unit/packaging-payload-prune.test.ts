@@ -66,6 +66,9 @@ const EXTRA_DIRS = [
   // would make the release tarball grow by a gigabyte.
   "desktop",
   "dist",
+  // The channel inventory. Read by scripts and by the showcase generator, never
+  // at runtime: the server reads src/lib/distribution/channels.generated.ts.
+  "distribution",
   "docker",
   "docs",
   "e2e",
@@ -91,9 +94,14 @@ const EXTRA_FILES = [
   "CLAUDE.md",
   "CODE_OF_CONDUCT.md",
   "components.json",
+  "codecov.yml",
   "CONTRIBUTING.md",
   "database-compose.yml",
   "Dockerfile",
+  // One per published image variant (#840). They are covered by a glob rather
+  // than three literals, and the literal entry covered one of the three.
+  "Dockerfile.alpine",
+  "Dockerfile.alpine-slim",
   "docker-entrypoint.sh",
   "DOCKERHUB.md",
   "eslint.config.mjs",
@@ -101,6 +109,11 @@ const EXTRA_FILES = [
   "knip.json",
   "next.config.ts",
   "playwright.config.ts",
+  // One per harness, covered by a glob: the base-path, channel and smoke configs
+  // shipped in every image while only the bare name was on the list.
+  "playwright.base-path.config.ts",
+  "playwright.channel.config.ts",
+  "playwright.smoke.config.ts",
   "postcss.config.mjs",
   "render.yaml",
   "SECURITY.md",

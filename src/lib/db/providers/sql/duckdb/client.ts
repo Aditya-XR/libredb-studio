@@ -119,6 +119,71 @@ const LOCK_CONFLICT_MARKER = "conflicting lock is held";
  */
 const NO_TRANSACTION_MARKER = "cannot rollback - no transaction is active";
 
+/** The driver package, as every failure that is about its absence names it. */
+const DRIVER_PACKAGE = "@duckdb/node-api";
+
+/**
+ * What an operator is told when the driver is not installed.
+ *
+ * A constant rather than an expression inside the branch below: it names the
+ * remedy, which is the only reason this message exists, and a module-level
+ * string cannot drift out of the coverage the branch has.
+ */
+const DRIVER_ABSENT_MESSAGE =
+  `DuckDB is not available in this deployment: the ${DRIVER_PACKAGE} driver is not installed. ` +
+  "The libredb-studio -alpine-slim image leaves it out to stay small; the default and -alpine tags ship it. " +
+  "Use one of those tags, or install the driver, to open DuckDB connections.";
+
+/**
+ * The absence of the driver package, told apart from every other import failure
+ * (issue #840).
+ *
+ * The `-alpine-slim` image ships without `@duckdb/node-api` deliberately - it is
+ * four packages ending in a ~70 MB `libduckdb.so`, the largest removable item in
+ * that image - so on that tag this import is expected to fail, and the operator
+ * needs to be told which tags do carry it. Raw, the failure reads as
+ * "Failed to load external module @duckdb/node-api-<hash>: Error: Cannot find
+ * module ... Require stack: - /app/.next/server/chunks/...", which answers
+ * neither question and prints the deployment's own file layout into a browser
+ * toast.
+ *
+ * NARROW ON PURPOSE. Only a resolution failure that NAMES THIS PACKAGE is
+ * translated; anything else answers null and is re-raised untouched by the
+ * caller. "DuckDB is not installed in this image" is a false statement about a
+ * corrupt binding or about some other dependency going missing, and it would
+ * send the operator off to change tags over an unrelated fault.
+ */
+export function describeDriverAbsence(error: unknown): ConnectionError | null {
+  if (!(error instanceof Error)) return null;
+
+  const code = (error as Error & { code?: unknown }).code;
+  const unresolved =
+    code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND" || error.message.includes("Cannot find module");
+  if (!unresolved || !error.message.includes(DRIVER_PACKAGE)) return null;
+
+  return new ConnectionError(DRIVER_ABSENT_MESSAGE, "duckdb");
+}
+
+/**
+ * The driver import, behind its own function so the absence path has a seam.
+ *
+ * The loader is a parameter with a default rather than a module-scope import:
+ * making a real import fail is not something a test can arrange, and both arms
+ * of the catch below are load-bearing. The default is the one production uses
+ * and is exercised by every DuckDB integration test.
+ */
+export async function loadDuckDBDriver(
+  load: () => Promise<typeof import("@duckdb/node-api")> = () => import("@duckdb/node-api"),
+): Promise<typeof import("@duckdb/node-api")> {
+  try {
+    return await load();
+  } catch (error) {
+    const absence = describeDriverAbsence(error);
+    if (absence) throw absence;
+    throw error;
+  }
+}
+
 /** The PID DuckDB named as holding the lock, when its message names one. */
 export function readLockHolderPid(message: string): number | null {
   const match = /\(PID (\d+)\)/.exec(message);
@@ -190,8 +255,9 @@ export function describeOpenFailure(error: unknown, path: string, readOnly: bool
  * unaffected by this change.
  */
 export async function openDuckDBClient(path: string, options: DuckDBOpenOptions): Promise<DuckDBClient> {
-  // Inside the function, never at module scope - see the file header.
-  const { DuckDBInstance: Instance } = await import("@duckdb/node-api");
+  // Inside the function, never at module scope - see the file header. Through
+  // loadDuckDBDriver so that a deployment without the driver says so (#840).
+  const { DuckDBInstance: Instance } = await loadDuckDBDriver();
 
   let instance: DuckDBInstance;
   let connection: DuckDBConnection;

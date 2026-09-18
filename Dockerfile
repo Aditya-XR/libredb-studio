@@ -50,6 +50,79 @@ ENV USER_PASSWORD=$USER_PASSWORD_BUILD
 # origin (issue #247). Explicit here: this bypasses the package.json build script.
 RUN node scripts/copy-monaco.mjs && npx next build
 
+# Drop the repo-root extras Next's output file tracing swept into the payload
+# (issue #124). Tracing walks the repository root, so `.next/standalone` carries
+# `src/`, `scripts/`, the lockfile, the tooling configs and this file - and the
+# runner below unpacks all of it onto /app. Shipping application source in a
+# production image is a security property before it is a size one.
+#
+# The deny-list is not reimplemented here: `prune-standalone-payload.sh` is the
+# one the release tarballs, .deb/.rpm, snap and the npx cache already use, so a
+# new root file leaves every artifact family through one edit. The script refuses
+# to run against anything that is not an assembled payload, and the asserts below
+# are what turn an over-eager future entry into a failed build rather than a
+# provider failing at runtime. `seed-assets/` is not on the list and is COPYed
+# explicitly below in any case; nothing else under /app is read at runtime
+# (src/lib/seed/sqlite-sample.ts is the only `process.cwd()` reader).
+#
+# HERE rather than in the runner: an `rm` after a COPY deletes the files in a
+# later layer while leaving every byte of them in the layer the COPY created.
+#
+# `public/screenshots` goes with it: 4.4 MB of README and marketing artwork that
+# no running container ever serves, because src/app/layout.tsx points social
+# previews at raw.githubusercontent.com. It is not a payload-root entry, so the
+# deny-list cannot reach it.
+#
+# The native payload is pruned in the same step, and it is the larger half.
+# Neither `@duckdb/node-bindings-<platform>-<arch>[-musl]` package declares a
+# libc field, so bun installs the glibc AND the musl one whatever the stage runs
+# on; sharp ships the same way; and better-sqlite3 13 carries eight prebuilds
+# (darwin, win32, linux, linuxmusl x two arches) plus the 9.9 MB SQLite
+# amalgamation it would compile from if it ever had to. Measured in the image
+# published on 2026-09-18: 71 MB of musl DuckDB bindings, 19 MB of musl libvips
+# and six unloadable prebuilds, none of which any process in a glibc image can
+# open. It lands twice, because `next build` writes a second traced copy of
+# those packages into `.next/standalone/node_modules` and the runner unpacks it
+# onto the same /app the explicit COPYs below land in - which is why the loop
+# below walks both trees, and why this step took the image from 892 MB to 649 MB
+# (292 MB to 203 MB compressed, amd64) rather than the ~115 MB one tree holds.
+#
+# GLOBS AND $(node -p process.arch), NEVER A LITERAL. The deps stage installs the
+# bindings package for the BUILD arch, so naming linux-x64 would break the arm64
+# leg of the same manifest (tests/unit/packaging-duckdb-native.test.ts asserts
+# that literal is absent). `*-linux-*` does not match `*-linuxmusl-*`, because
+# "linux-" is not a prefix of "linuxmusl-", so the two sharp patterns below are
+# each other's complement rather than overlapping.
+#
+# The `test` lines are the point of the step: a glob that took the payload this
+# image DOES load would otherwise surface as a provider failing at runtime, long
+# after the build went green.
+#
+# oracledb keeps every platform's addon on purpose. This is the only variant
+# where Thick mode can be turned on at all, the whole build/ directory is ~3 MB,
+# and the package resolves the addon at runtime from its own __dirname.
+RUN set -eux; \
+    bash scripts/lib/prune-standalone-payload.sh .next/standalone; \
+    rm -rf public/screenshots .next/standalone/public/screenshots; \
+    ARCH="$(node -p 'process.arch')"; \
+    for root in node_modules .next/standalone/node_modules; do \
+      [ -d "$root/@duckdb" ] && find "$root/@duckdb" -maxdepth 1 -type d -name 'node-bindings-*-musl' -exec rm -rf {} + ; \
+      [ -d "$root/@img" ] && find "$root/@img" -maxdepth 1 -type d -name '*-linuxmusl-*' -exec rm -rf {} + ; \
+      [ -d "$root/better-sqlite3/prebuilds" ] && find "$root/better-sqlite3/prebuilds" -maxdepth 1 -type f -name '*.node' ! -name "linux-${ARCH}.node" -delete ; \
+      rm -rf "$root/better-sqlite3/deps" "$root/better-sqlite3/src" "$root/better-sqlite3/binding.gyp"; \
+      true; \
+    done; \
+    test -f "node_modules/@duckdb/node-bindings-linux-${ARCH}/libduckdb.so"; \
+    test -d "node_modules/@img/sharp-libvips-linux-${ARCH}"; \
+    test -f "node_modules/better-sqlite3/prebuilds/linux-${ARCH}.node"; \
+    test -d node_modules/oracledb/build; \
+    test -f .next/standalone/server.js; \
+    test -d .next/standalone/node_modules; \
+    test ! -e .next/standalone/src; \
+    test ! -e .next/standalone/Dockerfile; \
+    echo "--- native payload surviving the prune ---"; \
+    find node_modules .next/standalone/node_modules \( -name '*.node' -o -name '*.so' -o -name '*.so.*' \) | sort | xargs -r ls -lh | awk '{print $5, $9}'
+
 # Production image - use Node.js slim for lower memory footprint
 # trixie-slim: glibc must match the stage where native modules were built (see builder).
 FROM node:26.8.2-trixie-slim AS runner

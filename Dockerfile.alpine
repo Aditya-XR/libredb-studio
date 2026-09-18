@@ -1,0 +1,292 @@
+# ==============================================================================
+# LibreDB Studio - Alpine (musl) production Dockerfile  [issue #840]
+#
+# A SECOND image variant, not a replacement. `Dockerfile` (Debian trixie-slim)
+# stays the default tag; this one is published as `-alpine` and exists for the
+# security posture measured on the issue: the Debian base carries 3 CRITICAL and
+# 52 HIGH OS findings that are the distro's, not a stale pin of ours (the newest
+# node:26-trixie-slim control scores identically), while node:26-alpine scores
+# 0 and 2.
+#
+# WHAT THIS VARIANT GIVES UP, stated here rather than discovered at runtime:
+# Oracle **Thick** mode, and only that. Thick needs Oracle Instant Client, which
+# has no musl build, so the path an operator can open on the Debian image is
+# unreachable here whatever this file ships. That left node-oracledb's five
+# platform addons (~3 MB) as binaries no process in this image could ever load -
+# the opposite of what a security-motivated variant is for - so the explicit
+# COPY of the package is gone.
+#
+# Thin mode is NOT given up, and that is measured rather than hoped for: the
+# driver is pure JavaScript in Thin mode, and Next's output file tracing pulls
+# that JavaScript (index.js, lib/, package.json - 1.3 MB, zero .node files) into
+# `.next/standalone`, which the runner unpacks. Verified in this image:
+# `oracledb.thin === true`, and an attempted `initOracleClient()` fails with the
+# driver's own NJS-045, whose text already tells the operator to use Thin mode.
+# So Oracle 12.1+ works on the -alpine tag; an 11.2 server needs the Debian tag.
+# See docs/providers/oracle.md 4.4.
+#
+# Two files rather than one `ARG VARIANT`: Dependabot's docker ecosystem cannot
+# follow an ARG-interpolated FROM tag, so an interpolated base would silently
+# stop receiving CVE bumps - which is the one thing this variant exists for.
+# ==============================================================================
+
+# Bun for fast dependency installation, Node.js for build.
+# Bun's JIT compiler segfaults under QEMU emulation (ARM64 cross-build), so we
+# use Node.js for the Next.js build step.
+FROM oven/bun:1.4.2-alpine AS deps
+WORKDIR /usr/src/app
+RUN apk add --no-cache python3 make g++
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+# Build with Node.js to avoid Bun/QEMU segfaults on ARM64.
+#
+# EVERY STAGE HERE IS musl, and that is load-bearing in the mirror image of the
+# way it is load-bearing in the Debian file.
+#
+# better-sqlite3 13 is the forgiving one: it ships every prebuild inside the
+# package and picks one in the RUNNING process (lib/binding.js reads
+# process.platform/arch and detects musl via process.report), so neither the ABI
+# nor the libc of the installing stage constrains the stage that requires it.
+#
+# @duckdb/node-api is NOT forgiving and the reasoning above does not transfer.
+# Its binaries live in separate per-libc, per-platform packages
+# (@duckdb/node-bindings-<platform>-<arch>[-musl]) and NEITHER declares a libc
+# field, so bun installs BOTH the glibc and the musl package whatever the stage
+# runs on - which is why the published Debian image carries 144 MB of bindings
+# to use 70 MB of them. The choice is made at RUNTIME by @duckdb/node-bindings
+# through detect-libc. Keeping every stage on musl is what makes the prune below
+# safe: the package this image keeps is the package this image loads.
+FROM node:26.8.2-alpine3.23 AS builder
+WORKDIR /usr/src/app
+# bash for scripts/lib/prune-standalone-payload.sh below: it is the deny-list the
+# release artifacts share, and it is a bash script (arrays), not a POSIX one.
+RUN apk add --no-cache bash
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+COPY . .
+
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV DOCKER_BUILD=true
+
+# Next.js bakes this prefix into routes and browser bundles. Rebuild to change it.
+ARG BASE_PATH=""
+
+ARG JWT_SECRET_BUILD="build-time-placeholder-secret-32ch"
+ARG ADMIN_PASSWORD_BUILD="build"
+ARG USER_PASSWORD_BUILD="build"
+ENV JWT_SECRET=$JWT_SECRET_BUILD
+ENV ADMIN_PASSWORD=$ADMIN_PASSWORD_BUILD
+ENV USER_PASSWORD=$USER_PASSWORD_BUILD
+
+# Stage Monaco from node_modules into public/ so the editor is served from our own
+# origin (issue #247). Explicit here: this bypasses the package.json build script.
+RUN node scripts/copy-monaco.mjs && npx next build
+
+# Drop the native payloads this image can never load, and the repo-root extras
+# nothing in it reads, BEFORE the runner copies them.
+#
+# The second half is `prune-standalone-payload.sh`, invoked rather than
+# reimplemented: it is the deny-list the release tarballs, .deb/.rpm, snap and
+# the npx cache already share (issue #124), so a new root file leaves every
+# artifact family through one edit. Next's output file tracing walks the
+# repository root, so without it `.next/standalone` carries `src/`, `scripts/`,
+# the lockfile, the tooling configs and this file, and the runner unpacks all of
+# it onto /app. Shipping application source in a production image is a security
+# property before it is a size one.
+#
+# TWO TREES, and the second one is the one that is easy to miss. `next build`
+# runs its own output file tracing and writes a SECOND copy of some packages
+# into `.next/standalone/node_modules`, which the runner unpacks onto /app - the
+# same directory the explicit COPYs below land in. A prune of the top-level
+# `node_modules` alone therefore removes nothing from the image: the traced copy
+# is written first and whatever the pruned copy no longer contains simply
+# survives. Measured on the first build of this file: a glibc `duckdb.node`, a
+# glibc `libvips-cpp.so` and three unusable better-sqlite3 prebuilds reached the
+# musl image that way, ~24 MB of binaries that could never be loaded.
+#
+# WHY IT HAS TO BE HERE rather than in the runner: a `rm` after a COPY deletes
+# the files in a later layer while leaving every byte of them in the layer the
+# COPY created, so the image would keep its size and gain a layer.
+#
+# GLOBS, NEVER A LITERAL PACKAGE NAME. The deps stage installs the bindings
+# package for the BUILD arch, so `node-bindings-linux-x64` is only half the truth
+# and naming it would break the ARM64 leg - the same trap the arch-agnostic COPY
+# of the whole @duckdb scope avoids below
+# (tests/unit/packaging-duckdb-native.test.ts asserts that literal is absent).
+#
+# WHAT EACH PATTERN REMOVES, and why the survivor is the right one:
+#   @duckdb    - neither bindings package declares a libc field, so bun installs
+#                the glibc AND the musl one whatever the stage runs on. Only the
+#                musl one is loadable here; @duckdb/node-bindings picks it at
+#                runtime through detect-libc.
+#   @img       - sharp (Next's image optimizer) ships the same way, and libvips
+#                is the single biggest dead file: ~17 MB of glibc .so. The
+#                pattern `*-linux-*` does NOT match `*-linuxmusl-*`, because
+#                "linux-" is not a prefix of "linuxmusl-".
+#   deps/src   - better-sqlite3 13 is N-API and loads a prebuild, so the SQLite
+#                amalgamation it would otherwise COMPILE from is dead weight:
+#                9.8 MB of C that nothing in a running container reads.
+#   screenshots - README artwork. src/app/layout.tsx points social previews at
+#                raw.githubusercontent.com, so no running container serves it.
+#   prebuilds  - better-sqlite3 13 carries eight prebuilds (darwin, win32, linux,
+#                linuxmusl x two arches) and resolves one in the RUNNING process,
+#                so exactly one of the eight is reachable here. The survivor is
+#                keyed on $(node -p process.arch) rather than on the libc alone:
+#                each leg of the manifest is built for its own arch, so keeping
+#                the other one is 2.3 MB no process in THIS image can open.
+#
+# The asserts are the point of the step, not decoration: an over-eager glob that
+# deleted the payload the image actually loads would otherwise surface as a
+# runtime failure in a provider, long after the build went green.
+RUN set -eux; \
+    ARCH="$(node -p 'process.arch')"; \
+    for root in node_modules .next/standalone/node_modules; do \
+      [ -d "$root/@duckdb" ] && find "$root/@duckdb" -maxdepth 1 -type d -name 'node-bindings-*' ! -name '*-musl' -exec rm -rf {} + ; \
+      [ -d "$root/@img" ] && find "$root/@img" -maxdepth 1 -type d -name '*-linux-*' -exec rm -rf {} + ; \
+      [ -d "$root/better-sqlite3/prebuilds" ] && find "$root/better-sqlite3/prebuilds" -maxdepth 1 -type f -name '*.node' ! -name "linuxmusl-${ARCH}.node" -delete ; \
+      rm -rf "$root/better-sqlite3/deps" "$root/better-sqlite3/src" "$root/better-sqlite3/binding.gyp"; \
+      true; \
+    done; \
+    rm -rf public/screenshots .next/standalone/public/screenshots; \
+    bash scripts/lib/prune-standalone-payload.sh .next/standalone; \
+    test -f "node_modules/@duckdb/node-bindings-linux-${ARCH}-musl/libduckdb.so"; \
+    test -d "node_modules/@img/sharp-libvips-linuxmusl-${ARCH}"; \
+    test -f "node_modules/better-sqlite3/prebuilds/linuxmusl-${ARCH}.node"; \
+    test -f .next/standalone/server.js; \
+    test ! -e .next/standalone/src; \
+    test ! -e .next/standalone/Dockerfile.alpine; \
+    echo "--- native payload surviving the prune ---"; \
+    find node_modules .next/standalone/node_modules \( -name '*.node' -o -name '*.so' -o -name '*.so.*' \) | sort | xargs -r ls -lh | awk '{print $5, $9}'
+
+# Production image.
+# alpine3.23: musl must match the stage where the native payload was selected
+# (see builder).
+FROM node:26.8.2-alpine3.23 AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Memory optimization for low-memory environments (Render free tier)
+# V8 heap limit to prevent OOM on 512MB instances
+ENV NODE_OPTIONS="--max-old-space-size=384"
+
+# Where the agent's durable ledger lives, and half of what decides whether the
+# agent is available at all (docs/AGENT.md). The workflow SDK's own default is
+# ".workflow-data" resolved against the working directory — /app here, the
+# container's writable layer: writable, so nothing fails loudly, and discarded on
+# the next recreate or image upgrade. docker-compose.yml sets this; a plain
+# `docker run` cannot be given a default from outside the image, so it is set
+# here for every way this image is started. It sits under /app/data, the
+# directory the entrypoint chowns to the app user and the one operators mount a
+# volume on — without that volume the run history still dies with the container,
+# which is the documented trade, not a silent one.
+ENV WORKFLOW_LOCAL_DATA_DIR=/app/data/workflow
+
+# The app user, `gosu`, and the removal of the package manager, in one layer.
+#
+# busybox's adduser/addgroup take different flags from Debian's adduser; the
+# UIDs, the names and the `nextjs:nodejs` pair are what docker-entrypoint.sh
+# execs through, so those are identical to the Debian image on purpose.
+#
+# gosu comes from Alpine's community repository (su-exec in main would work too,
+# and is smaller, but the entrypoint names `gosu` - one entrypoint serving both
+# variants is worth more than the few hundred kilobytes).
+#
+# npm/npx/corepack/yarn are removed: CMD is `node server.js` and nothing in the
+# runtime path shells out to a package manager, while the bundled npm is what
+# contributed the 4 HIGH findings that are OURS rather than the distro's on the
+# Debian image.
+RUN set -eux; \
+    apk add --no-cache gosu; \
+    addgroup -S -g 1001 nodejs; \
+    adduser -S -u 1001 -G nodejs nextjs; \
+    rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx \
+           /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+           /opt/yarn-*; \
+    gosu nobody true; \
+    node --version
+
+# Set the correct permission for prerender cache and storage.
+RUN mkdir -p .next data && chown nextjs:nodejs .next data
+
+# Ownership is set BY the COPY, never by a `RUN chown -R` afterwards. On the
+# Debian image that recursive chown is the single largest layer in the whole
+# artifact - 105.8 MB of a 316 MB image - because changing a file's owner copies
+# it into the new layer. `--chown` writes the ownership as the layer is created
+# and costs nothing.
+
+# Automatically leverage output traces to reduce image size
+# https://nextjs.org/docs/advanced-features/output-file-tracing
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/public ./public
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/.next/standalone ./
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/.next/static ./.next/static
+
+# Copy better-sqlite3 native binding for server storage support. Since v13 the
+# package is N-API and self-contained: lib/binding.js resolves
+# ../prebuilds/<platform>-<arch>.node relative to itself, so the former
+# bindings + file-uri-to-path runtime dependencies are gone (they are no longer
+# in the lockfile at all). Pruned to the musl prebuilds in the builder stage.
+# Keep in sync with scripts/build-standalone-payload.sh.
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
+
+# Copy the embedded LibreDB database package. The libredb provider lazy-imports
+# it (await import('@libredb/libredb')) so it stays out of client bundles, but
+# that also means Next.js output-file-tracing does not include it in the
+# standalone server bundle — copy it explicitly so the provider works at runtime.
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/node_modules/@libredb/libredb ./node_modules/@libredb/libredb
+
+# Copy the DuckDB driver. Same tracing blind spot as @libredb/libredb (the
+# provider lazy-imports it), but a different shape: the driver is FOUR packages,
+# not one. @duckdb/node-api -> @duckdb/node-bindings -> a per-platform
+# @duckdb/node-bindings-<platform>-<arch> holding duckdb.node next to the
+# ~70 MB libduckdb.so it links against (NEEDED libduckdb.so, RUNPATH $ORIGIN,
+# so the two must stay in the same directory). Copying the whole @duckdb scope
+# in one line is also what keeps the ARM64 cross-build working: the deps stage
+# installs only the optional package matching the build arch, so naming a
+# platform package here would break that leg. detect-libc is what
+# @duckdb/node-bindings requires to choose between a glibc and a musl package;
+# it is required inside a try/catch that silently falls back to glibc, so its
+# absence would never announce itself - ship it rather than rely on tracing.
+# On THIS variant the fallback would be a loud failure rather than a silent one,
+# since the builder stage pruned the glibc package away; detect-libc is shipped
+# for the same reason either way.
+# Keep in sync with scripts/build-standalone-payload.sh.
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/node_modules/@duckdb ./node_modules/@duckdb
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/node_modules/detect-libc ./node_modules/detect-libc
+
+# Vendored sample database templates (the SQLite employees sample). Read at
+# runtime via fs relative to process.cwd() (/app), so output file tracing
+# never sees them — copy explicitly (keep scripts/build-standalone-payload.sh
+# in sync).
+COPY --chown=nextjs:nodejs --from=builder /usr/src/app/seed-assets ./seed-assets
+
+# Entrypoint makes the SQLite data dir writable by `nextjs` then drops privileges.
+# The container starts as root only long enough to chown the volume mount; the
+# app process itself runs as the non-root `nextjs` user.
+# --chmod sets the bit as the layer is written, so no `RUN chmod` layer follows.
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
+# The bind-address resolver the entrypoint runs (issue #432). It lives next to
+# the entrypoint, OUTSIDE /app, so a volume mounted on /app cannot hide it, and
+# outside the standalone payload so the native channels - which bind 127.0.0.1
+# by design (#134) - can never inherit container bind policy.
+COPY docker/bind-address.mjs /usr/local/lib/libredb-studio/bind-address.mjs
+
+# Render uses PORT env variable, default to 3000
+EXPOSE 3000/tcp
+ENV PORT=3000
+# Empty is the "nobody chose" sentinel: an image-level empty ENV suppresses
+# Docker's HOSTNAME=<container-id> injection (which the resolver would otherwise
+# be unable to tell apart from an operator's own value), while leaving a
+# bypassed entrypoint on Next's own `process.env.HOSTNAME || '0.0.0.0'` default -
+# i.e. exactly this image's pre-#432 behaviour. Anything non-empty an operator
+# passes is honoured verbatim.
+ENV HOSTNAME=""
+
+# server.js is created by next build from the standalone output
+# https://nextjs.org/docs/pages/api-reference/next-config-js/output
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["node", "server.js"]
