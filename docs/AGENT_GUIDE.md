@@ -214,13 +214,13 @@ having **no statistics**, never as empty. On SQLite the statistics exist only af
 
 **Every engine, read one of two ways.** On **PostgreSQL and SQLite** the server composes catalog
 statements and reads them through the same audited, read-only path an Agent run uses. On every other
-connection — MySQL, Oracle, SQL Server, MongoDB, Redis, ClickHouse, Couchbase, Druid,
-Elasticsearch, OpenSearch, Trino, LibreDB — it
-asks that connection's own provider to describe its schema, which is the reading the sidebar already
-performs when it lists your tables, and composes no statement at all. Grounding is no longer decided
-by the engine, and that changed in #414; what decides it now is whether the reading succeeds. A run
-whose provider cannot describe its own schema, whose description overruns the time the run granted
-it, or whose reading is refused says plainly that no inventory could be read for it, and is asked to
+connection, which is the other fifteen (MySQL, Oracle, SQL Server, libSQL, DuckDB, MongoDB, Redis,
+ClickHouse, Couchbase, Druid, Elasticsearch, OpenSearch, Trino, Cassandra and the bundled LibreDB
+store), it asks that connection's own provider to describe its schema, which is the reading the
+sidebar already performs when it lists your tables, and composes no statement at all. Grounding is
+no longer decided by the engine, and that changed in #414; what decides it now is whether the
+reading succeeds. A run whose provider cannot describe its own schema, whose description overruns
+the time the run granted it, or whose reading is refused says plainly that no inventory could be read for it, and is asked to
 refuse rather than to invent table names. **That is the whole of the rule**, and it holds in every
 workflow including **Operate**.
 
@@ -953,9 +953,10 @@ Stated plainly, because a surface that hides its edges is the one that surprises
   Acquiring a profiled provider for any other engine raises `PROFILE_UNSUPPORTED_BY_PROVIDER`
   (`src/lib/db/factory.ts`), which the runtime reports as `engine-unsupported`
   (`src/lib/agent/runtime.ts`) — the rail says so in as many words
-  (`src/components/agent/timeline.ts`). So on MySQL, Oracle, libSQL, MongoDB, Redis,
-  ClickHouse, Druid, Trino, Cassandra and Couchbase an Agent-mode run cannot read anything. It also covers the bundled
-  **LibreDB sample** connection, whose provider implements no `queryReadOnly`
+  (`src/components/agent/timeline.ts`). So on the other thirteen ids in the `DatabaseType` union
+  (`src/lib/types.ts`), an Agent-mode run cannot read anything: MySQL, Oracle, libSQL, MongoDB, Redis,
+  ClickHouse, Druid, Elasticsearch, OpenSearch, Trino, Cassandra, Couchbase and LibreDB. That
+  last id is the bundled **LibreDB sample** connection, whose provider implements no `queryReadOnly`
   (`src/lib/db/providers/embedded/libredb.ts`) — the bundled **SQLite sample** is the seeded
   connection to try a run against (`src/lib/seed/sqlite-sample.ts:131`). **Plan** mode still opens on
   every connection — the model is toolless there, so no profile has to be acquired for it — and since

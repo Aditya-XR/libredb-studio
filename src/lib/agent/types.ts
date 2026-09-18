@@ -369,6 +369,22 @@ export type AgentRunFailureReason =
    * already carried the distinction; this is where it becomes visible.
    */
   | "agent-credential-unusable"
+  /**
+   * The database principal this run would have executed as was refused by the
+   * read-only execution profile itself. The engine IS supported and the credential
+   * WAS applied: what failed is the user it names.
+   *
+   * Split out of `engine-unsupported` the same way and for the same reason B47 split
+   * `agent-credential-unusable` out of it. `PROFILE_PRIVILEGES_TOO_BROAD` is raised by
+   * PostgreSQL for a superuser and by SQL Server for a principal that is unverified or
+   * too broad, and SQL Server raises it a second way, for a principal that cannot ask
+   * for the plan its admission step compiles. Folded into the engine reason, every one
+   * of those told the user to investigate a different connection while the fix was one
+   * GRANT: measured on the SQL Server fixture, where `sa`, the only credential this
+   * repository's own `database-compose.yml` ships, is refused by the profile, and the
+   * least-privilege `libredb_agent` principal beside it is accepted.
+   */
+  | "agent-principal-refused"
   /** The run's persisted connection no longer resolves on the server. */
   | "connection-unresolvable"
   /** Anything else. Deliberately unspecific; the log carries the detail. */

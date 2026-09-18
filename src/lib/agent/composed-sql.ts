@@ -51,7 +51,12 @@ export interface AgentEstimatingExplain {
 }
 
 export type AgentComposedSqlDenyCode =
-  /** This milestone has verified a composition for PostgreSQL and SQLite only. */
+  /**
+   * This dialect has no verified composition. `CATALOG_COMPOSERS` is the list, and it
+   * is the four engines of `AGENT_EXECUTION_ENGINES`: PostgreSQL, SQLite, DuckDB and
+   * SQL Server. Anything else is refused rather than served a statement nobody ran
+   * against that engine's catalog.
+   */
   | "UNSUPPORTED_DIALECT"
   /** Blank, over-long, or carrying a character that cannot be safely quoted. */
   | "INVALID_SELECTOR"
@@ -804,6 +809,18 @@ const MSSQL_SCHEMA_EXCLUSION = "s.name NOT IN ('sys', 'INFORMATION_SCHEMA')";
  * along as this engine's own word for what the entry IS, the way `pg_class.relkind`
  * does on PostgreSQL, and a trailing space would make `'U '` and `'U'` two kinds.
  *
+ * `system_type_id` and NOT `user_type_id`, which is the obvious spelling and the wrong
+ * one. SQL Server ALIAS types are ordinary in a real schema and everywhere in this
+ * fixture: measured, `Person.PersonPhone.PhoneNumber` answers `Phone` for the alias and
+ * `nvarchar` for the base, and `Person.Person.FirstName` answers `Name` over `nvarchar`.
+ * Nothing downstream knows an alias: `table-profile.ts` decides which columns get a text
+ * SHAPE test and which are excluded from `count(DISTINCT …)` by matching this string
+ * against base-type spellings, so with the alias name `profile_table` emitted no shape
+ * test at all for `PhoneNumber` - the one column in that table the PII shapes exist to
+ * find - and an alias over `text` would have failed the whole table's profile. The base
+ * spelling is also the more useful of the two to a model writing SQL, which is what this
+ * inventory is for; the object browser reads its own catalog and still shows the alias.
+ *
  * `sys.objects` rather than `INFORMATION_SCHEMA.TABLES`, for the reason the provider
  * gives for its own reads: `INFORMATION_SCHEMA` is permission-filtered in a way that
  * silently drops rows, and `is_ms_shipped` has no counterpart there at all.
@@ -811,7 +828,7 @@ const MSSQL_SCHEMA_EXCLUSION = "s.name NOT IN ('sys', 'INFORMATION_SCHEMA')";
 function composeMssqlCatalog(selector: AgentCatalogSelector): string {
   return (
     "SELECT s.name AS table_schema, o.name AS table_name, RTRIM(o.type) AS relkind, " +
-    "(SELECT c.name AS [name], TYPE_NAME(c.user_type_id) AS [type], " +
+    "(SELECT c.name AS [name], TYPE_NAME(c.system_type_id) AS [type], " +
     "CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END AS [nullable] " +
     "FROM sys.columns c WHERE c.object_id = o.object_id ORDER BY c.column_id FOR JSON PATH) AS columns " +
     "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id " +
@@ -863,7 +880,9 @@ function composeMssqlRelations(selector: AgentCatalogSelector): string {
  * that distinction on older servers and documents the resulting imprecision; SQL Server
  * publishes it on every supported version, so this arm is exact.
  *
- * Measured on AdventureWorks2022: 229 rows.
+ * Measured on AdventureWorks2022, with no selector: 228 rows, one per (index, key column)
+ * pair across the database's user tables and views. It is a count of KEY POSITIONS and not
+ * of indexes: an index on two columns contributes two rows.
  */
 function composeMssqlIndexes(selector: AgentCatalogSelector): string {
   return (

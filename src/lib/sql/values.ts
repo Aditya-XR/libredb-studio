@@ -8,12 +8,15 @@ import type { DatabaseType } from "@/lib/types";
  *   has to be doubled too or it would escape the closing quote.
  * - `backslash` — every escape is spelled with a backslash, including the quote;
  *   doubling is not part of the grammar.
+ * - `unicode` — the quote is doubled and a backslash is ordinary data, exactly as
+ *   `standard`, but the literal carries an `N` prefix because without it the
+ *   characters are not Unicode at all. See the `mssql` row for the measurement.
  *
  * The map is total on purpose: a new provider cannot be added without TypeScript
  * demanding an answer here, because the silent wrong answer is exactly the defect
  * this file exists to close (issue #290).
  */
-type LiteralEscape = "standard" | "double-and-backslash" | "backslash";
+type LiteralEscape = "standard" | "double-and-backslash" | "backslash" | "unicode";
 
 const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
   // `standard_conforming_strings` has been on by default since PostgreSQL 9.1, so
@@ -28,7 +31,18 @@ const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
   // is data, and doubling it would add a second one to the value.
   duckdb: "standard",
   oracle: "standard",
-  mssql: "standard",
+  // SQL Server parses a BARE literal in the database's collation code page and only an
+  // `N`-prefixed one as Unicode, so the prefix is not decoration: every catalog name in
+  // `sys` is `sysname`, which is `nvarchar(128)`.
+  // Measured on SQL Server 2022 CU26, database AdventureWorks2022, collation
+  // `SQL_Latin1_General_CP1_CI_AS` (code page 1252), with schemas `Müşteri` and `Müsteri`
+  // both present: `SELECT 'Müşteri'` answers `Müsteri`, because `ş` (U+015F) is not in
+  // 1252 and the server best-fits it to `s`. So `… WHERE s.name = 'Müşteri'` matched
+  // `Müsteri.Siparis` - THE WRONG OBJECT - while `… WHERE s.name = N'Müşteri'` matched
+  // `Müşteri.Sipariş`. With no `Müsteri` present the bare form matched nothing at all.
+  // Both failures are silent, which is why this dialect does not share the `standard`
+  // row: the escaping is the same, the code page is not.
+  mssql: "unicode",
   // Druid quotes a string with single quotes and puts its backslash escapes in the
   // separate `U&'fo\00F6'` form, so a backslash in a plain literal is data.
   druid: "standard",
@@ -100,6 +114,9 @@ const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
 export function quoteLiteral(value: string, dialect: DatabaseType | undefined): string {
   const escape = dialect ? LITERAL_ESCAPE[dialect] : "standard";
   if (escape === "standard") return `'${value.replace(/'/g, "''")}'`;
+  // Same escaping as `standard`, plus the prefix that decides which character set the
+  // server reads the escaped text in.
+  if (escape === "unicode") return `N'${value.replace(/'/g, "''")}'`;
 
   // The backslash goes first in both remaining forms: doubling it afterwards would
   // also double the one this function just added in front of a quote.

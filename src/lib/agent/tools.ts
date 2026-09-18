@@ -945,10 +945,14 @@ const DATABASE_ASSESSMENT_TOOLS: readonly AgentToolDefinition[] = Object.freeze(
  * Deliberately not `[...AGENT_MODE_TOOLS, inspect_operations]`, which is what every
  * other template does. All three of the read-class tools this leaves out —
  * `inspect_schema`, `run_read_query`, `inspect_plan` — reach the database through
- * `provider.queryReadOnly`, which only PostgreSQL and SQLite implement. Offering any
- * of them here would reintroduce, tool by tool, the exact engine restriction this
- * workflow exists to escape: the run would open on MySQL, be offered a tool, call it,
- * and be answered by an acquisition that refuses the engine.
+ * `provider.queryReadOnly`, which only the engines `AGENT_EXECUTION_ENGINES`
+ * (`src/lib/agent/engine-support.ts`) names implement. That list is named rather than
+ * restated here, and its own docblock records why: the real rule is the probe the
+ * factory runs against the provider, so a count written out in prose goes stale the
+ * next time an engine implements the method. Offering any of those tools here would
+ * reintroduce, tool by tool, the exact engine restriction this workflow exists to
+ * escape: the run would open on MySQL, be offered a tool, call it, and be answered by
+ * an acquisition that refuses the engine.
  *
  * `inspect_schema` was checked rather than assumed, per the spec's condition:
  * `inspectSchemaTool` composes a statement and hands it to `executeAgentOperation`,

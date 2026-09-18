@@ -19,13 +19,29 @@ describe("quoteLiteral", () => {
     expect(quoteLiteral("O'Brien", "mysql")).toBe("'O''Brien'");
     expect(quoteLiteral("O'Brien", "sqlite")).toBe("'O''Brien'");
     expect(quoteLiteral("O'Brien", "oracle")).toBe("'O''Brien'");
-    expect(quoteLiteral("O'Brien", "mssql")).toBe("'O''Brien'");
     expect(quoteLiteral("O'Brien", "clickhouse")).toBe("'O''Brien'");
     expect(quoteLiteral("O'Brien", "druid")).toBe("'O''Brien'");
     // Measured on Trino 476: `SELECT 'O''Brien' AS a` answers the row `O'Brien`.
     expect(quoteLiteral("O'Brien", "trino")).toBe("'O''Brien'");
     // Measured on DuckDB v1.5.5: `SELECT 'it''s'` answers `it's`.
     expect(quoteLiteral("O'Brien", "duckdb")).toBe("'O''Brien'");
+  });
+
+  test("prefixes the SQL Server literal with N, so the value is read as Unicode", () => {
+    // SQL Server parses a BARE literal in the DATABASE's collation code page, and only
+    // an `N`-prefixed one as Unicode. Measured on SQL Server 2022 CU26 against
+    // AdventureWorks2022, collation `SQL_Latin1_General_CP1_CI_AS` (code page 1252):
+    // `SELECT 'Müşteri'` answers `Müsteri`, because `ş` (U+015F) is not in 1252 and the
+    // server best-fits it to `s`. With schemas `Müşteri` and `Müsteri` both present,
+    // `… WHERE s.name = 'Müşteri'` matched `Müsteri.Siparis` - the WRONG object - while
+    // `… WHERE s.name = N'Müşteri'` matched `Müşteri.Sipariş`. Every catalog name this
+    // repo composes a selector against is `sysname`, which is `nvarchar(128)`.
+    expect(quoteLiteral("Müşteri", "mssql")).toBe("N'Müşteri'");
+    // The escaping is the standard doubling either way: the prefix decides the
+    // character set, not the escape.
+    expect(quoteLiteral("O'Brien", "mssql")).toBe("N'O''Brien'");
+    // A backslash is ordinary data on this dialect, as it is on the `standard` ones.
+    expect(quoteLiteral("a\\b", "mssql")).toBe("N'a\\b'");
   });
 
   test("escapes the quote with a backslash where the grammar has no doubling", () => {
@@ -51,7 +67,6 @@ describe("quoteLiteral", () => {
     expect(quoteLiteral("a\\b", "postgres")).toBe("'a\\b'");
     expect(quoteLiteral("a\\b", "sqlite")).toBe("'a\\b'");
     expect(quoteLiteral("a\\b", "oracle")).toBe("'a\\b'");
-    expect(quoteLiteral("a\\b", "mssql")).toBe("'a\\b'");
     expect(quoteLiteral("a\\b", "druid")).toBe("'a\\b'");
     // Measured on Trino 476: `SELECT 'a\b' AS a` answers the two characters `a\b`, so
     // the backslash is data and doubling it would put a second one in the value.

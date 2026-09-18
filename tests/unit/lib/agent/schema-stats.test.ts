@@ -150,6 +150,22 @@ const SQLITE_STATISTICS = [
   { table_name: "notes", index_name: null, stat: null },
 ];
 
+/**
+ * What SQL Server answers `composeMssqlStatistics`: one row per user table, the sum of
+ * `sys.partitions.rows` over the heap or clustered index. `sa` reading
+ * AdventureWorks2022 gets 72 such rows.
+ *
+ * `estimated_rows` arrives as TEXT here on purpose: `SUM(p.rows)` is a `bigint` and a
+ * driver is entitled to hand one back as a string rather than lose precision, which is
+ * the case `numeric` exists for.
+ */
+const MSSQL_STATISTICS = [
+  { table_schema: "public", table_name: "orders", estimated_rows: "1000" },
+  { table_schema: "public", table_name: "audit_log", estimated_rows: 0 },
+];
+
+const answerMssql = async (): Promise<QueryResult> => result(MSSQL_STATISTICS);
+
 function answerSqlite(withStatisticsTable: boolean): (sql: string) => Promise<QueryResult> {
   return async (sql: string) => {
     if (sql.includes("name = 'sqlite_stat1'")) {
@@ -367,6 +383,66 @@ describe("readSchemaStatistics — SQLite", () => {
 
     if (statistics.kind !== "read") throw new Error("expected a reading");
     expect(statistics.byTable.get("orders")?.estimatedRows).toBeNull();
+  });
+});
+
+describe("readSchemaStatistics — SQL Server", () => {
+  /**
+   * `ESTIMATE_BUILDERS` had arms for PostgreSQL and SQLite only, so every SQL Server run
+   * reported `DIALECT_HAS_NO_STATISTICS` while the composer beside it answered 72 rows of
+   * real table estimates. The composer being served is not enough on its own: this module
+   * reads the rows BACK, and the two decisions are separate.
+   */
+  test("sends one statement and no availability probe, because sys.partitions is always there", async () => {
+    const h = harness("mssql", answerMssql);
+
+    const statistics = await readOf(h);
+
+    expect(statistics.kind).toBe("read");
+    expect(h.statements()).toHaveLength(1);
+    expect(h.statements()[0]).toContain("SUM(p.rows)");
+  });
+
+  test("keys the estimates by the qualified name the inventory uses, so the two join", async () => {
+    const statistics = await readOf(harness("mssql", answerMssql));
+
+    if (statistics.kind !== "read") throw new Error("expected a reading");
+    expect(statistics.dialect).toBe("mssql");
+    expect([...statistics.byTable.keys()]).toEqual(["public.orders", "public.audit_log"]);
+  });
+
+  test("reads a bigint handed back as text as a number, and holds no column statistics", async () => {
+    const statistics = await readOf(harness("mssql", answerMssql));
+
+    if (statistics.kind !== "read") throw new Error("expected a reading");
+    expect(statistics.byTable.get("public.orders")).toEqual({ estimatedRows: 1000, columns: [] });
+    // 0 is a real count on this engine: `sys.partitions` is maintained, so an empty table
+    // is 0 rather than the "never counted" -1 PostgreSQL's `reltuples` carries.
+    expect(statistics.byTable.get("public.audit_log")).toEqual({ estimatedRows: 0, columns: [] });
+  });
+
+  test("an unreadable value is absence rather than a NaN that would print as a row count", async () => {
+    const h = harness("mssql", async () =>
+      result([{ table_schema: "public", table_name: "orders", estimated_rows: "not a number" }]),
+    );
+
+    const statistics = await readOf(h);
+
+    if (statistics.kind !== "read") throw new Error("expected a reading");
+    expect(statistics.byTable.get("public.orders")?.estimatedRows).toBeNull();
+  });
+
+  test("the estimates reach the packed block, which is what the run shows the model", async () => {
+    const packed = packSchemaStatistics(TABLES, await readOf(harness("mssql", answerMssql)));
+
+    expect(packed).toContain("public.orders: roughly 1000 row(s), estimated");
+    expect(packed).toContain("public.audit_log: roughly 0 row(s), estimated");
+    // In the inventory and absent from the reading: listed as unknown, never omitted.
+    expect(packed).toContain("public.staging: no statistics recorded for this table; its size is unknown");
+    // SQLite's absolute per-column limit is not claimed here: SQL Server DOES record
+    // distributions, behind a DBCC command this boundary refuses, so the sentence that
+    // says the engine records none would be false.
+    expect(packed).not.toContain("records no per-column distinct count");
   });
 });
 

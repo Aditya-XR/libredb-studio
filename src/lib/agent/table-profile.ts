@@ -91,7 +91,20 @@ const PII_NAME_WORDS: readonly string[] = Object.freeze([
   "zip",
 ]);
 
-/** Declared types this module is willing to apply a text shape test to. */
+/**
+ * Declared types this module is willing to apply a text shape test to.
+ *
+ * It matches the SPELLING the inventory reports, which makes it only as good as that
+ * spelling. On SQL Server that is a live limitation rather than a hypothetical one:
+ * an ALIAS type is reported by its own name, so `Person.PersonPhone.PhoneNumber`
+ * arrives as `Phone` and `Person.Person.FirstName` as `Name` (measured on
+ * AdventureWorks2022 via `sys.columns`, where `TYPE_NAME(user_type_id)` answers
+ * `Phone` and `TYPE_NAME(system_type_id)` answers `nvarchar`). No pattern over a
+ * user-chosen alias name can tell a text alias from a numeric one, so the fix belongs
+ * where the type is read, not here: the catalog composer must report the BASE type.
+ * Until it does, an alias-typed column is profiled for presence and distinctness and
+ * gets no shape test, which understates a suspicion rather than inventing one.
+ */
 const TEXTUAL_TYPE = /char|text|string|clob|varying/i;
 
 /** Dialects with a verified profile composition; enforced by `composeTableProfile`. */
@@ -258,18 +271,53 @@ const INCOMPARABLE_TYPE: Readonly<Record<ProfileDialect, RegExp>> = Object.freez
   postgres: /\b(jsonb?|xml|point|line|lseg|box|path|polygon|circle)\b/i,
   sqlite: /\b(jsonb?|xml|point|line|lseg|box|path|polygon|circle)\b/i,
   // PER DIALECT because the sets genuinely differ, and one shared regex would have to
-  // be wrong about one of them. SQL Server refuses `count(DISTINCT …)` on `xml`
-  // ("Operand data type xml is invalid for count operator", measured on 2022 CU26) and
-  // on the three deprecated large types, while `varbinary(max)` and `uniqueidentifier`
-  // are both fine, also measured. `text` is the reason this cannot be one list:
-  // SQL Server's `text` is incomparable and PostgreSQL's is its ordinary string type,
-  // so a shared entry would silently stop counting distinct values for every
-  // PostgreSQL text column.
-  mssql: /\b(xml|ntext|text|image|geography|geometry|hierarchyid)\b/i,
+  // be wrong about one of them.
+  //
+  // Every SQL Server entry was MEASURED on 2022 CU26, one `count(DISTINCT …)` per type,
+  // rather than reasoned about: `xml`, `geography` and `geometry` each answer
+  // "Operand data type <type> is invalid for count operator" (Msg 8117), while
+  // `varbinary(max)` and `uniqueidentifier` both count without complaint. `hierarchyid`
+  // was listed here and is NOT incomparable: the same probe counts it, and
+  // `count(DISTINCT DocumentNode)` over `Production.Document` answers 13 for 13 rows.
+  // Listing it cost that column its distinct count for nothing, so it is gone.
+  //
+  // `text`, `ntext` and `image` are absent for a different reason: SQL Server refuses
+  // PLAIN `count` on them too, so they are excluded from the projection entirely by
+  // `UNCOUNTABLE_TYPE` below and never reach this test. `text` is also why this cannot
+  // be one shared list, since PostgreSQL's `text` is its ordinary string type.
+  mssql: /\b(xml|geography|geometry)\b/i,
 });
 
 const isComparable = (column: ColumnSchema, dialect: ProfileDialect): boolean =>
   !INCOMPARABLE_TYPE[dialect].test(column.type);
+
+/**
+ * Declared types the engine refuses to COUNT at all, so the column is left out whole.
+ *
+ * Stronger than `INCOMPARABLE_TYPE`, and therefore its own set: an incomparable type
+ * still has a presence count and only loses its distinct count, while a column of one
+ * of these types cannot be projected at all. SQL Server answers
+ * "Operand data type text is invalid for count operator" (Msg 8117) for a plain
+ * `count([col])` on `text`, `ntext` and `image` - measured on 2022 CU26, one probe
+ * column per type. Because the whole profile is ONE aggregate over one scan, a single
+ * such column would fail the statement and with it every other column's statistics, so
+ * the column contributes no presence, no distinct count and no shape test. That reads
+ * back as "the engine was not asked about this column", which is exactly true: a
+ * column the composer left out is absent from the profile rather than reported as
+ * empty (see `readTableProfile`).
+ *
+ * Only SQL Server has such a set. PostgreSQL and SQLite count presence for every type
+ * this module has met, including the ones they refuse to count DISTINCT, so an entry
+ * for them would be an assertion nothing measured.
+ */
+const UNCOUNTABLE_TYPE: Readonly<Partial<Record<ProfileDialect, RegExp>>> = Object.freeze({
+  mssql: /\b(text|ntext|image)\b/i,
+});
+
+const isCountable = (column: ColumnSchema, dialect: ProfileDialect): boolean => {
+  const refused = UNCOUNTABLE_TYPE[dialect];
+  return refused === undefined || !refused.test(column.type);
+};
 
 /**
  * One statement covering the whole table, rather than one per statistic.
@@ -282,6 +330,11 @@ const isComparable = (column: ColumnSchema, dialect: ProfileDialect): boolean =>
  * comparing an integer column to a string pattern is an error on PostgreSQL, and
  * casting every column to text to avoid that would turn a bounded read into a full
  * conversion of the table.
+ *
+ * A column of a type the engine will not count is left out of the projection entirely
+ * (`UNCOUNTABLE_TYPE`). Because everything is one aggregate, one such column would
+ * otherwise cost the table its whole profile. A table made only of them still composes:
+ * the row count is a profile, a smaller one than was asked for.
  */
 export function composeTableProfile(
   dialect: DatabaseType,
@@ -300,6 +353,9 @@ export function composeTableProfile(
 
   const parts = ["count(*) AS row_count"];
   columns.forEach((column, index) => {
+    // A type the engine refuses to count contributes NOTHING: one such column in the
+    // projection fails the single aggregate and takes the whole table's profile with it.
+    if (!isCountable(column, dialect)) return;
     const quoted = quoteIdentifier(column.name, dialect);
     parts.push(`count(${quoted}) AS ${alias("present", index)}`);
     // A type with no equality operator is skipped rather than counted: its absence
@@ -335,6 +391,13 @@ const count = (row: Record<string, unknown>, key: string): number | undefined =>
  * Turns the one aggregate row into a profile. A statistic the engine did not
  * report is ABSENT rather than zero: zero present values is a finding, and "the
  * engine said nothing" is not.
+ *
+ * A COLUMN the engine did not report is absent the same way, and for the same reason.
+ * The composer leaves an uncountable column out of the projection whole
+ * (`UNCOUNTABLE_TYPE`), and reading its missing presence count back as zero would make
+ * a `text` column on SQL Server arrive as `high_null` at 100% - a finding derived from
+ * a question nobody asked. The aliases carry the column's own index, so dropping one
+ * column cannot shift another's statistics onto it.
  */
 export function readTableProfile(
   table: string,
@@ -347,20 +410,23 @@ export function readTableProfile(
   const rowCount = count(row, "row_count");
   if (rowCount === undefined) return null;
 
-  const profiled: AgentColumnProfile[] = columns.map((column, index) => {
+  const profiled: AgentColumnProfile[] = [];
+  columns.forEach((column, index) => {
+    const present = count(row, alias("present", index));
+    if (present === undefined) return;
     const distinct = count(row, alias("distinct", index));
     const shaped = count(row, alias(EMAIL_SHAPE_TEST.alias, index));
     const digitRun = count(row, alias(DIGIT_RUN_SHAPE_TEST.alias, index));
-    return {
+    profiled.push({
       column: column.name,
-      present: count(row, alias("present", index)) ?? 0,
+      present,
       ...(distinct === undefined ? {} : { distinct }),
       ...(shaped === undefined ? {} : { shaped }),
       ...(digitRun === undefined ? {} : { digitRun }),
-    };
+    });
   });
 
-  return { table, depth, rowCount, columns: profiled, findings: deriveFindings(rowCount, columns, profiled) };
+  return { table, depth, rowCount, columns: profiled, findings: deriveFindings(rowCount, profiled) };
 }
 
 const ratio = (part: number, whole: number): string => `${Math.round((part / whole) * 100)}%`;
@@ -400,15 +466,10 @@ function matchedShapes(profile: AgentColumnProfile): readonly string[] {
  * Order is stable and by column, so two profiles of the same table produce the same
  * list — a finding set that reordered between runs would read as having changed.
  */
-function deriveFindings(
-  rowCount: number,
-  columns: readonly ColumnSchema[],
-  profiles: readonly AgentColumnProfile[],
-): readonly AgentProfileFinding[] {
+function deriveFindings(rowCount: number, profiles: readonly AgentColumnProfile[]): readonly AgentProfileFinding[] {
   const findings: AgentProfileFinding[] = [];
 
-  profiles.forEach((profile, index) => {
-    const declared = columns[index];
+  for (const profile of profiles) {
     const missing = rowCount - profile.present;
 
     if (rowCount >= MIN_ROWS_FOR_RATIO_FINDINGS && missing / rowCount >= HIGH_NULL_RATIO) {
@@ -439,7 +500,7 @@ function deriveFindings(
     }
 
     const shapes = matchedShapes(profile);
-    if (declared !== undefined && (namesPersonalData(profile.column) || shapes.length > 0)) {
+    if (namesPersonalData(profile.column) || shapes.length > 0) {
       findings.push({
         code: "suspected_pii",
         column: profile.column,
@@ -449,7 +510,7 @@ function deriveFindings(
             : "The column's name suggests personal data. Its values were not inspected to establish this.",
       });
     }
-  });
+  }
 
   return findings;
 }

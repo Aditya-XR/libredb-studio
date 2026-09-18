@@ -28,7 +28,7 @@ const column = (name: string, type = "text"): ColumnSchema => ({ name, type, nul
 const COLUMNS: ColumnSchema[] = [column("id", "integer"), column("email", "character varying"), column("status")];
 
 describe("the composed statement", () => {
-  test.each(["postgres", "sqlite"] as const)(
+  test.each(["postgres", "sqlite", "mssql"] as const)(
     "%s: passes the same statement guard a model-drafted read does",
     (dialect) => {
       for (const depth of ["basic", "distribution", "pattern"] as const) {
@@ -85,8 +85,8 @@ describe("the composed statement", () => {
     expect(sqlite).not.toContain(" ~ ");
   });
 
-  test("both shape tests still project a count and nothing else on either dialect", () => {
-    for (const dialect of ["postgres", "sqlite"] as const) {
+  test("both shape tests still project a count and nothing else on every dialect", () => {
+    for (const dialect of ["postgres", "sqlite", "mssql"] as const) {
       const sql = composeTableProfile(dialect, { segments: ["t"], depth: "pattern" }, COLUMNS);
       const projection = sql.slice("SELECT ".length, sql.indexOf(" FROM "));
 
@@ -538,5 +538,145 @@ describe("the shape tests against a live engine", () => {
     expect(profile?.findings.filter((finding) => finding.code === "suspected_pii")[0]?.detail).toContain(
       "an email address",
     );
+  });
+});
+
+/**
+ * The SQL Server arm, pinned rather than covered incidentally.
+ *
+ * Every test above this block runs `postgres` or `sqlite`, so the mssql predicates,
+ * the per-dialect incomparable map and the bracket quoting were only ever executed as
+ * a by-product of the 100% line gate: every line ran, and nothing asserted what any of
+ * them produced. The cases here assert the composed text literally, and each exclusion
+ * carries the engine's own refusal as its reason. All of them were measured on
+ * SQL Server 2022 CU26 against AdventureWorks2022 before they were written down.
+ */
+describe("the SQL Server arm of the composition", () => {
+  test("the digit run is spelled as nine repeated T-SQL character classes, not a regex", () => {
+    // T-SQL has no regular expressions and no GLOB, and its LIKE has no quantifier,
+    // so the run is nine `[0-9]`s between two `%`s. Asserted literally, because a
+    // count of classes could pass while the spelling was wrong.
+    const sql = composeTableProfile("mssql", { segments: ["t"], depth: "pattern" }, COLUMNS);
+
+    expect(sql).toContain("[email] LIKE '%[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]%'");
+    expect(sql).not.toContain("GLOB");
+    expect(sql).not.toContain(" ~ ");
+  });
+
+  test("the email shape is the same LIKE all three dialects spell alike", () => {
+    const sql = composeTableProfile("mssql", { segments: ["t"], depth: "pattern" }, COLUMNS);
+
+    expect(sql).toContain("count(CASE WHEN [email] LIKE '%_@_%._%' THEN 1 END)");
+    // And the integer column beside it gets neither shape test.
+    expect(sql).not.toContain("[id] LIKE");
+  });
+
+  test("every segment of a three-part address is bracket-quoted on its own", () => {
+    const sql = composeTableProfile(
+      "mssql",
+      { segments: ["AdventureWorks2022", "Person", "PersonPhone"], depth: "basic" },
+      COLUMNS,
+    );
+
+    expect(sql).toContain("FROM [AdventureWorks2022].[Person].[PersonPhone]");
+    expect(sql).not.toContain("[AdventureWorks2022.Person]");
+  });
+
+  test("a closing bracket in an identifier is escaped, not interpolated", () => {
+    // Typed `nvarchar` rather than the file's default `text`, which SQL Server will
+    // not count at all and which is therefore left out of the projection.
+    const sql = composeTableProfile("mssql", { segments: ["we]ird"], depth: "basic" }, [column("c]1", "nvarchar")]);
+
+    expect(sql).toContain("[we]]ird]");
+    expect(sql).toContain("[c]]1]");
+    expect(inspectAgentStatement(sql)).toBeNull();
+  });
+
+  // Msg 8117, "Operand data type text is invalid for count operator", for a PLAIN
+  // count on each of the three. One such column in the projection fails the single
+  // aggregate, so it would cost the whole table its profile.
+  test.each(["text", "ntext", "image"])("a %s column is left out of the projection entirely", (type) => {
+    const sql = composeTableProfile("mssql", { segments: ["t"], depth: "pattern" }, [
+      column("body", type),
+      column("name", "nvarchar"),
+    ]);
+
+    expect(sql).not.toContain("[body]");
+    // No presence, no distinct count and no shape test - and the column beside it
+    // keeps all three.
+    expect(sql).toContain("count([name]) AS present_1");
+    expect(sql).toContain("count(DISTINCT [name]) AS distinct_1");
+    expect(sql).toContain("count(CASE WHEN [name] LIKE");
+  });
+
+  test("a table of nothing but uncountable columns still composes its row count", () => {
+    const sql = composeTableProfile("mssql", { segments: ["t"], depth: "pattern" }, [column("body", "text")]);
+
+    expect(sql).toBe("SELECT count(*) AS row_count FROM [t]");
+  });
+
+  test("PostgreSQL still counts its own text columns, which SQL Server refuses", () => {
+    // The reason the uncountable set is per dialect: `text` is PostgreSQL's ordinary
+    // string type and SQL Server's deprecated large-object one.
+    const sql = composeTableProfile("postgres", { segments: ["t"], depth: "distribution" }, [column("body", "text")]);
+
+    expect(sql).toContain('count("body")');
+    expect(sql).toContain('count(DISTINCT "body")');
+  });
+
+  // Msg 8117 again, this time only for count(DISTINCT ...): presence still counts.
+  test.each(["xml", "geography", "geometry"])("%s keeps its presence count and loses only its distinct one", (type) => {
+    const sql = composeTableProfile("mssql", { segments: ["t"], depth: "distribution" }, [column("shape", type)]);
+
+    expect(sql).toContain("count([shape]) AS present_0");
+    expect(sql).not.toContain("count(DISTINCT [shape])");
+  });
+
+  // Measured, not assumed: `count(DISTINCT DocumentNode)` over `Production.Document`
+  // answers 13 for 13 rows, and the same probe counts varbinary(max) and
+  // uniqueidentifier. hierarchyid was listed as incomparable and is not.
+  test.each(["hierarchyid", "varbinary", "uniqueidentifier"])("%s is counted DISTINCT, not excluded", (type) => {
+    const sql = composeTableProfile("mssql", { segments: ["t"], depth: "distribution" }, [column("v", type)]);
+
+    expect(sql).toContain("count(DISTINCT [v]) AS distinct_0");
+  });
+
+  /**
+   * The alias-type limitation, stated as a test so it cannot drift silently.
+   *
+   * SQL Server reports an ALIAS type by its own name, so AdventureWorks2022's
+   * `Person.PersonPhone.PhoneNumber` arrives as `Phone` and `Person.Person.FirstName`
+   * as `Name` while their base types are `nvarchar`. No pattern over a user-chosen
+   * alias name can tell a text alias from a numeric one, so the shape tests can only
+   * be as good as the type spelling the catalog read reports: given the BASE type they
+   * fire, given the alias name they do not. The fix therefore belongs in the catalog
+   * composer, which must report `TYPE_NAME(c.system_type_id)`.
+   */
+  test("a shape test follows the type spelling the catalog reports, so it needs the base type", () => {
+    const aliased = composeTableProfile("mssql", { segments: ["Person", "PersonPhone"], depth: "pattern" }, [
+      column("PhoneNumber", "Phone"),
+    ]);
+    const base = composeTableProfile("mssql", { segments: ["Person", "PersonPhone"], depth: "pattern" }, [
+      column("PhoneNumber", "nvarchar"),
+    ]);
+
+    expect(aliased).not.toContain("LIKE");
+    expect(aliased).toContain("count([PhoneNumber]) AS present_0");
+    expect(base).toContain("count(CASE WHEN [PhoneNumber] LIKE");
+  });
+
+  test("a column the composer left out is absent from the profile, never reported empty", () => {
+    // Reading the missing presence count back as zero would make every `text` column
+    // on SQL Server a high_null finding at 100%: an answer to a question nobody asked.
+    const profile = readTableProfile(
+      "t",
+      "basic",
+      [column("body", "text"), column("name", "nvarchar")],
+      [{ row_count: 100, present_1: 100 }],
+    );
+
+    expect(profile?.columns.map((entry) => entry.column)).toEqual(["name"]);
+    expect(profile?.columns[0]?.present).toBe(100);
+    expect(profile?.findings).toEqual([]);
   });
 });

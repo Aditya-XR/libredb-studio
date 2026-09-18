@@ -4453,6 +4453,18 @@ class ShowplanSession {
   readonly batches: Array<{ sql: string; pinned: boolean }> = [];
   /** Lifecycle and statement events, in the order they really happened. */
   readonly events: string[] = [];
+  /**
+   * The server's large-value ceiling. Measured: `SET TEXTSIZE n` does not refuse an
+   * oversized value, it TRUNCATES it to n, and a fresh tedious session opens at
+   * 2147483647. The fixture cuts strings the same way, because the provider's byte
+   * refusal is meant to fire ON the truncated value rather than on the original.
+   */
+  textsize = 2_147_483_647;
+  /**
+   * How many operator rows hang under each root. One is enough for every admission test;
+   * a plan test needs more, because the question there is how MANY rows a plan may have.
+   */
+  planNodesPerRoot = 1;
   /** What a non-plan statement returns, BEFORE `SET ROWCOUNT` cuts it. */
   rows: ResultRow[] = [{ ok: 1 }];
   /** The driver's column metadata, when a test wants the declared types asserted. */
@@ -4509,18 +4521,20 @@ class ShowplanSession {
     }
     const rows: ResultRow[] = [];
     roots.forEach((root, index) => {
-      const nodeId = index * 10 + 1;
+      const nodeId = index * 10_000 + 1;
       rows.push({ StmtText: sql, StmtId: root.StmtId, NodeId: nodeId, Parent: 0, Type: root.Type });
-      // One operator row per root. `PLAN_ROW` is what SHOWPLAN_ALL puts in `Type` for
+      // Operator rows under the root. `PLAN_ROW` is what SHOWPLAN_ALL puts in `Type` for
       // everything that is not a statement row, and a non-zero `Parent` is what makes it
-      // a child: anything reading the plan by ROW COUNT would see twice what it should.
-      rows.push({
-        StmtText: "  |--Clustered Index Scan(OBJECT:([Person].[Person]))",
-        StmtId: root.StmtId,
-        NodeId: nodeId + 1,
-        Parent: nodeId,
-        Type: "PLAN_ROW",
-      });
+      // a child: anything reading the plan by ROW COUNT would see more than it should.
+      for (let node = 1; node <= this.planNodesPerRoot; node += 1) {
+        rows.push({
+          StmtText: "  |--Clustered Index Scan(OBJECT:([Person].[Person]))",
+          StmtId: root.StmtId,
+          NodeId: nodeId + node,
+          Parent: nodeId,
+          Type: "PLAN_ROW",
+        });
+      }
     });
     return toResult(rows);
   }
@@ -4566,8 +4580,19 @@ class ShowplanSession {
     }
     if (sql === PLAN_MODE_PROBE.sql) return toResult([{ libredb_plan_mode_probe: 1 }]);
     const visible = this.rowcount > 0 ? this.rows.slice(0, this.rowcount) : this.rows;
+    // TEXTSIZE truncates, it does not refuse, and that is the whole reason the provider
+    // asks for one byte MORE than the budget: a cut value is `maxResultBytes + 1` on its
+    // own, which the byte refusal then catches.
+    const cut = visible.map((row) =>
+      Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [
+          key,
+          typeof value === "string" && value.length > this.textsize ? value.slice(0, this.textsize) : value,
+        ]),
+      ),
+    );
     this.events.push("answered");
-    return toResult(visible, this.columns);
+    return toResult(cut, this.columns);
   }
 
   private applySet(option: string, argument: string) {
@@ -4578,6 +4603,7 @@ class ShowplanSession {
       return;
     }
     if (option === "ROWCOUNT") this.rowcount = Number(argument);
+    if (option === "TEXTSIZE") this.textsize = Number(argument);
     if (option === "LOCK_TIMEOUT") this.lockTimeout = Number(argument);
     if (option === "DEADLOCK_PRIORITY") this.deadlockPriority = argument.toUpperCase();
   }
@@ -4790,7 +4816,7 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
   test("one root of each class the optimizer names a read is admitted and runs", async () => {
     const profiled = await openProfiled();
 
-    for (const admitted of [READ_SELECT, READ_SELECT_WITHOUT_QUERY, READ_JSON_SELECT, READ_XML_SELECT]) {
+    for (const admitted of [READ_SELECT, READ_SELECT_WITHOUT_QUERY]) {
       const result = await profiled.queryReadOnly(admitted.sql, budget());
       expect(result.rows).toEqual([{ ok: 1 }]);
       expect(result.rowCount).toBe(1);
@@ -4946,6 +4972,82 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
     expect(result.rowCount).toBe(1);
   });
 
+  /**
+   * The row budget bounds how MANY rows arrive; it says nothing about how big one is.
+   * Measured against the live engine, `SELECT REPLICATE(CAST('a' AS varchar(max)), 700000000)`
+   * is ONE row of ONE column that the optimizer classifies as a plain read, so every other
+   * layer admits it, and it arrived in full before any result-side cap could look at it.
+   */
+  test("the byte budget is asked of the SERVER too, one byte past the budget so a cut is never silent", async () => {
+    const profiled = await openProfiled();
+    engine.rows = [{ blob: "x".repeat(5_000_000) }];
+
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 1024 }));
+
+    // The server cut it to 1025, and 1025 alone is over the budget, so the refusal fires on
+    // a value the process never held at its original size.
+    await expect(rejection).rejects.toThrow(/exceeded the byte budget/);
+    expect(engine.batches.map((batch) => batch.sql)).toContain("SET TEXTSIZE 1025");
+  });
+
+  test("the large-value ceiling is restored, because a session that keeps it truncates the next caller's read", async () => {
+    const profiled = await openProfiled();
+
+    await profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 1024 }));
+
+    // tedious opens a session at 2147483647, measured, so this is a restore rather than a
+    // widening - and it sits in the teardown beside the other three modes, all of which
+    // survive the rollback.
+    expect(engine.batches.map((batch) => batch.sql)).toContain("SET TEXTSIZE 2147483647");
+    expect(engine.textsize).toBe(2_147_483_647);
+  });
+
+  /**
+   * A plan's rows are the optimizer's NODES, not data. Measured on AdventureWorks2022, a
+   * `SELECT TOP 10 *` over one shipped view compiles to 170 of them, so a 200-row DATA
+   * budget refuses the plans an optimization run exists to read - and refuses them with a
+   * sentence about row counts, which sends a model to narrow a statement that was never
+   * wide. PostgreSQL never meets this: its plan is ONE row however large the plan is.
+   */
+  test("a plan is not judged by the DATA row budget, because its rows are operators", async () => {
+    const profiled = await openProfiled();
+    engine.planNodesPerRoot = 40;
+
+    const plan = await profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultRows: 3 }), "estimate-plan");
+
+    expect(plan.rows.length).toBeGreaterThan(3);
+    expect(plan.rows[0]).toMatchObject({ Parent: 0 });
+  });
+
+  test("a plan IS judged by the byte budget, and the refusal says it is the plan", async () => {
+    const profiled = await openProfiled();
+    engine.planNodesPerRoot = 400;
+
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 512 }), "estimate-plan");
+
+    await expect(rejection).rejects.toThrow(/could not hold this query plan/);
+  });
+
+  test("a data result of the same size is still refused as a row budget, so the exemption is the MODE and not the size", async () => {
+    const profiled = await openProfiled();
+    engine.rows = Array.from({ length: 50 }, (_row, index) => ({ n: index }));
+
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultRows: 3 }));
+
+    await expect(rejection).rejects.toThrow(/exceeded the row budget/);
+  });
+
+  test("a statement the deadline ended says so, rather than reporting the driver's word for any cancel", async () => {
+    const profiled = await openProfiled();
+    engine.hangs.add(READ_SELECT.sql);
+
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ statementTimeoutMs: 15 }));
+
+    // tedious words every cancel "Canceled.", including a user pressing stop, and a model
+    // handed that alone has nothing to repair.
+    await expect(rejection).rejects.toThrow(/exceeded its time budget: the statement was cancelled after 15 ms/);
+  });
+
   test("an admitted read that returns nothing answers no fields, and the declared types travel when the driver sends them", async () => {
     const profiled = await openProfiled();
     engine.rows = [];
@@ -4985,6 +5087,41 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
     expect(engine.events.indexOf("begin")).toBeLessThan(engine.events.indexOf("cancelled"));
   });
 
+  /**
+   * A serialised read is a pure read and was admitted for exactly that reason, and it is
+   * the one shape whose row count cannot be bounded: `FOR JSON` and `FOR XML` turn the
+   * rows the statement produced into ONE result row, so `SET ROWCOUNT` cuts the rows
+   * UNDERNEATH the serialiser and the document that comes back is complete-looking and
+   * short.
+   *
+   * Measured against the live engine with the budget's 200-row cap:
+   * `SELECT TOP 5000 SalesOrderID, OrderQty FROM Sales.SalesOrderDetail FOR JSON PATH`
+   * returned ONE row of well-formed JSON holding 201 objects, and `FOR XML PATH` returned
+   * 201 `<row>` elements. Both parse. Neither budget check can fire, because the result
+   * really is one row and 7 KB - so a model is handed 201 where the answer is 5000, and
+   * nothing anywhere says otherwise. That is a wrong answer nobody can detect, which is
+   * worse than a refusal that says what to do instead.
+   */
+  test("a serialised read is refused, because a row budget cannot bound a document", async () => {
+    const profiled = await openProfiled();
+
+    for (const serialising of [READ_JSON_SELECT, READ_XML_SELECT]) {
+      const rejection = profiled.queryReadOnly(serialising.sql, budget());
+      await expect(rejection).rejects.toThrow(/cannot bound a serialised result/);
+      // Refused BEFORE execution: the statement travelled once, compiled by the admission.
+      expect(engine.batches.filter((batch) => batch.sql === serialising.sql)).toHaveLength(1);
+    }
+  });
+
+  test("the refusal names the clause, so the model can drop it and ask for the rows", async () => {
+    const profiled = await openProfiled();
+
+    const rejection = profiled.queryReadOnly(READ_JSON_SELECT.sql, budget());
+
+    await expect(rejection).rejects.toThrow(/JSON SELECT/);
+    await expect(rejection).rejects.toThrow(/Ask for the rows themselves instead/);
+  });
+
   // -------------------------------------------------------------------------
   // Teardown: every session mode this profile sets LEAKS past the rollback
   // -------------------------------------------------------------------------
@@ -4996,9 +5133,10 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
 
     // SHOWPLAN first and on its own: while it is on, a SET is COMPILED rather than run,
     // so every reset after it would be a no-op that looked like a success.
-    expect(engine.batchesAfter(READ_SELECT.sql).slice(-4)).toEqual([
+    expect(engine.batchesAfter(READ_SELECT.sql).slice(-5)).toEqual([
       "SET SHOWPLAN_ALL OFF",
       "SET ROWCOUNT 0",
+      "SET TEXTSIZE 2147483647",
       "SET LOCK_TIMEOUT -1",
       "SET DEADLOCK_PRIORITY NORMAL",
     ]);

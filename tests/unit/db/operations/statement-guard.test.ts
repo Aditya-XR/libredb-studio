@@ -132,6 +132,47 @@ describe("inspectAgentStatement — side effects hidden inside a read-shaped sta
   });
 });
 
+/**
+ * The T-SQL locking table hints, which are the only entries in `SIDE_EFFECT_WORDS` that
+ * NOTHING else can refuse.
+ *
+ * Every other word there rides beside a control that also sees it: a data-modifying CTE
+ * is a write the database-native profile refuses on its own, and a second statement is
+ * refused by the shape scan above. A lock hint is not. Measured on SQL Server 2022 CU26,
+ * `SELECT TOP 1 … FROM Person.Person WITH (TABLOCKX, HOLDLOCK)` compiles to ONE root
+ * statement of class `SELECT`, so the provider's admission step, which asks the optimizer
+ * what the batch compiles to, admits it, and executing it took twenty `X` object locks
+ * and blocked an independent writer for the life of the agent's transaction. No isolation
+ * level refuses it either. This guard is therefore the whole boundary for these seven
+ * words, and an entry silently dropped from the set would cost the only layer that says
+ * no, so all seven are pinned one by one rather than by a representative.
+ */
+describe("inspectAgentStatement — T-SQL locking table hints", () => {
+  test.each([["TABLOCK"], ["TABLOCKX"], ["XLOCK"], ["UPDLOCK"], ["HOLDLOCK"], ["REPEATABLEREAD"], ["SERIALIZABLE"]])(
+    "denies a SELECT carrying the %s hint",
+    (hint) => {
+      expect(inspectAgentStatement(`SELECT TOP 1 BusinessEntityID FROM Person.Person WITH (${hint})`)).toBe(
+        "SIDE_EFFECT_KEYWORD",
+      );
+    },
+  );
+
+  /**
+   * The control that keeps the rule above honest, and the reason the guard reads spans
+   * instead of matching text: a hint word the statement merely CONTAINS, inside a string
+   * literal or a quoted identifier, is not the statement taking a lock. Asserted as the
+   * guard actually behaves, measured: each of these is admitted.
+   */
+  test.each([
+    ["a hint word inside a string literal", "SELECT 'holdlock' AS note FROM Person.Person"],
+    ["a hint word as a bracketed identifier", "SELECT [XLOCK] FROM Person.Person"],
+    ["a hint word as a double-quoted identifier", 'SELECT "UPDLOCK" FROM Person.Person'],
+    ["a hint word inside a line comment", "SELECT 1 -- TABLOCKX\n"],
+  ])("admits %s", (_label, sql) => {
+    expect(inspectAgentStatement(sql)).toBeNull();
+  });
+});
+
 describe("inspectAgentStatement — text with no readable statement", () => {
   test.each([
     ["only a line comment", "-- nothing here\n"],

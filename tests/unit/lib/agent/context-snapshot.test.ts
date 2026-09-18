@@ -878,6 +878,45 @@ describe("captureContextSnapshot — an environment failure on the composed path
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
     expect(capture.detail).toContain("under the execution profile a grounding read takes");
     expect(capture.detail).not.toContain("could not be decrypted");
+    // The generic sentence names no cause, so what the operator gets is that sentence AND
+    // the advice for this deny code. Asserted per code rather than by substring of a
+    // shared prefix, because the whole point of the advice is that it DIFFERS per code.
+    expect(capture.detail).toContain("both a user and a password are required");
+    expect(capture.detail).not.toMatch(/so its schema was not read for this run\.$/);
+  });
+
+  test("a profile that refuses the principal says what to do about it, in the deny code's own words", async () => {
+    // The measured case this exists for: a SQL Server connection saved as `sa`, which is
+    // how most of them are saved, is refused correctly and was reported only as "could not
+    // open a connection", which names no cause and reads like the server being down. The
+    // operator's real next step is one `CREATE LOGIN`, so the refusal has to say so.
+    //
+    // Driven on `postgres` because the advice is keyed by the DENY CODE and not by the
+    // engine: this harness's composed path needs a type whose provider declares object
+    // kinds, and choosing one changes nothing the assertions below read.
+    const h = harness("postgres");
+
+    const capture = await captureContextSnapshot({
+      ...h.context,
+      acquireProvider: async () => {
+        throw new ExecutionProfileError(
+          "the session principal holds privileges no read-only boundary can contain",
+          "PROFILE_PRIVILEGES_TOO_BROAD",
+        );
+      },
+    });
+
+    expect(capture.kind).toBe("unavailable");
+    if (capture.kind !== "unavailable") throw new Error("unreachable");
+    expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
+    expect(capture.detail).toContain("under the execution profile a grounding read takes");
+    expect(capture.detail).toContain("Point the connection's agent credential at a least-privilege principal");
+    // The generic sentence alone is not what a caller gets, and the advice is not the
+    // credential code's: a shared sentence would make both assertions above vacuous.
+    expect(capture.detail).not.toMatch(/so its schema was not read for this run\.$/);
+    expect(capture.detail).not.toContain("both a user and a password are required");
+    // The error's own message stays out of the note a run reads as the server's voice.
+    expect(capture.detail).not.toContain("the session principal holds");
   });
 
   test("anything that is not one of those two is this server's own bug, and propagates", async () => {
@@ -1268,6 +1307,9 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
     expect(capture.detail).toContain("under the execution profile a grounding read takes");
     expect(capture.detail).not.toContain("could not be decrypted");
+    // Same refusal, same advice, on the other of the two paths that catch this error.
+    expect(capture.detail).toContain("both a user and a password are required");
+    expect(capture.detail).not.toMatch(/so its schema was not read for this run\.$/);
   });
 
   test("anything that is not one of those two is this server's own bug, and propagates", async () => {

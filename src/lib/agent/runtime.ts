@@ -247,6 +247,17 @@ const AGENT_CREDENTIAL_DENY_CODES: ReadonlySet<ExecutionProfileDenyCode> = new S
 ]);
 
 /**
+ * The profile refusal that is about the database PRINCIPAL rather than about the
+ * engine or the credential field that names it.
+ *
+ * Kept beside the other set for the same reason: one error type, three things a user
+ * can do about it. This one is raised when the credential resolved and the provider
+ * exists, and the profile then refused the user it opened as, so neither of the other
+ * two labels is true of it.
+ */
+const PROFILE_PRINCIPAL_DENY_CODE: ExecutionProfileDenyCode = "PROFILE_PRIVILEGES_TOO_BROAD";
+
+/**
  * Chooses the label a user sees from the error's TYPE.
  *
  * Never from its message: that text comes from a model provider, a driver or a
@@ -269,8 +280,17 @@ function classifyDriveFailure(error: unknown): AgentRunFailureReason {
   // error on ANY engine for a credential that cannot be applied, and calling that
   // "engine unsupported" told a PostgreSQL operator something false about their
   // database while saying nothing about the credential they could fix (B47).
+  //
+  // The principal code is the third cause, split off the same way (the SQL Server
+  // work of 2026-09-18). `PROFILE_PRIVILEGES_TOO_BROAD` says the engine granted the
+  // profile and then refused the USER: `sa`, which is the only SQL Server credential
+  // this repository's own `database-compose.yml` ships, is refused by the profile
+  // while `libredb_agent` beside it is accepted. Reported as "engine unsupported",
+  // that told an operator to change engines when the fix is one CREATE LOGIN.
   if (error instanceof ExecutionProfileError) {
-    return AGENT_CREDENTIAL_DENY_CODES.has(error.reasonCode) ? "agent-credential-unusable" : "engine-unsupported";
+    if (AGENT_CREDENTIAL_DENY_CODES.has(error.reasonCode)) return "agent-credential-unusable";
+    if (error.reasonCode === PROFILE_PRINCIPAL_DENY_CODE) return "agent-principal-refused";
+    return "engine-unsupported";
   }
 
   /*

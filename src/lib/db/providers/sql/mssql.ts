@@ -1890,6 +1890,30 @@ export class MSSQLProvider extends SQLBaseProvider {
   private static readonly AGENT_ADMITTED_STATEMENT_TYPES: ReadonlySet<string> = new Set([
     "SELECT",
     "SELECT WITHOUT QUERY",
+  ]);
+
+  /**
+   * The two read classes that are REFUSED, and the only ones refused for a reason that is
+   * not about what they do to the database.
+   *
+   * `SELECT … FOR JSON` and `SELECT … FOR XML` are pure reads, and an earlier version of
+   * this list admitted them for exactly that reason. They cannot be ROW-bounded, and this
+   * profile's row bound is a server-side `SET ROWCOUNT`: the clause serialises the rows the
+   * statement produced into ONE result row, so `SET ROWCOUNT` cuts the rows UNDERNEATH the
+   * serialiser and the document that comes back is complete-looking and short.
+   *
+   * Measured on AdventureWorks2022, with the budget's 200-row cap:
+   * `SELECT TOP 5000 SalesOrderID, OrderQty FROM Sales.SalesOrderDetail FOR JSON PATH`
+   * returned ONE row holding well-formed JSON with 201 objects in it, and `FOR XML PATH`
+   * returned 201 `<row>` elements. Both parse. Neither budget check can fire, because the
+   * result really is one row and 7 KB. A model handed that document reports 201 where the
+   * answer is 5000, and nothing anywhere says otherwise.
+   *
+   * So they are refused rather than silently bounded, and the refusal names the clause so
+   * the model can drop it and ask for the rows: a wrong answer nobody can detect is worse
+   * than a refusal that says what to do instead.
+   */
+  private static readonly AGENT_SERIALISING_STATEMENT_TYPES: ReadonlySet<string> = new Set([
     "JSON SELECT",
     "XML SELECT",
   ]);
@@ -2028,6 +2052,19 @@ export class MSSQLProvider extends SQLBaseProvider {
           // full before any result-side cap can look at it. Measured: a 20-million-row
           // cross join took the Node process down with an out-of-memory crash.
           await new mssql.Request(transaction).batch(`SET ROWCOUNT ${budget.maxResultRows + 1}`);
+          // The BYTE half of the same bound, and it is server-side for the same reason the row
+          // half is: a row budget bounds how MANY rows arrive and says nothing about how big
+          // one is. Measured, `SELECT REPLICATE(CAST('a' AS varchar(max)), 700000000)` is one
+          // row of one column that the optimizer classifies as a plain read, and it arrives in
+          // full before any result-side cap can look at it.
+          //
+          // One MORE byte than the budget allows, exactly as the row bound takes one more row:
+          // `SET TEXTSIZE` TRUNCATES rather than refusing, so the `+ 1` is what makes a
+          // truncation detectable instead of silent. It is detectable through the cap that
+          // follows rather than by inspecting values: a value the server cut is
+          // `maxResultBytes + 1` bytes on its own, which already exceeds the whole result's
+          // byte budget, so the refusal below fires for every truncation there can be.
+          await new mssql.Request(transaction).batch(`SET TEXTSIZE ${budget.maxResultBytes + 1}`);
           return await this.runWithDeadline(transaction, sql, budget.statementTimeoutMs);
         } catch (error) {
           throw error instanceof QueryError ? error : mapDatabaseError(error, "mssql", sql);
@@ -2053,7 +2090,20 @@ export class MSSQLProvider extends SQLBaseProvider {
       });
 
       const recordset = result.recordset || [];
-      if (recordset.length > budget.maxResultRows) {
+      // The ROW budget bounds DATA rows, and a plan's rows are not data: they are the
+      // optimizer's nodes, one per operator. Measured on AdventureWorks2022, an ordinary
+      // `SELECT TOP 10 *` over one shipped view compiles to 170 of them and the same view
+      // unioned with itself to 340, so judging a plan by a 200-row DATA budget refuses the
+      // plans an optimization run exists to read - and refuses them with a sentence about
+      // row counts, which sends a model to narrow a statement that was never wide.
+      // PostgreSQL never meets this because its `EXPLAIN (FORMAT JSON)` is ONE row whatever
+      // the plan holds; the difference is the shape of the answer, not the size of it.
+      //
+      // `SET ROWCOUNT` cannot help here either way: measured, it does not bound SHOWPLAN
+      // output at all (340 rows with `SET ROWCOUNT 50`), so a plan is bounded by the
+      // statement's own complexity and then by the byte cap below, which is exactly how
+      // PostgreSQL's one-row plan is bounded.
+      if (mode !== "estimate-plan" && recordset.length > budget.maxResultRows) {
         throw new QueryError(
           `Read-only execution exceeded the row budget: ${recordset.length} rows > ${budget.maxResultRows} allowed`,
           "mssql",
@@ -2063,7 +2113,9 @@ export class MSSQLProvider extends SQLBaseProvider {
       const resultBytes = measureResultBytes(recordset as unknown[]);
       if (resultBytes > budget.maxResultBytes) {
         throw new QueryError(
-          `Read-only execution exceeded the byte budget: ${resultBytes} bytes > ${budget.maxResultBytes} allowed`,
+          mode === "estimate-plan"
+            ? `Read-only execution could not hold this query plan: ${resultBytes} bytes > ${budget.maxResultBytes} allowed. The plan is this statement's own shape, so a narrower statement is what makes it readable.`
+            : `Read-only execution exceeded the byte budget: ${resultBytes} bytes > ${budget.maxResultBytes} allowed`,
           "mssql",
           sql,
         );
@@ -2169,9 +2221,24 @@ export class MSSQLProvider extends SQLBaseProvider {
     deadlineMs: number,
   ): Promise<mssql.IResult> {
     const request = new mssql.Request(transaction);
-    const deadline = setTimeout(() => request.cancel(), deadlineMs);
+    // The timer records that IT fired, because tedious words every cancel the same way:
+    // a statement this deadline ended arrives as `Canceled.`, which is also what a user
+    // pressing stop produces, and a model told only that is given nothing to repair. The
+    // flag is what lets the refusal name the budget it overran.
+    let deadlineFired = false;
+    const deadline = setTimeout(() => {
+      deadlineFired = true;
+      request.cancel();
+    }, deadlineMs);
     try {
       return await request.batch(sql);
+    } catch (error) {
+      if (!deadlineFired) throw error;
+      throw new QueryError(
+        `Read-only execution exceeded its time budget: the statement was cancelled after ${deadlineMs} ms`,
+        "mssql",
+        sql,
+      );
     } finally {
       clearTimeout(deadline);
     }
@@ -2193,10 +2260,17 @@ export class MSSQLProvider extends SQLBaseProvider {
       // with ENOTBEGUN while the connection still carries the mode.
       await new mssql.Request(transaction).batch("SET SHOWPLAN_ALL OFF");
       await new mssql.Request(transaction).batch("SET ROWCOUNT 0");
+      // The driver's own default, read back from a fresh session rather than assumed: tedious
+      // opens at `@@TEXTSIZE` 2147483647, measured, so this is a restore and not a widening.
+      await new mssql.Request(transaction).batch("SET TEXTSIZE 2147483647");
       await new mssql.Request(transaction).batch("SET LOCK_TIMEOUT -1");
       await new mssql.Request(transaction).batch("SET DEADLOCK_PRIORITY NORMAL");
       return true;
-    } catch {
+    } catch (error) {
+      // The caller answers this by ending the pool, which is a loud enough event that the
+      // reason must not be the one thing nobody can see. An operator reading "the agent's
+      // pool keeps restarting" has no other place to learn why.
+      console.error("[MSSQL] Read-only session reset failed; ending the pool:", error);
       return false;
     }
   }
@@ -2232,6 +2306,14 @@ export class MSSQLProvider extends SQLBaseProvider {
       );
     }
     const classes = roots.map((row) => String(row.Type));
+    const serialising = classes.filter((type) => MSSQLProvider.AGENT_SERIALISING_STATEMENT_TYPES.has(type));
+    if (serialising.length > 0) {
+      throw new QueryError(
+        `Read-only execution cannot bound a serialised result: SQL Server compiled this as ${serialising.join(", ")}, and the row budget would silently cut the rows underneath the FOR JSON or FOR XML clause. Ask for the rows themselves instead.`,
+        "mssql",
+        sql,
+      );
+    }
     const refused = classes.filter(
       (type) =>
         !MSSQLProvider.AGENT_ADMITTED_STATEMENT_TYPES.has(type) && type !== MSSQLProvider.AGENT_MODULE_BODY_TYPE,
