@@ -118,7 +118,12 @@ export async function proxy(request: NextRequest) {
     pathname.startsWith("/_next") ||
     isStaticAsset ||
     pathname === "/favicon.ico" ||
-    // Health check endpoint for load balancers (Render, K8s, etc.)
+    // Health check endpoints for load balancers (Render, K8s, etc.). Three paths, because
+    // an operator reaches for whichever one their platform's form defaults to, and a health
+    // path that answers with a redirect to the login screen reads as healthy to any check
+    // that follows redirects (#909).
+    pathname === "/health" ||
+    pathname === "/api/health" ||
     pathname === "/api/db/health" ||
     // Storage config endpoint (public, returns only mode info)
     pathname === "/api/storage/config"
