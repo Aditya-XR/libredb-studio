@@ -292,7 +292,12 @@ export function CodeGenerator({ isOpen, onClose, tablePath, tableSchema, databas
             <span className="text-xs text-fg-muted font-mono">{tableName}</span>
             {databaseType && <span className="text-xs text-fg-subtle font-mono uppercase">{databaseType}</span>}
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-fill text-fg-muted">
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            title="Close"
+            className="p-1 rounded hover:bg-fill text-fg-muted"
+          >
             <X strokeWidth={1.5} className="w-3.5 h-3.5" />
           </button>
         </div>

@@ -220,7 +220,12 @@ export function QuerySafetyDialog({
             <ShieldAlert strokeWidth={1.5} className="w-3.5 h-3.5 text-warning" />
             <span className="text-xs font-medium text-fg">Query Safety Check</span>
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-fill text-fg-muted">
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            title="Close"
+            className="p-1 rounded hover:bg-fill text-fg-muted"
+          >
             <X strokeWidth={1.5} className="w-3.5 h-3.5" />
           </button>
         </div>

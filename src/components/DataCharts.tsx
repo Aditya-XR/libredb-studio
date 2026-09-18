@@ -901,6 +901,8 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
                           e.stopPropagation();
                           deleteSavedChart(chart.id);
                         }}
+                        aria-label="Delete chart"
+                        title="Delete chart"
                         className="text-fg-subtle hover:text-danger"
                       >
                         <X strokeWidth={1.5} className="w-3 h-3" />

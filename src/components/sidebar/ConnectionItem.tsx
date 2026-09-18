@@ -143,6 +143,8 @@ export const ConnectionItem = React.memo(function ConnectionItem({
         {!conn.managed && onEdit && (
           <button
             className="p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-brand-tint/20 hover:text-brand"
+            aria-label="Edit connection"
+            title="Edit connection"
             onClick={(e) => {
               e.stopPropagation();
               onEdit(conn);
@@ -167,6 +169,8 @@ export const ConnectionItem = React.memo(function ConnectionItem({
         {!conn.managed && (
           <button
             className="p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-danger-tint/20 hover:text-danger"
+            aria-label="Delete connection"
+            title="Delete connection"
             onClick={(e) => {
               e.stopPropagation();
               onDelete(conn.id);
