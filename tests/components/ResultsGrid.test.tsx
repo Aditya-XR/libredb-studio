@@ -928,6 +928,29 @@ describe("ResultsGrid", () => {
       expect(container.textContent).toContain("alice@example.com");
     });
 
+    test("a reveal follows its row through a filter, not the position it sat at", () => {
+      // A revealed cell is keyed by its position, and the table iterates the FILTERED
+      // rows - so revealing Alice's email and then filtering down to Charlie handed
+      // Charlie's row the key Alice's reveal wrote, and a sensitive value nobody asked
+      // for was on screen unmasked. Same addressing defect as the pending-change one
+      // above it, and this half of it crosses the masking boundary.
+      setupMasking();
+
+      const { container } = render(React.createElement(ResultsGrid, maskingProps));
+
+      fireEvent.click(container.querySelectorAll('button[title="Reveal value (10s)"]')[0]);
+      expect(container.textContent).toContain("alice@example.com");
+
+      const filterButtons = container.querySelectorAll('button[title="Filter column"]');
+      fireEvent.click(filterButtons[1]);
+      fireEvent.change(container.querySelector('input[placeholder="Filter name..."]')!, {
+        target: { value: "Charlie" },
+      });
+
+      expect(container.textContent).not.toContain("charlie@example.com");
+      expect(container.textContent).toContain("***");
+    });
+
     test("revealed cell auto-hides after timeout", () => {
       setupMasking();
 

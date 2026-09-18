@@ -452,7 +452,11 @@ export function ResultsGrid({
 
         // Apply masking if enabled
         const sensitivePattern = sensitiveColumns.get(column.id);
-        const cellKey = `${row.index}:${column.id}`;
+        // Addressed through the map for the same reason a pending change is: a reveal
+        // keyed by the filtered position was handed to whichever row later sat there, so
+        // changing a filter inside the 10s window put another row's sensitive value on
+        // screen unmasked.
+        const cellKey = `${sourceIndex}:${column.id}`;
         const isRevealed = revealedCells.has(cellKey);
 
         if (effectiveMaskingEnabled && sensitivePattern && val !== null && val !== undefined && !isRevealed) {
