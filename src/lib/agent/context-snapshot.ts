@@ -972,6 +972,8 @@ function displayName(object: AgentInventoryObject): string {
 const PROFILE_REFUSAL_ADVICE: Readonly<Record<ExecutionProfileDenyCode, string>> = Object.freeze({
   PROFILE_PRIVILEGES_TOO_BROAD:
     "The connection's own user holds privileges no read-only boundary can contain, so the profile refused it rather than run as that user. Point the connection's agent credential at a least-privilege principal, or connect as one.",
+  PROFILE_PRIVILEGES_TOO_NARROW:
+    "The user this connection would run the agent as is missing a privilege the read-only boundary itself needs, so the profile refused it rather than run without that layer. Grant the missing privilege named in the server log to that user; this is the opposite repair to the one above, and the two are separate codes for that reason.",
   PROFILE_UNSUPPORTED_BY_PROVIDER:
     "This engine has no database-native read-only statement path, so the profile cannot be granted on it at all.",
   PROFILE_UNSUPPORTED_TARGET: "This engine can grant the profile, but not against this target.",

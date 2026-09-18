@@ -255,7 +255,10 @@ const AGENT_CREDENTIAL_DENY_CODES: ReadonlySet<ExecutionProfileDenyCode> = new S
  * exists, and the profile then refused the user it opened as, so neither of the other
  * two labels is true of it.
  */
-const PROFILE_PRINCIPAL_DENY_CODE: ExecutionProfileDenyCode = "PROFILE_PRIVILEGES_TOO_BROAD";
+const PROFILE_PRINCIPAL_DENY_CODES: ReadonlySet<ExecutionProfileDenyCode> = new Set<ExecutionProfileDenyCode>([
+  "PROFILE_PRIVILEGES_TOO_BROAD",
+  "PROFILE_PRIVILEGES_TOO_NARROW",
+]);
 
 /**
  * Chooses the label a user sees from the error's TYPE.
@@ -281,15 +284,22 @@ function classifyDriveFailure(error: unknown): AgentRunFailureReason {
   // "engine unsupported" told a PostgreSQL operator something false about their
   // database while saying nothing about the credential they could fix (B47).
   //
-  // The principal code is the third cause, split off the same way (the SQL Server
-  // work of 2026-09-18). `PROFILE_PRIVILEGES_TOO_BROAD` says the engine granted the
-  // profile and then refused the USER: `sa`, which is the only SQL Server credential
-  // this repository's own `database-compose.yml` ships, is refused by the profile
-  // while `libredb_agent` beside it is accepted. Reported as "engine unsupported",
-  // that told an operator to change engines when the fix is one CREATE LOGIN.
+  // The principal codes are the third cause, split off the same way (the SQL Server
+  // work of 2026-09-18). They say the engine granted the profile and then refused the
+  // USER: `sa`, which is the only SQL Server credential this repository's own
+  // `database-compose.yml` ships, is refused by the profile while `libredb_agent`
+  // beside it is accepted. Reported as "engine unsupported", that told an operator to
+  // change engines when the fix is one CREATE LOGIN.
+  //
+  // TWO codes and one label, deliberately. A principal can be refused for holding too
+  // much or for holding too little - SQL Server's admission step needs `SHOWPLAN`, so a
+  // plain reader cannot be admitted - and the REPAIRS are opposite, which is why they are
+  // separate codes carrying opposite advice (`PROFILE_REFUSAL_ADVICE`). What a RUN ended
+  // as is the same fact either way: this connection's user is not one the profile will
+  // run as, which is what this label says and all it says.
   if (error instanceof ExecutionProfileError) {
     if (AGENT_CREDENTIAL_DENY_CODES.has(error.reasonCode)) return "agent-credential-unusable";
-    if (error.reasonCode === PROFILE_PRINCIPAL_DENY_CODE) return "agent-principal-refused";
+    if (PROFILE_PRINCIPAL_DENY_CODES.has(error.reasonCode)) return "agent-principal-refused";
     return "engine-unsupported";
   }
 

@@ -1968,7 +1968,11 @@ export class MSSQLProvider extends SQLBaseProvider {
     if (row?.showplan !== 1) {
       throw new ExecutionProfileError(
         "The agent read-only execution profile requires SHOWPLAN on this database: the profile admits a statement by asking the optimizer to compile it without running it, and a principal that cannot ask for a plan cannot be admitted. GRANT SHOWPLAN TO <agent principal>.",
-        "PROFILE_PRIVILEGES_TOO_BROAD",
+        // NOT the too-broad code beside it, and the difference is the whole point of the
+        // pair: this principal is too NARROW, and the two are repaired in opposite
+        // directions. Under one code the advice a run reports told an operator whose agent
+        // principal simply lacked one grant to narrow it instead.
+        "PROFILE_PRIVILEGES_TOO_NARROW",
       );
     }
   }

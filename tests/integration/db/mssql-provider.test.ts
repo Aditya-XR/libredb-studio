@@ -4789,6 +4789,26 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
     const rejection = provider.connect();
     await expect(rejection).rejects.toThrow(ExecutionProfileError);
     await expect(rejection).rejects.toThrow(/requires SHOWPLAN on this database/);
+    // NOT the too-broad code: this principal holds too LITTLE, and the two are repaired in
+    // opposite directions. Under one code the advice a run reports told an operator whose
+    // agent principal simply lacked one grant to narrow it instead.
+    const denied = await rejection.then(
+      () => null,
+      (error: unknown) => error as ExecutionProfileError,
+    );
+    expect(denied?.reasonCode).toBe("PROFILE_PRIVILEGES_TOO_NARROW");
+  });
+
+  test("a principal holding too MUCH carries the other code, so the pair cannot collapse", async () => {
+    engine.principalAnswers.set("IS_SRVROLEMEMBER('sysadmin')", 1);
+    provider = new MSSQLProvider(baseConfig, {}, { readOnly: true });
+
+    const denied = await provider.connect().then(
+      () => null,
+      (error: unknown) => error as ExecutionProfileError,
+    );
+
+    expect(denied?.reasonCode).toBe("PROFILE_PRIVILEGES_TOO_BROAD");
   });
 
   test("a server that answers the probe with no row at all is refused, not trusted", async () => {
