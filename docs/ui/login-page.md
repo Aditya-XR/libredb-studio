@@ -150,7 +150,10 @@ generic error:
 are generated at boot and the admin password is printed once to the server
 log instead of the 503 above; see [DISTRIBUTION.md](../DISTRIBUTION.md) for
 the full behavior. Set `AUTH_BOOTSTRAP=off` to disable generation and exercise
-the 503 path with explicit credentials.
+the 503 path with explicit credentials — except for a missing `JWT_SECRET` in
+production, where the server now refuses to boot rather than start and answer
+every login 503 (#908). Outside production the 503 path is unchanged, and so is
+the one for a missing `ADMIN_PASSWORD`.
 
 ---
 
@@ -196,7 +199,7 @@ The login page follows the app's premium dark aesthetic:
 |----------|---------|-----------------|
 | `NEXT_PUBLIC_AUTH_PROVIDER` | `local` | `"oidc"` → SSO button, `"local"` → email/password form |
 | `NEXT_PUBLIC_APP_VERSION` | — | Displayed in footer as `v{version}` |
-| `AUTH_BOOTSTRAP` | on | `off`/`false`/`0` (case-insensitive) disables zero-config credential generation, so a missing `ADMIN_PASSWORD`/`JWT_SECRET` surfaces the 503 error above instead |
+| `AUTH_BOOTSTRAP` | on | `off`/`false`/`0` (case-insensitive) disables zero-config credential generation — and secret generation with it. A missing `ADMIN_PASSWORD` then surfaces the 503 error above; a missing `JWT_SECRET` stops the server at boot in production, because nothing would produce one and every login would be 503 |
 
 ---
 
