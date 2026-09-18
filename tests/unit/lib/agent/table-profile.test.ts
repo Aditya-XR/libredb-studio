@@ -680,3 +680,65 @@ describe("the SQL Server arm of the composition", () => {
     expect(profile?.findings).toEqual([]);
   });
 });
+
+/**
+ * The declared type is what a person reads and the BASE type is what a reader decides on,
+ * and on SQL Server they differ for every alias type. Measured on AdventureWorks2022:
+ * `Person.PersonPhone.PhoneNumber` is declared `Phone` over `nvarchar`, and the provider's
+ * own object read reports the declared name, so this is the path `profile_table` actually
+ * takes - the catalog composer's own base-type projection feeds `inspect_schema` and never
+ * reaches here.
+ */
+describe("composeTableProfile - an alias type is decided on by what it is built on", () => {
+  const aliasText = (): ColumnSchema => ({
+    name: "PhoneNumber",
+    type: "Phone",
+    baseType: "nvarchar",
+    nullable: true,
+    isPrimary: false,
+  });
+
+  test("an alias over a text type still gets its shape tests", () => {
+    const sql = composeTableProfile("mssql", { segments: ["Person", "PersonPhone"], depth: "pattern" }, [aliasText()]);
+
+    expect(sql).toContain("LIKE '%_@_%._%'");
+    expect(sql).toContain(`LIKE '%${"[0-9]".repeat(9)}%'`);
+  });
+
+  test("the declared name alone is not enough, which is what the base type is for", () => {
+    const { baseType: _dropped, ...declaredOnly } = aliasText();
+
+    const sql = composeTableProfile("mssql", { segments: ["Person", "PersonPhone"], depth: "pattern" }, [declaredOnly]);
+
+    // `Phone` matches no spelling this module knows, so nothing can fire for it.
+    expect(sql).not.toContain("LIKE '%_@_%._%'");
+  });
+
+  test("an alias over an uncountable type is left out whole, as the base type is", () => {
+    const column: ColumnSchema = { name: "body", type: "Article", baseType: "text", nullable: true, isPrimary: false };
+
+    const sql = composeTableProfile("mssql", { segments: ["dbo", "t"], depth: "basic" }, [column]);
+
+    expect(sql).not.toContain("[body]");
+    expect(sql).toContain("count(*) AS row_count");
+  });
+
+  test("an alias over an incomparable type keeps its presence and loses its distinct count", () => {
+    const column: ColumnSchema = { name: "doc", type: "Payload", baseType: "xml", nullable: true, isPrimary: false };
+
+    const sql = composeTableProfile("mssql", { segments: ["dbo", "t"], depth: "distribution" }, [column]);
+
+    expect(sql).toContain("count([doc]) AS present_0");
+    expect(sql).not.toContain("count(DISTINCT [doc])");
+  });
+
+  test("an engine that draws no such distinction is unchanged, because the field is absent there", () => {
+    const column: ColumnSchema = { name: "note", type: "text", nullable: true, isPrimary: false };
+
+    const sql = composeTableProfile("postgres", { segments: ["public", "t"], depth: "pattern" }, [column]);
+
+    // PostgreSQL's own `text` is its ordinary string type: it is counted, and it is shaped.
+    expect(sql).toContain('count("note") AS present_0');
+    expect(sql).toContain("LIKE '%_@_%._%'");
+  });
+});

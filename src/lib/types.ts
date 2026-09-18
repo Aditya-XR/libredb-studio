@@ -289,6 +289,24 @@ export interface ForeignKeySchema {
 export interface ColumnSchema {
   name: string;
   type: string;
+  /**
+   * The type this column's declared type is BUILT ON, where the engine distinguishes the
+   * two, and absent where it does not.
+   *
+   * SQL Server alias types are why it exists. `Person.PersonPhone.PhoneNumber` is declared
+   * `Phone`, which is an alias over `nvarchar`, and `Person.Person.FirstName` is `Name` over
+   * the same: the alias is what a person wants to SEE, and it is what `type` carries and
+   * what the object browser renders. It is not what a reader can DECIDE on. Anything that
+   * matches a declared type against a spelling it knows - which columns get a text shape
+   * test, which cannot be counted, which have no equality operator - is matching a name the
+   * schema's author invented, and it silently matches nothing.
+   *
+   * So a provider that can tell the two apart reports both, and a reader that is deciding
+   * rather than displaying prefers this one. Optional because most engines have no such
+   * distinction, and there an absent field is the honest answer rather than a copy of
+   * `type` that would claim a provider had looked.
+   */
+  baseType?: string;
   nullable: boolean;
   isPrimary: boolean;
   defaultValue?: string;

@@ -252,7 +252,23 @@ function quoteTarget(dialect: DatabaseType, segments: readonly string[]): string
   return segments.map((segment) => quoteIdentifier(assertProfileTable(segment), dialect)).join(".");
 }
 
-const isTextual = (column: ColumnSchema): boolean => TEXTUAL_TYPE.test(column.type);
+/**
+ * The spelling a TYPE TEST must match against, which is not always the declared one.
+ *
+ * SQL Server alias types are why: `Person.PersonPhone.PhoneNumber` is declared `Phone`,
+ * an alias over `nvarchar`, and `Person.Person.FirstName` is `Name` over the same. The
+ * declared name is what a person wants to see and what `type` carries; it is a name the
+ * schema's author invented, so every regex below would match nothing against it, and the
+ * one column in that table the PII shapes exist to find got no shape test at all. Worse,
+ * an alias over `text` would slip past `UNCOUNTABLE_TYPE` and fail the whole table's
+ * profile with Msg 8117.
+ *
+ * `baseType` is the provider's answer to that, absent wherever an engine draws no such
+ * distinction, so this falls back to the declared type and every other engine is unchanged.
+ */
+const decidableType = (column: ColumnSchema): string => column.baseType ?? column.type;
+
+const isTextual = (column: ColumnSchema): boolean => TEXTUAL_TYPE.test(decidableType(column));
 
 /**
  * Declared types with no equality operator, so `count(DISTINCT …)` refuses them.
@@ -289,7 +305,7 @@ const INCOMPARABLE_TYPE: Readonly<Record<ProfileDialect, RegExp>> = Object.freez
 });
 
 const isComparable = (column: ColumnSchema, dialect: ProfileDialect): boolean =>
-  !INCOMPARABLE_TYPE[dialect].test(column.type);
+  !INCOMPARABLE_TYPE[dialect].test(decidableType(column));
 
 /**
  * Declared types the engine refuses to COUNT at all, so the column is left out whole.
@@ -316,7 +332,7 @@ const UNCOUNTABLE_TYPE: Readonly<Partial<Record<ProfileDialect, RegExp>>> = Obje
 
 const isCountable = (column: ColumnSchema, dialect: ProfileDialect): boolean => {
   const refused = UNCOUNTABLE_TYPE[dialect];
-  return refused === undefined || !refused.test(column.type);
+  return refused === undefined || !refused.test(decidableType(column));
 };
 
 /**

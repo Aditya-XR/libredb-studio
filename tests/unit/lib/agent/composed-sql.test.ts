@@ -1305,8 +1305,23 @@ describe("composeCatalogRead — SQL Server columns", () => {
   test("reports each column's BASE type, because an alias type is invisible to everything that reads it", () => {
     const sql = composeCatalogRead("mssql", {});
 
-    expect(sql).toContain("TYPE_NAME(c.system_type_id) AS [type]");
-    expect(sql).not.toContain("user_type_id");
+    expect(sql).toContain("COALESCE(TYPE_NAME(c.system_type_id), TYPE_NAME(c.user_type_id)) AS [type]");
+  });
+
+  /**
+   * The base spelling alone is NULL for the system CLR types, which all share
+   * `system_type_id` 240: measured, `Person.Address.SpatialLocation` answers NULL for the
+   * base and `geography` for the alias, and `Production.Document.DocumentNode` the same
+   * with `hierarchyid`. `FOR JSON PATH` omits a NULL property, so such a column would reach
+   * the snapshot with NO type, and a column with no type matches none of table-profile's
+   * exclusions: `count(DISTINCT [SpatialLocation])` would be composed and the whole table's
+   * profile would fail with Msg 8117.
+   */
+  test("falls back to the type's own name where there is no base type, which is every CLR type", () => {
+    const sql = composeCatalogRead("mssql", {});
+
+    expect(sql).toContain("COALESCE(TYPE_NAME(c.system_type_id), TYPE_NAME(c.user_type_id))");
+    expect(sql).not.toContain("TYPE_NAME(c.user_type_id) AS [type]");
   });
 
   test("trims the padded char(2) kind, so 'U ' and 'U' are not two kinds", () => {

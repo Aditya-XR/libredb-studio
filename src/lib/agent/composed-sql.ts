@@ -821,6 +821,16 @@ const MSSQL_SCHEMA_EXCLUSION = "s.name NOT IN ('sys', 'INFORMATION_SCHEMA')";
  * spelling is also the more useful of the two to a model writing SQL, which is what this
  * inventory is for; the object browser reads its own catalog and still shows the alias.
  *
+ * COALESCE'd, because `system_type_id` alone is NULL for the system CLR types. They all
+ * share id 240 and `TYPE_NAME(240)` answers NULL: measured, `Person.Address.SpatialLocation`
+ * answers NULL for the base and `geography` for the alias, and `Production.Document.DocumentNode`
+ * the same with `hierarchyid`. `FOR JSON PATH` omits a NULL property, so those columns would
+ * have reached the snapshot with NO type at all, and a column with no type matches none of
+ * `table-profile.ts`'s exclusions: `count(DISTINCT [SpatialLocation])` would then be composed
+ * and the whole table's profile would fail with Msg 8117, "Operand data type geography is
+ * invalid for count operator". So the base spelling where there is one, and the type's own
+ * name where the base is NULL.
+ *
  * `sys.objects` rather than `INFORMATION_SCHEMA.TABLES`, for the reason the provider
  * gives for its own reads: `INFORMATION_SCHEMA` is permission-filtered in a way that
  * silently drops rows, and `is_ms_shipped` has no counterpart there at all.
@@ -828,7 +838,7 @@ const MSSQL_SCHEMA_EXCLUSION = "s.name NOT IN ('sys', 'INFORMATION_SCHEMA')";
 function composeMssqlCatalog(selector: AgentCatalogSelector): string {
   return (
     "SELECT s.name AS table_schema, o.name AS table_name, RTRIM(o.type) AS relkind, " +
-    "(SELECT c.name AS [name], TYPE_NAME(c.system_type_id) AS [type], " +
+    "(SELECT c.name AS [name], COALESCE(TYPE_NAME(c.system_type_id), TYPE_NAME(c.user_type_id)) AS [type], " +
     "CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END AS [nullable] " +
     "FROM sys.columns c WHERE c.object_id = o.object_id ORDER BY c.column_id FOR JSON PATH) AS columns " +
     "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id " +

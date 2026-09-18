@@ -718,7 +718,7 @@ function sourceTriggerSql(database: string, bySchema: boolean): string {
  */
 function objectColumnsSql(database: string): string {
   return `
-        SELECT c.name AS name, ty.name AS data_type, c.is_nullable, dc.definition AS default_definition
+        SELECT c.name AS name, ty.name AS data_type, TYPE_NAME(c.system_type_id) AS base_type, c.is_nullable, dc.definition AS default_definition
         FROM ${database}.sys.columns c
         JOIN ${database}.sys.objects o ON o.object_id = c.object_id
         JOIN ${database}.sys.schemas s ON s.schema_id = o.schema_id
@@ -855,7 +855,7 @@ function bulkDetailSql(
   const described = describedSql(database, types, bySchema, bounded);
   return {
     columns: `${described}
-        SELECT d.object_id, c.name AS name, ty.name AS data_type, c.is_nullable, dc.definition AS default_definition
+        SELECT d.object_id, c.name AS name, ty.name AS data_type, TYPE_NAME(c.system_type_id) AS base_type, c.is_nullable, dc.definition AS default_definition
         FROM described d
         JOIN ${database}.sys.columns c ON c.object_id = d.object_id
         JOIN ${database}.sys.types ty ON ty.user_type_id = c.user_type_id
@@ -937,6 +937,14 @@ interface TriggerRow {
 interface ColumnRow {
   name: string;
   data_type: string;
+  /**
+   * `TYPE_NAME(system_type_id)`: the type the declared one is BUILT ON, which for an alias
+   * type is not the declared name. NULL for the system CLR types, which all share
+   * `system_type_id` 240 - measured, `Person.Address.SpatialLocation` answers NULL for the
+   * base and `geography` for the declared name - so the reader falls back rather than
+   * reporting an absence it would have to invent.
+   */
+  base_type: string | null;
   is_nullable: boolean;
   default_definition: string | null;
 }
@@ -1421,7 +1429,10 @@ function objectDetailFromRows(path: readonly string[], schema: string, rows: Det
   const primaryKey = new Set(rows.primaryKey.map((row) => row.name));
   const columns: ColumnSchema[] = rows.columns.map((row) => ({
     name: row.name,
+    // What a person reads is the DECLARED type, alias and all: SSMS shows `Phone`, and so
+    // does this browser. What a reader DECIDES on is `baseType` - see `ColumnSchema`.
     type: row.data_type,
+    ...(row.base_type === null || row.base_type === row.data_type ? {} : { baseType: row.base_type }),
     nullable: row.is_nullable,
     isPrimary: primaryKey.has(row.name),
     defaultValue: row.default_definition ?? undefined,
@@ -2037,7 +2048,7 @@ export class MSSQLProvider extends SQLBaseProvider {
           // write, SQL Server chooses this session as the victim.
           await new mssql.Request(transaction).batch("SET DEADLOCK_PRIORITY LOW");
 
-          const plan = await this.admitReadStatement(transaction, sql);
+          const plan = await this.admitReadStatement(transaction, sql, budget.statementTimeoutMs);
           MSSQLProvider.assertSingleReadStatement(plan, sql);
           await this.assertPlanModeIsOff(transaction, sql);
 
@@ -2051,7 +2062,9 @@ export class MSSQLProvider extends SQLBaseProvider {
           // "the server cut it off". Without it an unbounded read is materialised in
           // full before any result-side cap can look at it. Measured: a 20-million-row
           // cross join took the Node process down with an out-of-memory crash.
-          await new mssql.Request(transaction).batch(`SET ROWCOUNT ${budget.maxResultRows + 1}`);
+          await new mssql.Request(transaction).batch(
+            `SET ROWCOUNT ${MSSQLProvider.sessionCeiling(budget.maxResultRows)}`,
+          );
           // The BYTE half of the same bound, and it is server-side for the same reason the row
           // half is: a row budget bounds how MANY rows arrive and says nothing about how big
           // one is. Measured, `SELECT REPLICATE(CAST('a' AS varchar(max)), 700000000)` is one
@@ -2064,8 +2077,11 @@ export class MSSQLProvider extends SQLBaseProvider {
           // follows rather than by inspecting values: a value the server cut is
           // `maxResultBytes + 1` bytes on its own, which already exceeds the whole result's
           // byte budget, so the refusal below fires for every truncation there can be.
-          await new mssql.Request(transaction).batch(`SET TEXTSIZE ${budget.maxResultBytes + 1}`);
-          return await this.runWithDeadline(transaction, sql, budget.statementTimeoutMs);
+          const valueCeiling = MSSQLProvider.sessionCeiling(budget.maxResultBytes);
+          await new mssql.Request(transaction).batch(`SET TEXTSIZE ${valueCeiling}`);
+          const executed = await this.runWithDeadline(transaction, sql, budget.statementTimeoutMs);
+          MSSQLProvider.assertNoValueWasCut(executed, valueCeiling, sql);
+          return executed;
         } catch (error) {
           throw error instanceof QueryError ? error : mapDatabaseError(error, "mssql", sql);
         } finally {
@@ -2146,12 +2162,20 @@ export class MSSQLProvider extends SQLBaseProvider {
    * the session in plan-emitting mode. Measured: the OFF succeeds after such a
    * failure and the next borrow of the connection is clean.
    */
-  private async admitReadStatement(transaction: mssql.Transaction, sql: string): Promise<mssql.IResult> {
+  private async admitReadStatement(
+    transaction: mssql.Transaction,
+    sql: string,
+    deadlineMs: number,
+  ): Promise<mssql.IResult> {
     await new mssql.Request(transaction).batch("SET SHOWPLAN_ALL ON");
     let compiled: mssql.IResult | undefined;
     let compileError: unknown;
     try {
-      compiled = await new mssql.Request(transaction).batch(sql);
+      // Under the SAME deadline as the execution, because compiling is not free: the
+      // optimizer takes locks of its own on the objects it resolves, and a candidate whose
+      // compilation blocks would otherwise sit on the pinned connection unbounded while
+      // every other layer waited behind it.
+      compiled = await this.runWithDeadline(transaction, sql, deadlineMs);
     } catch (error) {
       compileError = error;
     }
@@ -2173,6 +2197,54 @@ export class MSSQLProvider extends SQLBaseProvider {
     if (compileError !== undefined) throw compileError;
     // Non-null: the only path that leaves it unset is the one that just threw.
     return compiled!;
+  }
+
+  /**
+   * `SET ROWCOUNT` and `SET TEXTSIZE` both take a SIGNED 32-BIT integer, and the budget does
+   * not: `assertReadOnlyBudget` admits anything up to `Number.MAX_SAFE_INTEGER`. Measured,
+   * `SET ROWCOUNT 9007199254740991` answers "The integer value 9007199254740991 is out of
+   * range" and so does the TEXTSIZE form, which would fail every call a generous budget was
+   * meant to widen.
+   *
+   * Clamped rather than refused, because a ceiling of two billion rows is a budget that
+   * means "do not bound this", and the result-side caps still enforce the real number. The
+   * `+ 1` is what makes a server-side cut detectable, so it is applied first and the clamp
+   * only ever takes effect where no honest result could reach it anyway.
+   */
+  private static sessionCeiling(budgetValue: number): number {
+    return Math.min(budgetValue + 1, 2_147_483_647);
+  }
+
+  /**
+   * Refuses a result holding a value the SERVER cut, which the byte budget cannot see.
+   *
+   * `SET TEXTSIZE` counts WIRE bytes, and the wire encoding is not the one the byte budget
+   * measures. Measured with the ceiling at 262145: a `varchar(max)` of two million
+   * characters came back as 262145 characters, which the budget refuses; the same value as
+   * `nvarchar(max)` came back as 131072 characters, because nvarchar travels as UTF-16 at
+   * two bytes each, and 131072 ASCII characters are 131072 UTF-8 bytes, which is HALF the
+   * budget and passes. The caller would have been handed a silently truncated string.
+   *
+   * So the cut is detected in the server's own unit instead. A cut value is exactly the
+   * ceiling in wire bytes, which is `ceiling` characters for a single-byte type and
+   * `floor(ceiling / 2)` for a Unicode one, and a Buffer is `ceiling` bytes. Nothing else is
+   * refused: a value that merely happens to be one of those two lengths is astronomically
+   * unlikely and would be refused fail-closed, which is the right way round for a check
+   * whose alternative is a wrong answer nobody can detect.
+   */
+  private static assertNoValueWasCut(result: mssql.IResult, ceiling: number, sql: string): void {
+    const unicodeCut = Math.floor(ceiling / 2);
+    for (const row of (result.recordset ?? []) as Record<string, unknown>[]) {
+      for (const [column, value] of Object.entries(row)) {
+        const size = typeof value === "string" ? value.length : Buffer.isBuffer(value) ? value.length : -1;
+        if (size !== ceiling && size !== unicodeCut) continue;
+        throw new QueryError(
+          `Read-only execution refused a value the server cut at the byte budget: ${column} came back at exactly the ${ceiling}-byte ceiling, so what it holds cannot be told from the whole value. Project fewer or smaller columns.`,
+          "mssql",
+          sql,
+        );
+      }
+    }
   }
 
   /**

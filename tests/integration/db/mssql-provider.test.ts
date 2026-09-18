@@ -4461,6 +4461,12 @@ class ShowplanSession {
    */
   textsize = 2_147_483_647;
   /**
+   * Whether the fixture's string columns travel as Unicode. It decides where TEXTSIZE cuts,
+   * and that is the whole point of modelling it: `SET TEXTSIZE` counts WIRE bytes, so a
+   * single-byte type is cut at `textsize` characters and a Unicode one at half that.
+   */
+  unicodeValues = false;
+  /**
    * How many operator rows hang under each root. One is enough for every admission test;
    * a plan test needs more, because the question there is how MANY rows a plan may have.
    */
@@ -4471,6 +4477,13 @@ class ShowplanSession {
   columns: Record<string, unknown> | undefined;
   /** Statements that never answer until the request is cancelled. */
   readonly hangs = new Set<string>();
+  /**
+   * Statements that never answer while they are being COMPILED, which is a different
+   * moment from execution and reachable only under SHOWPLAN: the optimizer resolves and
+   * locks the objects a candidate names, so a compile can block where the execution never
+   * begins.
+   */
+  readonly hangsOnCompile = new Set<string>();
   /** Statements whose compilation is a batch-aborting error. */
   readonly dooms = new Set<string>([BATCH_ABORTING_READ]);
   /** Statements that fail to compile WITHOUT dooming the transaction, and what the engine says. */
@@ -4566,18 +4579,11 @@ class ShowplanSession {
       this.applySet(set[1].toUpperCase(), set[2].trim());
       return toResult([]);
     }
-    if (this.showplanAll) return this.planFor(sql);
-    if (this.hangs.has(sql)) {
-      return new Promise<ReturnType<typeof toResult>>((_resolve, reject) => {
-        request.onCancel(() => {
-          this.events.push("cancelled");
-          // tedious ends a cancelled request by rejecting it. The wording is this
-          // fixture's own and nothing asserts it; what is asserted is that the await
-          // ended because `cancel()` was called, and that it ended before the rollback.
-          reject(new Error("Canceled."));
-        });
-      });
+    if (this.showplanAll) {
+      if (this.hangsOnCompile.has(sql)) return this.hangUntilCancelled(request);
+      return this.planFor(sql);
     }
+    if (this.hangs.has(sql)) return this.hangUntilCancelled(request);
     if (sql === PLAN_MODE_PROBE.sql) return toResult([{ libredb_plan_mode_probe: 1 }]);
     const visible = this.rowcount > 0 ? this.rows.slice(0, this.rowcount) : this.rows;
     // TEXTSIZE truncates, it does not refuse, and that is the whole reason the provider
@@ -4585,14 +4591,29 @@ class ShowplanSession {
     // own, which the byte refusal then catches.
     const cut = visible.map((row) =>
       Object.fromEntries(
-        Object.entries(row).map(([key, value]) => [
-          key,
-          typeof value === "string" && value.length > this.textsize ? value.slice(0, this.textsize) : value,
-        ]),
+        Object.entries(row).map(([key, value]) => [key, typeof value === "string" ? this.cutToTextsize(value) : value]),
       ),
     );
     this.events.push("answered");
     return toResult(cut, this.columns);
+  }
+
+  private hangUntilCancelled(request: MockRequest) {
+    return new Promise<ReturnType<typeof toResult>>((_resolve, reject) => {
+      request.onCancel(() => {
+        this.events.push("cancelled");
+        // tedious ends a cancelled request by rejecting it. The wording is this fixture's
+        // own and nothing asserts it; what is asserted is that the await ended because
+        // `cancel()` was called, and that it ended before the rollback.
+        reject(new Error("Canceled."));
+      });
+    });
+  }
+
+  /** Where the server cuts, in the unit the server counts in. */
+  private cutToTextsize(value: string): string {
+    const ceiling = this.unicodeValues ? Math.floor(this.textsize / 2) : this.textsize;
+    return value.length > ceiling ? value.slice(0, ceiling) : value;
   }
 
   private applySet(option: string, argument: string) {
@@ -4956,7 +4977,9 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
 
   test("the byte budget REFUSES rather than truncating, and it is measured on the rows themselves", async () => {
     const profiled = await openProfiled();
-    engine.rows = [{ blob: "x".repeat(4096) }];
+    // MANY values, none of them at the server's own ceiling, so what is refused here is the
+    // total rather than a cut: the two refusals are different facts and say so.
+    engine.rows = Array.from({ length: 20 }, () => ({ blob: "x".repeat(200) }));
 
     const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 1024 }));
 
@@ -4984,10 +5007,75 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
 
     const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 1024 }));
 
-    // The server cut it to 1025, and 1025 alone is over the budget, so the refusal fires on
-    // a value the process never held at its original size.
-    await expect(rejection).rejects.toThrow(/exceeded the byte budget/);
+    // The server cut it to 1025, so the process never held it at its original size, and the
+    // refusal names the cut rather than the total: the two are different facts, and only the
+    // cut says that what came back cannot be told from the whole value.
+    await expect(rejection).rejects.toThrow(/refused a value the server cut/);
     expect(engine.batches.map((batch) => batch.sql)).toContain("SET TEXTSIZE 1025");
+  });
+
+  /**
+   * The byte budget cannot see a cut the SERVER made, because the two count in different
+   * units. Measured with the ceiling at 262145: a `varchar(max)` of two million characters
+   * came back as 262145 characters, which the budget refuses, and the SAME value as
+   * `nvarchar(max)` came back as 131072 characters, because nvarchar travels as UTF-16 at
+   * two bytes each. 131072 ASCII characters are 131072 UTF-8 bytes, which is HALF the
+   * budget and passes every check. The caller would have been handed a silently truncated
+   * string, which is the defect `FOR JSON` is refused for, arriving by another door.
+   */
+  test("a value the server cut is refused, even when what came back fits the byte budget", async () => {
+    const profiled = await openProfiled();
+    engine.unicodeValues = true;
+    engine.rows = [{ v: "x".repeat(5_000_000) }];
+
+    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 1024 }));
+
+    // 512 characters is 512 UTF-8 bytes, half the 1024-byte budget, so the byte cap cannot
+    // fire: only the cut itself says what happened.
+    await expect(rejection).rejects.toThrow(/refused a value the server cut at the byte budget/);
+  });
+
+  test("a value that merely fits is served, so the refusal above is the cut and not the size", async () => {
+    const profiled = await openProfiled();
+    engine.unicodeValues = true;
+    engine.rows = [{ v: "x".repeat(100) }];
+
+    const result = await profiled.queryReadOnly(READ_SELECT.sql, budget({ maxResultBytes: 1024 }));
+
+    expect(result.rows).toEqual([{ v: "x".repeat(100) }]);
+  });
+
+  /**
+   * `SET ROWCOUNT` and `SET TEXTSIZE` take a SIGNED 32-BIT integer and the budget does not:
+   * `assertReadOnlyBudget` admits anything up to `Number.MAX_SAFE_INTEGER`. Measured,
+   * `SET ROWCOUNT 9007199254740991` answers "The integer value 9007199254740991 is out of
+   * range", so a budget generous enough to mean "do not bound this" would have failed every
+   * call it was meant to widen.
+   */
+  test("a budget past the 32-bit ceiling clamps the session settings instead of failing the call", async () => {
+    const profiled = await openProfiled();
+
+    const result = await profiled.queryReadOnly(
+      READ_SELECT.sql,
+      budget({ maxResultRows: Number.MAX_SAFE_INTEGER - 1, maxResultBytes: Number.MAX_SAFE_INTEGER - 1 }),
+    );
+
+    expect(result.rowCount).toBe(1);
+    expect(engine.batches.map((batch) => batch.sql)).toContain("SET ROWCOUNT 2147483647");
+    expect(engine.batches.map((batch) => batch.sql)).toContain("SET TEXTSIZE 2147483647");
+  });
+
+  test("the admission compile is bounded by the same deadline the execution is", async () => {
+    const profiled = await openProfiled();
+    // The candidate never answers while it is being COMPILED, which is the case a deadline
+    // on the execution alone cannot reach: the optimizer takes locks of its own.
+    engine.hangsOnCompile.add(READ_SELECT.sql);
+
+    const rejection = settlesWithin(profiled.queryReadOnly(READ_SELECT.sql, budget({ statementTimeoutMs: 15 })), 5_000);
+
+    await expect(rejection).rejects.toThrow(/exceeded its time budget/);
+    // It hung on the COMPILE, so the execution was never reached.
+    expect(engine.batches.map((batch) => batch.sql)).not.toContain("SET ROWCOUNT 201");
   });
 
   test("the large-value ceiling is restored, because a session that keeps it truncates the next caller's read", async () => {
@@ -5041,7 +5129,7 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
     const profiled = await openProfiled();
     engine.hangs.add(READ_SELECT.sql);
 
-    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ statementTimeoutMs: 15 }));
+    const rejection = settlesWithin(profiled.queryReadOnly(READ_SELECT.sql, budget({ statementTimeoutMs: 15 })), 5_000);
 
     // tedious words every cancel "Canceled.", including a user pressing stop, and a model
     // handed that alone has nothing to repair.
@@ -5068,11 +5156,39 @@ describe("queryReadOnly() - the agent read-only execution profile (#328)", () =>
   // The deadline: cancelled, not abandoned
   // -------------------------------------------------------------------------
 
+  /**
+   * A deadline test whose subject is a LOST cancel cannot simply await its own rejection:
+   * if the cancel never fires, the await never settles and the whole suite hangs instead of
+   * reporting a failure, which is the one outcome a regression test must not have. So the
+   * awaited promise is raced against a bound of its own, generously longer than the budget
+   * under test, and losing that race IS the failure.
+   */
+  const settlesWithin = async (work: Promise<unknown>, ms: number): Promise<unknown> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`the call did not settle within ${ms} ms: the deadline never fired`)),
+        ms,
+      );
+    });
+    try {
+      return await Promise.race([
+        work.then(
+          (value) => value,
+          (error: unknown) => Promise.reject(error),
+        ),
+        bound,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   test("the deadline CANCELS the statement, and the statement is settled before the rollback", async () => {
     const profiled = await openProfiled();
     engine.hangs.add(READ_SELECT.sql);
 
-    const rejection = profiled.queryReadOnly(READ_SELECT.sql, budget({ statementTimeoutMs: 25 }));
+    const rejection = settlesWithin(profiled.queryReadOnly(READ_SELECT.sql, budget({ statementTimeoutMs: 25 })), 5_000);
 
     // Mapped through `mapDatabaseError`, so it reaches the caller as this engine's error
     // rather than as a raw driver rejection.

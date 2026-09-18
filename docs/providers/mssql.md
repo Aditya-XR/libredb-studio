@@ -1429,7 +1429,7 @@ in its own right.
 |---|---|---|
 | `SELECT` | Yes | `SELECT TOP 1 …`, and `WITH cte AS (…) SELECT … ORDER BY …`, which is ONE root and not one per CTE |
 | `SELECT WITHOUT QUERY` | Yes | `SELECT 1`, a SELECT with no table reference |
-| `JSON SELECT` / `XML SELECT` | Yes | `… FOR JSON PATH` / `… FOR XML PATH` |
+| `JSON SELECT` / `XML SELECT` | No, and the refusal names the clause | `… FOR JSON PATH` / `… FOR XML PATH` |
 | `TEXT` | Only beside an admitted statement of the same `StmtId` | the inlined body of a multi-statement table-valued function |
 | `INSERT` / `UPDATE` / `DELETE` | No | the statements of those names |
 | `SELECT INTO` | No | `SELECT … INTO t` |
@@ -1437,6 +1437,18 @@ in its own right.
 | `EXECUTE PROC` | No | `EXEC sp_executesql N'…'` |
 | `EXECUTE STRING` | No | `EXEC('…')` |
 | `COMMIT TRANSACTION` | No | `SELECT 1; COMMIT; SELECT 2`, which compiles to three roots and three `StmtId`s |
+
+A serialised read is the one refusal on that list that is not about what the statement DOES.
+`FOR JSON` and `FOR XML` are pure reads, and they were admitted for exactly that reason until the row
+bound below was measured against them: the clause turns the rows a statement produced into ONE result
+row, so `SET ROWCOUNT` cuts the rows UNDERNEATH the serialiser and the document that comes back is
+complete-looking and short.
+Measured with the budget's 200-row cap, `SELECT TOP 5000 SalesOrderID, OrderQty FROM
+Sales.SalesOrderDetail FOR JSON PATH` returned one row of well-formed JSON holding 201 objects, and the
+`FOR XML PATH` form returned 201 `<row>` elements.
+Both parse, and neither budget check can fire, because the result really is one row and 7 KB.
+A model handed that document reports 201 where the answer is 5000, and nothing anywhere says otherwise,
+so the refusal names the clause and tells it to ask for the rows instead.
 
 It is an allowlist rather than a denylist because that right-hand column is what "everything else"
 turned out to be, and a denylist would still have been wrong about the next one.
@@ -1530,9 +1542,23 @@ apart.
   database or the file system, but server-level metadata readable by `public` (`master.sys.databases`,
   `master.sys.server_principals`, `master.dbo.spt_values`) is inside the boundary. That is the same
   class of gap [BACKLOG](../BACKLOG.md) A3 records for the other engines, not a SQL Server property.
-- **The byte budget is still post-hoc.** The ROW budget is enforced by the server, so a result is
-  bounded in rows before it is measured in bytes, but a small number of very large values is
-  materialised before `maxResultBytes` can refuse it.
+- **The byte budget's TOTAL is still post-hoc**, though each VALUE is now bounded by the server.
+  `SET TEXTSIZE` is set to one byte past the budget alongside `SET ROWCOUNT`, so no single large value
+  arrives whole: without it, `SELECT REPLICATE(CAST('a' AS varchar(max)), 700000000)` is one row of one
+  column that every other layer admits and that arrives in full. A cut value is refused rather than
+  served, and it is detected in the SERVER's unit rather than in the budget's, because the two differ:
+  `SET TEXTSIZE` counts WIRE bytes, and measured with the ceiling at 262145, a `varchar(max)` came back
+  as 262145 characters while the same value as `nvarchar(max)` came back as 131072, since nvarchar
+  travels as UTF-16 at two bytes each. 131072 ASCII characters are 131072 UTF-8 bytes, half the budget,
+  so measuring the cut in UTF-8 would have passed it silently. What remains post-hoc is the TOTAL: rows
+  times values can still exceed `maxResultBytes` before the sum is taken, which is the property every
+  engine with a byte budget has and is filed as [BACKLOG](../BACKLOG.md) A7.
+- **A linked server is outside layer 4.** `SELECT * FROM OPENQUERY(<linked server>, '…')` compiles to a
+  single `SELECT` root, so admission accepts it, and the pass-through executes on the OTHER server under
+  that server's own credential mapping: the local principal's grants do not reach it and the local
+  rollback only covers it where the linked server promotes to a distributed transaction. It needs a
+  linked server to have been configured with a write-capable mapping, so it is a residual rather than a
+  default-open path, and it is the one write class in this section that was NOT measured refused.
 - **`queryReadOnly()` on a provider opened outside the profile.** It refuses outright rather than
   falling back to `query()`: such a provider has had no principal verification, so its session may be
   able to write, and serving agent semantics without the layer that makes them true is the one thing
