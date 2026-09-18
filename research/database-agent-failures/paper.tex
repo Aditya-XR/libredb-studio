@@ -96,8 +96,9 @@ drives correction.
 
 We differ in three ways. Our models are an order of magnitude larger, 1.7B to 35B for the tags that name a size, rather than 135M to 1.7B. Our
 outcome is end-to-end task success under a server-side verifier rather than a log-probability proxy. And our
-setting is a deployed product against a live database, which lets us report a failure class, verification, that a
-simulated tool environment cannot produce at all.
+setting is a deployed product against a live database, so the evidence check runs inside the loop: a report is
+refused by the server during the run rather than scored after it, which is what makes verification a cause of
+loss here rather than a label applied to a finished trace.
 
 \paragraph{The same failure, repaired by training.}
 Zhang et al.~\cite{zhang2026fission} report independently that smaller models after an execution error often
@@ -110,8 +111,42 @@ help every model at once, which is the practical difference.
 \paragraph{Tool-use benchmarks.}
 BFCL~\cite{patil2025bfcl}, ToolLLM~\cite{qin2024toolllm}, API-Bank~\cite{li2023apibank},
 ToolSandbox~\cite{lu2024toolsandbox} and $\tau$-bench~\cite{yao2024taubench} vary the model against a harness
-whose rejection messages are fixed and form part of the benchmark. We hold the model fixed and vary the harness,
-which is the axis those designs hold constant by construction.
+whose rejection messages are fixed and form part of the benchmark. Holding those messages fixed is what makes
+scores comparable across models, and it is also what places the harness outside what those five can measure.
+
+\paragraph{The harness as an experimental variable.}
+That axis is not ours to claim. Sigdel and Baral isolate the tool interface
+directly~\cite{sigdel2026schemafirst}, comparing free-form documentation, JSON Schema, and JSON Schema with
+structured validation diagnostics under identical tool semantics, and report that the schema conditions reduce
+interface misuse but not semantic misuse; that pilot runs one open local model and ends at zero task success in
+every condition. Their ToolMisuseBench~\cite{sigdel2026toolmisuse} makes the interface a declared condition
+rather than a fixture, with per-task fault plans replayed under a fixed seed across schema drift, rate limits,
+timeouts, authorization failures and adversarial error rewriting, so the text returned after a failed call is
+itself a variable; its baselines are deterministic policies rather than language models, and its environments are
+simulators that need no external service. AgentCheck~\cite{mazumder2026agentcheck} records an agent's real tool
+responses, replays them with exactly one perturbed, and re-runs under a mitigation wrapper against the identical
+fault, which is a reproduce-and-intervene loop like the one in Section~\ref{sec:interventions}, applied at the
+tool layer rather than to the server's contract. Xiong et al.~\cite{xiong2025butterfly} hold the agent scaffold
+fixed and apply fifteen perturbations to the three input sources a tool agent reads, the tool document, the user
+query and the tool return, and close by recommending that tool error messages be redesigned so that models can
+correct failures.
+
+What this work adds is the setting and the provenance rather than the axis. The harness defects reported here
+were not injected. They were live in a shipped validator, recovered from a production ledger, and then repaired
+in the product, and the effect of repairing them is measured across 40 models rather than a scripted policy or a
+single pilot model. The change those studies recommend is the change we made and then measured.
+
+\paragraph{The same separation, the opposite ordering.}
+ToolFailBench~\cite{soni2026toolfailbench} draws the distinction Table~\ref{tab:taxonomy} draws, between a run
+that never called a tool and one that called it and then failed to use the result, and reports the first as much
+the larger class across nineteen models. Its protocol is single-turn against mock tools that return a controlled
+value, with the final answer written in a second step and no further turn in which to repair a rejected call, so
+a call the system did not execute is recorded as a skip rather than answered with a refusal the model could act
+on. Its own rule counts a tool call emitted as plain text in the answer body and never executed within that skip
+class; we count the same observable as a transport failure of the surface that did not parse it, and repair it in
+Section~\ref{sec:interventions}. We read the two results as the same argument from opposite ends. Which class a
+tool-calling failure falls into is a joint property of the model and the harness, and a design that varies only
+one of them settles the attribution in advance.
 
 \paragraph{Agent benchmarks that attribute failure to capability.}
 AgentBench~\cite{liu2024agentbench} evaluates across eight environments including a database environment and
@@ -510,6 +545,7 @@ the model deleted the field in response to being told to. The defect is the cont
 visible without the ordering.
 
 \section{Interventions and measured effect}
+\label{sec:interventions}
 
 Five changes were made to the server on the strength of the above. None touches a model, a prompt, a temperature
 or a task.
@@ -659,8 +695,11 @@ AgentBench attributes the open-versus-commercial gap to reasoning and instructio
 refute that, and our own corpus contains models that never became usable. What they suggest is that any such
 attribution is only as good as the harness it was measured through, and that a benchmark which fixes its
 rejection messages and its argument parsing as part of the apparatus is measuring the pair rather than the model.
-We would encourage reporting the rejection-message text and the parser's tolerance alongside results, as
-benchmark artefacts in their own right.
+Redesigning tool error feedback is already a standing recommendation~\cite{xiong2025butterfly}, and
+ToolMisuseBench~\cite{sigdel2026toolmisuse} already treats the feedback returned after a failed call as a
+declared condition; what we add is a measurement, in a deployed system, of what making that change is worth. We
+would extend the practice to the leaderboards that report per-model results, so that the rejection-message text
+and the parser's tolerance are published as benchmark artefacts in their own right.
 
 \paragraph{Practical advice.}
 Record the arguments of refused calls somewhere, even when they must not enter the audit ledger: a shape that
@@ -740,6 +779,16 @@ All authors are contributors to LibreDB Studio, the software evaluated. No exter
 \newblock ToolSandbox: a stateful, conversational, interactive evaluation benchmark for LLM tool use capabilities. arXiv:2408.04682, 2024.
 \bibitem{yao2024taubench} S.~Yao, N.~Shinn, P.~Razavi, and K.~Narasimhan.
 \newblock $\tau$-bench: a benchmark for tool-agent-user interaction in real-world domains. arXiv:2406.12045, 2024.
+\bibitem{sigdel2026schemafirst} A.~Sigdel and R.~Baral.
+\newblock Schema first tool APIs for LLM agents: a controlled study of tool misuse, recovery, and budgeted performance. arXiv:2603.13404, 2026.
+\bibitem{sigdel2026toolmisuse} A.~Sigdel and R.~Baral.
+\newblock ToolMisuseBench: an offline deterministic benchmark for tool misuse and recovery in agentic systems. arXiv:2604.01508, 2026.
+\bibitem{mazumder2026agentcheck} A.~Mazumder and N.~J. Lia.
+\newblock AgentCheck: a reproduce-intervene-mitigate workbench for LLM agents over MCP. arXiv:2607.11098, 2026.
+\bibitem{xiong2025butterfly} Q.~Xiong, Y.~Huang, Z.~Jiang, et al.
+\newblock Butterfly effects in toolchains: a comprehensive analysis of failed parameter filling in LLM tool-agent systems. arXiv:2507.15296, 2025.
+\bibitem{soni2026toolfailbench} H.~Soni.
+\newblock ToolFailBench: diagnosing tool-use failures in LLM agents. arXiv:2607.04686, 2026.
 \bibitem{liu2024agentbench} X.~Liu, H.~Yu, H.~Zhang, et al.
 \newblock AgentBench: evaluating LLMs as agents. \emph{ICLR}, 2024. arXiv:2308.03688.
 \bibitem{yu2018spider} T.~Yu, R.~Zhang, K.~Yang, et al.
