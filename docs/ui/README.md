@@ -4,7 +4,7 @@ Reference docs for LibreDB Studio's visual layer — theming and standalone page
 
 | Doc | Covers |
 |-----|--------|
-| [Theming](theming.md) | Tailwind v4 `@theme inline`, shadcn/ui CSS variables, the color palette, and the (currently dark-only) theme model |
+| [Theming](theming.md) | Tailwind v4 `@theme inline`, shadcn/ui CSS variables, the color palette, and the dark-first theme model with a runtime light theme |
 | [Login Page](login-page.md) | Responsive split-panel login layout, OIDC vs. local auth modes, and the design system |
 
 ## Source map

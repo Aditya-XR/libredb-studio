@@ -1,0 +1,21 @@
+======== llama3.2:3b | plan x 5 ========
+server up with llama3.2:3b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.2:3b
+######## llama3.2:3b | planning/investigation ########
+---- repeat 1/5 ----
+run=arun_8e4a789bdd7142ddace2bff666e8a7c0
+status=succeeded
+---- repeat 2/5 ----
+run=arun_d6f949f7e2e94fc9994d1b1411ddf9ad
+status=succeeded
+---- repeat 3/5 ----
+run=arun_f35b381761544cdb960aaa7b43beea73
+status=succeeded
+---- repeat 4/5 ----
+run=arun_2ed73f03d2844953adbc01d9998fcd63
+status=succeeded
+---- repeat 5/5 ----
+run=arun_fc1ea9aa99a34fafa46ea9605a294498
+status=succeeded
+@@@@ llama3.2:3b plan done

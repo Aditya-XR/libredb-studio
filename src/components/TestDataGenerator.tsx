@@ -285,7 +285,12 @@ export function TestDataGenerator({
             <span className="text-xs font-medium text-fg">Test Data Generator</span>
             <span className="text-xs text-fg-muted font-mono">{tableName}</span>
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-fill text-fg-muted">
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            title="Close"
+            className="p-1 rounded hover:bg-fill text-fg-muted"
+          >
             <X strokeWidth={1.5} className="w-3.5 h-3.5" />
           </button>
         </div>

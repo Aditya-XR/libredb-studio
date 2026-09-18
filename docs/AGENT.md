@@ -122,6 +122,14 @@ request time, and `GET /api/agent/config` reports which one is missing:
    With an unreachable `WORKFLOW_POSTGRES_URL` the rail still appears and the first Start still
    fails (see [HTTP surface](#http-surface)).
 
+**A third condition, not covered by `/api/agent/config`, gates the Start button itself:** the
+connection being investigated must be one the server can resolve on its own, which needs
+`STORAGE_PROVIDER` to be `sqlite` or `postgres`. With the default `STORAGE_PROVIDER=local`,
+connection metadata lives only in the browser, so `resolveAgentRunConnectionId` (in
+[`src/hooks/use-connection-payload.ts`](../src/hooks/use-connection-payload.ts)) never has a
+server-known connection to hand back, and Start stays disabled no matter what the two conditions
+above report.
+
 The owner ratified this in
 [#331](https://github.com/libredb/libredb-studio/issues/331#issuecomment-5277689616), and the reason
 is the removal that came with it: once the NL2SQL and Autopilot panels were gone,
@@ -318,8 +326,10 @@ host, port, database, service, instance, role and the SSH tunnel the database is
 deliberately not the password. A follow-up whose database does not match its predecessor's declines as
 `"unavailable"` rather than carrying it. Rotating a credential or renaming a connection is the same
 database and keeps the conversation, and a predecessor that recorded no identity at all is carried
-rather than refused — no conversation in flight across a deploy is ended by a silence. What is left of
-B67 is run history across threads.
+rather than refused — no conversation in flight across a deploy is ended by a silence. A user's
+finished conversations are listed by the run-history surface under the rail's header, which reads the
+per-actor history index stream (`src/lib/agent/history.ts`); each conversation's steps come off that
+index and a reopened report is served by `GET /api/agent/runs/{runId}` as usual.
 
 A run emits a closed set of **semantic events**, and they are the whole of what the UI renders:
 `run-started`, `driver-resolved`, `context-captured`, `context-unavailable`, `statement-drafted`,
@@ -2396,6 +2406,36 @@ PostgreSQL database — its own, not one of the databases you connect Studio to.
 availability probe does not, and cannot cheaply (B31), so an unreachable one leaves the rail rendered
 and the first Start failing — the one place this feature's central promise does not hold.
 
+**Transient Windows ledger locks (#900).** The pinned `@workflow/world-local` 4.2.4 does not retry
+the `fs.access` existence probe preceding a stream chunk write, reported upstream in
+[vercel/workflow#4203](https://github.com/vercel/workflow/issues/4203). This path is reachable without
+concurrent writes: measured on Windows with Node 24.16.0, `STORAGE_PROVIDER=sqlite`,
+`WORKFLOW_TARGET_WORLD=local`, a writable `WORKFLOW_LOCAL_DATA_DIR`, and an enabled Ollama model
+configuration. The availability probe reported `available=true, ledgerVerified=true`. Injecting
+one `EPERM` at that probe during sequential service calls caused start, narrative append, and
+EOF publication to reject; an index-write failure was logged and left the completed run absent
+from history. The production API error mapper returned HTTP 500, `INTERNAL_ERROR`, and the
+original `EPERM` message including its file path; the start hook uses that message as its error
+state. This measures the service and response boundary, not an authenticated browser request.
+It is fault-injection evidence of reachability, not a measurement of Defender lock frequency
+or a live model run.
+
+Studio retries only Windows `EPERM`, `EBUSY`, or `EACCES` from `access` to the current stream's
+`streams/chunks/<stream>-chnk_*.bin` file. The probe precedes publication, so replaying that
+append cannot duplicate a committed entry. Write and rename failures, other paths, and other
+platforms are not retried. Ledger entries, history entries, and EOF use the same handling; each
+retry is logged, and five retries with exponential backoff bound the wait to approximately
+310–360 ms. Exhaustion raises `LEDGER_WRITE_FAILED` with the file, error code, attempt count,
+and original cause. The existing history failure boundary still logs an exhausted index write
+without discarding the run's already-persisted ending.
+
+Windows writes are queued per stream within one `AgentRunStore`, including EOF, so a new chunk
+ID allocated by a retry cannot move an earlier entry behind a later one. Different streams
+remain independent; this is not a cross-process ownership mechanism. Sequential service calls
+with the same four injected faults all succeeded after the fix, including history listing.
+`tests/unit/lib/agent/run-store-windows-retry.test.ts` pins recovery, write-ahead ordering,
+single tool execution, EOF ordering, bounded failure, and refusal to replay uncertain writes.
+
 **Where run state lands matters, because it decides whether the agent exists at all — so the image
 sets it rather than leaving it to the SDK.** The local backend's directory is
 `WORKFLOW_LOCAL_DATA_DIR`, and the SDK's own default is `.workflow-data` resolved against the
@@ -2420,8 +2460,8 @@ and the agent honestly reported itself absent.
 
 The chart supplies that default itself, and it did so before the image could. `image.tag` defaults to
 the chart's `appVersion`, and the Dockerfile's `WORKFLOW_LOCAL_DATA_DIR` landed after the `0.11.0`
-tag, so only an install pinned below that tag lacks the ENV; `appVersion` now names `0.14.1`, whose
-image sets the same path. Leaning on
+tag, so only an install pinned below that tag lacks the ENV; `appVersion` has named a later release
+ever since, whose image sets the same path. Leaning on
 the image would have left the ledger resolving to `.workflow-data` under `WORKDIR /app` — read-only —
 and the probe answering `LEDGER_UNAVAILABLE` on an install the chart advertises as working. With the
 chart writing it (verified by rendering `charts/libredb-studio` at its defaults), the agent appears as
@@ -2500,7 +2540,8 @@ src/lib/agent/
 ├── types.ts              # durable domain contracts: run, events, snapshot, artifact/evidence refs
 ├── state-guard.ts        # refuses to persist a function, a client, a credential or a result set
 ├── run-store.ts          # the append-only ledger over the durable backend
-├── run-service.ts        # start / status / cancel / resume / stream, decided from the ledger
+├── history.ts            # the per-actor finished-run index: entry, fold, retention and pages
+├── run-service.ts        # start / status / cancel / resume / stream / history, decided from the ledger
 ├── investigation.ts      # the one workflow; start and resume are the same call
 ├── runtime.ts            # composition root: the only place that assembles a tool context
 ├── tools.ts              # the four tools + server-side selection; the only database reach,
@@ -2572,10 +2613,6 @@ the role's own grants are the whole boundary (A3).
 - **B33** — a run is observable only from its own ledger. There is no OpenTelemetry export and no
   metrics: the record described above is complete, and getting it into a stack the operator already
   runs is designed (#332) and deliberately unbuilt.
-- **B67** — there is no run history across conversations. The rail names the conversation a run
-  continues and lists its steps from the run's own header, but a user cannot see the conversations
-  they had yesterday or return to one: the store has no enumeration, there is no list route, and
-  pagination and retention have not been decided.
 - **B75** — a conversation's database is checked when a follow-up OPENS; a run already open is not
   re-checked, so a resumed drive can read a repointed database while carrying a conversation and a
   captured schema established against the old one. The record now carries the identity needed to close
@@ -2625,7 +2662,7 @@ the role's own grants are the whole boundary (A3).
   fixed here because separating "unasked" from "measured empty" changes a type every consumer
   reads, and two tests currently pin the wrong half as intended.
 
-**Settled as limits rather than as work.** The seven below have no entry in `docs/BACKLOG.md`, and
+**Settled as limits rather than as work.** The eight below have no entry in `docs/BACKLOG.md`, and
 that is the point: each is how the product behaves, stated where a reader of this document will meet
 it, rather than a queue item nobody was going to pick up. A limitation needs a record; it does not
 need a work item to hold that record.
@@ -2670,6 +2707,16 @@ need a work item to hold that record.
   server-held connections are the seeds, and editing a seed makes it browser-local, which the rail
   refuses before any thread check. Reaching it takes a seed run, an edit of that seed's target on the
   SERVER between two questions, and a second question with the rail mounted throughout.
+- **The run history index is a pointer list, not the record.** A finished run is appended to a
+  per-user index stream after its `run-finished` entry; the run ledger remains the authority a
+  reopened report reads from. If that index append fails — a full disk, a backend error — the run
+  still finishes and stays reopenable by id, but it is missing from the History listing, and nothing
+  rebuilds the index afterwards (a resume that finishes again would append it). `AGENT_HISTORY_MAX_CONVERSATIONS`
+  is a listing bound, not storage retention: the index stream is append-only and grows with every
+  finished run, while the listing folds it and keeps the newest 50 conversations. The listing reads
+  the whole stream in 1 000-chunk pages rather than the world's default 100, because each page makes
+  the backend re-list the chunk directory and re-skip every earlier file — the default would make the
+  read quadratic in the page count, not in the bytes. It is a pointer list and not a query table.
 
 ## Related documentation
 

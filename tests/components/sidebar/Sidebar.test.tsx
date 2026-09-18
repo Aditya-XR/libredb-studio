@@ -435,4 +435,20 @@ describe("Sidebar", () => {
 
     expect(onShowDiagram).toHaveBeenCalledTimes(1);
   });
+
+  // ── Icon-only controls announce their name (#919) ──────────────────────────
+  //
+  // Measured on a running 0.15.0: 17 of the 71 buttons on the default view had no text,
+  // no `aria-label`, no `aria-labelledby` and no `title`, so a screen reader announced
+  // "button" and nothing else. Each already had an obvious name.
+
+  test("the new-connection control has a name, not just a plus sign", () => {
+    const props = createDefaultProps();
+    const { getByRole } = render(<Sidebar {...props} />);
+
+    const button = getByRole("button", { name: "New connection" });
+    fireEvent.click(button);
+
+    expect(props.onAddConnection).toHaveBeenCalledTimes(1);
+  });
 });

@@ -38,10 +38,11 @@ const CONTRIBUTING = "CONTRIBUTING.md";
 /**
  * Evidence is a pull request OR a commit in THIS repository, and the second is not a fallback.
  *
- * The two earliest outside changes reached `main` by rebase rather than through the merge button,
- * so GitHub records pull requests 8 and 12 as closed with `mergedAt: null` even though the code has
- * been in the tree since 2025-12-25. Linking those would show a stranger a rejected pull request as
- * proof of a contribution. The commit is the honest citation there.
+ * The three earliest outside entries cite the contributor's own commit rather than the pull request
+ * that carried it, and there that is the more precise citation: `ff22a5dd`, `c6d3e10c`, `d8227cbc`
+ * and `09d36a4d` were each written by the person the entry is about, while the merge commit sitting
+ * above them in the history is the maintainer's. So the predicate accepts both forms rather than
+ * treating a commit as what you fall back to when there is no pull request.
  *
  * Matched on the parsed origin and path rather than as a substring of the entry, which CodeQL
  * flagged (`js/incomplete-url-substring-sanitization`) on the first version of this file. The alert

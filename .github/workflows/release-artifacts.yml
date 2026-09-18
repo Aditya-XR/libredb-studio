@@ -685,12 +685,17 @@ jobs:
         with:
           subject-path: sbom/libredb-studio-*.cdx.json
 
-      - name: Upload the SBOM to the draft release
+      - name: Upload the SBOM and its checksum to the draft release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.guard.outputs.version }}
+        # Same reasoning as the snap's: the SBOM is downloaded on its own, so it carries its
+        # own checksum rather than relying on a SHA256SUMS written before it existed.
         run: |
-          gh release upload "$TAG" sbom/libredb-studio-*.cdx.json \
+          cd sbom
+          sha256sum libredb-studio-*.cdx.json > "libredb-studio-${TAG}.cdx.json.sha256"
+          cat "libredb-studio-${TAG}.cdx.json.sha256"
+          gh release upload "$TAG" libredb-studio-*.cdx.json libredb-studio-*.cdx.json.sha256 \
             --clobber --repo "$GITHUB_REPOSITORY"
 
   linux-packages:
@@ -1097,13 +1102,21 @@ jobs:
         with:
           subject-path: ${{ steps.snapcraft.outputs.snap }}
 
-      - name: Upload snap to GitHub release
+      - name: Upload snap and its checksum to GitHub release
         if: steps.snapstore.outputs.enabled == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.guard.outputs.version }}
           SNAP_FILE: ${{ steps.snapcraft.outputs.snap }}
-        run: gh release upload "$TAG" "$SNAP_FILE" --clobber --repo "$GITHUB_REPOSITORY"
+        # Hashed from inside its own directory so the sidecar carries the BASENAME:
+        # `sha256sum -c` then works wherever the file is downloaded to, rather than only
+        # under the path it was built at.
+        run: |
+          cd "$(dirname "$SNAP_FILE")"
+          base="$(basename "$SNAP_FILE")"
+          sha256sum "$base" > "$base.sha256"
+          cat "$base.sha256"
+          gh release upload "$TAG" "$base" "$base.sha256" --clobber --repo "$GITHUB_REPOSITORY"
 
   publish-release:
     # The LAST step of the draft-first flow (issue #154): verify the complete
@@ -1157,7 +1170,8 @@ jobs:
             "libredb-studio-desktop_${TAG}_amd64.deb.sha256" \
             "libredb-studio-desktop_${TAG}_arm64.deb" \
             "libredb-studio-desktop_${TAG}_arm64.deb.sha256" \
-            "libredb-studio-${TAG}.cdx.json"; do
+            "libredb-studio-${TAG}.cdx.json" \
+            "libredb-studio-${TAG}.cdx.json.sha256"; do
             if ! grep -Fqx "$asset" /tmp/assets.txt; then
               echo "::error::draft release '$TAG' is missing required asset '$asset' - refusing to publish an incomplete immutable release"
               missing=1
@@ -1174,6 +1188,29 @@ jobs:
           set -euo pipefail
           gh release edit "$TAG" --draft=false --latest
           echo "Release '$TAG' published with the verified asset set."
+
+      # Building a snapshot consumes DO resources and still needs a tested image
+      # and a Vendor Portal submission. Keep it manual, with a handoff on every
+      # release instead of a release:published trigger (GITHUB_TOKEN suppresses it).
+      - name: DigitalOcean Marketplace release checklist
+        if: ${{ !contains(needs.guard.outputs.version, '-') }}
+        continue-on-error: true
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          echo "::notice::DigitalOcean Marketplace is updated manually. Follow the release checklist in this job summary for ${VERSION}."
+          {
+            echo "### DigitalOcean Marketplace release checklist"
+            echo ""
+            echo "Publishing this release does not update the separately reviewed Marketplace snapshot."
+            echo ""
+            echo "- [ ] Wait for the Docker publish workflow to make \`ghcr.io/libredb/libredb-studio:${VERSION}\` available."
+            echo "- [ ] Run [DO Packer Build](https://github.com/${REPOSITORY}/actions/workflows/do-packer-build.yml) on release tag \`${VERSION}\`, with \`version=${VERSION}\`."
+            echo "- [ ] Test a fresh Droplet, including HTTP sign-in and \`AUTH_COOKIE_SECURE=false\`; follow the [pre-submission checks](https://github.com/${REPOSITORY}/blob/${VERSION}/deploy/digitalocean/README.md#pre-submission-checklist)."
+            echo "- [ ] Submit the new snapshot and matching version through the [Vendor Portal](https://cloud.digitalocean.com/vendorportal); wait for approval."
+            echo "- [ ] Run \`bun run distribution:check\` and confirm the [live listing](https://marketplace.digitalocean.com/apps/libredb-studio) reports \`${VERSION}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   dispatch-downstream:
     # The publish above runs under GITHUB_TOKEN, and events created by

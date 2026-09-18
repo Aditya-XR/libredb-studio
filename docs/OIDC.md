@@ -17,6 +17,7 @@ Browser → Redirect to app (/ or /admin based on role)
 
 - [Part 1 — Setup Guide](#part-1--setup-guide)
   - [Quick Start](#quick-start)
+  - [Try it locally with Keycloak](#try-it-locally-with-keycloak)
   - [Provider-Specific Setup](#provider-specific-setup)
     - [Auth0](#auth0)
     - [Keycloak](#keycloak)
@@ -82,6 +83,42 @@ Navigate to `/login` and click **"Login with SSO"**.
 
 ---
 
+## Try it locally with Keycloak
+
+To see SSO login and role mapping before configuring your own provider, start the demo stack. It runs LibreDB Studio, a preconfigured Keycloak and a TLS proxy from one file, with no source checkout, `.env` file or second command:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/libredb/libredb-studio/main/docker-compose.oidc-demo.yml
+docker compose -f docker-compose.oidc-demo.yml up
+```
+
+When the stack is up, open **https://demo.127.0.0.1.nip.io:8443**.
+
+**Before you start**
+
+- **Docker Compose v2.23.1 or newer.** The Caddyfile and the Keycloak realm are inline in the compose file.
+- **Network access.** A cold start pulls three images.
+- **A resolver that answers `demo.127.0.0.1.nip.io`.** The name is served by the public [nip.io](https://nip.io) wildcard DNS and resolves to `127.0.0.1`. Check it first:
+
+  ```bash
+  getent hosts demo.127.0.0.1.nip.io              # Linux
+  dscacheutil -q host -a name demo.127.0.0.1.nip.io   # macOS
+  ```
+
+  It should print `127.0.0.1  demo.127.0.0.1.nip.io`. If it prints nothing (`getent` exits with status 2) or an address other than `127.0.0.1`, your resolver filters wildcard DNS names, and the stack will start but the browser cannot reach it. Some corporate networks do this. The demo is meant for evaluating the product on a networked machine, not for air-gapped ones.
+
+**Expected first step: one certificate warning.** The proxy serves the demo's own self-signed certificate, from Caddy's local CA, so your browser warns once on `https://demo.127.0.0.1.nip.io:8443`. Proceed past it. Every page, Keycloak included, is on that one origin, so there is no second warning. The certificate is short-lived (12 hours): if you leave the stack running longer, the browser warns once more after it renews.
+
+**The walkthrough (about a minute)**
+
+1. On the login page, click **Login with SSO** and sign in as `admin` / `admin`. You land on the admin dashboard.
+2. Click **Logout**. Keycloak asks **Do you want to log out?**; confirm it, and you are back on the login page.
+3. Click **Login with SSO** again. Keycloak asks for credentials again rather than signing you straight back in. Sign in as `user` / `user`. You land on the editor, and the admin surfaces are gone: `/admin` sends you back to `/`.
+
+The difference is the realm role (`admin` or `user`), mapped through `OIDC_ROLE_CLAIM=realm_access.roles` exactly as in the [Keycloak](#keycloak) setup below. The realm already has the roles in the ID token, so nothing needs changing in the Keycloak admin console.
+
+**Not a production setup.** Keycloak runs `start-dev` with an embedded store that is lost when the container is removed, the certificate is self-signed, and the client secret and passwords are committed in the file. Use the provider sections below for real deployments. `docker compose -f docker-compose.oidc-demo.yml down -v` removes the stack and its volumes.
+
 ## Provider-Specific Setup
 
 ### Auth0
@@ -145,7 +182,8 @@ Navigate to `/login` and click **"Login with SSO"**.
 
 4. **Role Mapping:**
 
-   Keycloak includes realm roles in the ID token by default:
+   Verified on Keycloak 26.4: enable the realm-role mapper's **Add to ID token** setting via **Client scopes → roles → Mappers → realm roles → Add to ID token**, then click **Save**.
+   This is required because Keycloak does not enable this setting by default.
    ```env
    OIDC_ROLE_CLAIM=realm_access.roles
    OIDC_ADMIN_ROLES=admin
@@ -258,7 +296,7 @@ Navigate to `/login` and click **"Login with SSO"**.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `NEXT_PUBLIC_AUTH_PROVIDER` | No | `local` | Auth mode: `local` or `oidc` |
-| `OIDC_ISSUER` | When `oidc` | — | Issuer URL (must serve `/.well-known/openid-configuration`) |
+| `OIDC_ISSUER` | When `oidc` | — | Issuer URL (must be `https://` and serve `/.well-known/openid-configuration`) |
 | `OIDC_CLIENT_ID` | When `oidc` | — | OAuth client ID |
 | `OIDC_CLIENT_SECRET` | When `oidc` | — | OAuth client secret |
 | `OIDC_SCOPE` | No | `openid profile email` | OAuth scopes to request |
@@ -320,6 +358,21 @@ The role mapping system:
 - Verify `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` match your provider configuration
 - Check server logs for token exchange errors
 
+### "Single sign-on is not configured correctly on this server"
+
+- `GET /api/auth/oidc/login` found the deployment incomplete: one of `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` is unset or the issuer is not `https://` (both checked before any network call), or the JWT secret the state cookie is signed with is missing or too short (checked after discovery, when the cookie is signed)
+- The audit trail records `login_failure` with reason `oidc_config`. Trying again cannot help until the environment is fixed
+
+### "The identity provider could not be reached"
+
+- The configuration was complete as far as Studio can tell up front (only the scheme is checked), but discovery against `OIDC_ISSUER/.well-known/openid-configuration` failed: the host does not resolve (a mistyped `OIDC_ISSUER` host lands here too), TLS verification failed, or the response is not JSON or names a different issuer
+- The audit trail records `login_failure` with reason `oidc_discovery`. The server log line `OIDC login error` carries the underlying message, which is deliberately never shown on the login page
+
+### Plain-http issuer
+
+- **Not supported.** `openid-client` refuses it, on `localhost` too, with `only requests to HTTPS are allowed`, so Studio checks the scheme up front and reports a non-`https://` issuer as the configuration error it is. Studio wires no insecure-transport switch (openid-client's `allowInsecureRequests` is deliberately not exposed), because a switch that exists is a switch someone will eventually set in production
+- To test against a local IdP, give it TLS: for Keycloak, run `start-dev --https-certificate-file=... --https-certificate-key-file=...` with a self-signed certificate, point `OIDC_ISSUER` at `https://localhost:8443/realms/<realm>`, and start Studio with `NODE_EXTRA_CA_CERTS=/path/to/ca.pem` so Node trusts it
+
 ### "Authentication failed" error on login page
 
 - The callback received an error from the provider. Check that the callback URL is registered correctly in your provider
@@ -334,6 +387,7 @@ The role mapping system:
 
 ### Role is always "user" even for admins
 
+- For Keycloak, first verify **Client scopes → roles → Mappers → realm roles → Add to ID token** is enabled and saved (verified on Keycloak 26.4)
 - Verify `OIDC_ROLE_CLAIM` points to the correct claim in your ID token
 - Use your provider's token debugger to inspect the actual claims returned
 - Check `OIDC_ADMIN_ROLES` matches the role value exactly (case-insensitive)
@@ -802,6 +856,8 @@ Forces the OIDC provider to show the login screen on every SSO click, even if th
 
 The role mapping system converts provider-specific claims into LibreDB's binary role model (`admin` | `user`).
 
+Studio reads role claims from the ID token returned by the authorization-code exchange; it does not read the access token.
+
 ### Algorithm (`mapOIDCRole`)
 
 ```
@@ -917,30 +973,30 @@ and requires a non-standard endpoint, add a provider-specific case before the ge
 
 ## Error Handling
 
-### Callback Error Codes
+### Error Codes
 
-The callback route redirects to `/login?error=<code>` on failure:
+Both OIDC routes redirect to `/login?error=<code>` on failure, and record the same code as the `reason` of a `login_failure` audit event. Classification is by error type (`instanceof AuthConfigError`), never by matching on `error.message`.
 
-| Error Code | Cause | When |
-|------------|-------|------|
-| `oidc_state_missing` | `oidc-state` cookie not found | Cookie expired (>5 min) or blocked by browser |
-| `oidc_state_invalid` | State decryption failed or state mismatch | Tampered cookie, wrong JWT_SECRET, or CSRF attempt |
-| `oidc_no_claims` | Token exchange returned no claims | Provider returned invalid/empty ID token |
-| `oidc_failed` | Generic catch-all error | Network error, invalid client credentials, etc. |
-| `oidc_config` | OIDC configuration invalid | Missing env vars, unreachable discovery endpoint |
+| Error Code | Route | Cause | When |
+|------------|-------|-------|------|
+| `oidc_config` | login, callback | `AuthConfigError` | Missing `OIDC_*` env vars, a non-`https://` issuer, or a missing/too-short JWT secret |
+| `oidc_discovery` | login | Any other error before discovery answered | Issuer does not resolve, TLS failure, response is not JSON or names a different issuer |
+| `oidc_state_missing` | callback | `oidc-state` cookie not found | Cookie expired (>5 min) or blocked by browser |
+| `oidc_state_invalid` | callback | State decryption failed or state mismatch | Tampered cookie, wrong JWT_SECRET, or CSRF attempt |
+| `oidc_no_claims` | callback | Token exchange returned no claims | Provider returned invalid/empty ID token |
+| `oidc_failed` | login, callback | Any other error after the provider answered | A discovery document that parses but lacks an endpoint, PKCE or state-cookie failure on login; network error, invalid client credentials, etc. on callback |
 
 ### Login Page Error Display
 
-```tsx
-// login/login-form.tsx reads ?error= param
-const oidcError = searchParams.get('error');
+`login/login-form.tsx` reads the `?error=` code and renders one fixed sentence per class through `oidcErrorMessage()`:
 
-{oidcError && (
-  <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-    Authentication failed. Please try again.
-  </div>
-)}
-```
+| Code | Message |
+|------|---------|
+| `oidc_config` | Single sign-on is not configured correctly on this server. Contact your administrator. |
+| `oidc_discovery` | The identity provider could not be reached. Try again later, or contact your administrator if this continues. |
+| anything else | Authentication failed. Please try again. |
+
+The page is unauthenticated, so it is never given the underlying error: the code names the class and nothing the issuer said reaches the browser. `tests/components/LoginPageOIDC.test.tsx` asserts the negative.
 
 ### Server-Side Error Logging
 

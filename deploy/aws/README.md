@@ -81,7 +81,7 @@ Locally, against the seller account:
 ```bash
 cd deploy/aws/ami
 export AWS_PROFILE=libredb-seller
-VERSION=0.14.1
+VERSION=0.16.0
 DIGEST=$(docker buildx imagetools inspect ghcr.io/libredb/libredb-studio:$VERSION --format '{{.Manifest.Digest}}')
 SUPPORT=$(gh variable get AWS_SUPPORT_EMAIL)   # the same mailbox the workflow uses
 packer init .

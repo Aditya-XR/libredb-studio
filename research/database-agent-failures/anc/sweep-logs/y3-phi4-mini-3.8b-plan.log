@@ -1,0 +1,21 @@
+======== phi4-mini:3.8b | plan x 5 ========
+server up with phi4-mini:3.8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=phi4-mini:3.8b
+######## phi4-mini:3.8b | planning/investigation ########
+---- repeat 1/5 ----
+run=arun_4e302288fee34afaa65c444c015b9330
+status=succeeded
+---- repeat 2/5 ----
+run=arun_f899f3a31629467d8bacb0618240bc49
+status=succeeded
+---- repeat 3/5 ----
+run=arun_d3dd7951ed8045b3b15ff6faf7d49924
+status=succeeded
+---- repeat 4/5 ----
+run=arun_d003776ace184890ab1709c9a3c03cea
+status=succeeded
+---- repeat 5/5 ----
+run=arun_c5c76a3c2b6349abaa3db3df2c6f82c9
+status=succeeded
+@@@@ phi4-mini:3.8b plan done

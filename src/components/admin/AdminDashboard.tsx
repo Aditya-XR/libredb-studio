@@ -28,10 +28,20 @@ export default function AdminDashboard({ children }: AdminDashboardProps) {
   const activeSection = adminSectionFromPathname(pathname);
 
   const handleLogout = async () => {
-    await appFetch("/api/auth/logout", { method: "POST" });
+    const res = await appFetch("/api/auth/logout", { method: "POST" });
+    const data = await res.json();
     toast.success("Logged out successfully");
-    router.push("/login");
-    router.refresh();
+
+    // In OIDC mode the route answers with the provider's end_session URL. The local cookie is gone
+    // either way, but the provider session only ends if the browser visits that URL, so dropping it
+    // here left an admin signed in at the IdP while the app looked signed out. Same handling as
+    // src/hooks/use-auth.ts, which is the other caller of this route.
+    if (data.redirectUrl) {
+      window.location.href = data.redirectUrl;
+    } else {
+      router.push("/login");
+      router.refresh();
+    }
   };
 
   return (

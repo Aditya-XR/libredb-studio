@@ -8,6 +8,7 @@ import {
   engineNames,
   findEngineTable,
   findInstallTable,
+  hasPlainHttpWarning,
   parseTables,
 } from "../../scripts/readme-check.mjs";
 
@@ -37,8 +38,19 @@ function installTable(commands: string[], indent = ""): string {
 const ENGINES = ["PostgreSQL", "MySQL", "Redis"];
 const COMMANDS = ["docker run -d ghcr.io/libredb/libredb-studio:latest", "sudo snap install libredb-studio"];
 
+/**
+ * The blockquote every README carries under its quickstart. Only its shape matters to the
+ * guard - a blockquote naming the variable - so the fixture text need not match the real one.
+ */
+const WARNING = "> Reaching Studio at anything but localhost or HTTPS needs `AUTH_COOKIE_SECURE=false`.";
+
 function readme(engines = ENGINES, commands = COMMANDS, indent = ""): string {
-  return `# Title\n\nprose\n\n${engineTable(engines, indent)}\n\nmore prose\n\n${installTable(commands, indent)}\n`;
+  return `# Title\n\nprose\n\n${WARNING}\n\n${engineTable(engines, indent)}\n\nmore prose\n\n${installTable(commands, indent)}\n`;
+}
+
+/** The same file with its warning blockquote removed, for the negative cases. */
+function withoutWarning(text: string): string {
+  return text.replace(`${WARNING}\n\n`, "");
 }
 
 function runCLI(files: Record<string, string>): { exitCode: number; stdout: string; stderr: string } {
@@ -136,6 +148,34 @@ describe("extraction", () => {
   });
 });
 
+describe("hasPlainHttpWarning", () => {
+  // README.md carried the variable only as a row of its environment table, where a reader
+  // following the quickstart never reaches it, while all five translations carried the
+  // warning as a blockquote right under the quickstart. The blockquote is what the guard
+  // keys on, because it is the one form that survives translation: the heading text is in
+  // Chinese, Japanese, Spanish, Urdu and Hindi, but `AUTH_COOKIE_SECURE` is not.
+  test("accepts a blockquote naming the variable", () => {
+    expect(hasPlainHttpWarning(readme())).toBe(true);
+  });
+
+  test("rejects a file that names the variable only in a table row", () => {
+    const tableOnly = "| `AUTH_COOKIE_SECURE` | no | drops the Secure flag |\n";
+    expect(hasPlainHttpWarning(tableOnly)).toBe(false);
+  });
+
+  test("rejects a file that does not name the variable at all", () => {
+    expect(hasPlainHttpWarning(withoutWarning(readme()))).toBe(false);
+  });
+
+  test("accepts the indented blockquote form", () => {
+    expect(hasPlainHttpWarning("  > set `AUTH_COOKIE_SECURE=false` on a LAN")).toBe(true);
+  });
+
+  test("rejects a blockquote that does not name the variable", () => {
+    expect(hasPlainHttpWarning("> Need Helm, Homebrew, Snap, winget, or deb/rpm?")).toBe(false);
+  });
+});
+
 describe("checkReadmes", () => {
   const canonical = readme();
 
@@ -169,7 +209,7 @@ describe("checkReadmes", () => {
 
   test("rejects a localized command that only appears in README.md's Notes column", () => {
     const withNotes =
-      `# Title\n\n${engineTable(ENGINES)}\n\n` +
+      `# Title\n\n${WARNING}\n\n${engineTable(ENGINES)}\n\n` +
       "| Channel | Command | Notes |\n| :--- | :--- | :--- |\n" +
       `| **Docker** | \`${COMMANDS[0]}\` | run \`brew update\` first |\n`;
     const localized = readme(ENGINES, [COMMANDS[0], "brew update"]);
@@ -200,6 +240,35 @@ describe("checkReadmes", () => {
     const localized = `# Title\n\n${engineTable(ENGINES)}\n`;
     const violations = checkReadmes({ canonical, localized: [{ name: "README_zh.md", text: localized }] });
     expect(violations[0]).toContain("install table");
+  });
+
+  test("reports README.md when it is the file missing the plain-HTTP warning", () => {
+    // The direction that actually shipped: every translation warned and the canonical
+    // file did not, so the guard has to check the canonical side too.
+    const violations = checkReadmes({
+      canonical: withoutWarning(canonical),
+      localized: [{ name: "README_zh.md", text: readme() }],
+    });
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain("README.md");
+    expect(violations[0]).toContain("AUTH_COOKIE_SECURE");
+  });
+
+  test("reports a localized file missing the plain-HTTP warning", () => {
+    const violations = checkReadmes({
+      canonical,
+      localized: [{ name: "README_ja.md", text: withoutWarning(readme()) }],
+    });
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain("README_ja.md");
+  });
+
+  test("a file missing both the warning and an engine reports both", () => {
+    const localized = withoutWarning(readme(["PostgreSQL", "MySQL"]));
+    const violations = checkReadmes({ canonical, localized: [{ name: "README_zh.md", text: localized }] });
+    expect(violations).toHaveLength(2);
+    expect(violations.some((v) => v.includes("Redis"))).toBe(true);
+    expect(violations.some((v) => v.includes("AUTH_COOKIE_SECURE"))).toBe(true);
   });
 });
 

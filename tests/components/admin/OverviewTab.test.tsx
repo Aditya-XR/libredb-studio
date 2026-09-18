@@ -74,7 +74,9 @@ import React from "react";
 
 import { mockGlobalFetch, restoreGlobalFetch } from "../../helpers/mock-fetch";
 
-import { OverviewTab } from "@/components/admin/tabs/OverviewTab";
+import { OverviewTab, DB_TYPES_PREVIEW } from "@/components/admin/tabs/OverviewTab";
+import { EXTERNAL_DATABASE_TYPES } from "@/lib/db/compatibility";
+import { getDBConfig } from "@/lib/db-ui-config";
 
 // =============================================================================
 // OverviewTab Tests
@@ -190,6 +192,30 @@ describe("OverviewTab", () => {
 
     // The empty state shows "Welcome to Command Center"
     expect(queryByText("Welcome to Command Center")).not.toBeNull();
+  });
+
+  test("empty state DB Types card is derived from EXTERNAL_DATABASE_TYPES, not hand-typed", async () => {
+    mockGetConnections.mockImplementation(() => []);
+
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OverviewTab user={{ username: "admin", role: "admin" }} />);
+    });
+    const { queryByText } = renderResult!;
+
+    // The count matches the real external-engine catalog, not a stale literal.
+    expect(queryByText(`${EXTERNAL_DATABASE_TYPES.length} DB Types`)).not.toBeNull();
+    expect(queryByText("7 DB Types")).toBeNull();
+
+    // The description previews the hand-picked DB_TYPES_PREVIEW labels and names the rest as
+    // "+N more". getDBConfig is mocked to "PostgreSQL" for every type in this file, so this
+    // only pins the join/count mechanics; DB_TYPES_PREVIEW's real, category-spanning labels
+    // and its membership in EXTERNAL_DATABASE_TYPES are checked unmocked in
+    // tests/unit/components/overview-tab-db-types-preview.test.ts.
+    const labels = DB_TYPES_PREVIEW.map((type) => getDBConfig(type).label);
+    const hidden = EXTERNAL_DATABASE_TYPES.length - DB_TYPES_PREVIEW.length;
+    const expectedDescription = `${labels.join(", ")}, +${hidden} more`;
+    expect(queryByText(expectedDescription)).not.toBeNull();
   });
 
   test("shows hero section when connections exist", async () => {
@@ -567,6 +593,48 @@ describe("OverviewTab", () => {
       expect(queryByText("PG Prod")).not.toBeNull();
       expect(queryByText("timeout")).not.toBeNull();
       expect(queryByText("Connection refused")).not.toBeNull();
+      // one failing connection: singular badge
+      expect(queryByText("1 error")).not.toBeNull();
+    });
+  });
+
+  test("fleet status badge pluralizes the error count", async () => {
+    fetchMock = mockGlobalFetch({
+      "/api/admin/audit": { json: { events: [] } },
+      "/api/admin/fleet-health": {
+        json: {
+          results: [
+            {
+              connectionId: "c1",
+              connectionName: "PG Prod",
+              type: "postgres",
+              status: "error",
+              latencyMs: 999,
+              error: "Connection refused",
+            },
+            {
+              connectionId: "c2",
+              connectionName: "PG Prod Replica",
+              type: "postgres",
+              status: "error",
+              latencyMs: 999,
+              error: "Connection refused",
+            },
+          ],
+        },
+      },
+    });
+
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OverviewTab user={{ username: "admin", role: "admin" }} />);
+    });
+    const { queryByText } = renderResult!;
+
+    await waitFor(() => {
+      // two failing connections: plural badge, not the unpluralized singular text
+      expect(queryByText("2 errors")).not.toBeNull();
+      expect(queryByText("2 error")).toBeNull();
     });
   });
 
@@ -715,6 +783,43 @@ describe("OverviewTab", () => {
       expect(refreshButton().disabled).toBe(false);
     } finally {
       restore();
+    }
+  });
+
+  // ── Gauge track ────────────────────────────────────────────────────────────
+
+  /**
+   * The unfilled part of a gauge is the ring its arc is read against. Both gauges painted
+   * it in 4% white, which on a light panel is nothing at all, so the score read as an arc
+   * floating on its own (#856). Recharts inline-styles it, so the palette has to be handed
+   * over the same way the tooltip's is.
+   */
+  async function gaugeTracksUnderTheme(theme: "dark" | "light") {
+    document.documentElement.classList.remove("dark", "light");
+    document.documentElement.classList.add(theme);
+    mockGlobalFetch({ "/api/admin/audit": { ok: true, json: { events: [] } } });
+
+    let result: ReturnType<typeof render>;
+    await act(async () => {
+      result = render(<OverviewTab user={{ username: "admin", role: "admin" }} />);
+    });
+    return Array.from(result!.container.querySelectorAll("[data-testid='mock-radial-bar']")).map((el) =>
+      el.getAttribute("data-track"),
+    );
+  }
+
+  test("the gauge track is the palette's grid line in the dark theme", async () => {
+    const tracks = await gaugeTracksUnderTheme("dark");
+    expect(tracks.length).toBeGreaterThan(0);
+    for (const track of tracks) expect(track).toBe("#222222");
+  });
+
+  test("and turns into the light theme's grid line, not an invisible white", async () => {
+    const tracks = await gaugeTracksUnderTheme("light");
+    expect(tracks.length).toBeGreaterThan(0);
+    for (const track of tracks) {
+      expect(track).toBe("#e4e4e7");
+      expect(track).not.toContain("255, 255, 255");
     }
   });
 

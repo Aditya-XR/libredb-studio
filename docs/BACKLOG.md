@@ -30,17 +30,17 @@ None of it is a GitHub issue.
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
 - [Drivers and connections](#drivers-and-connections) — D1–D97, U17 · 43
 - [Value interpolation](#value-interpolation) — V1
-- [Row editing](#row-editing) — R1
+- [Row editing](#row-editing) — R1–R2 · 2
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U21 · 12
 - [Dependencies](#dependencies) — P1–P5 · 5
 - [Documentation](#documentation) — DOC3–DOC4 · 2
-- [Release pipeline](#release-pipeline) — REL1–REL3 · 3
+- [Release pipeline](#release-pipeline) — REL1–REL4 · 4
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H8 · 2
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A5 · 4
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 25
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 24
 
 ---
 
@@ -1211,7 +1211,7 @@ accept, a single line, a range and a comma pair, and one negative that fails whe
 
 ### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses two exports
 
-`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 36 hits, measured 2026-09-15. Five of
+`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 37 hits, measured 2026-09-15. Six of
 them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`,
 the agent routes' pattern). Twenty-nine write out the same five-key object - `getSession`, `signJWT`,
 `verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token
@@ -1388,6 +1388,22 @@ Two constraints from #269 that do not go away:
 Whether row editing should be universal at all is a product decision. The published
 `WorkspaceFeatures.inlineEditing` flag is deprecated against this entry (#288): it becomes real, or
 goes away in a major, with this work.
+
+### R2. A MySQL index hint refuses an inline edit that the tab title used to write
+
+`resolveUpdateTarget` (`src/lib/sql/update-target.ts`) reads the FROM reference as a name, an
+optional `AS`, and an optional alias, and refuses everything longer through its trailing catch-all.
+A MySQL index hint is longer: measured, `resolveUpdateTarget("SELECT * FROM users USE INDEX (idx)
+WHERE id = 1", "mysql")` answers "This query describes its table in a way this editor cannot read".
+The same applies to `FORCE INDEX` and `IGNORE INDEX`.
+
+It reads exactly one table, and the tab-title reader #881 replaced wrote it correctly, so inline
+editing on such a tab goes from working to refused. It is a refusal rather than a wrong write, which
+is the direction that module chooses everywhere, so it is recorded rather than rushed.
+
+Done looks like: the hint is read and dropped, the table resolves, and a hint naming a second table
+(there is no such form on MySQL, which is what makes this safe) stays refused. Tests belong beside
+the LIMIT case in `tests/unit/sql/update-target.test.ts`, with the engine each shape was measured on.
 
 ---
 
@@ -1951,6 +1967,30 @@ the feed within minutes of a push, with no human reviewer recorded — or a deci
 that the moderation lag is accepted permanently and this entry is deleted.
 
 ---
+
+---
+
+### REL4. `backlog-structure.test.ts` scans gitignored files, so a local draft fails a gate CI cannot
+
+The citation scan globs `docs/**/*.md` and reads whatever is on disk. `.gitignore:133` excludes
+`docs/superpowers/`, where plans, specs and run reports are written during a working session, and
+those drafts cite backlog ids freely. So `bun run test` goes red on a maintainer's machine over
+files that are not in the repository, while CI, which checks out only tracked files, is green on the
+same commit.
+
+Measured while cutting 0.16.0: six citations across four untracked report files failed
+`every cited entry exists`, and the whole suite had to be re-run with `docs/superpowers/` moved
+aside to get a coverage number. The failure names the untracked path, so it is diagnosable, but it
+costs a full run to discover and it trains the reader to treat a red suite as noise, which is the
+real damage.
+
+`tests/unit/agent-documentation.test.ts` asks the same question of `docs/AGENT.md` alone and does
+not have the problem, because it names one file rather than a glob.
+
+**Done when:** the scan enumerates tracked files, for example by driving the glob through
+`git ls-files` and intersecting, so a working tree with local drafts under `docs/` gives the same
+verdict as a clean checkout. The scan's own floor assertion (`scanned.length > 200`) stays, so a
+broken enumeration still fails loudly rather than passing vacuously.
 
 ## Chart configuration surface
 
@@ -2675,25 +2715,6 @@ the entry cannot tell what the model is actually driven with.
 
 **Done when:** the gate tests the stopping text and the affected cells are re-measured, or the
 two switches become one setting whose name covers both stops.
-
----
-
-### B67. There is no run history across conversations
-
-A run now belongs to a conversation, the rail names the one it continues and offers to leave it,
-and the steps of THAT conversation are listed from the run's own header. What is left of B36's
-"larger shape" is everything outside it: a user cannot see the conversations they had yesterday,
-cannot return to one, and cannot open an earlier step's report.
-
-The reason it is a separate entry rather than more of the same work is a measurement. Listing the
-current conversation needs no new infrastructure — each run's header carries its own prefix, so the
-chain is self-describing and `GET /api/agent/runs/{runId}` already serves any step. Listing ALL of a
-user's runs has nothing behind it at all: `run-store.ts` has no enumeration, there is no list route,
-and the two questions that follow immediately — pagination and retention — have not been asked. It
-is a persistence surface, not a rail change.
-
-**Done when:** a user can see their earlier conversations and open one, with the store's
-enumeration, the route and the retention rule each decided rather than inherited.
 
 ### B70. A run writes no summary for the step after it
 

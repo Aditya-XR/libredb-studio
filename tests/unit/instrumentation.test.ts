@@ -47,13 +47,35 @@ describe("instrumentation register()", () => {
     setSqliteSampleSeedState("idle");
   });
 
-  afterEach(() => {
-    for (const key of ENV_KEYS) {
-      if (orig[key] === undefined) delete process.env[key];
-      else process.env[key] = orig[key];
+  afterEach(async () => {
+    // Drain the fire-and-forget seed before anything it reads is taken away.
+    //
+    // register() returns while the sqlite copy is still running, and not every
+    // test above awaits it - "seeds the sample file on a nodejs boot" is about
+    // the libredb sample and leaves a sqlite seed in flight. That copy logs
+    // when it lands, so a later test's logger spy catches a line no call of
+    // its own produced: measured on 2026-09-17 as a red Windows leg (CI run
+    // 35172616920) where "SQLite embedded sample seed completed" reached the
+    // fast-path test, which asserts exactly that no such info line appears.
+    // Linux stayed green only because the stray line landed one test earlier,
+    // where nothing was watching info.
+    //
+    // Draining on the state is enough to contain the log: instrumentation.ts
+    // sets the terminal state and logs in the same synchronous step, so a
+    // state that is no longer "seeding" means the line has already been
+    // emitted into the test that started it. The cleanup runs in `finally`,
+    // because a drain that times out must not leave the next test to fail on
+    // this one's env and state.
+    try {
+      await waitFor(() => getSqliteSampleSeedState() !== "seeding");
+    } finally {
+      for (const key of ENV_KEYS) {
+        if (orig[key] === undefined) delete process.env[key];
+        else process.env[key] = orig[key];
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      setSqliteSampleSeedState("idle");
     }
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    setSqliteSampleSeedState("idle");
   });
 
   test("does nothing outside the nodejs runtime", async () => {

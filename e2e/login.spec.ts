@@ -13,7 +13,7 @@ test.describe("Login Flow", () => {
     await expect(page.locator("text=LibreDB Studio").first()).toBeVisible();
     await expect(page.locator('input[type="email"]').first()).toBeVisible();
     await expect(page.locator('input[type="password"]').first()).toBeVisible();
-    await expect(page.locator('button:has-text("Sign In")').first()).toBeVisible();
+    await expect(page.locator('button:has-text("Sign in")').first()).toBeVisible();
   });
 
   test("admin login redirects to /admin", async ({ page }) => {

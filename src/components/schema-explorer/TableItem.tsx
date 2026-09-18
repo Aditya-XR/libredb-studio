@@ -225,6 +225,7 @@ export const TableItem = React.memo(function TableItem({
     onOpenMaintenance,
   };
 
+  const actionsLabel = `Actions for ${table.name}`;
   return (
     <div className="group flex flex-col">
       <ContextMenu>
@@ -271,6 +272,8 @@ export const TableItem = React.memo(function TableItem({
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
+                    aria-label={actionsLabel}
+                    title={actionsLabel}
                     className="absolute inset-0 w-full h-full opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 focus-within:opacity-100 transition-opacity hover:bg-accent flex items-center justify-center"
                     onClick={(e) => e.stopPropagation()}
                   >

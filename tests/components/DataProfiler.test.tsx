@@ -123,6 +123,38 @@ describe("DataProfiler", () => {
     expect(view.queryByText("users")).toBeNull();
   });
 
+  // ── The column rows carry no icon that never varies (#880) ────────────────
+
+  test("no column profile row draws an icon that is the same for every type", async () => {
+    // A numeric icon was drawn on every row - text, boolean and date alike - so it said
+    // nothing about the column it sat on. The alternative was an icon per type, but a
+    // column profile carries only the engine's own type STRING, and classifying that across
+    // sixteen dialects is a guess. The type label is on the same row and says it exactly.
+    const props = createDefaultProps();
+    const { container } = render(<DataProfiler {...props} />);
+    const view = within(container);
+
+    await waitFor(() => {
+      expect(view.queryByText("Column Profiles")).not.toBeNull();
+    });
+
+    // Each row is name + type, and the three fixture columns differ in type.
+    expect(view.queryAllByText("integer").length).toBeGreaterThan(0);
+    expect(view.queryAllByText("varchar(255)").length).toBeGreaterThan(0);
+
+    const rows = Array.from(container.querySelectorAll("div.bg-surface.rounded-lg.border"));
+    const withColumnName = rows.filter((row) => /^(id|name|created_at)/.test(row.textContent ?? ""));
+    expect(withColumnName.length).toBeGreaterThan(0);
+    for (const row of withColumnName) {
+      // The one icon a row may still carry is the sensitive-column lock, which is
+      // conditional; nothing unconditional is left.
+      const unconditional = Array.from(row.querySelectorAll("svg")).filter(
+        (svg) => svg.closest("[title='Sensitive column - values masked']") === null,
+      );
+      expect(unconditional).toHaveLength(0);
+    }
+  });
+
   // ── Loading state during fetch ────────────────────────────────────────────
 
   test("shows loading state during fetch", () => {
@@ -789,6 +821,49 @@ describe("DataProfiler", () => {
     fireEvent.keyDown(document, { key: "Escape" });
 
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // ── Shortcuts dialog (#746) ────────────────────────────────────────────────
+
+  test("? opens the shortcuts dialog while the profiler is open", () => {
+    const props = createDefaultProps({ isOpen: true });
+    const { queryByText } = render(<DataProfiler {...props} />);
+    expect(queryByText("Keyboard Shortcuts")).toBeNull();
+
+    fireEvent.keyDown(document, { key: "?" });
+
+    expect(queryByText("Keyboard Shortcuts")).not.toBeNull();
+  });
+
+  test("? does nothing while the profiler is closed", () => {
+    const props = createDefaultProps({ isOpen: false });
+    const { queryByText } = render(<DataProfiler {...props} />);
+
+    fireEvent.keyDown(document, { key: "?" });
+
+    expect(queryByText("Keyboard Shortcuts")).toBeNull();
+  });
+
+  // Radix's Dialog handles Escape in the capture phase and only calls
+  // preventDefault() - not stopPropagation() - so this component's OWN Escape
+  // listener (bound on `document`, above) still ran and closed the profiler
+  // underneath the shortcuts dialog on the very same keypress.
+  test("Escape closes only the shortcuts dialog, leaving the profiler open", async () => {
+    const onClosed = mock(() => {});
+    const { container, queryByText } = render(<ProfilerHost onClosed={onClosed} />);
+
+    await waitFor(() => {
+      expect(within(container).queryByText("Data Profiler")).not.toBeNull();
+    });
+
+    fireEvent.keyDown(document, { key: "?" });
+    expect(queryByText("Keyboard Shortcuts")).not.toBeNull();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(queryByText("Keyboard Shortcuts")).toBeNull();
+    expect(onClosed).not.toHaveBeenCalled();
+    expect(within(container).queryByText("Data Profiler")).not.toBeNull();
   });
 
   // Same rule as every other connection-bearing request: a managed (seed)

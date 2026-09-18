@@ -62,8 +62,10 @@ server log:
   server does when a channel leaves those variables unset.
 
 **Strict mode:** set `AUTH_BOOTSTRAP=off` to disable generation and require explicit
-`JWT_SECRET` and `ADMIN_PASSWORD` (recommended for production; missing values then surface as a
-clear error on the login page instead of silently generated credentials in collected logs). Every
+`JWT_SECRET` and `ADMIN_PASSWORD` (recommended for production; a missing `ADMIN_PASSWORD` then
+surfaces as a clear error on the login page instead of silently generated credentials in
+collected logs, and a missing `JWT_SECRET` stops the server at boot with an actionable banner
+rather than starting a deployment whose every login is 503). Every
 channel that starts the server itself, the Helm chart included, defaults to zero-config and takes
 strict mode as an opt-in; the [Sealos](#sealos-app-store) template is the one channel that ships
 with it already on. Unrecognized `AUTH_BOOTSTRAP` values log a warning and keep bootstrap on.
@@ -1673,6 +1675,14 @@ Neither Fly.io nor
 Render has a marketplace or template gallery to publish into, which is why the repo file itself is the
 deliverable (`pin.strategy: local_file` for the version-pinned `fly.toml`; `none` for
 `render.yaml`, which builds from the repo Dockerfile and tracks whatever `main` builds).
+
+**DigitalOcean measures the live listing**, not the Packer workflow's version
+input: its `remote_file` pin reads `custom_data.version` from the public
+Marketplace page. Drift and unreadable metadata remain visible in the weekly
+report without blocking a release. Snapshot builds and Vendor Portal updates
+stay manual and on demand; every successful `publish-release` job adds a
+versioned build, test, submit and verify checklist to its summary. See the
+[DigitalOcean build guide](../deploy/digitalocean/README.md).
 
 ### Manual steps still open
 

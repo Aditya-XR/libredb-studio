@@ -1,0 +1,21 @@
+======== ministral-3:3b | optimize x 5 ========
+server up with ministral-3:3b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=ministral-3:3b
+######## ministral-3:3b | agent/query-optimization ########
+---- repeat 1/5 ----
+run=arun_6a978d6606344514ad2f33de3f089e5e
+status=succeeded
+---- repeat 2/5 ----
+run=arun_973d9ffe8d654382a50feed608a39391
+status=succeeded
+---- repeat 3/5 ----
+run=arun_7e4b6e9a03d2448688fcebb11dbeca64
+status=succeeded
+---- repeat 4/5 ----
+run=arun_f0c970bbf82042e9b2bcd11a943d0552
+status=succeeded
+---- repeat 5/5 ----
+run=arun_3c674a3eb9bb48f7bb1de7316c2ef54a
+status=succeeded
+@@@@ ministral-3:3b optimize done

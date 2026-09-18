@@ -1,0 +1,20 @@
+======== llama3.2:3b | assess x 5 ========
+server up with llama3.2:3b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.2:3b
+######## llama3.2:3b | agent/database-assessment ########
+---- repeat 1/5 ----
+run=arun_82ff5837e8f14bd3ae4efdbe0c891b52
+status=failed
+---- repeat 2/5 ----
+no run started: {"error":"The model \"llama3.2:3b\" (ollama) cannot drive an agent run: the capability probe could not establish schema-valid tool arguments. Configure a different model and start the run again.","missing":["structuredOutput"],"disproved":["structuredOutput"]}
+---- repeat 3/5 ----
+run=arun_d61cd7390dfa4c7283ed64e55c0f4a4b
+status=succeeded
+---- repeat 4/5 ----
+run=arun_660848c3c1964baf908f140bd87d6103
+status=succeeded
+---- repeat 5/5 ----
+run=arun_cc7e7fa5084149c59d4c253de267f17a
+status=succeeded
+@@@@ llama3.2:3b assess done

@@ -1,0 +1,21 @@
+======== cogito:8b | plan x 5 ========
+server up with cogito:8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=cogito:8b
+######## cogito:8b | planning/investigation ########
+---- repeat 1/5 ----
+run=arun_6e418d12709c43f9b2ca3b53f3595898
+status=succeeded
+---- repeat 2/5 ----
+run=arun_426960623cf244d18969b9b8e0caf61f
+status=succeeded
+---- repeat 3/5 ----
+run=arun_6f0b90ac449e483cb3164e670905250d
+status=succeeded
+---- repeat 4/5 ----
+run=arun_422e52b3266c4eeda6bb06d71ca6d792
+status=succeeded
+---- repeat 5/5 ----
+run=arun_3f6cf24b79aa4340973adb42db621b33
+status=succeeded
+@@@@ cogito:8b plan done

@@ -13,7 +13,8 @@
   <a href="README_zh.md">简体中文</a> ·
   <b>日本語</b> ·
   <a href="README_es.md">Español</a> ·
-  <a href="README_ur.md">اردو</a>
+  <a href="README_ur.md">اردو</a> ·
+  <a href="README_hi.md">हिन्दी</a>
 </p>
 
 <p align="center">
@@ -29,7 +30,10 @@
   <a href="https://clickhouse.com/docs/integrations/connectors/tools/gui#libredb-studio">ClickHouse</a>、
   <a href="https://mariadb.com/docs/server/clients-and-utilities/graphical-and-enhanced-clients/libredb-studio">MariaDB</a>、
   <a href="https://trino.io/ecosystem/client-application#libredb-studio">Trino</a>、
-  <a href="https://cloudberry.apache.org/docs/ecosystem/sql-clients/libredb-studio/">Apache Cloudberry</a>
+  <a href="https://cloudberry.apache.org/docs/ecosystem/sql-clients/libredb-studio/">Apache Cloudberry</a>、
+  <a href="https://docs.yugabyte.com/stable/integrations/tools/libredb-studio/">YugabyteDB</a>、
+  <a href="https://www.dragonflydb.io/docs/integrations/libredb-studio">DragonflyDB</a>、
+  <a href="https://opensearch.org/community-projects/">OpenSearch</a>
   の公式ドキュメントにも掲載
 </p>
 
@@ -154,7 +158,7 @@ StudioのAIの中心は、エディタの隣にあるエージェントレール
   提案した文を実行することもありません。適用するかどうかはあなたのクリックです。
 - **根拠がなければ主張もない**：引用のない主張は記録できません。Runの最後には「Run answered」または
   「Run did not answer」と明示されます。
-- **上限があり、画面に出ています**：1Runあたり20文、データベース時間60秒、1読み取り200行、実行時間5分。
+- **上限があり、画面に出ています**：ワークフローにより1Runあたり18〜45文、実行時間360〜900秒、1読み取り200行。ワークフローごとの正確な数値は [docs/AGENT.md](docs/AGENT.md) を参照してください。
 - **モデルは自分のもの**：Gemini（既定）、OpenAI、Ollama、またはOpenAI互換の任意のエンドポイント。
   **Agent**モードにはツール呼び出しに対応したモデルが必要で、Ollamaではそれをベンダーの資料ではなく実際の
   プローブで確かめます。**Plan**モードはツールを必要とせず、プローブも行われないため

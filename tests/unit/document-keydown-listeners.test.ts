@@ -9,7 +9,7 @@
  *
  * That is how the previous sentence became false: it said there were TWO document listeners for as
  * long as that was true, `DataProfiler` added a third, and nothing noticed until a reviewer ran the
- * grep again. A fifth registration, or a fourth that moves to `document`, would make all three
+ * grep again. A sixth registration, or a fifth that moves to `document`, would make all three
  * sentences false in the same silence.
  *
  * So the grep runs here. This asserts the SITES, not the count: a bare number tells the next reader
@@ -46,14 +46,21 @@ const registrations = sourceFiles(SRC)
   .sort((a, b) => a.file.localeCompare(b.file));
 
 describe("every global keydown listener in src", () => {
-  test("the registrations are the four this repository has enumerated", () => {
+  test("the registrations are the six this repository has enumerated", () => {
     expect(registrations).toEqual([
+      // Escape (#879), bound only while the generator is open. It closes that modal and moves no
+      // tab; a prevented Escape belongs to the dialog above it and is left alone.
+      { file: "src/components/CodeGenerator.tsx", target: "document" },
       // Cmd/Ctrl+K. Its table rows move the active tab, so the standalone shell refuses them
       // while an object apply is in flight (D82). The embedded shell renders no palette.
       { file: "src/components/CommandPalette.tsx", target: "document" },
       // Escape, bound only while the profiler is open, and it closes the profiler. Moves no tab,
       // and it is the listener the two-listener sentence used to miss.
       { file: "src/components/DataProfiler.tsx", target: "document" },
+      // `?` (#746), guarded against the editor and every text input. Opens a dialog of shortcut
+      // labels and moves no tab. `DataProfiler.tsx` always mounts one while it is open, so this
+      // site is live on both shells even though only `Studio.tsx` mounts it directly.
+      { file: "src/components/ShortcutsDialog.tsx", target: "document" },
       // The new-tab shortcut (#745), on `document` deliberately so it works while Monaco owns
       // focus. Both shells refuse it while an object apply is in flight (D82).
       { file: "src/components/studio/StudioTabBar.tsx", target: "document" },
@@ -62,10 +69,12 @@ describe("every global keydown listener in src", () => {
     ]);
   });
 
-  test("exactly three of them are on document, which is what the apply dialog cannot refuse", () => {
+  test("exactly five of them are on document, which is what the apply dialog cannot refuse", () => {
     expect(registrations.filter((one) => one.target === "document").map((one) => one.file)).toEqual([
+      "src/components/CodeGenerator.tsx",
       "src/components/CommandPalette.tsx",
       "src/components/DataProfiler.tsx",
+      "src/components/ShortcutsDialog.tsx",
       "src/components/studio/StudioTabBar.tsx",
     ]);
   });

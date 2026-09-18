@@ -69,6 +69,16 @@ prerendered and its hydration scripts are inline and nonce-less. What the policy
 (a runtime variable, no rebuild) if an upgrade blocks a resource you need while you identify the
 directive.
 
+**1.1, HSTS.** `Strict-Transport-Security` is sent with a 180-day `max-age` (15 552 000 s) and has no
+off switch: a browser that has cached the pin keeps enforcing HTTPS-only until it expires, whatever
+the server sends next. Browsers ignore the header when it arrives over plain HTTP. `includeSubDomains`
+is off unless `HSTS_INCLUDE_SUBDOMAINS=true`, and it is left to the operator because its reach is a
+property of the hostname rather than of Studio: it extends the pin to every host *below* the one
+serving Studio, for the full 180 days, with no server-side way to withdraw it. On a dedicated host
+such as `studio.example.com` that usually covers nothing else; served from a registrable domain that
+other services sit under, it makes each of those services HTTPS-only in every browser that visited
+Studio. See [`.env.example`](../.env.example) under Security Headers.
+
 **1.1, the subresource half.** The row says *document* response for a reason: the two delivery
 paths do not carry the same set. [`src/proxy.ts`](../src/proxy.ts)'s matcher deliberately skips
 `_next/static`, `_next/image` and every path containing a dot — so a file under `public/` or
@@ -139,6 +149,21 @@ domain does get the cookie and can time an authenticated endpoint. That residual
 **1.2.** The counters live in the application process. With more than one replica the budgets apply
 per replica; multi-replica deployments should enforce the same budgets at the ingress. See
 [`charts/libredb-studio/README.md`](../charts/libredb-studio/README.md).
+
+**1.2, tuning the budgets.** Each bucket takes a request count and a window in seconds from a pair of
+runtime variables, documented in [`.env.example`](../.env.example) under Rate Limiting:
+
+| What it bounds | Variables | Default |
+|---|---|---|
+| Failed logins per client address | `RATE_LIMIT_LOGIN_MAX`, `RATE_LIMIT_LOGIN_WINDOW_SEC` | 5 per 300 s |
+| Failed logins per submitted account | `RATE_LIMIT_LOGIN_ACCOUNT_MAX`, `RATE_LIMIT_LOGIN_ACCOUNT_WINDOW_SEC` | 20 per 300 s |
+| AI and agent-run requests per signed-in user | `RATE_LIMIT_AI_MAX`, `RATE_LIMIT_AI_WINDOW_SEC` | 20 per 60 s |
+| Database-reaching requests per signed-in user | `RATE_LIMIT_QUERY_MAX`, `RATE_LIMIT_QUERY_WINDOW_SEC` | 120 per 60 s |
+| Permission-denied audit lines | `RATE_LIMIT_ANON_MAX`, `RATE_LIMIT_ANON_WINDOW_SEC` | 5 per 300 s |
+
+Setting a `*_MAX` to `0` disables that bucket. A window below one second is raised to one. The last
+bucket bounds how often a refusal is written to the audit log; it never changes whether a request
+is refused.
 
 **1.4.** Marked Partial: sessions and origin failures are audited, role failures are not. Four
 in-handler admin checks and the middleware's `/admin` redirect return their denial with no audit
@@ -327,7 +352,16 @@ These are real, current, and not oversights. Each is a decision with a reason.
   environment variables, so the environment already holds the secret. Rate limiting (1.2) and the
   constant-time comparison (1.5) address the reachable part of the risk.
 - **Rate limiting is per process and every bucket is keyed on something the caller supplies.** See
-  [`docs/BACKLOG.md`](./BACKLOG.md), entries H11 and H13.
+  [`docs/BACKLOG.md`](./BACKLOG.md), entries H11 and H13. Two variables decide what that something
+  is. `TRUST_PROXY_HEADERS` (default `true`) derives the client address from `X-Forwarded-For`,
+  falling back to `X-Real-IP`; set to `false`, every anonymous caller shares one bucket, so a single
+  caller tripping the login limiter locks everyone out until the window closes. `TRUSTED_PROXY_HOPS`
+  (default `0`) picks which `X-Forwarded-For` entry is the client. `0` takes the leftmost entry,
+  which the caller writes, so behind a reverse proxy it should be set to the number of proxies in
+  front of Studio. Set too low, a caller can choose the bucket they land in; set too high, it keys
+  on a proxy and lumps everyone behind it into one bucket. The same derived address is the `ip`
+  field in the audit log, so a wrong value also makes that field unreliable. Both are documented in
+  [`.env.example`](../.env.example) under Forwarded Headers.
 - **Configuring an AI model means database content leaves the machine.** Nothing here is telemetry
   and nothing fires on its own, but an agent run sends the objective you typed, the schema
   inventory, the relations graph and the rows of every read it performs to the model provider you

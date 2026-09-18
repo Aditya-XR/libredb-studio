@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { storage } from "@/lib/storage";
 import { useAllConnections } from "@/hooks/use-all-connections";
-import { getDBIcon, getDBColor } from "@/lib/db-ui-config";
+import { getDBIcon, getDBColor, getDBConfig } from "@/lib/db-ui-config";
+import { EXTERNAL_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { formatBytes } from "@/lib/db/utils/pool-manager";
 import {
   type DatabaseType,
@@ -42,7 +43,7 @@ import Link from "next/link";
 import type { FleetHealthItem } from "@/app/api/admin/fleet-health/route";
 import type { AuditEvent } from "@/lib/audit";
 import { useEffectiveTheme } from "@/hooks/use-effective-theme";
-import { chartTooltipStyle } from "@/lib/charts/palette";
+import { chartTheme, chartTooltipStyle } from "@/lib/charts/palette";
 
 // ─── Animation Variants ─────────────────────────────────────────────────────
 
@@ -437,6 +438,14 @@ function HeroStatusBanner({
   const animatedQueries = useAnimatedCounter(queryStats.total);
   const animatedToday = useAnimatedCounter(todayQueries);
 
+  // The unfilled part of the gauge, which is the ring the filled arc is read against.
+  // It was 4% white, so on a light panel there was nothing there and the score read as an
+  // arc floating on its own. Recharts writes `background.fill` straight onto the element
+  // and cannot resolve a CSS token, so the palette is handed to it — the same reason
+  // `chartTooltipStyle` exists a few lines down. `grid` is the palette's recessive line:
+  // it orients without competing, which is exactly what a gauge track is for.
+  const gaugeTrack = chartTheme(useEffectiveTheme()).grid;
+
   const gaugeColor = getGaugeColor(healthScore);
   const gaugeData = [{ value: healthScore, fill: gaugeColor }];
 
@@ -488,7 +497,7 @@ function HeroStatusBanner({
                   startAngle={90}
                   endAngle={-270}
                 >
-                  <RadialBar dataKey="value" cornerRadius={6} background={{ fill: "rgba(255,255,255,0.04)" }} />
+                  <RadialBar dataKey="value" cornerRadius={6} background={{ fill: gaugeTrack }} />
                 </RadialBarChart>
               </ResponsiveContainer>
             </div>
@@ -530,7 +539,7 @@ function HeroStatusBanner({
                   )}
                   {errorCount > 0 && (
                     <Badge variant="outline" className="border-danger-tint/30 text-danger h-5 text-[0.625rem]">
-                      {errorCount} error
+                      {errorCount} error{errorCount === 1 ? "" : "s"}
                     </Badge>
                   )}
                 </div>
@@ -854,6 +863,8 @@ function MetricGauge({
   const pct = Math.round((value / maxValue) * 100);
   const animatedValue = useAnimatedCounter(value);
   const gaugeData = [{ value: pct, fill: color }];
+  // See `HeroStatusBanner`: the track has to come from the palette, not from a fixed white.
+  const gaugeTrack = chartTheme(useEffectiveTheme()).grid;
 
   return (
     <div className="rounded-xl border border-hairline bg-fill-subtle p-4 flex flex-col items-center">
@@ -867,7 +878,7 @@ function MetricGauge({
             startAngle={90}
             endAngle={-270}
           >
-            <RadialBar dataKey="value" cornerRadius={4} background={{ fill: "rgba(255,255,255,0.03)" }} />
+            <RadialBar dataKey="value" cornerRadius={4} background={{ fill: gaugeTrack }} />
           </RadialBarChart>
         </ResponsiveContainer>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
@@ -1108,12 +1119,31 @@ function QuickActionsSection() {
 
 // ─── Empty State ─────────────────────────────────────────────────────────────
 
+// Keeps the card's second line short: name a handful of engines, not the whole catalog.
+// Picked by hand rather than sliced off registry order, so the seven shown span the product's
+// range (relational, document, key-value, wide-column, search, analytics) instead of reading
+// as "six flavours of SQL" — every id here must still be in EXTERNAL_DATABASE_TYPES.
+export const DB_TYPES_PREVIEW: readonly DatabaseType[] = [
+  "postgres",
+  "mysql",
+  "mongodb",
+  "redis",
+  "cassandra",
+  "elasticsearch",
+  "clickhouse",
+];
+
 function EmptyState() {
+  const previewEngineLabels = DB_TYPES_PREVIEW.map((type) => getDBConfig(type).label);
+  const hiddenEngineCount = EXTERNAL_DATABASE_TYPES.length - DB_TYPES_PREVIEW.length;
+  const dbTypesDescription =
+    previewEngineLabels.join(", ") + (hiddenEngineCount > 0 ? `, +${hiddenEngineCount} more` : "");
+
   const features = [
     {
       icon: Database,
-      label: "7 DB Types",
-      description: "PostgreSQL, MySQL, SQLite, MongoDB, Redis, Oracle, MSSQL",
+      label: `${EXTERNAL_DATABASE_TYPES.length} DB Types`,
+      description: dbTypesDescription,
     },
     {
       icon: Sparkles,

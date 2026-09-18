@@ -214,13 +214,26 @@ export function useQueryExecution({
   const { toast } = useToast();
 
   // Unified executeQuery — handles both normal and force (skipSafety) execution
+  /**
+   * Runs one statement against the active connection and writes the outcome into the
+   * target tab.
+   *
+   * Returns whether the statement ran and the engine accepted it. Every failure is
+   * still reported here — the toast, the tab flags and the history entry are unchanged
+   * — but the answer is now handed back as well, because a caller running statements in
+   * a loop cannot see a toast. Applying inline grid edits ran that loop and reported
+   * "Changes Applied" whatever happened, dropping the user's pending edits after a write
+   * the engine had refused (#882). `false` covers every way a run can fail to land: no
+   * connection, the safety dialog taking over, an unsupported EXPLAIN, a cancellation,
+   * a thrown request, and a multi-statement run the engine reported an error for.
+   */
   const executeQuery = useCallback(
     async (
       overrideQuery?: string,
       tabId?: string,
       isExplain: boolean = false,
       executionOptions?: QueryExecutionOptions,
-    ) => {
+    ): Promise<boolean> => {
       const activeTabId = activeTabIdRef.current;
       const targetTabId = tabId || activeTabId;
       const tabToExec = tabsRef.current.find((t) => t.id === targetTabId) || currentTabRef.current;
@@ -236,7 +249,7 @@ export function useQueryExecution({
 
       if (!activeConnection) {
         toast({ title: "No Connection", description: "Select a connection first.", variant: "destructive" });
-        return;
+        return false;
       }
 
       // Safety check for dangerous queries (skip for explain, load-more, playground, and force-execute)
@@ -251,7 +264,7 @@ export function useQueryExecution({
         isDangerousQuery(queryToExecute, activeConnection.type)
       ) {
         setSafetyCheckQuery(queryToExecute);
-        return;
+        return false;
       }
 
       // Options extraction
@@ -292,7 +305,7 @@ export function useQueryExecution({
         setTabs((prev) =>
           prev.map((t) => (t.id === targetTabId ? { ...t, isExecuting: false, isLoadingMore: false } : t)),
         );
-        return;
+        return false;
       }
 
       const startTime = Date.now();
@@ -480,7 +493,7 @@ export function useQueryExecution({
           if (errorCode === ApiErrorCode.QUERY_CANCELLED) {
             commitToTab((t) => ({ ...t, isExecuting: false, isLoadingMore: false }));
             toast({ title: "Query Cancelled", description: "Query execution was cancelled." });
-            return;
+            return false;
           }
 
           throw new Error(errorMessage);
@@ -595,6 +608,10 @@ export function useQueryExecution({
 
             return {
               ...t,
+              // The page appended here is what this run fetched, so the tab names it for
+              // the same reason the replace branch does: a reader of the rows must never
+              // be handed a different statement's name for them.
+              resultQuery: queryToExecute,
               result: {
                 ...resultData,
                 rows: newAllRows,
@@ -611,6 +628,10 @@ export function useQueryExecution({
           return {
             ...t,
             result: isExplain ? null : resultData, // Don't show EXPLAIN as results
+            // The rows and the statement that fetched them are committed together, so a
+            // reader of one can never be handed the other's (#881). An EXPLAIN leaves the
+            // results alone, so it leaves this alone too.
+            resultQuery: isExplain ? t.resultQuery : queryToExecute,
             allRows: isExplain ? t.allRows : resultData.rows,
             currentOffset: isExplain ? t.currentOffset : resultData.rows.length,
             isExecuting: false,
@@ -656,6 +677,15 @@ export function useQueryExecution({
         if (!isExplain && !isLoadMore && !resultData.hasError) {
           maybeInviteToStar();
         }
+
+        // The run reached the engine and the engine accepted it. `hasError` is the
+        // multi-statement path's own signal — the request succeeds while one of the
+        // statements inside it did not — so it is the same answer, not a separate one.
+        //
+        // A SUPERSEDED run reports false whatever the engine said. `commitToTab` dropped
+        // its result, so nothing it did is on screen, and a caller counting applied rows
+        // would otherwise count one the user never sees.
+        return !resultData.hasError && !isSuperseded();
       } catch (error) {
         // Playground mode: rollback on error too
         if (isPlaygroundRun) {
@@ -681,7 +711,7 @@ export function useQueryExecution({
           if (!superseded) {
             toast({ title: "Query Cancelled", description: "Query execution was cancelled." });
           }
-          return;
+          return false;
         }
 
         const title = "Query Error";
@@ -689,9 +719,10 @@ export function useQueryExecution({
         // Fallback string check for cancellation errors not caught by response code
         if (errorMessage.includes("Query was cancelled") || errorMessage.includes("cancelled")) {
           toast({ title: "Query Cancelled", description: "Query execution was cancelled." });
-          return;
+          return false;
         }
         toast({ title, description: errorMessage, variant: "destructive" });
+        return false;
       } finally {
         // Only the run that still owns this tab's slot may clear it. A superseded
         // run finishes AFTER its replacement started, and deleting the entry here
@@ -858,7 +889,12 @@ export function useQueryExecution({
     if (!currentTab.result?.pagination?.hasMore) return;
 
     const currentOffset = currentTab.currentOffset || currentTab.result.rows.length;
-    executeQuery(currentTab.query, currentTab.id, false, {
+    // The next page of the STATEMENT THAT BUILT THIS GRID, not of whatever has been typed
+    // since. The editor buffer is rewritten on every keystroke, and a run takes the
+    // editor's effective query, which may be only a selection of it - so paging the buffer
+    // appended another table's rows under these columns and left the tab holding rows from
+    // two tables while naming one (#881).
+    executeQuery(currentTab.resultQuery ?? currentTab.query, currentTab.id, false, {
       limit: 500,
       offset: currentOffset,
     });

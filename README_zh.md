@@ -13,7 +13,8 @@
   <b>简体中文</b> ·
   <a href="README_ja.md">日本語</a> ·
   <a href="README_es.md">Español</a> ·
-  <a href="README_ur.md">اردو</a>
+  <a href="README_ur.md">اردو</a> ·
+  <a href="README_hi.md">हिन्दी</a>
 </p>
 
 <p align="center">
@@ -29,9 +30,12 @@
   <a href="https://redis.io/docs/latest/develop/tools/#libredb-studio">Redis</a>、
   <a href="https://clickhouse.com/docs/integrations/connectors/tools/gui#libredb-studio">ClickHouse</a>、
   <a href="https://mariadb.com/docs/server/clients-and-utilities/graphical-and-enhanced-clients/libredb-studio">MariaDB</a>、
-  <a href="https://trino.io/ecosystem/client-application#libredb-studio">Trino</a>
+  <a href="https://trino.io/ecosystem/client-application#libredb-studio">Trino</a>、
+  <a href="https://cloudberry.apache.org/docs/ecosystem/sql-clients/libredb-studio/">Apache Cloudberry</a>、
+  <a href="https://docs.yugabyte.com/stable/integrations/tools/libredb-studio/">YugabyteDB</a>、
+  <a href="https://www.dragonflydb.io/docs/integrations/libredb-studio">DragonflyDB</a>
   和
-  <a href="https://cloudberry.apache.org/docs/ecosystem/sql-clients/libredb-studio/">Apache Cloudberry</a>
+  <a href="https://opensearch.org/community-projects/">OpenSearch</a>
   官方文档
 </p>
 
@@ -153,7 +157,7 @@ PostgreSQL · MySQL · Oracle · SQL Server · SQLite · libSQL · DuckDB · Mon
 - **不会自己动手**：Agent 不会替你开始运行，不会写入编辑器，也不会执行它建议的语句。是否采用由你点击决定。
 - **有证据才有结论**：没有引用的结论无法被记录；运行结束时会明确给出 “Run answered” 或
   “Run did not answer”。
-- **有上限，而且界面上就能看到**：每次运行 20 条语句、60 秒数据库时间、单次读取 200 行、整轮 5 分钟。
+- **有上限，而且界面上就能看到**：根据工作流类型，每次运行 18 到 45 条语句、整轮耗时 360 到 900 秒，单次读取 200 行。各工作流的具体数值见 [docs/AGENT.md](docs/AGENT.md)。
 - **用你自己的模型**：Gemini（默认）、OpenAI、Ollama，或任何兼容 OpenAI 的端点。**Agent** 模式需要一个
   真正支持工具调用的模型——在 Ollama 上这要靠一次真实探测来确认，而不是照抄厂商文档。**Plan** 模式不需要
   工具，也从不做探测（`src/lib/agent/capability-gate.ts:74`），所以被 Agent 模式拒绝的模型仍然可以用在

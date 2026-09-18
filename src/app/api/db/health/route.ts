@@ -3,18 +3,16 @@ import { getOrCreateProvider } from "@/lib/db";
 import { createErrorResponse } from "@/lib/api/errors";
 import { resolveConnection } from "@/lib/seed/resolve-connection";
 import { guardRoute } from "@/lib/api/require-session";
+import { livenessResponse } from "@/lib/api/liveness";
 
 /**
  * GET /api/db/health
- * Simple health check for load balancers and container orchestration (Render, K8s, etc.)
- * Returns 200 OK if the service is running
+ *
+ * Liveness, for anything already pointed here. `/health` and `/api/health` answer the same
+ * thing (#909); the body is built in one place so the three cannot drift.
  */
-export async function GET() {
-  return NextResponse.json({
-    status: "healthy",
-    timestamp: new Date().toISOString(),
-    service: "libredb-studio",
-  });
+export function GET() {
+  return livenessResponse();
 }
 
 /**

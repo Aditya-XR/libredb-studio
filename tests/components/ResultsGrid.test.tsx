@@ -760,6 +760,58 @@ describe("ResultsGrid", () => {
       expect(findEditInput(container)).toBeUndefined();
     });
 
+    test("a filtered row's edit is addressed to its place in the result, not in the filter", () => {
+      // The table is built over the FILTERED rows, so TanStack's `row.index` is a position
+      // in that array. `useInlineEditing` reads the row's primary key out of
+      // `result.rows[rowIndex]`, so with a filter on, an edit used to be keyed to whatever
+      // row happened to sit at the same position unfiltered — a silent write to the wrong
+      // row, which is #881's harm reached through the grid instead of the tab title.
+      const threeRows: QueryResult = {
+        rows: [
+          { id: 1, name: "Alice" },
+          { id: 2, name: "Bob" },
+          { id: 3, name: "Charlie" },
+        ],
+        fields: ["id", "name"],
+        rowCount: 3,
+        executionTime: 1,
+      };
+      const onCellChange = mock(() => {});
+      const { container } = render(
+        React.createElement(ResultsGrid, {
+          result: threeRows,
+          editingEnabled: true,
+          onCellChange,
+          pendingChanges: [],
+        }),
+      );
+
+      // Filter down to Charlie, who is the only visible row and so sits at filtered index 0.
+      const filterButton = Array.from(container.querySelectorAll("button")).find(
+        (b) =>
+          b.getAttribute("title") === "Filter column" && b.closest(".group\\/header")?.textContent?.includes("name"),
+      );
+      fireEvent.click(filterButton ?? container.querySelectorAll('button[title="Filter column"]')[1]);
+      const filterInput = Array.from(container.querySelectorAll("input")).find((i) =>
+        (i.getAttribute("placeholder") ?? "").startsWith("Filter"),
+      )!;
+      fireEvent.change(filterInput, { target: { value: "Charlie" } });
+
+      const visible = Array.from(container.querySelectorAll(".cursor-text")).filter((c) => c.textContent === "Charlie");
+      expect(visible).toHaveLength(1);
+      fireEvent.doubleClick(visible[0]);
+
+      const editInput = findEditInput(container)!;
+      fireEvent.change(editInput, { target: { value: "Charlize" } });
+      fireEvent.keyDown(findEditInput(container)!, { key: "Enter" });
+
+      expect(onCellChange).toHaveBeenCalledTimes(1);
+      const change = (onCellChange.mock.calls as unknown[][])[0][0] as Record<string, unknown>;
+      expect(change.rowIndex).toBe(2);
+      expect(change.originalValue).toBe("Charlie");
+      expect(change.newValue).toBe("Charlize");
+    });
+
     test("blur commits edit when value changed", () => {
       const onCellChange = mock(() => {});
       const { container } = render(
@@ -874,6 +926,29 @@ describe("ResultsGrid", () => {
       // After reveal, the cell should show actual email value (not ***)
       // This confirms the revealed cell branch (lines 328-333) is hit
       expect(container.textContent).toContain("alice@example.com");
+    });
+
+    test("a reveal follows its row through a filter, not the position it sat at", () => {
+      // A revealed cell is keyed by its position, and the table iterates the FILTERED
+      // rows - so revealing Alice's email and then filtering down to Charlie handed
+      // Charlie's row the key Alice's reveal wrote, and a sensitive value nobody asked
+      // for was on screen unmasked. Same addressing defect as the pending-change one
+      // above it, and this half of it crosses the masking boundary.
+      setupMasking();
+
+      const { container } = render(React.createElement(ResultsGrid, maskingProps));
+
+      fireEvent.click(container.querySelectorAll('button[title="Reveal value (10s)"]')[0]);
+      expect(container.textContent).toContain("alice@example.com");
+
+      const filterButtons = container.querySelectorAll('button[title="Filter column"]');
+      fireEvent.click(filterButtons[1]);
+      fireEvent.change(container.querySelector('input[placeholder="Filter name..."]')!, {
+        target: { value: "Charlie" },
+      });
+
+      expect(container.textContent).not.toContain("charlie@example.com");
+      expect(container.textContent).toContain("***");
     });
 
     test("revealed cell auto-hides after timeout", () => {

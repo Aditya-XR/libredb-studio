@@ -1,0 +1,16 @@
+======== olmo-3:7b | analyze x 5 ========
+server up with olmo-3:7b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=olmo-3:7b
+######## olmo-3:7b | agent/data-analysis ########
+---- repeat 1/5 ----
+no run started: {"error":"The model \"olmo-3:7b\" (ollama) cannot drive an agent run: the capability probe could not establish tool calling, schema-valid tool arguments, streaming. The endpoint refused the tool request with HTTP 400: registry.ollama.ai/library/olmo-3:7b does not support tools. Configure a different
+---- repeat 2/5 ----
+no run started: {"error":"The model \"olmo-3:7b\" (ollama) cannot drive an agent run: the capability probe could not establish tool calling, schema-valid tool arguments, streaming. The endpoint refused the tool request with HTTP 400: registry.ollama.ai/library/olmo-3:7b does not support tools. Configure a different
+---- repeat 3/5 ----
+no run started: {"error":"The model \"olmo-3:7b\" (ollama) cannot drive an agent run: the capability probe could not establish tool calling, schema-valid tool arguments, streaming. The endpoint refused the tool request with HTTP 400: registry.ollama.ai/library/olmo-3:7b does not support tools. Configure a different
+---- repeat 4/5 ----
+no run started: {"error":"The model \"olmo-3:7b\" (ollama) cannot drive an agent run: the capability probe could not establish tool calling, schema-valid tool arguments, streaming. The endpoint refused the tool request with HTTP 400: registry.ollama.ai/library/olmo-3:7b does not support tools. Configure a different
+---- repeat 5/5 ----
+no run started: {"error":"The model \"olmo-3:7b\" (ollama) cannot drive an agent run: the capability probe could not establish tool calling, schema-valid tool arguments, streaming. The endpoint refused the tool request with HTTP 400: registry.ollama.ai/library/olmo-3:7b does not support tools. Configure a different
+@@@@ olmo-3:7b analyze done

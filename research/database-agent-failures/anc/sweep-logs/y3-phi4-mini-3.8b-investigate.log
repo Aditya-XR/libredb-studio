@@ -1,0 +1,21 @@
+======== phi4-mini:3.8b | investigate x 5 ========
+server up with phi4-mini:3.8b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=phi4-mini:3.8b
+######## phi4-mini:3.8b | agent/investigation ########
+---- repeat 1/5 ----
+run=arun_c69c5b86f83f48cf9823155a08162ddd
+status=succeeded
+---- repeat 2/5 ----
+run=arun_a618a29c04ba4942ab0cc8c123df6c6f
+status=succeeded
+---- repeat 3/5 ----
+run=arun_3bca8556bdf94f40a2f3e09d2a15add1
+status=succeeded
+---- repeat 4/5 ----
+run=arun_52161c882b2f487ab29b9fabd66eee6f
+status=succeeded
+---- repeat 5/5 ----
+run=arun_d7e2282b90b54c29bea27db7215c9cf6
+status=succeeded
+@@@@ phi4-mini:3.8b investigate done

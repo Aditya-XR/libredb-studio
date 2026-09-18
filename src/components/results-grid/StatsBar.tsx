@@ -169,6 +169,8 @@ export function StatsBar({
         <div className="flex md:hidden items-center bg-fill rounded-lg p-0.5">
           <button
             onClick={() => onSetViewMode("card")}
+            aria-label="Card view"
+            title="Card view"
             className={cn(
               "p-1.5 rounded transition-all",
               viewMode === "card" ? "bg-brand-solid text-white" : "text-fg-muted",
@@ -178,6 +180,8 @@ export function StatsBar({
           </button>
           <button
             onClick={() => onSetViewMode("table")}
+            aria-label="Table view"
+            title="Table view"
             className={cn(
               "p-1.5 rounded transition-all",
               viewMode === "table" ? "bg-brand-solid text-white" : "text-fg-muted",

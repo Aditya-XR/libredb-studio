@@ -165,6 +165,8 @@ export function QueryHistory({ onSelectQuery, activeConnectionId, refreshTrigger
             {search && (
               <button
                 onClick={() => setSearch("")}
+                aria-label="Clear search"
+                title="Clear search"
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-fg-muted hover:text-fg-bright"
               >
                 <X strokeWidth={1.5} className="w-3 h-3" />

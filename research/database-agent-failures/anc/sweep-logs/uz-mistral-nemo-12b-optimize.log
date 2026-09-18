@@ -1,0 +1,21 @@
+======== mistral-nemo:12b | optimize x 5 ========
+server up with mistral-nemo:12b at /home/researcher/projects/libredb/lb-guncel
+LLM_PROVIDER=ollama
+LLM_MODEL=mistral-nemo:12b
+######## mistral-nemo:12b | agent/query-optimization ########
+---- repeat 1/5 ----
+run=arun_c2d613232a1c44f99a7e4a2008fb0536
+status=succeeded
+---- repeat 2/5 ----
+run=arun_4bea9e22eb0c4d2a8b4ed2fc09b0fc5d
+status=succeeded
+---- repeat 3/5 ----
+run=arun_2e8f1d118b524e57ba30ba4fdfbdf361
+status=succeeded
+---- repeat 4/5 ----
+run=arun_29063e49fb354a109c97ee9e854702d3
+status=succeeded
+---- repeat 5/5 ----
+run=arun_d055c1cb6cbf47069b0090292913cdc7
+status=succeeded
+@@@@ mistral-nemo:12b optimize done

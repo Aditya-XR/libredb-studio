@@ -33,7 +33,11 @@ by hand. URL-encode every special character (`@` → `%40`, `:` → `%3A`,
 - **No secret generation.** Unlike Railway's `${{ secret(48) }}`, Koyeb cannot
   auto-generate values. The user **must** set a strong `JWT_SECRET` (32+ chars)
   and real `ADMIN_PASSWORD` / `USER_PASSWORD` in the deploy form before
-  launching. The prefilled values in the button are placeholders only.
+  launching. The prefilled values are deliberately unusable rather than merely
+  nominal: the secret is **shorter than the 32-character minimum**, so a deploy
+  left as-is stops at boot with `JWT_SECRET is too short` instead of coming up
+  on a secret that is printed in a public README. Keep it that way — a
+  placeholder that clears the minimum is a published working secret.
 - **Ephemeral filesystem.** Koyeb instances do not have a persistent disk in the
   button flow, so SQLite-on-disk storage (`STORAGE_PROVIDER=sqlite`) will reset
   on every redeploy/sleep. The button therefore defaults to

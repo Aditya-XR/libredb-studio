@@ -132,4 +132,44 @@ describe("AdminDashboard", () => {
       expect(mockRouterPush).toHaveBeenCalledWith("/login");
     });
   });
+
+  test("logout follows the provider logout URL when the route returns one", async () => {
+    // Mock window.location to prevent navigation side effects
+    const savedDescriptor = Object.getOwnPropertyDescriptor(window, "location");
+    const locationMock = { href: "" };
+    Object.defineProperty(window, "location", {
+      value: locationMock,
+      writable: true,
+      configurable: true,
+    });
+
+    mockGlobalFetch({
+      "/api/auth/logout": {
+        json: { success: true, redirectUrl: "https://idp.example.com/logout?client_id=abc" },
+      },
+    });
+
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<AdminDashboard>content</AdminDashboard>);
+    });
+    const logoutButton = renderResult!.getByText("Logout").closest("button");
+
+    await act(async () => {
+      fireEvent.click(logoutButton!);
+    });
+
+    // In OIDC mode the route answers with the provider's end_session URL. Only visiting it ends the
+    // session at the provider; pushing /login clears the local cookie and leaves the provider
+    // session alive, which is the state the admin surface shipped in until this test existed.
+    await waitFor(() => {
+      expect(locationMock.href).toBe("https://idp.example.com/logout?client_id=abc");
+    });
+    expect(mockRouterPush).not.toHaveBeenCalledWith("/login");
+
+    // Restore window.location
+    if (savedDescriptor) {
+      Object.defineProperty(window, "location", savedDescriptor);
+    }
+  });
 });

@@ -120,6 +120,67 @@ describe("config/auth-preflight verifyAuthEnvAtBoot", () => {
       restore();
     }
   });
+
+  describe("when nothing will produce a secret", () => {
+    const origBootstrap = process.env.AUTH_BOOTSTRAP;
+    const origNodeEnv = process.env.NODE_ENV;
+
+    function setEnv(name: "AUTH_BOOTSTRAP" | "NODE_ENV", value: string | undefined): void {
+      if (value === undefined) delete process.env[name];
+      else Object.defineProperty(process.env, name, { value, configurable: true, writable: true, enumerable: true });
+    }
+
+    afterEach(() => {
+      setEnv("AUTH_BOOTSTRAP", origBootstrap);
+      setEnv("NODE_ENV", origNodeEnv);
+    });
+
+    test("refuses to boot in production with bootstrap off and no secret", () => {
+      setSecret(undefined);
+      setEnv("AUTH_BOOTSTRAP", "off");
+      setEnv("NODE_ENV", "production");
+      const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+      const { exitCalls, restore } = stubProcessExit();
+
+      const result = verifyAuthEnvAtBoot();
+
+      expect(result).toBe(false);
+      expect(exitCalls).toEqual([1]);
+      const banner = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(banner).toContain("JWT_SECRET is not set");
+      expect(banner).toContain("AUTH_BOOTSTRAP is off");
+      restore();
+      errorSpy.mockRestore();
+    });
+
+    test("leaves bootstrap-on deployments alone: the first run generates one", () => {
+      setSecret(undefined);
+      setEnv("AUTH_BOOTSTRAP", undefined);
+      setEnv("NODE_ENV", "production");
+      const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+      const { exitCalls, restore } = stubProcessExit();
+
+      verifyAuthEnvAtBoot();
+
+      expect(exitCalls).toEqual([]);
+      restore();
+      errorSpy.mockRestore();
+    });
+
+    test("leaves development alone: getJwtSecret still has its fallback there", () => {
+      setSecret(undefined);
+      setEnv("AUTH_BOOTSTRAP", "off");
+      setEnv("NODE_ENV", "development");
+      const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+      const { exitCalls, restore } = stubProcessExit();
+
+      verifyAuthEnvAtBoot();
+
+      expect(exitCalls).toEqual([]);
+      restore();
+      errorSpy.mockRestore();
+    });
+  });
 });
 
 /**
@@ -262,4 +323,12 @@ describe("config/auth-preflight STORAGE_ENCRYPTION_KEY", () => {
       errorSpy.mockRestore();
     }
   });
+
+  // ── AUTH_BOOTSTRAP=off with no secret (#908) ───────────────────────────────
+  //
+  // The setting is documented as turning off credential generation so an operator supplies
+  // their own. It also turns off SECRET generation, which was documented nowhere, and the
+  // failure was silent: the server started, the health probe answered "healthy", and every
+  // login returned 503. A monitor stayed green through all of it and the first report came
+  // from a user who could not sign in.
 });

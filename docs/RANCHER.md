@@ -75,6 +75,8 @@ and serious defects are disclosed in the release notes.
    kubectl --namespace <namespace> exec deploy/<release>-libredb-studio -- cat /app/data/auth-bootstrap.json
    ```
 
+   Set `LIBREDB_NO_BANNER=1` (or `true`) to suppress the startup banner entirely.
+
 5. Expose the UI with a port-forward (or enable `ingress.*` values):
 
    ```bash

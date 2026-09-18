@@ -1023,4 +1023,91 @@ describe("useQueryAdapter", () => {
       expect(localStorage.getItem(COUNT_KEY)).toBe("9");
     });
   });
+
+  // ── The statement a tab's rows came from (#881) ───────────────────────────
+  //
+  // `query` is the editor buffer and is rewritten on every keystroke, so it is not a safe
+  // name for the rows on screen. The standalone app pairs the two on `QueryTab`; this
+  // surface writes the same tab type and has to pair them too, or a tab ends up holding
+  // rows from two tables while naming one.
+
+  test("records the statement beside the result it fetched", async () => {
+    const params = makeHookParams();
+    const { result } = renderHook(() => useQueryAdapter(params as never));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users WHERE id = 1");
+    });
+
+    expect(params.tabs[0].resultQuery).toBe("SELECT * FROM users WHERE id = 1");
+  });
+
+  test("records it on the force-execute path too", async () => {
+    const params = makeHookParams();
+    const { result } = renderHook(() => useQueryAdapter(params as never));
+
+    await act(async () => {
+      result.current.forceExecuteQuery("DELETE FROM users WHERE id = 1");
+    });
+
+    expect(params.tabs[0].resultQuery).toBe("DELETE FROM users WHERE id = 1");
+  });
+
+  test("records it on the unlimited-run path too", async () => {
+    const params = makeHookParams();
+    const { result } = renderHook(() => useQueryAdapter(params as never));
+
+    act(() => {
+      result.current.setPendingUnlimitedQuery({ query: "SELECT * FROM users", tabId: "tab-1" });
+    });
+    await act(async () => {
+      result.current.handleUnlimitedQuery();
+    });
+
+    expect(params.tabs[0].resultQuery).toBe("SELECT * FROM users");
+  });
+
+  test("Load More pages that statement, not whatever has been typed since", async () => {
+    const paged = makeQueryResult({
+      pagination: { limit: 500, offset: 0, hasMore: true, totalReturned: 2, wasLimited: false },
+    });
+    const tab = makeTab({
+      query: "SELECT * FROM orders",
+      resultQuery: "SELECT * FROM users",
+      result: paged,
+    });
+    const { tabs, setTabs } = createMutableTabs([tab]);
+    const params = makeHookParams({ tabs, setTabs, currentTab: tab });
+    const { result } = renderHook(() => useQueryAdapter(params as never));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    expect(params.onQueryExecute).toHaveBeenCalledWith("conn-1", "SELECT * FROM users", {
+      limit: 500,
+      offset: 2,
+    });
+    // And the appended page is still that statement's, so the tab keeps naming it.
+    expect(params.tabs[0].resultQuery).toBe("SELECT * FROM users");
+  });
+
+  test("names the statement on Load More for a tab that has no name for its rows yet", async () => {
+    // A tab whose result was built before this field existed has rows and no statement, and
+    // the page appended to it has to give the pair a name rather than leave the rows
+    // anonymous.
+    const paged = makeQueryResult({
+      pagination: { limit: 500, offset: 0, hasMore: true, totalReturned: 2, wasLimited: false },
+    });
+    const tab = makeTab({ query: "SELECT * FROM users", result: paged });
+    const { tabs, setTabs } = createMutableTabs([tab]);
+    const params = makeHookParams({ tabs, setTabs, currentTab: tab });
+    const { result } = renderHook(() => useQueryAdapter(params as never));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    expect(params.tabs[0].resultQuery).toBe("SELECT * FROM users");
+  });
 });

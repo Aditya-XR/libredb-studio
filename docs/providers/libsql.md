@@ -746,7 +746,52 @@ Measured through the provider against both deployments (fixture: 2 tables, 3 and
 
 ---
 
-## 9. Testing
+## 9. Capabilities & labels
+
+### `getCapabilities()` ([`src/lib/db/providers/sql/libsql/index.ts`](../../src/lib/db/providers/sql/libsql/index.ts))
+
+| Capability | Value | Description / Note |
+|---|---|---|
+| `queryLanguage` | `sql` | SQLite dialect over Hrana JSON pipeline |
+| `defaultPort` | `8080` | `sqld`'s own default; `443` under TLS (Turso Cloud) |
+| `supportsExplain` | `true` | `EXPLAIN QUERY PLAN` supported |
+| `explainFormat` | `"sqlite-queryplan"` | SQLite's 4-column `id/parent/notused/detail` query plan strategy |
+| `supportsConnectionString` | `true` | `libsql://<database>-<org>.turso.io?authToken=<jwt>` |
+| `supportsInlineRowEdit` | `true` | Results grid inline edits supported |
+| `supportsTransactions` | `false` | Stateless request stream closed with each statement; no interactive session held |
+| `maintenanceOperations` | `["reindex", "check"]` | Only `REINDEX` and `PRAGMA integrity_check` are permitted by server allowlist |
+| `maintenanceOperationSpecs` | `reindex` (`perEntity: true`, `global: true`), `check` (`perEntity: false`, `global: true`) | Placement rules for per-table and global maintenance actions |
+| `supportsCreateTable` | `true` | `CREATE TABLE` works as an ordinary SQL statement |
+| `schemaRefreshPattern` | `"(CREATE\|DROP\|ALTER\|TRUNCATE\|REINDEX)\\b"` | Matches statements that modify schema or index metadata |
+| `containerLevels` | `[]` | Zero-container engine; bare object names throughout ([§6.1](#61-the-object-surface-789)) |
+| `objectKinds` | `LIBSQL_OBJECT_KINDS` | `table` (relation, `acceptsRowWrites`), `view` (relation), `index` (config), `trigger` (attached) |
+
+### Labels — overridden (`getLabels()`, [`src/lib/db/providers/sql/libsql/index.ts`](../../src/lib/db/providers/sql/libsql/index.ts))
+
+| Label Key | Value | Purpose |
+|---|---|---|
+| `slowQueriesEmptyState` | *"libSQL keeps no statistics about finished statements, so there is nothing to enable."* | Queries panel empty state; libSQL tracks no slow query statistics |
+| `reindexGlobalLabel` | *"Run Reindex"* | Global maintenance action button |
+| `reindexGlobalTitle` | *"Rebuild Indexes"* | Operations tab card heading |
+| `reindexGlobalDesc` | *"Runs bare REINDEX, rebuilding every index in the database."* | Operations tab card description |
+
+---
+
+## 10. Error handling
+
+libSQL maps HTTP transport errors and Hrana execution errors to typed application exceptions via `mapLibSQLError()` ([`src/lib/db/providers/sql/libsql/index.ts`](../../src/lib/db/providers/sql/libsql/index.ts)):
+
+| Situation | Error Class | Details |
+|---|---|---|
+| Missing `host` and no `connectionString` | `DatabaseConfigError` | Thrown during `validate()` |
+| HTTP `400`, `401`, or `403` status | `AuthenticationError` | Indicates invalid, missing, or unauthorized auth token |
+| HTTP Status `0` / Network unreachable / Connect timeout | `ConnectionError` | Carries `host` and `port` |
+| Statement execution error in Hrana pipeline (`results[].error`) | `QueryError` | Extracts message from error payload and associates original SQL |
+| Non-transport error | `QueryError` / `DatabaseError` | Passed through or wrapped |
+
+---
+
+## 11. Testing
 
 ```bash
 # Just this provider
@@ -776,7 +821,50 @@ For Turso Cloud, create a database and a token with the `turso` CLI and paste th
 
 ---
 
-## 10. Known limitations
+## 12. Usage examples
+
+```ts
+import { createDatabaseProvider } from "@/lib/db/factory";
+
+// 1. Connect using a Turso Cloud connection string (includes auth token)
+const provider = await createDatabaseProvider({
+  id: "libsql-turso",
+  name: "Turso Cloud DB",
+  type: "libsql",
+  connectionString: "libsql://my-database-my-org.turso.io?authToken=eyJhbGciOi...",
+  createdAt: new Date(),
+});
+
+// Or connect using discrete parameters for a self-hosted sqld instance
+const localProvider = await createDatabaseProvider({
+  id: "libsql-local",
+  name: "Local sqld",
+  type: "libsql",
+  host: "127.0.0.1",
+  port: 8080,
+  createdAt: new Date(),
+});
+
+await provider.connect();
+
+// 2. Execute queries with parameter binding
+const result = await provider.query("SELECT * FROM users WHERE active = ?", [1]);
+console.log(`Fetched ${result.rowCount} rows in ${result.executionTime}ms`);
+
+// 3. Introspect schema objects (libSQL is zero-container, so container is [])
+const tables = await provider.listObjects([], "table");
+const { details } = await provider.describeObjects([], "table");
+
+// 4. Run maintenance tasks
+const integrity = await provider.runMaintenance("check");
+console.log("Integrity check result:", integrity.message);
+
+await provider.disconnect();
+```
+
+---
+
+## 13. Known limitations & future work
 
 | Limitation | Cause | Owner |
 |---|---|---|
@@ -791,7 +879,7 @@ For Turso Cloud, create a database and a token with the `turso` CLI and paste th
 
 ---
 
-## 11. References
+## 14. References
 
 - Turso documentation — <https://docs.turso.tech/introduction>
 - libSQL — <https://github.com/tursodatabase/libsql>
@@ -799,3 +887,4 @@ For Turso Cloud, create a database and a token with the `turso` CLI and paste th
 - Hrana protocol specification — <https://github.com/tursodatabase/libsql/blob/main/docs/HRANA_3_SPEC.md>
 - [`docs/ADDING_A_PROVIDER.md`](../ADDING_A_PROVIDER.md) — the registration checklist this provider followed
 - [`docs/providers/sqlite.md`](sqlite.md) — the same dialect against a file
+- [`docs/providers/mongodb.md`](mongodb.md) — sibling provider doc reference

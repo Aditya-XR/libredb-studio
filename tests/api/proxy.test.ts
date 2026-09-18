@@ -58,6 +58,17 @@ describe("proxy", () => {
       expect(isRedirect(res)).toBe(false);
     });
 
+    // A health path that answers with a redirect to the login screen reads as HEALTHY to
+    // any check that follows redirects, which is worse than a 404 (#909). All three have to
+    // be reachable without a credential or the check is measuring the login page.
+    test("/health passes through without redirect", async () => {
+      expect(isRedirect(await proxy(createNextRequest("/health")))).toBe(false);
+    });
+
+    test("/api/health passes through without redirect", async () => {
+      expect(isRedirect(await proxy(createNextRequest("/api/health")))).toBe(false);
+    });
+
     test("/_next/static/chunk.js passes through without redirect", async () => {
       const req = createNextRequest("/_next/static/chunk.js");
       const res = await proxy(req);
@@ -263,12 +274,20 @@ describe("proxy", () => {
   // ───────────────────────────────────────────────────────────────────────────
 
   describe("agent drive path", () => {
-    test("the public-path list is exactly the five it has always been", () => {
+    test("the public-path list is exactly the seven it names", () => {
       const source = readFileSync(new URL("../../src/proxy.ts", import.meta.url), "utf8");
       const block = source.slice(source.indexOf("// Allow public routes"), source.indexOf("if (!token)"));
       const literals = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
 
-      expect(literals).toEqual(["/api/auth", "/_next", "/favicon.ico", "/api/db/health", "/api/storage/config"]);
+      expect(literals).toEqual([
+        "/api/auth",
+        "/_next",
+        "/favicon.ico",
+        "/health",
+        "/api/health",
+        "/api/db/health",
+        "/api/storage/config",
+      ]);
     });
 
     test("no unlisted path reaches the app without a credential", () => {

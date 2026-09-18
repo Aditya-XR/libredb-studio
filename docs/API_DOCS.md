@@ -82,7 +82,8 @@ LibreDB Studio uses JWT (JSON Web Tokens) for authentication. Tokens are stored 
 The middleware (`src/proxy.ts`) gates every route: all of them require a valid `auth-token` cookie **except** the routes below. It is an optimisation rather than the authorization boundary, though — every handler that reaches a database or a model provider verifies the session again itself, through `guardRoute` (`src/lib/api/require-session.ts`), which is also where the rate-limit bucket and the audit line come from.
 
 - `/api/auth/*` — login, logout, me, and OIDC login/callback
-- `/api/db/health` — excluded from the middleware for **both** methods; `GET` is fully public, while `POST` performs its own session check and returns JSON `401` if unauthenticated
+- `/health` and `/api/health` — liveness, fully public, no dependencies
+- `/api/db/health` — excluded from the middleware for **both** methods; `GET` is fully public and answers the same as the two above, while `POST` performs its own session check and returns JSON `401` if unauthenticated
 - `GET /api/storage/config` — storage-mode discovery (returns `{ provider, serverMode }`, no user data)
 
 Unauthenticated requests to any other (middleware-gated) route are redirected to `/login`. A few allowlisted handlers self-check instead and return JSON — e.g. `POST /api/db/health` (`401`) and `GET /api/auth/me` (`{ "authenticated": false }`).
@@ -192,9 +193,19 @@ Get current authenticated user information.
 
 ### Database API
 
-#### GET /api/db/health
+#### GET /health, GET /api/health, GET /api/db/health
 
-Simple health check for load balancers and container orchestration.
+Liveness, for load balancers and container orchestration. All three answer the same body and
+depend on nothing, so a check reads the same whichever path its platform's form defaults to.
+Point a probe at any of them.
+
+They are public in the middleware for a reason worth keeping: an unknown path is redirected
+to `/login`, and a check that follows redirects reads `200` from a login page whether or not
+the app works. A health path that can answer with a redirect is worse than one that 404s.
+
+For a check scoped to one database connection, use `POST /api/db/health` below — that is a
+different question, and a liveness probe that touches a database reports a database outage as
+a dead application.
 
 **Authentication:** Not required
 
@@ -1052,6 +1063,55 @@ session; `404` when this server runs no agents.
 
 ---
 
+#### GET /api/agent/runs
+
+The finished conversations the calling session can reopen, newest first. This is the **history
+index**, not the run record: each conversation carries its steps (run id, objective, workflow, mode,
+status, whether it answered, connection, timestamps) so the list needs no per-run ledger read, and a
+reopened report is the `GET /api/agent/runs/{runId}` below.
+
+**Authentication:** Required, and scoped to the calling session — a user can only list their own
+runs. `404` when this server runs no agents, `401` without a session.
+
+**Query parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `limit` | number | No | Page size, default 20, clamped to 100 at most. A value that is not a positive integer is refused with `400` |
+| `cursor` | string | No | The opaque cursor the previous page returned; absent means the newest page. An unreadable value is refused with `400` |
+
+**Response (200 OK):**
+
+```json
+{
+  "conversations": [
+    {
+      "threadId": "arun_…",
+      "steps": [
+        {
+          "runId": "arun_…",
+          "objective": "Why is checkout slow?",
+          "workflowType": "investigation",
+          "mode": "agent",
+          "status": "succeeded",
+          "answered": true,
+          "connectionId": "seed:sample",
+          "createdAtMs": 1740000000000,
+          "updatedAtMs": 1740000120000
+        }
+      ]
+    }
+  ],
+  "nextCursor": "1740000120000.arun_…"
+}
+```
+
+`steps` is oldest first within a conversation; conversations are newest first overall. `nextCursor`
+is `null` when there is no page after this one. The list is bounded to the 50 newest conversations —
+a listing bound, not a deletion.
+
+---
+
 #### POST /api/agent/runs
 
 Opens a run and returns immediately; the drive happens in the background.
@@ -1761,7 +1821,7 @@ async function streamAIExplanation(query: string, explainPlan: string) {
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `JWT_SECRET` | Recommended | JWT signing secret (min 32 chars). Auto-generated at boot if unset unless `AUTH_BOOTSTRAP=off` (see `.env.example`). Set but shorter than 32 chars: the server exits at startup with code 1 rather than serving a deployment whose logins all fail with 503 |
+| `JWT_SECRET` | Recommended | JWT signing secret (min 32 chars). Auto-generated at boot if unset unless `AUTH_BOOTSTRAP=off`, which turns off secret generation as well as credential generation. Unset with bootstrap off **in production**, the server exits at startup rather than serving a deployment whose every login is 503; outside production the development fallback still applies. Set but shorter than 32 chars: the server exits at startup with code 1 rather than serving a deployment whose logins all fail with 503 |
 | `ADMIN_PASSWORD` | Recommended | Admin account password. Auto-generated and printed once at boot if unset unless `AUTH_BOOTSTRAP=off` |
 | `ADMIN_EMAIL` | No | Admin login email (default `admin@libredb.org`) |
 | `USER_PASSWORD` | No | Optional lower-privilege account password; the `user` account exists only when this is set |

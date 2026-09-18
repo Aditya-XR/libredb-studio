@@ -79,9 +79,11 @@ describe("ColumnList", () => {
   test("displays column type without size specification", () => {
     const html = renderToStaticMarkup(<ColumnList columns={[typedColumn]} indexes={[]} />);
 
-    // type.split('(')[0] should show 'numeric' not 'numeric(10,2)'
+    // type.split('(')[0] should show 'numeric' not 'numeric(10,2)' as visible
+    // text; the size still reaches the title attribute for hover.
     expect(html).toContain("numeric");
-    expect(html).not.toContain("10,2");
+    expect(html).toContain('title="numeric(10,2)"');
+    expect(html.replace(/title="[^"]*"/g, "")).not.toContain("10,2");
   });
 
   test("displays simple type as-is", () => {
@@ -160,7 +162,9 @@ describe("ColumnList", () => {
   test("strips varchar size from type display", () => {
     const html = renderToStaticMarkup(<ColumnList columns={[regularColumn]} indexes={[]} />);
 
+    // Visible text drops the size; the title attribute keeps it for hover.
     expect(html).toContain("varchar");
-    expect(html).not.toContain("255");
+    expect(html).toContain('title="varchar(255)"');
+    expect(html.replace(/title="[^"]*"/g, "")).not.toContain("255");
   });
 });

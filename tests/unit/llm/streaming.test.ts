@@ -217,6 +217,93 @@ describe("streamFromAsyncIterable", () => {
       expect((error as Error).message).toBe("iteration error");
     }
   });
+
+  test("stops consuming null-transform items after cancellation", async () => {
+    const started = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    let pulled = 0;
+    let transformed = 0;
+    async function* generate() {
+      try {
+        for (let i = 0; i < 200; i++) {
+          pulled += 1;
+          if (i > 0) await resume.promise;
+          yield i;
+        }
+      } finally {
+        finished.resolve();
+      }
+    }
+    const stream = streamFromAsyncIterable(generate(), () => {
+      transformed += 1;
+      started.resolve();
+      return null;
+    });
+    const reader = stream.getReader();
+    const pendingRead = reader.read();
+    await started.promise;
+    // Cancel before EOF, while the next item is suspended.
+    await reader.cancel();
+    resume.resolve();
+    await finished.promise;
+
+    expect(await pendingRead).toEqual({ done: true, value: undefined });
+    expect(pulled).toBe(2);
+    expect(transformed).toBe(1);
+  });
+
+  test("stops consuming enqueueing items after cancellation", async () => {
+    const started = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    let pulled = 0;
+    async function* generate() {
+      try {
+        for (let i = 0; i < 200; i++) {
+          pulled += 1;
+          if (i > 0) await resume.promise;
+          yield `item-${i}`;
+        }
+      } finally {
+        finished.resolve();
+      }
+    }
+    const stream = streamFromAsyncIterable(generate(), (item) => {
+      started.resolve();
+      return encodeText(item);
+    });
+    const reader = stream.getReader();
+    const first = await reader.read();
+    expect(decodeText(first.value!)).toBe("item-0");
+    // Cancel before EOF, while the next item is suspended.
+    await reader.cancel();
+    resume.resolve();
+    await finished.promise;
+
+    expect(pulled).toBe(2);
+  });
+
+  test("propagates real TypeErrors mentioning closed", async () => {
+    const failure = new TypeError("Cannot read properties of undefined (reading 'closed')");
+    async function* generate() {
+      yield "item";
+    }
+    const stream = streamFromAsyncIterable(generate(), () => {
+      throw failure;
+    });
+    const reader = stream.getReader();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("reader did not settle")), 1000);
+    });
+    try {
+      await expect(Promise.race([reader.read(), timeout])).rejects.toBe(failure);
+    } finally {
+      clearTimeout(timer);
+      await reader.cancel().catch(() => {});
+    }
+  });
 });
 
 // ============================================================================

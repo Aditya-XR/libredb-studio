@@ -92,6 +92,39 @@ describe("results-grid/StatsBar", () => {
     expect(onSetViewMode).toHaveBeenCalledTimes(2);
   });
 
+  // ── Icon-only controls announce their name (#919) ──────────────────────────
+  //
+  // The two view toggles are icons with no text, and the test above had to reach them by
+  // counting from the end of the button list - which is what a screen reader user has to
+  // do too, except they cannot. The issue names the sidebar and adds that the results bar
+  // has the same shape and is worth checking while someone is in there.
+
+  test("the view toggles have names, not just icons", () => {
+    const onSetViewMode = mock((mode: "card" | "table") => {
+      void mode;
+    });
+    const { getByRole } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={onSetViewMode}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+      />,
+    );
+
+    fireEvent.click(getByRole("button", { name: "Card view" }));
+    fireEvent.click(getByRole("button", { name: "Table view" }));
+    expect(onSetViewMode).toHaveBeenCalledTimes(2);
+    expect((onSetViewMode.mock.calls as unknown[][]).map((c) => c[0])).toEqual(["card", "table"]);
+  });
+
   test("supports text wrapping toggle", () => {
     const onToggleWrapText = mock(() => {});
     const { queryByText } = render(
