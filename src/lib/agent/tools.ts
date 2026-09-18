@@ -740,6 +740,43 @@ function readSerializedClaims(input: unknown): unknown {
   }
 }
 
+/**
+ * A key that is the schema's own name wearing an affix, moved onto the field it names.
+ *
+ * `renamesAmong` works this pairing out already and has stated it in the refusal since #4xx -
+ * "rename artifact_id to artifact" - and the models kept re-sending the same key. Measured twice:
+ * `llama3.1:8b` had `present_answer` declined in all five analyze runs, never once on the value it
+ * carried, and the 2026-09-17 argument capture found the same call again, five of seventeen
+ * refusals, `{"artifact_id": "<a real id>"}` with nothing wrong but the key.
+ *
+ * Naming it left the model two sentences - a field absent AND a field surplus - for what is one
+ * displaced key plus, here, one genuine omission. Reading the key leaves one sentence about the one
+ * thing actually missing, which is the difference between a refusal a model can act on and a wall.
+ *
+ * The pairing rule is `renamesAmong`'s, deliberately: the two names must be the same word once
+ * punctuation and case are set aside, one possibly carrying an affix the other does not, and each
+ * side is claimed once so two surplus keys can never both land on one field. A confident rename to
+ * the WRONG field would be worse than the two sentences it replaces.
+ */
+function readNearMissKeys(input: unknown, keys: readonly string[]): unknown {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
+  const read = { ...(input as Record<string, unknown>) };
+  const bare = (name: string): string => name.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+  const absent = keys.filter((key) => read[key] === undefined);
+  const claimed = new Set<string>();
+  for (const key of Object.keys(read)) {
+    if (keys.includes(key)) continue;
+    const match = absent.find(
+      (name) => !claimed.has(name) && (bare(key).includes(bare(name)) || bare(name).includes(bare(key))),
+    );
+    if (match === undefined) continue;
+    claimed.add(match);
+    read[match] = read[key];
+    delete read[key];
+  }
+  return read;
+}
+
 function readSerializedPresentation(input: unknown): unknown {
   if (typeof input !== "object" || input === null) return input;
   const { presentation } = input as { presentation?: unknown };
@@ -824,6 +861,95 @@ const recommendationSchema = z.strictObject({
   rationale: z.string().min(1),
   evidence: z.array(evidenceSchema).min(1),
 });
+
+/** The four keys `recommendationSchema` accepts, for the lone-rename reading below. */
+const RECOMMENDATION_KEYS = ["change", "statement", "rationale", "evidence"] as const;
+
+/**
+ * Which kind of change a statement IS, read from the statement itself.
+ *
+ * Only the two openings that are unmistakable. A model that writes prose here has named no
+ * statement, and guessing one would be this server composing the SQL it declines to execute.
+ */
+function changeKindOf(statement: string): "index" | "rewrite" | undefined {
+  if (/^\s*create\s+(unique\s+)?index\b/i.test(statement)) return "index";
+  if (/^\s*(select|with)\b/i.test(statement)) return "rewrite";
+  return undefined;
+}
+
+/**
+ * The `recommend_change` call as models send it, read back into the call the schema accepts.
+ *
+ * Measured 2026-09-17 by capturing the ARGUMENTS of every refused call on the two surfaces that
+ * were failing - something the ledger deliberately does not record, and the reason this shape went
+ * eleven measurement days unseen. Seventeen refusals, NINE of them one shape:
+ *
+ *     {"change": "CREATE INDEX idx_employee_emp_no ON employee(emp_no);",
+ *      "reason": "...", "evidence": {"correlationId": "772210b6-...", "source": "artifact"}}
+ *
+ * Every value in it is right - valid DDL that answers the objective, a real rationale, and a
+ * correlation id the run genuinely produced. Three are displaced, each in its only plausible
+ * direction: the statement sits in a field named `change`, the rationale is called `reason`, and
+ * one evidence item arrived as itself rather than as a list of one. What the model was told was
+ * that three fields were missing, about a call carrying all three values, nine times.
+ *
+ * Read in the order that makes each step unambiguous, and no step guesses:
+ *
+ *   the statement names its own KIND. `CREATE INDEX` is an index and a `SELECT` is a rewrite;
+ *   anything else stays refused, because prose in that field names no statement to offer.
+ *
+ *   then exactly one absent field and exactly one surplus key is a rename and cannot be
+ *   anything else. `renamesAmong` pairs names that are the same word - it cannot pair `reason`
+ *   with `rationale` - and a 1:1 remainder needs no spelling at all. Two of either and this
+ *   does nothing: a model choosing between two fields must be told, not guessed at.
+ *
+ *   then a lone evidence object is the one-item list the contract describes.
+ *
+ * Nothing is invented and no value is altered; the keys a model used are structural exactly as
+ * `renamesAmong` argues, and every repaired call still goes through the same schema and the same
+ * citation contract as one that arrived correct.
+ */
+function readDisplacedRecommendation(input: unknown): unknown {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
+  let read = { ...(input as Record<string, unknown>) };
+
+  const { change, statement } = read;
+  if (typeof change === "string" && change !== "index" && change !== "rewrite" && statement === undefined) {
+    const kind = changeKindOf(change);
+    if (kind !== undefined) read = { ...read, change: kind, statement: change };
+  }
+
+  const absent = RECOMMENDATION_KEYS.filter((key) => read[key] === undefined);
+  const surplus = Object.keys(read).filter((key) => !(RECOMMENDATION_KEYS as readonly string[]).includes(key));
+  if (absent.length === 1 && surplus.length === 1) {
+    const [to] = absent as [(typeof RECOMMENDATION_KEYS)[number]];
+    const [from] = surplus as [string];
+    const { [from]: moved, ...rest } = read;
+    read = { ...rest, [to]: moved };
+  }
+
+  const { evidence } = read;
+  if (typeof evidence === "object" && evidence !== null && !Array.isArray(evidence)) {
+    read = { ...read, evidence: [evidence] };
+  }
+  /*
+    And the array serialized as a string, which is `readSerializedClaims`' case one field over.
+
+    Captured on `llama3.1:8b` optimize: `change`, `statement` and `rationale` all correct and
+    `evidence` a JSON string holding the array. A transport that stringifies one argument
+    stringifies it wherever it appears, so the reading claims already get is the reading this
+    needs. Left alone when it will not parse, for `AGENT_CLAIMS_NOT_JSON`'s reason: a sentence
+    where an array goes is not an encoding to read.
+  */
+  if (typeof evidence === "string") {
+    try {
+      read = { ...read, evidence: JSON.parse(evidence) };
+    } catch {
+      return read;
+    }
+  }
+  return read;
+}
 
 export const AGENT_TOOL_DEFINITIONS: Readonly<Record<AgentToolName, AgentToolDefinition>> = Object.freeze({
   inspect_schema: {
@@ -1308,6 +1434,36 @@ function isShapeFailure(problems: string): boolean {
  */
 const AGENT_RECOMMENDATION_SHAPE =
   'The call is ONE object: {"change": "index", "statement": "<the CREATE INDEX or the rewritten SELECT, as SQL text>", "rationale": "<why it answers the objective>", "evidence": [ ... ]} — "statement" is that SQL itself, as a plain string in this call; SQL written only in your reply is not part of it.';
+
+/**
+ * What a run is told when its call describes the change in PARTS rather than as a statement.
+ *
+ * The largest shape in the 2026-09-17 argument capture - five of six refusals on `llama3.1:8b`
+ * optimize - carries none of the four fields at all:
+ *
+ *     {"table_name": "employee", "column_name": "emp_no", "index_name": "emp_no_idx"}
+ *
+ * Nothing is misfiled. The model believes this tool BUILDS the index from its parts, the way most
+ * index APIs do, and the refusal it was getting - three fields absent - describes fields it does
+ * not believe in. `AGENT_RECOMMENDATION_SHAPE` was being sent too and answers the other question,
+ * what the call looks like, which to a model that thinks the server writes the SQL reads as
+ * agreement.
+ *
+ * The server does not compose it, and that is the same line `changeKindOf` draws on prose in
+ * `change`: the DDL here is fully determined by three names, and writing it would be this server
+ * authoring the statement it declines to execute - for a run that also supplied no evidence for it.
+ * So the sentence says which of the two writes the SQL, and says it only where the call carries
+ * none of the four fields: a model that sent three of them is misfiling, not misunderstanding, and
+ * would be answered with a lecture.
+ */
+const AGENT_RECOMMENDATION_NOT_ASSEMBLED =
+  "This tool does not compose the statement from parts: there is no table, column or index-name field, and the server will not build the SQL for you. Write the statement yourself — the CREATE INDEX or the rewritten SELECT, as SQL text — and cite a result this run read.";
+
+/** Whether a call named none of the four fields, which is the parts case rather than a misfiling. */
+function describedInParts(input: unknown): boolean {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return false;
+  return RECOMMENDATION_KEYS.every((key) => (input as Record<string, unknown>)[key] === undefined);
+}
 
 /**
  * Whether a `recommend_change` call failed on one of its OWN top-level fields.
@@ -2183,6 +2339,36 @@ function arrivedAt(input: unknown, path: readonly PropertyKey[]): string {
  * Three at most, because a model that got the shape wrong is not helped by a fourth, and a
  * long list read as prose is how a refusal becomes another wall.
  */
+/**
+ * The tool each field belongs to, for a surplus key that is misfiled rather than stray.
+ *
+ * Measured 2026-09-17 on `granite4-3b`, one cell short of the whole model. Its analyze cell lost
+ * 5/5, every loss `report-composed` with `no-answer`, and the captured arguments show a run that
+ * had both halves of the answer and filed one on the wrong tool:
+ *
+ *     present_answer   {"artifact": "bfe7ca93-..."}
+ *     compose_report   {"claims": [...], "presentation": {"kind": "table"}}
+ *
+ * Six refusals of the first for a missing `presentation`, three of the second CARRYING it. What the
+ * server said to the second was `the arguments object: remove presentation`, so the model removed
+ * the only presentation it ever composed, and the run was then scored for not having one.
+ *
+ * `remove` stays the right word for a key that belongs nowhere. For a key that is a field of
+ * another tool this run holds, the true sentence is where it goes — and only the sentence: moving
+ * a half-call from one tool to another would be the server making a call the model never made.
+ */
+const TOOL_OWNING_FIELD: Readonly<Record<string, string>> = Object.freeze({
+  claims: "compose_report",
+  presentation: "present_answer",
+  artifact: "present_answer",
+  change: "recommend_change",
+  statement: "recommend_change",
+  rationale: "recommend_change",
+  recommendations: "recommend_change",
+  before: "compare_plans",
+  after: "compare_plans",
+});
+
 function describeIssues(issues: readonly z.core.$ZodIssue[], input: unknown): string {
   const renames = renamesAmong(issues, input);
   const renamedTo = new Set(renames.values());
@@ -2196,7 +2382,15 @@ function describeIssues(issues: readonly z.core.$ZodIssue[], input: unknown): st
       if (issue.code === "invalid_type" && issue.path.length === 1 && renamedTo.has(String(issue.path[0]))) return [];
       if (issue.code === "unrecognized_keys") {
         const surplus = issue.keys.filter((key) => !renames.has(key));
-        return surplus.length === 0 ? [] : [`${where}: remove ${surplus.join(", ")}`];
+        if (surplus.length === 0) return [];
+        // A key this tool does not take but a SIBLING does is not surplus, it is misfiled, and
+        // `remove` is the one instruction that loses it. See `TOOL_OWNING_FIELD`.
+        const misfiled = surplus.flatMap((key) => {
+          const owner = TOOL_OWNING_FIELD[key];
+          return owner === undefined ? [] : [`${key} belongs to ${owner}, send it there`];
+        });
+        const strays = surplus.filter((key) => TOOL_OWNING_FIELD[key] === undefined);
+        return [...misfiled, ...(strays.length === 0 ? [] : [`${where}: remove ${strays.join(", ")}`])];
       }
       return [describeIssue(issue, where, input)];
     }),
@@ -3646,7 +3840,7 @@ export function recommendChangeTool(
     throw new Error("agent tool layer: the recommendation's run record does not belong to this run");
   }
 
-  const parsed = parseToolInput(recommendationSchema, input);
+  const parsed = parseToolInput(recommendationSchema, readDisplacedRecommendation(input));
   if (!parsed.ok) {
     return invalidEvidenceInput(
       parsed.problems,
@@ -3655,7 +3849,11 @@ export function recommendChangeTool(
       // `AGENT_RECOMMENDATION_SHAPE`. The worked call above stays behind the lever it was
       // measured on; the one line stating the contract goes to every model, as it does for
       // this tool's two evidence-bearing siblings.
-      isRecommendationShapeFailure(parsed.problems) ? AGENT_RECOMMENDATION_SHAPE : undefined,
+      describedInParts(input)
+        ? AGENT_RECOMMENDATION_NOT_ASSEMBLED
+        : isRecommendationShapeFailure(parsed.problems)
+          ? AGENT_RECOMMENDATION_SHAPE
+          : undefined,
     );
   }
   if (!matchesCard(parsed.value.change, parsed.value.statement)) {
@@ -3811,31 +4009,80 @@ function verifiedAgainst(events: readonly AgentRunEvent[], reference: AgentEvide
 }
 
 /**
- * The id is one this run produced — under the OTHER source. Says which, in the words of
- * the object that would have worked.
+ * A citation whose id names something this run holds under the OTHER source, read as what it is.
  *
- * Measured on `cogito:8b`: five database-investigation runs, all five `turn-limit` with
- * `no-report`, each holding the same `compose_report` call sent about forty times. Its two
- * claims were correct and its two citations carried the SAME id, one filed as a
- * `context-snapshot` and one as an `artifact`. The refusal said "at least one evidence
- * reference does not match" and then offered the id the model was already using, so nothing
- * in the answer distinguished the good citation from the bad one and the model resent it
- * until the turns ran out.
+ * The refusal this case used to get was exact: it named the
+ * failing position and hands back the object that would have worked, character for character. It
+ * was then measured for thirty hours on `cogito:8b`'s investigate cell - 26 runs, 936 refusals, as
+ * many as thirty-six inside a single run, every one identical, every run ending at the turn limit
+ * with no report. The cell reads 0/5.
  *
- * Deliberately narrow: it fires only when the id names something this run REALLY holds
- * under the other source. An invented id gets the offer of what is citable and no sentence
- * about where it belongs, because there is nowhere it belongs.
+ * A model that re-sends the same bytes thirty-six times against a perfect instruction will not be
+ * told its way out. And it does not need to be: the id is this run's own snapshot fingerprint, this
+ * function recognises it well enough to rewrite the reference itself, and citing the snapshot is
+ * something the run is entitled to do. The only thing wrong is which key the id sits under - which
+ * is the fault `readSerializedClaims` reads one field over, at this same boundary.
+ *
+ * The BAR does not move. A snapshot citation is worth what it was already worth, and
+ * `verifyOperationsGoal` still refuses a report resting on one: such a run now earns `no-reading`
+ * honestly rather than dying holding a call the server could read. An id that names nothing is
+ * untouched - there is nowhere for it to belong - and still meets the refusal.
  */
-function misfiledSource(events: readonly AgentRunEvent[], reference: AgentEvidenceReference): string | undefined {
-  if (reference.source === "artifact") {
-    const snapshot = events.find(
-      (event) => event.kind === "context-captured" && event.fingerprint === reference.correlationId,
-    );
-    if (snapshot === undefined) return undefined;
-    return `that id is this run's schema snapshot and belongs under a different source: {"source": "context-snapshot", "fingerprint": "${reference.correlationId}"}`;
-  }
-  if (producedArtifact(events, reference.fingerprint) === null) return undefined;
-  return `that id is a result this run read and belongs under a different source: {"source": "artifact", "correlationId": "${reference.fingerprint}"}`;
+/**
+ * Whether a snapshot citation can satisfy this surface at all, which is what decides whether the
+ * reader below should read a misfiled one or leave the refusal in place.
+ *
+ * Three verdicts require `source === "artifact"`: query-optimization wants a plan, data-analysis
+ * wants the read it answered with, operations wants any reading. On those a snapshot citation is a
+ * report that CANNOT score, so refusing it is worth more than accepting it - the refusal buys the
+ * run another turn, and that turn is the only thing that can still change the outcome.
+ *
+ * Measured both ways on one day. Reading the citation ended `cogito:8b`'s investigate loop (936
+ * refusals, 0/5 to 5/5) and cost `mistral-small3.2:24b` its analyze cell (0/5): there the model
+ * reported citing the snapshot, the reader made that valid, the report composed and the run ended
+ * `no-answer` - where before it had been refused and had gone back with a turn in hand.
+ */
+const AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION: Readonly<Record<AgentRunWorkflowType, boolean>> = Object.freeze({
+  investigation: true,
+  "query-optimization": false,
+  "database-assessment": true,
+  operations: false,
+  "data-analysis": false,
+} satisfies Record<AgentRunWorkflowType, boolean>);
+
+function readMisfiledEvidence(
+  input: unknown,
+  events: readonly AgentRunEvent[],
+  workflowType: AgentRunWorkflowType,
+): unknown {
+  if (!AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION[workflowType]) return input;
+  if (typeof input !== "object" || input === null) return input;
+  const { claims } = input as { claims?: unknown };
+  if (!Array.isArray(claims)) return input;
+  const readReference = (reference: unknown): unknown => {
+    if (typeof reference !== "object" || reference === null) return reference;
+    const { source, correlationId, fingerprint } = reference as Record<string, unknown>;
+    if (source === "artifact" && typeof correlationId === "string") {
+      const snapshot = events.some((event) => event.kind === "context-captured" && event.fingerprint === correlationId);
+      return snapshot ? { source: "context-snapshot", fingerprint: correlationId } : reference;
+    }
+    if (source === "context-snapshot" && typeof fingerprint === "string") {
+      const read = events.some(
+        (event) => event.kind === "tool-completed" && event.artifact.correlationId === fingerprint,
+      );
+      return read ? { source: "artifact", correlationId: fingerprint } : reference;
+    }
+    return reference;
+  };
+  return {
+    ...input,
+    claims: claims.map((claim) => {
+      if (typeof claim !== "object" || claim === null) return claim;
+      const { evidence } = claim as { evidence?: unknown };
+      if (!Array.isArray(evidence)) return claim;
+      return { ...claim, evidence: evidence.map(readReference) };
+    }),
+  };
 }
 
 /**
@@ -3843,7 +4090,7 @@ function misfiledSource(events: readonly AgentRunEvent[], reference: AgentEviden
  *
  * `citableEvidence` alone answers neither: it names what the run holds, which a model that
  * has already cited one of those ids reads as agreement. The path is what makes the answer
- * actionable when a report carries several claims, and `misfiledSource` is what ends the
+ * actionable when a report carries several claims, and `readMisfiledEvidence` above is what ends the
  * loop when the id was right all along.
  */
 function unverifiableCitation(
@@ -3858,12 +4105,11 @@ function unverifiableCitation(
       // as a path, even for a single claim — it is the field name the model has to look at,
       // and "the citation" would leave a two-claim report guessing again.
       const path = `claims.${claimIndex}.evidence.${evidenceIndex}`;
-      const misfiled = misfiledSource(events, reference);
+      // No "it belongs under the other source" arm any more: `readMisfiledEvidence` resolves that
+      // case at the call boundary, so a reference reaching here names nothing this run holds under
+      // EITHER source. What is left to offer is what IS citable.
       const offer = citableEvidence(events);
-      return [
-        `${path} does not match anything this run produced`,
-        misfiled ?? (offer === undefined ? undefined : offer),
-      ]
+      return [`${path} does not match anything this run produced`, offer]
         .filter((part) => part !== undefined)
         .join(" — ");
     }
@@ -4142,7 +4388,10 @@ export function presentAnswerTool(
     return unavailable("ANSWER_ALREADY_RECORDED");
   }
 
-  const parsed = parseToolInput(presentAnswerSchema, readSerializedPresentation(input));
+  const parsed = parseToolInput(
+    presentAnswerSchema,
+    readNearMissKeys(readSerializedPresentation(input), ["artifact", "presentation"]),
+  );
   if (!parsed.ok) {
     /*
       The same worked example the report refusal carries, for the same measured reason and one
@@ -4278,12 +4527,16 @@ export function composeReportTool(
     value, so a properly serialized array never sees this.
   */
   if (claimsArrivedAsUnparseableText(input)) return unavailable("INVALID_TOOL_INPUT", AGENT_CLAIMS_NOT_JSON);
-  const parsed = parseToolInput(reportSchema, readSerializedClaims(input));
-  if (!parsed.ok)
+  const parsed = parseToolInput(
+    reportSchema,
+    readMisfiledEvidence(readSerializedClaims(input), run.events, context.workflowType),
+  );
+  if (!parsed.ok) {
     return invalidEvidenceInput(
       parsed.problems,
       offersRefusalExamples(context.modelId) ? exampleReportCall(run.events) : undefined,
     );
+  }
 
   const claims: AgentReportClaim[] = [];
   for (const claim of parsed.value.claims) {

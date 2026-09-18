@@ -788,7 +788,8 @@ export type AgentGuidanceNotice =
    * A `compose_report` from a run holding the two plans a comparison would use.
    * Delivered as a TOOL RESULT instead of running the call; once per run.
    */
-  | "compare-before-report";
+  | "compare-before-report"
+  | "tool-call-as-text";
 
 /**
  * The semantic events one run emits, in the vocabulary a user reads in the rail
