@@ -166,12 +166,13 @@ Never watch with `gh run watch` immediately after a push without confirming the 
 never use `gh pr checks --watch --required` right after a push: with no runs registered yet it exits
 **0** with "no required checks reported", which reads as success.
 
-The publish step verifies a fixed list of 23 **required** assets and refuses to publish an incomplete
+The publish step verifies a fixed list of 24 **required** assets and refuses to publish an incomplete
 release, so `Verify assets and publish release` is the single step that tells you whether the release
 went public. Read that job's conclusion and the release's own `isDraft` - never infer publication from
 the run's overall conclusion, in either direction.
 
-The published release carries more than 23 assets: the two `.snap` files are outside the required list
+The published release carries more than 24 assets: the two `.snap` files and the snap's own
+`.sha256` are outside the required list
 because the snap jobs are credential-gated, but the store credentials are live, so they publish rather
 than skip. 0.10.0 landed 20 jobs green with **nothing** skipped and 25 assets. If you ever see snap
 skipping, that is an expired credential rather than the designed path.

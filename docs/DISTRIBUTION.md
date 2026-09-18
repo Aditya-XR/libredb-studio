@@ -62,8 +62,10 @@ server log:
   server does when a channel leaves those variables unset.
 
 **Strict mode:** set `AUTH_BOOTSTRAP=off` to disable generation and require explicit
-`JWT_SECRET` and `ADMIN_PASSWORD` (recommended for production; missing values then surface as a
-clear error on the login page instead of silently generated credentials in collected logs). Every
+`JWT_SECRET` and `ADMIN_PASSWORD` (recommended for production; a missing `ADMIN_PASSWORD` then
+surfaces as a clear error on the login page instead of silently generated credentials in
+collected logs, and a missing `JWT_SECRET` stops the server at boot with an actionable banner
+rather than starting a deployment whose every login is 503). Every
 channel that starts the server itself, the Helm chart included, defaults to zero-config and takes
 strict mode as an opt-in; the [Sealos](#sealos-app-store) template is the one channel that ships
 with it already on. Unrecognized `AUTH_BOOTSTRAP` values log a warning and keep bootstrap on.
