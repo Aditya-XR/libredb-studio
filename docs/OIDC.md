@@ -52,6 +52,10 @@ This part covers configuring SSO for popular identity providers. Most readers on
 
 ## Quick Start
 
+OIDC authentication is for teams past the two-account shape (one admin plus one user) who want individual logins, distinct team roles, and an audit trail that names the person who acted.
+Pair OIDC with `STORAGE_PROVIDER=sqlite` or `postgres` to give each team member their own private workspace for connections, saved queries, and settings.
+See [Storage Documentation](STORAGE.md) for configuring server storage.
+
 ### 1. Set Environment Variables
 
 ```env

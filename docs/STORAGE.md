@@ -55,6 +55,10 @@ LibreDB Studio supports three storage modes. Pick the one that fits your use cas
 | **SQLite** | Small teams, single server | Server file | Yes | 1 env var |
 | **PostgreSQL** | Enterprise, multi-node | External DB | Yes | 2 env vars |
 
+Server storage (`sqlite` or `postgres`) gives each person their own private workspace by partitioning connections, saved queries, and settings by the login username.
+For a team of three or more, pair server storage with Single Sign-On via [OIDC](OIDC.md) to provide individual logins, personal workspaces, and an audit trail that attributes actions to each user.
+The default `local` mode stores data in the browser and does not isolate workspaces between people using the same browser profile.
+
 ---
 
 ## 1. Local Mode (Default)
