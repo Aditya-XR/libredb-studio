@@ -97,21 +97,60 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
    * `null` until the read lands, and the prop stands in meanwhile: an empty side would
    * report every object as removed, which is worse than being briefly out of date.
    */
-  const [liveSchema, setLiveSchema] = useState<readonly DetailedObject[] | null>(null);
+  /**
+   * The last read, and the connection it was a read OF.
+   *
+   * The connection is stored with the result rather than the result being cleared when the
+   * connection changes, because the panel outlives a switch: `BottomPanel` keeps it mounted,
+   * so holding the previous database's objects made "Current Schema" mean the OTHER
+   * connection until the new read landed, and for good if that read failed. `takeSnapshot`
+   * then wrote the new connection's id and type onto the old one's objects, which is the
+   * stale-copy defect #884 is about, kept for as long as the snapshot is.
+   *
+   * Carrying the connection makes a stale read unusable rather than something a second
+   * effect has to remember to clear, and it is keyed on the connection OBJECT — the same
+   * thing the effect depends on — so a read can never outlive the exact render that asked
+   * for it.
+   *
+   * `error` is the other half. The panel falls back to the explorer's copy, and that copy is
+   * precisely what #884 is about, so the reason is state that reaches the screen rather than
+   * a log line that reaches nobody standing in front of the panel.
+   */
+  const [liveRead, setLiveRead] = useState<{
+    connection: DatabaseConnection;
+    objects: readonly DetailedObject[] | null;
+    error: string | null;
+  } | null>(null);
+
+  const readForThisConnection = liveRead?.connection === connection ? liveRead : null;
+
+  /**
+   * The objects the database holds right now, read when this panel opens.
+   *
+   * `schema` is the prop the explorer already had, and it is what "Current Schema" used to
+   * mean — so a diff taken right after a DDL change compared a copy of the schema from
+   * before the change and answered "No differences found" (#884). The panel is mounted when
+   * the user opens it, so reading here is the moment that matters for that sequence.
+   *
+   * `null` until the read lands, and the prop stands in meanwhile: an empty side would
+   * report every object as removed, which is worse than being briefly out of date.
+   */
+  const liveSchema = readForThisConnection?.objects ?? null;
+  const liveSchemaError = readForThisConnection?.error ?? null;
 
   useEffect(() => {
     if (!connection) return;
     let cancelled = false;
     readLiveSchema(connection)
       .then((objects) => {
-        if (!cancelled) setLiveSchema(objects);
+        if (!cancelled) setLiveRead({ connection, objects, error: null });
       })
       .catch((err) => {
-        // The prop stays in use. Saying so in the log and not on screen is deliberate: the
-        // panel still works, it is just comparing against what the explorer last read.
+        const reason = err instanceof Error ? err.message : String(err);
+        if (!cancelled) setLiveRead({ connection, objects: null, error: reason });
         logger.warn("Failed to read the current schema for a diff; falling back to the explorer's copy", {
           route: "SchemaDiff",
-          error: err instanceof Error ? err.message : String(err),
+          error: reason,
         });
       });
     return () => {
@@ -384,6 +423,15 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
           </Button>
         )}
       </div>
+
+      {liveSchemaError && (
+        <div className="flex items-center gap-2 px-3 py-1.5 border-b border-hairline bg-warning-tint/10 text-warning">
+          <TriangleAlert strokeWidth={1.5} className="w-3.5 h-3.5 shrink-0" />
+          <span className="text-xs">
+            {`Current Schema is the explorer's last copy, which may be out of date: ${liveSchemaError}`}
+          </span>
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex-1 overflow-hidden flex">
