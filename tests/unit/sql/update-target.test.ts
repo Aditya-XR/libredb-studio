@@ -384,13 +384,23 @@ describe("resolveUpdateTarget", () => {
       expect(refused("SELECT count(*) FROM products qualify JOIN orders ON true")).toBe(true);
     });
 
-    test("refuses MySQL's two-argument LIMIT, which carries a comma of its own", () => {
-      // `LIMIT 0, 50` is an everyday MySQL idiom and it reads one table, so this is a
-      // refusal the user does not deserve. It is the price of ending the comma scan at
-      // ORDER and GROUP and nowhere else: `LIMIT` could only be added to that list by
-      // trusting it never stands as a bare alias, and unlike those two it is a
-      // NON-RESERVED word on Oracle. Pinned here so it stays a decision.
-      expect(refused("SELECT * FROM users LIMIT 0, 50", "mysql")).toBe(true);
+    test("reads MySQL's two-argument LIMIT, and still refuses the alias it could hide", () => {
+      // `LIMIT 0, 50` is the everyday MySQL and MariaDB paging idiom and it reads one
+      // table, so ending the comma scan at ORDER and GROUP alone refused a query the tab
+      // title read correctly - inline editing went from working to refused on those tabs.
+      //
+      // `LIMIT` cannot join ORDER and GROUP on the strength of the word: it is a
+      // NON-RESERVED word on Oracle and can stand as a bare alias, which is the shape
+      // that hides a comma. What tells the two apart is not the word but what FOLLOWS
+      // it. An alias that hides a table comma is followed by that comma, and a real
+      // LIMIT clause never is. `(` is excluded with the comma, because a derived column
+      // list (`FROM products limit (a, b), orders`) holds its own commas below the top
+      // level and would put the one that matters out of the scan.
+      expect(table("SELECT * FROM users LIMIT 0, 50", "mysql")).toBe("users");
+      expect(table("SELECT * FROM users limit 0, 50", "sqlite")).toBe("users");
+      expect(refused("SELECT * FROM products limit, orders")).toBe(true);
+      expect(refused("SELECT * FROM products AS limit, orders")).toBe(true);
+      expect(refused("SELECT * FROM products limit (a, b), orders")).toBe(true);
       // The paginated forms the app itself generates carry no comma and still read.
       expect(table("SELECT * FROM users LIMIT 500 OFFSET 500", "mysql")).toBe("users");
     });
@@ -487,12 +497,14 @@ describe("resolveUpdateTarget", () => {
     });
 
     test("does not claim a second table it cannot be sure of", () => {
-      // Same shape: `FROM users, orders` really does read two tables and MySQL's
-      // `LIMIT 10, 20` really does not, and the comma is the only thing this reader sees.
+      // Same shape: `FROM users, orders` really does read two tables and PostgreSQL's
+      // `FOR UPDATE OF a, b` really does not, and the comma is the only thing this reader
+      // sees. (MySQL's `LIMIT 10, 20` used to stand here; it now resolves, because what
+      // follows `LIMIT` tells its comma apart from a table list - see the LIMIT test.)
       const two = reason("SELECT * FROM users, orders");
-      const limit = reason("SELECT * FROM users LIMIT 10, 20", "mysql");
+      const forUpdate = reason("SELECT * FROM t FOR UPDATE OF a, b", "postgres");
       expect(two).toContain("could separate two tables");
-      expect(limit).toBe(two);
+      expect(forUpdate).toBe(two);
     });
 
     test("does not tell a DuckDB FROM-first query it is not a SELECT", () => {

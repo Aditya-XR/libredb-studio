@@ -101,8 +101,43 @@ const CLAUSE_KEYWORDS = new Set([
  * here: it does carry a comma between window definitions, and SQLite also accepts it as an
  * alias, so trusting it would put `FROM products window, orders` out of sight. A query with
  * two named windows refuses instead, which is the cheap half of that trade.
+ *
+ * `LIMIT` is the third, and it is not here because the word alone cannot earn it: it is
+ * NON-RESERVED on Oracle, so `FROM products limit, orders` really is a table named
+ * `products` aliased `limit` beside a second table. It is admitted by `endsTheCommaScan`
+ * below on what follows it instead.
  */
 const LIST_CLAUSES = new Set(["ORDER", "GROUP"]);
+
+/**
+ * Whether a piece ends the region the comma scan reads.
+ *
+ * `LIMIT 0, 50` is how MySQL and MariaDB spell a page, and SQLite and ClickHouse take the
+ * same form. It reads ONE table, and scanning past it found that comma and refused — a
+ * refusal on the everyday paging shape, which the tab-title reader this module replaces
+ * got right.
+ *
+ * So `LIMIT` ends the scan, but only on what FOLLOWS it, because the word by itself is
+ * not trustworthy the way `ORDER` and `GROUP` are (see `LIST_CLAUSES`). Both exclusions
+ * are a shape that hides a table comma behind the word:
+ *
+ *  - a `,` — an alias called `limit` is followed by the FROM list's own comma, and a real
+ *    LIMIT clause never is: `FROM products limit, orders` is two tables on every engine
+ *    that lets `limit` stand as a bare alias;
+ *  - a `(` — a derived column list (`FROM products limit (a, b), orders`) keeps its own
+ *    commas below the top level, so the scan would see only the one after the `)`, and
+ *    stopping at `limit` puts that one out of sight.
+ *
+ * Everything else after `LIMIT` is the clause's own argument, and the comma that may
+ * follow it is the clause's own.
+ */
+function endsTheCommaScan(piece: Piece, next: Piece | undefined): boolean {
+  if (piece.kind !== "name") return false;
+  const word = piece.text.toUpperCase();
+  if (LIST_CLAUSES.has(word)) return true;
+  if (word !== "LIMIT") return false;
+  return next !== undefined && !(next.kind === "other" && (next.text === "," || next.text === "("));
+}
 
 /**
  * Words that combine two results into one grid.
@@ -455,11 +490,12 @@ export function resolveUpdateTarget(sql: string, type?: DatabaseType): UpdateTar
   // out of sight and answered `products`, so an edit to that cell overwrote the wrong
   // table. MySQL 8.4 does the same with `offset`.
   //
-  // So the scan runs from FROM up to the first clause that legitimately CONTAINS a list.
-  // Both are reserved words in every engine that offers row editing — neither can be an
-  // alias — which is what makes the boundary trustworthy where the wider set was not. A
-  // comma anywhere before it is a second table reference.
-  const listIndex = afterFrom.findIndex((piece) => piece.kind === "name" && LIST_CLAUSES.has(piece.text.toUpperCase()));
+  // So the scan runs from FROM up to the first clause that legitimately CONTAINS a list,
+  // which `endsTheCommaScan` decides. `ORDER` and `GROUP` are reserved in every engine
+  // that offers row editing — neither can be an alias — which is what makes the boundary
+  // trustworthy where the wider set was not; `LIMIT` earns the same place on what follows
+  // it. A comma anywhere before that boundary is a second table reference.
+  const listIndex = afterFrom.findIndex((piece, at) => endsTheCommaScan(piece, afterFrom[at + 1]));
   const beforeList = listIndex === -1 ? afterFrom : afterFrom.slice(0, listIndex);
   const commaPiece = beforeList.findIndex((piece) => piece.kind === "other" && piece.text === ",");
   if (commaPiece !== -1) {
