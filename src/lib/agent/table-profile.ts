@@ -25,7 +25,7 @@
  *    that matched never leave it. Neither test establishes that a column holds
  *    personal data; both establish that it is worth a human looking. The shape tests
  *    are PER-DIALECT predicates rather than one shared operator, because the shapes
- *    worth suspecting are not all expressible in the intersection of the two
+ *    worth suspecting are not all expressible in the intersection of the three
  *    grammars (B26; see `PROFILE_SHAPES`).
  */
 
@@ -92,25 +92,31 @@ const PII_NAME_WORDS: readonly string[] = Object.freeze([
 ]);
 
 /**
- * Declared types this module is willing to apply a text shape test to.
+ * Types this module is willing to apply a text shape test to.
  *
- * It matches the SPELLING the inventory reports, which makes it only as good as that
- * spelling. On SQL Server that is a live limitation rather than a hypothetical one:
- * an ALIAS type is reported by its own name, so `Person.PersonPhone.PhoneNumber`
- * arrives as `Phone` and `Person.Person.FirstName` as `Name` (measured on
- * AdventureWorks2022 via `sys.columns`, where `TYPE_NAME(user_type_id)` answers
- * `Phone` and `TYPE_NAME(system_type_id)` answers `nvarchar`). No pattern over a
- * user-chosen alias name can tell a text alias from a numeric one, so the fix belongs
- * where the type is read, not here: the catalog composer must report the BASE type.
- * Until it does, an alias-typed column is profiled for presence and distinctness and
- * gets no shape test, which understates a suspicion rather than inventing one.
+ * It matches a SPELLING, which makes it only as good as the spelling it is handed, and
+ * the DECLARED one is not always usable. On SQL Server an ALIAS type is reported by its
+ * own name, so `Person.PersonPhone.PhoneNumber` is declared `Phone` and
+ * `Person.Person.FirstName` is `Name` (measured on AdventureWorks2022 via `sys.columns`,
+ * where `TYPE_NAME(user_type_id)` answers `Phone` and `TYPE_NAME(system_type_id)` answers
+ * `nvarchar`), and no pattern over a name the schema's author invented can tell a text
+ * alias from a numeric one.
+ *
+ * So the fix is where the type is READ rather than here, and it landed: the mssql
+ * provider reports the base type beside the declared one (`ColumnSchema.baseType`), and
+ * every type test in this file matches `decidableType` below, which prefers it. An
+ * alias-typed column therefore gets its shape tests. Measured end to end after that
+ * change: the provider reports `PhoneNumber` as `{type: Phone, baseType: nvarchar}` and
+ * the composed profile carries its `shaped_1` and `digits_1` counts, which it did not
+ * before. Where an engine draws no such distinction there is no `baseType` to prefer and
+ * the declared spelling is still what this matches, unchanged.
  */
 const TEXTUAL_TYPE = /char|text|string|clob|varying/i;
 
 /** Dialects with a verified profile composition; enforced by `composeTableProfile`. */
 type ProfileDialect = "postgres" | "sqlite" | "mssql";
 
-/** Something, an `@`, something, a `.`, something. Both engines spell `LIKE` alike. */
+/** Something, an `@`, something, a `.`, something. All three dialects spell `LIKE` alike. */
 const EMAIL_SHAPE = "%_@_%._%";
 
 /**
@@ -143,16 +149,19 @@ interface ProfileShape {
  * The shapes tested inside the database, so no matching value ever leaves it.
  *
  * PER-DIALECT predicates rather than one shared `LIKE` (B26). `LIKE` is the only
- * pattern operator both engines spell the same way, and `_` in it means "any
+ * pattern operator all three dialects spell the same way, and `_` in it means "any
  * character" rather than "any digit" — so a digit run cannot be expressed in the
  * intersection at all, and an earlier draft's `LIKE '%_________%'` would have
  * reported `suspected_pii` for essentially every text column. PostgreSQL spells the
- * run `~ '[0-9]{9,}'` and SQLite spells it `GLOB '*[0-9]…*'`.
+ * run `~ '[0-9]{9,}'`, SQLite spells it `GLOB '*[0-9]…*'` and T-SQL spells it as the
+ * character class repeated inside a `LIKE`.
  *
- * Both spellings were run against live engines over the same four rows and returned
- * the same counts — PostgreSQL 18 and SQLite 3.53 — so the two dialects agree about
- * what a run is rather than merely both being accepted. The SQLite arm is executed
- * end to end in `tests/unit/lib/agent/table-profile.test.ts`.
+ * Every spelling was run against a live engine and returned the same counts, so the
+ * dialects agree about what a run is rather than each merely being accepted: PostgreSQL
+ * 18 and SQLite 3.53 over the same four rows, and the T-SQL pair replayed on SQL Server
+ * 2022 CU26 over four values (a nine-digit run, an eight-digit one, an email and a plain
+ * string), which counted the nine-digit run once and the email once. The SQLite arm is
+ * executed end to end in `tests/unit/lib/agent/table-profile.test.ts`.
  */
 const EMAIL_SHAPE_TEST: ProfileShape = Object.freeze({
   alias: "shaped",
@@ -236,7 +245,8 @@ function assertProfileTable(value: string): string {
 }
 
 /**
- * The resolved address, one quoted identifier per SEGMENT. Both engines here quote with `"`.
+ * The resolved address, one quoted identifier per SEGMENT, each in the DIALECT's own quote:
+ * `"` on PostgreSQL and SQLite, `[…]` on SQL Server (`quoteIdentifier`).
  *
  * A schema and a table was enough while a resolution produced at most those two, and it is
  * not any more: an address is as deep as the object read made it, and joining its leading
@@ -271,7 +281,7 @@ const decidableType = (column: ColumnSchema): string => column.baseType ?? colum
 const isTextual = (column: ColumnSchema): boolean => TEXTUAL_TYPE.test(decidableType(column));
 
 /**
- * Declared types with no equality operator, so `count(DISTINCT …)` refuses them.
+ * Types with no equality operator, so `count(DISTINCT …)` refuses them.
  *
  * PostgreSQL answers `could not identify an equality operator for type json` — and
  * because one unsupported column aborts the WHOLE aggregate, a single `json` column
@@ -308,7 +318,7 @@ const isComparable = (column: ColumnSchema, dialect: ProfileDialect): boolean =>
   !INCOMPARABLE_TYPE[dialect].test(decidableType(column));
 
 /**
- * Declared types the engine refuses to COUNT at all, so the column is left out whole.
+ * Types the engine refuses to COUNT at all, so the column is left out whole.
  *
  * Stronger than `INCOMPARABLE_TYPE`, and therefore its own set: an incomparable type
  * still has a presence count and only loses its distinct count, while a column of one
@@ -342,7 +352,8 @@ const isCountable = (column: ColumnSchema, dialect: ProfileDialect): boolean => 
  * on a single table. Everything here is an aggregate over one scan, which is also
  * the shape an engine can plan best.
  *
- * The shape tests are applied only to columns whose DECLARED type reads as textual:
+ * The shape tests are applied only to columns whose type reads as textual - the base
+ * type where the engine reports one, the declared type otherwise (`decidableType`):
  * comparing an integer column to a string pattern is an error on PostgreSQL, and
  * casting every column to text to avoid that would turn a bounded read into a full
  * conversion of the table.

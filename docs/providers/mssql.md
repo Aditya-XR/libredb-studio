@@ -1508,6 +1508,20 @@ transaction, against a control of 30 ms for the same UPDATE with no lock held an
 No isolation level refuses the hint, `SNAPSHOT` and `READ COMMITTED` both measured, so the T-SQL locking
 hints are refused by the shared statement guard beside PostgreSQL's `LOCK`.
 
+The same guard refuses `NOLOCK`, `READUNCOMMITTED` and `READPAST`, which are the opposite kind of hint
+and are refused for the opposite reason.
+They take FEWER locks, so they harm no other session; what they cost is the answer.
+Measured against a second session holding an uncommitted `UPDATE`, `WITH (NOLOCK)` and
+`WITH (READUNCOMMITTED)` both returned the value of a transaction that then rolled back, and
+`WITH (READPAST)` answered `count(*) = 2` over three committed rows, short by the locked one and with no
+error.
+A run's claims cite the result they came from and the report states those numbers as facts about the
+database, so a read whose number no citation can vouch for is refused rather than reported on: the same
+class as the `FOR JSON` refusal above, a wrong answer nothing downstream can tell from a right one.
+The control is what makes that cheap: the same read with no hint is bounded by the `SET LOCK_TIMEOUT`
+this profile already issues, measured as error 1222 after 1.5 s on a database with read-committed
+snapshot OFF, and where it is ON, as the fixture database is, the read does not wait at all.
+
 Finally, the whole call runs inside a `mssql.Transaction`, which pins ONE pooled connection for its
 duration, and it is always rolled back and never committed.
 SQL Server rolls DDL back too, so anything transactional that reached the server anyway is undone.

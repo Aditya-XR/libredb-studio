@@ -2328,33 +2328,46 @@ no reading either.
 with no reading gives the editor a plan the agent still cannot weigh, and a reading with no
 `ExplainFormat` member has nothing to key on.
 
-### A7. The agent's byte budget is measured after the result exists, on every engine that has one
+### A7. The agent's byte budget TOTAL is measured after the result exists, on every engine that has one
 
-SQL Server is the engine that makes this visible, because it is the first whose ROW budget is the
-SERVER's: `queryReadOnly` issues `SET ROWCOUNT <maxResultRows + 1>` before the statement, so the
-result arrives already bounded in rows and the `+ 1` is what keeps an overrun detectable. That is
-stronger than PostgreSQL and SQLite, which compare `rows.length` against the budget after the driver
-has materialised everything.
+SQL Server is the engine that makes this visible, because it is the first whose result budget is the
+SERVER's.
+`queryReadOnly` issues `SET ROWCOUNT <maxResultRows + 1>` before the statement, so the result arrives
+already bounded in rows, and `SET TEXTSIZE <maxResultBytes + 1>` beside it, so no single VALUE arrives
+whole either.
+In both the `+ 1` is what keeps a cut detectable rather than silent, and the value half is checked in
+the server's own unit by `assertNoValueWasCut`, because `SET TEXTSIZE` counts wire bytes while the
+budget counts UTF-8, which `docs/providers/mssql.md` §12.5 carries the measurement for.
+The other three do neither: PostgreSQL, SQLite and DuckDB compare `rows.length` and then
+`measureResultBytes(rows)` against the budget after the driver has materialised everything.
 
-The BYTE budget is post-hoc on all three. `resultBytes > budget.maxResultBytes` is measured on a
-result that already exists, and a row budget bounds row COUNT rather than row SIZE, so a small number
-of very large values - `varbinary(max)`, `nvarchar(max)`, a `FOR JSON` document - is materialised in
-the Node process before the cap can refuse it.
+What is left is the TOTAL, and it is post-hoc on all four.
+`resultBytes > budget.maxResultBytes` is measured on a result that already exists, and a row budget
+bounds row COUNT while a value ceiling bounds one VALUE, so rows times values can exceed
+`maxResultBytes` before the sum is taken: many rows of moderate `varbinary(max)` or `nvarchar(max)`
+values are materialised in the Node process before the cap can refuse them.
+On the other three engines that same check is also all there is for a SINGLE large value, so both
+halves are post-hoc there.
 
 Measured while building the SQL Server profile, and the reason the row half was worth doing at all:
 without `SET ROWCOUNT` one 20-million-row cross join took the Node process down with an
 out-of-memory crash before any result-side cap looked at it, and `requestTimeout` did not prevent it,
-because tedious stops the request timer on the first data packet. With `SET ROWCOUNT 1001` the same
-statement returned 1001 rows in 6 ms.
+because tedious stops the request timer on the first data packet.
+With `SET ROWCOUNT 1001` the same statement returned 1001 rows in 6 ms.
 
-A per-provider fix would be three different truncations of one rule, which is why this is not a SQL
-Server entry: the shape is identical in all three `queryReadOnly` implementations, the ceiling is one
-number in one policy (`ExecutionBudget`), and no two of the engines offer the same server-side lever -
-SQL Server has no byte equivalent of `SET ROWCOUNT`.
+Still not a SQL Server entry, and the per-value fix is the reason rather than a counter-example to it.
+That fix went in per provider because SQL Server is the only one of the four with a server-side lever
+for a value, and it closed the single-value half on one engine without touching the total on any.
+The total is a property of how a result is READ rather than of any one value, none of the four offers
+a lever for it, the ceiling is one number in one policy (`ExecutionBudget`), and the shape is
+identical in all four `queryReadOnly` implementations - so spelling what remains four different ways
+would be four truncations of one rule.
 
 **Done when:** the byte ceiling is enforced while the result is read rather than after it is held -
 a streaming read that stops at the ceiling - in every provider that implements `queryReadOnly`, so
 that the budget bounds memory rather than reporting on it.
+On SQL Server that is the total alone, since `SET TEXTSIZE` already bounds each value; on PostgreSQL,
+SQLite and DuckDB it is both.
 
 ### A8. SQL Server's admitted SELECT reaches server-level metadata, which is A3 on a third engine
 
