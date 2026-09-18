@@ -26,7 +26,9 @@ starting with the first release that includes the release-artifacts workflow —
 have Docker images only.
 
 > **Runtime note:** every channel here runs the production server under Node (`node server.js`),
-> including the Docker image — its runner stage is `node:26.8.2-trixie-slim` and `CMD` execs
+> including the Docker image — the default tag's runner stage is `node:26.8.2-trixie-slim`, the
+> `-alpine` tag's is `node:26.8.2-alpine3.23` and the `-alpine-slim` tag's is Alpine's own `nodejs`
+> package (see [Image tag model](#image-tag-model)), and in all three `CMD` execs
 > `node server.js`; Bun is only used to install dependencies during the Docker build and for local
 > development (`bun dev`). The SQLite DB provider adapts to whichever runtime it finds
 > (`bun:sqlite` under Bun, `node:sqlite` under Node) — see
@@ -287,6 +289,29 @@ Published by [`.github/workflows/docker-build-push.yml`](../.github/workflows/do
 
 Use `<version>` or `sha-<commit>` for reproducible deployments; `main` / `dev` are for testing
 unreleased code.
+
+**Variants.** Every tag above is published three times, once per base image (#840). The suffix is
+appended to whatever the tag would otherwise be, so `0.16.0`, `0.16.0-alpine` and
+`0.16.0-alpine-slim` are the same release on three bases, and `latest-alpine` and `dev-alpine` exist
+for the same reason `latest` and `dev` do.
+
+| Suffix | Dockerfile | Base | Engines | Use |
+|---|---|---|---|---|
+| none | `Dockerfile` | `node:26.8.2-trixie-slim` (glibc) | all, and the only one where Oracle **Thick** mode can be layered on | the default; unchanged, and what every example in this repository pulls |
+| `-alpine` | `Dockerfile.alpine` | `node:26.8.2-alpine3.23` (musl) | all, Oracle **Thin** only | a much smaller OS attack surface: measured with Trivy 0.73.0 on 2026-09-15, the Debian base carries 3 CRITICAL / 52 HIGH OS findings that belong to the distro (the newest `node:26-trixie-slim` scores identically) against 0 / 2 for `node:26-alpine` |
+| `-alpine-slim` | `Dockerfile.alpine-slim` | `alpine:3.23` with Alpine's own `nodejs` package | all except **DuckDB** | smallest; see the trade below |
+
+`-alpine-slim` trades features for size and is the only variant that does. It drops the DuckDB
+driver (four packages ending in a ~70 MB `libduckdb.so`), sharp/libvips, and the repo tree that
+output file tracing sweeps into `.next/standalone`; it runs Alpine's packaged Node rather than the
+official image's unstripped binary, which is the single largest saving. Opening a DuckDB connection
+on it fails with a message naming the tags that do ship the driver, not a module-resolution stack.
+Its Node version follows Alpine's package index rather than a Dependabot-tracked pin, and Alpine
+ships English-only ICU data — safe here because every server-side locale call in `src` passes
+`en-US` explicitly.
+
+Oracle **Thick** mode needs Oracle Instant Client, which has no musl build, so it is reachable on
+the default tag only — see [providers/oracle.md](providers/oracle.md).
 
 **Architectures:** every tag published from `main`, a release or a manual dispatch is a
 `linux/amd64` + `linux/arm64` manifest. Branch previews (`dev` and the `sha-` tag of a

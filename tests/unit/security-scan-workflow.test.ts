@@ -32,6 +32,7 @@ interface Job {
   if?: string;
   permissions?: Record<string, string>;
   "timeout-minutes"?: number;
+  strategy?: { matrix?: { include?: { variant?: string; tag?: string }[] } };
   steps?: Step[];
 }
 interface Workflow {
@@ -440,7 +441,17 @@ describe("image-scan reports and never gates", () => {
   });
 
   test("scans the image users actually run", () => {
-    expect(resolve?.run).toContain("ghcr.io/libredb/libredb-studio:latest");
+    expect(resolve?.run).toContain("ghcr.io/libredb/libredb-studio:${{ matrix.tag }}");
+  });
+
+  test("scans every published variant, not only the default tag", () => {
+    // Three images ship from this repository (#840), and their OS layers are
+    // three different answers: the Alpine variants exist BECAUSE the Debian
+    // base scores 3 CRITICAL / 52 HIGH. A scan that only ever looked at
+    // `:latest` would leave the tags carrying the security claim unmeasured.
+    const tags = (job?.strategy?.matrix?.include ?? []).map((entry) => entry.tag).sort();
+
+    expect(tags).toEqual(["latest", "latest-alpine", "latest-alpine-slim"]);
   });
 
   test("resolves :latest to one digest and reuses it for both the vuln scan and the SBOM", () => {
@@ -471,7 +482,18 @@ describe("image-scan reports and never gates", () => {
   });
 
   test("uploads under its own category so it does not overwrite the dependency results", () => {
-    expect(sarif?.with?.category).toBe("trivy-image");
+    // Per variant, not just per scanner: code scanning keys results by category,
+    // so three matrix legs uploading as `trivy-image` would leave whichever
+    // finished last as the whole picture and silently drop the other two.
+    expect(sarif?.with?.category).toBe("trivy-image-${{ matrix.variant }}");
+  });
+
+  test("keeps each variant's SBOM as its own artifact", () => {
+    const upload = steps.find((s) => s.uses?.startsWith("actions/upload-artifact@"));
+
+    // Same reason as the SARIF category, with a louder failure: two matrix legs
+    // uploading one artifact name is a hard error on upload-artifact v4+.
+    expect(String(upload?.with?.name ?? "")).toContain("${{ matrix.variant }}");
   });
 
   test("can read the image from GHCR", () => {

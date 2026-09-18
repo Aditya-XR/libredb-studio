@@ -432,6 +432,22 @@ jobs:
       # Pull the published image from GHCR.
       packages: read
       security-events: write
+    # One leg per published variant (#840). The Alpine images exist because of
+    # what this job measures on the Debian one, so leaving them unscanned would
+    # publish a security claim nothing checks - and the slim variant's runtime
+    # base is Alpine's own `nodejs` package rather than the official image, a
+    # third OS layer with its own answer. fail-fast off: this job reports and
+    # never gates, so one unreadable tag must not cancel the others.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: debian
+            tag: latest
+          - variant: alpine
+            tag: latest-alpine
+          - variant: alpine-slim
+            tag: latest-alpine-slim
     steps:
       - name: Compute the database cache day
         id: day
@@ -462,7 +478,7 @@ jobs:
           # exact failure mode a digest-pinned reference exists to rule out
           # everywhere else in this workflow. Resolved once, here, and every
           # step below scans image_ref, never the bare tag.
-          digest=$(docker buildx imagetools inspect ghcr.io/libredb/libredb-studio:latest --format '{{json .Manifest.Digest}}' | tr -d '"')
+          digest=$(docker buildx imagetools inspect ghcr.io/libredb/libredb-studio:${{ matrix.tag }} --format '{{json .Manifest.Digest}}' | tr -d '"')
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "image_ref=ghcr.io/libredb/libredb-studio@$digest" >> "$GITHUB_OUTPUT"
 
@@ -512,8 +528,9 @@ jobs:
           # publishes the release BEFORE dispatching docker-build-push.yml, and
           # immutable releases (#154) freeze the asset set at publish time. The
           # source SBOM on the release covers the application closure; this one
-          # adds the Debian layer, and anyone can regenerate it from the immutable
-          # digest at any time with the command documented in SECURITY.md.
+          # adds the OS layer of one variant, and anyone can regenerate it from
+          # the immutable digest at any time with the command documented in
+          # SECURITY.md.
           #
           # Same $IMAGE_REF the vuln scan above used, not a second `:latest`
           # resolved independently - a release retagging `:latest` between the
@@ -537,14 +554,15 @@ jobs:
           {
             echo "## Published image: $IMAGE_REF"
             echo
-            echo "Resolved from \`ghcr.io/libredb/libredb-studio:latest\` once, at the start of"
-            echo "this run, so the vulnerability report and the SBOM above describe the same"
-            echo "bytes even if a release retags \`:latest\` while this job is running."
+            echo "Variant \`${{ matrix.variant }}\`, resolved from"
+            echo "\`ghcr.io/libredb/libredb-studio:${{ matrix.tag }}\` once, at the start of this"
+            echo "run, so the vulnerability report and the SBOM above describe the same bytes"
+            echo "even if a release retags it while this job is running."
             echo
-            echo "Critical and high findings only. Most carry no fixed package - Debian's"
-            echo "security team has not shipped one - which is why this job reports and never"
-            echo "gates. The actionable subset is the one with a Fixed Version column entry:"
-            echo "that is a base-image bump in \`Dockerfile\`."
+            echo "Critical and high findings only. On the Debian variant most carry no fixed"
+            echo "package - the distro has not shipped one - which is why this job reports and"
+            echo "never gates. The actionable subset is the one with a Fixed Version column"
+            echo "entry: that is a base-image bump in \`${{ matrix.variant == 'debian' && 'Dockerfile' || format('Dockerfile.{0}', matrix.variant) }}\`."
             echo
             echo '```'
             cat "$RUNNER_TEMP/trivy-out/image.txt"
@@ -555,12 +573,12 @@ jobs:
         uses: github/codeql-action/upload-sarif@a60c4df7a135c7317c1e9ddf9b5a9b07a910dda9 # v4
         with:
           sarif_file: ${{ runner.temp }}/trivy-out/image.sarif
-          category: trivy-image
+          category: trivy-image-${{ matrix.variant }}
 
       - name: Upload the image SBOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: image-sbom
+          name: image-sbom-${{ matrix.variant }}
           path: ${{ runner.temp }}/trivy-out/image.cdx.json
           if-no-files-found: error
           retention-days: 30
