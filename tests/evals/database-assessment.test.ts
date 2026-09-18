@@ -507,7 +507,7 @@ describe("the verdict is previewed before the report lands, not after the run di
       answersProse("still looking"),
     ]);
 
-    expect(seen[0]).toEqual({ temperature: 0, topP: 1 });
+    expect(seen[0]).toEqual({ temperature: 0, topP: undefined });
   });
 
   test("a report that already meets its bar is not delayed by a turn", async () => {
