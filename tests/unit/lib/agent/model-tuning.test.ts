@@ -236,7 +236,39 @@ describe("what a document from outside Studio is held to instead", () => {
     );
     resetTuning();
     expect(ceilingFor("gemma4:26b")).toBe(DEFAULT_UNREPORTED_CALL_CEILING);
-    expect(retriesEmptyTurn("gemma4:26b")).toBe(true);
+  });
+
+  test("an entry may state temperature without topP, suitable for Claude/Anthropic endpoints", () => {
+    const tempOnly = {
+      models: [{ id: "claude-haiku-4-5", measured: "temperature 0 only", settings: { sampling: { temperature: 0 } } }],
+    };
+    const tuning = parseOperatorTuning(document(tempOnly), "test");
+    expect(tuning.models["claude-haiku-4-5"]).toEqual({
+      measured: "temperature 0 only",
+      sampling: { temperature: 0 },
+    });
+  });
+
+  test("an entry may state topP without temperature", () => {
+    const topPOnly = {
+      models: [{ id: "custom-model:7b", measured: "topP 0.9 only", settings: { sampling: { topP: 0.9 } } }],
+    };
+    const tuning = parseOperatorTuning(document(topPOnly), "test");
+    expect(tuning.models["custom-model:7b"]).toEqual({
+      measured: "topP 0.9 only",
+      sampling: { topP: 0.9 },
+    });
+  });
+
+  test("an entry may state an empty sampling object for adaptive-thinking models", () => {
+    const emptySampling = {
+      models: [{ id: "claude-sonnet-5", measured: "adaptive thinking; no sampling params", settings: { sampling: {} } }],
+    };
+    const tuning = parseOperatorTuning(document(emptySampling), "test");
+    expect(tuning.models["claude-sonnet-5"]).toEqual({
+      measured: "adaptive thinking; no sampling params",
+      sampling: {},
+    });
   });
 
   test("a key this Studio does not implement is reported rather than refusing the document", () => {

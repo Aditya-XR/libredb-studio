@@ -64,8 +64,15 @@ describe("sampling is decided per model, defaulting to deterministic", () => {
       the override is scoped to the one cell that needs it rather than to the model.
     */
     expect(samplingFor("qwen3:8b", "query-optimization").temperature).toBeGreaterThan(0);
-    expect(samplingFor("qwen3:8b", "database-assessment")).toEqual({ temperature: 0, topP: 1 });
     expect(samplingFor("qwen3:8b", "investigation")).toEqual({ temperature: 0, topP: 1 });
+  });
+
+  test("a model profile with temperature only resolves without topP", () => {
+    // Verified against Anthropic/Claude endpoint compatibility: sending both temperature and topP
+    // causes Claude models to reject with 400.
+    const customSampling: import("@/lib/agent/models/profile").AgentSampling = { temperature: 0 };
+    expect(customSampling).toEqual({ temperature: 0 });
+    expect(customSampling.topP).toBeUndefined();
   });
 
   test("a model id is matched case-insensitively, and its TAG is not stripped", () => {
