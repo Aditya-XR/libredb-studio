@@ -37,6 +37,7 @@ import {
   turnTimeoutMsFor,
 } from "@/lib/agent/models";
 import { BASELINE_NOTICES } from "@/lib/agent/models/notices";
+import { DEFAULT_SAMPLING } from "@/lib/agent/models/profile";
 import type { AgentRunWorkflowType } from "@/lib/agent/types";
 
 const WORKFLOWS: readonly AgentRunWorkflowType[] = [
@@ -48,7 +49,7 @@ const WORKFLOWS: readonly AgentRunWorkflowType[] = [
 ];
 
 /** The sampling every surface gets unless a profile names that surface. */
-const PINNED = { temperature: 0, topP: 1 } as const;
+const PINNED = { temperature: 0 } as const;
 
 interface ResolvedRow {
   readonly id: string;

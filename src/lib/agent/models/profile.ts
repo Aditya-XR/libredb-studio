@@ -368,4 +368,4 @@ export const DEFAULT_VERDICT_HOLD_LIMIT = 2;
  * surprising one. Where that reasoning fails for a particular model it fails measurably, and
  * that model's own entry says so.
  */
-export const DEFAULT_SAMPLING: AgentSampling = Object.freeze({ temperature: 0, topP: 1 });
+export const DEFAULT_SAMPLING: AgentSampling = Object.freeze({ temperature: 0 });

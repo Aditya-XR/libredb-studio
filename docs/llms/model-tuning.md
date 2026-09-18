@@ -111,7 +111,7 @@ Every one is optional. What you do not state resolves to the compiled default in
 
 | setting | type and bounds | what it decides | default |
 | --- | --- | --- | --- |
-| `sampling` | `{temperature: 0–2, topP: 0–1}` | how every turn of this model is sampled | `{0, 1}` |
+| `sampling` | `{temperature?: 0–2, topP?: 0–1}` | how every turn of this model is sampled | `{temperature: 0}` |
 | `perWorkflow` | the same object, per workflow id | sampling for named surfaces only — the narrowest an override gets | — |
 | `unreportedCallCeiling` | integer 1–100 | how many calls it may make without reporting before the run is narrowed to the tools that would finish it | `12` |
 | `reportReminderLimit` | integer 0–5 | how many times a turn with no call and no report may be answered with the report reminder | `1` |
