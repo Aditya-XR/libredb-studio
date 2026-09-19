@@ -1078,8 +1078,7 @@ export function connectionIdentity(connection: DatabaseConnection): string {
   // tool regardless.
   return createHash("sha256")
     .update(
-      // biome-ignore format: codeql suppression comment must stay on this exact line
-      JSON.stringify([ // codeql[js/insufficient-password-hash] -- see the non-credential explanation above
+      JSON.stringify([
         connection.id,
         connection.type,
         connection.host ?? "",
