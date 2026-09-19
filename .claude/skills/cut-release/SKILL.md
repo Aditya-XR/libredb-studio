@@ -244,12 +244,17 @@ docker run -d --name lv-pg --network libredb-verify \
 # seed two tables, a view and a handful of rows, so counts and values are known in advance
 
 docker run -d --name lv-studio --network libredb-verify -p 3399:3000 \
-  -e JWT_SECRET='verify-jwt-secret-at-least-32-characters-long' \
+  -e JWT_SECRET="$(openssl rand -base64 32)" \
   -e ADMIN_PASSWORD='VerifyAdmin123!' -e USER_PASSWORD='VerifyUser123!' \
   -e AUTH_COOKIE_SECURE=false \
   -v "$PWD/verify-data:/data" \
   ghcr.io/libredb/libredb-studio:latest
 ```
+
+`JWT_SECRET` is generated rather than written out: a credential-shaped literal in this file is a
+`generic-api-key` hit in `Secret Scan`, which scans all of history, so pasting a fixed one here
+costs a `.gitleaksignore` fingerprint that can never be removed. Nothing in this phase needs to know
+it. The two passwords are literals because the browser step has to log in with them.
 
 `AUTH_COOKIE_SECURE=false` is required, not optional: over plain HTTP the cookie is dropped and
 login fails in a way that looks like bad credentials. Port 3399 rather than 3000 because another
@@ -304,7 +309,7 @@ proves the tag a user types resolves and boots:
 ```bash
 for v in alpine alpine-slim; do
   docker run -d --name lv-$v --network libredb-verify -p 0:3000 \
-    -e JWT_SECRET='verify-jwt-secret-at-least-32-characters-long' \
+    -e JWT_SECRET="$(openssl rand -base64 32)" \
     -e ADMIN_PASSWORD='VerifyAdmin123!' -e AUTH_COOKIE_SECURE=false \
     ghcr.io/libredb/libredb-studio:<version>-$v
 done
