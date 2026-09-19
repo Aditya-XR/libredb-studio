@@ -1071,14 +1071,15 @@ const heldSnapshots = new Map<string, AgentContextSnapshot>();
  * process-lifetime map should not hold one as a key.
  */
 export function connectionIdentity(connection: DatabaseConnection): string {
-  // codeql[js/insufficient-password-hash] -- `apiKeyId` is the identifier of WHICH
-  // pre-configured key is used (this function's analogue of `user`, see #708 comment
-  // below), not the credential; `apiKeySecret` is the actual secret and is excluded
-  // from this hash. This builds a cache-key fingerprint, not credential storage, so a
-  // slow KDF is not the right tool regardless.
+  // `apiKeyId` below is the identifier of WHICH pre-configured key is used (this
+  // function's analogue of `user`, see #708 comment below), not the credential;
+  // `apiKeySecret` is the actual secret and is excluded from this hash. This builds
+  // a cache-key fingerprint, not credential storage, so a slow KDF is not the right
+  // tool regardless.
   return createHash("sha256")
     .update(
-      JSON.stringify([
+      // biome-ignore format: codeql suppression comment must stay on this exact line
+      JSON.stringify([ // codeql[js/insufficient-password-hash] -- see the non-credential explanation above
         connection.id,
         connection.type,
         connection.host ?? "",
