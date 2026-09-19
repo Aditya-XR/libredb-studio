@@ -2037,7 +2037,7 @@ that the moderation lag is accepted permanently and this entry is deleted.
 
 ---
 
-### REL4. `backlog-structure.test.ts` scans gitignored files, so a local draft fails a gate CI cannot
+### REL4. Two tests scan gitignored files, so a local draft fails a gate CI cannot
 
 The citation scan globs `docs/**/*.md` and reads whatever is on disk. `.gitignore:133` excludes
 `docs/superpowers/`, where plans, specs and run reports are written during a working session, and
@@ -2054,10 +2054,17 @@ real damage.
 `tests/unit/agent-documentation.test.ts` asks the same question of `docs/AGENT.md` alone and does
 not have the problem, because it names one file rather than a glob.
 
-**Done when:** the scan enumerates tracked files, for example by driving the glob through
-`git ls-files` and intersecting, so a working tree with local drafts under `docs/` gives the same
-verdict as a clean checkout. The scan's own floor assertion (`scanned.length > 200`) stays, so a
-broken enumeration still fails loudly rather than passing vacuously.
+`tests/unit/published-credentials.test.ts` is the same defect in a second test, measured while
+cutting 0.16.1. It walks the working tree for published passwords, and `deploy/rancher/results/` -
+gitignored at `.gitignore:162`, written by the Rancher E2E run skill - holds the per-scenario
+`secrets.txt` files that run generates. Six offenders in `assigns no admin or user password
+anywhere` and one in `hands no working password to a login example`, all from paths CI never checks
+out. Its floor assertion needs the same treatment as the citation scan's.
+
+**Done when:** both scans enumerate tracked files, for example by driving the glob through
+`git ls-files` and intersecting, so a working tree with local drafts under `docs/` or `deploy/`
+gives the same verdict as a clean checkout. Each scan's own floor assertion stays, so a broken
+enumeration still fails loudly rather than passing vacuously.
 
 ## Chart configuration surface
 
