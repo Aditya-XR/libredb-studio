@@ -33,8 +33,7 @@ channel count.
 <!-- BEGIN:CHANNEL-SCORECARD -->
 
 ## Coverage snapshot
-
-**37 channels · 32 live · 4 pending · 1 deprecated**
+**37 channels · 32 live · 5 pending · 1 deprecated**
 
 Live channels by platform: **Linux 8 · macOS 3 · Windows 4 · Container 6 · Kubernetes 4 · Cloud 13**
 
@@ -47,7 +46,7 @@ Live channels by platform: **Linux 8 · macOS 3 · Windows 4 · Container 6 · K
 | OS / desktop packages | 3 | 0 | 0 |
 | PaaS catalogs (listed) | 10 | 3 | 0 |
 | Deploy recipes | 3 | 0 | 0 |
-| Cloud marketplaces | 4 | 1 | 0 |
+| Cloud marketplaces | 4 | 2 | 0 |
 
 <!-- END:CHANNEL-SCORECARD -->
 
@@ -93,6 +92,7 @@ Live channels by platform: **Linux 8 · macOS 3 · Windows 4 · Container 6 · K
 | [Azure Marketplace](https://marketplace.microsoft.com/en-us/product/libredb.libredb-studio) | Cloud marketplaces | Cloud | live | Manual, on demand | [deploy/azure/README.md](../deploy/azure/README.md) |
 | [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/libredb-studio) | Cloud marketplaces | Cloud | live | Manual, on demand | [deploy/digitalocean/README.md](../deploy/digitalocean/README.md) |
 | [Google Cloud Marketplace](https://console.cloud.google.com/marketplace/product/libredb-public/libredb-studio) | Cloud marketplaces | Kubernetes, Cloud | live | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
+| [Civo Kubernetes Marketplace](https://github.com/civo/kubernetes-marketplace) | Cloud marketplaces | Kubernetes | pending | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Koyeb One-Click Apps catalog](https://www.koyeb.com/deploy) | Cloud marketplaces | Cloud | pending | Manual, on demand | [deploy/koyeb/CATALOG_SUBMISSION.md](../deploy/koyeb/CATALOG_SUBMISSION.md) |
 
 <!-- END:CHANNEL-TABLE -->
