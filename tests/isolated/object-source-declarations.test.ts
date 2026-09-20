@@ -142,12 +142,12 @@ const UNCONNECTED_SOURCE_KINDS: readonly string[] = CENSUS_TYPES.flatMap((type) 
  */
 const CENSUS_ABSTAINERS: readonly DatabaseType[] = Object.freeze(["druid", "libredb"]);
 
-/** MariaDB's two extra kinds, which arrive only once `VERSION()` has been measured. */
+/** MariaDB's two extra kinds, which arrive only once the flavour has been measured. */
 const MARIADB_EXTRA_SOURCE_KINDS: readonly string[] = ["mysql/package/mysql", "mysql/sequence/mysql"];
 
 /**
- * The version string a MariaDB server answers `SELECT VERSION()` with, measured on
- * `mariadb:latest` (12.3.2) by the mysql provider task on 2026-09-11.
+ * The flavour a MariaDB server is measured as, which is the derived fact the provider stores
+ * once it has read `SELECT VERSION()`.
  *
  * SECOND OWNER, DISCLOSED RATHER THAN HOISTED. `tests/isolated/monaco-language-ids.test.ts`
  * carries the same constant and the same private-field write, for the same structural reason: an
@@ -156,11 +156,12 @@ const MARIADB_EXTRA_SOURCE_KINDS: readonly string[] = ["mysql/package/mysql", "m
  * implementer holds the checkout, and a shared module would be a third file this task does not
  * own, so the two copies stay and this note is the pointer between them.
  *
- * Neither copy can drift in SILENCE, measured in fix round 1: a string that stops matching
- * `objectKindsFor`'s `/mariadb/i` makes its own file go red by name. Here it is the named throw in
- * the half-declaration guard plus the MariaDB triple set; there it is `toContain("mysql/package")`.
+ * Neither copy can drift in SILENCE, measured in fix round 1: a flavour the provider no longer
+ * knows is a type error at the write, and a write that lands on nothing leaves the MySQL default
+ * answering. Here that is the named throw in the half-declaration guard plus the MariaDB triple
+ * set; there it is `toContain("mysql/package")`.
  */
-const MARIADB_VERSION_STRING = "12.3.2-MariaDB-ubu2404";
+const MARIADB_FLAVOUR = "mariadb";
 
 /**
  * The whole fleet's declared kinds, in one pass, with the type-id each came from.
@@ -183,8 +184,8 @@ async function censusKinds(): Promise<readonly CensusRow[]> {
 /**
  * The mysql provider's kinds as a MariaDB server resolves them, which no unconnected read shows.
  *
- * `objectKindsFor` resolves the kind set from what the server called itself, and the measured
- * version is a PRIVATE field written by `connect()`. It is set here directly rather than through
+ * `objectKindsFor` resolves the kind set from the flavour the server was measured as, and that
+ * flavour is a PRIVATE field written by `connect()`. It is set here directly rather than through
  * a stub of `getCapabilities`, because a stub would return a kind list this test typed, and the
  * whole point of a census is that the code produces the list. Writing the field drives the real
  * `objectKindsFor` branch. If the field is ever renamed, this write lands on nothing, the MySQL
@@ -192,7 +193,7 @@ async function censusKinds(): Promise<readonly CensusRow[]> {
  */
 async function mariadbKinds(): Promise<readonly CensusRow[]> {
   const provider = await createDatabaseProvider(CENSUS_CONNECTION.mysql);
-  (provider as unknown as { measuredServerVersion: string | undefined }).measuredServerVersion = MARIADB_VERSION_STRING;
+  (provider as unknown as { measuredFlavour: "mysql" | "mariadb" }).measuredFlavour = MARIADB_FLAVOUR;
   return declaredKinds(provider.getCapabilities()).map((kind) => ({ type: "mysql" as const, kind }));
 }
 

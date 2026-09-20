@@ -110,6 +110,8 @@ const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
  * gets the standard form, matching the standard identifier quoting such a
  * generator already emits: doubling the backslash there would corrupt the value on
  * every dialect that reads it as data, which is the larger group.
+ *
+ * The inverse is `unquoteLiteral` below, which reads these same rules backwards.
  */
 export function quoteLiteral(value: string, dialect: DatabaseType | undefined): string {
   const escape = dialect ? LITERAL_ESCAPE[dialect] : "standard";
@@ -122,6 +124,79 @@ export function quoteLiteral(value: string, dialect: DatabaseType | undefined): 
   // also double the one this function just added in front of a quote.
   const escaped = value.replace(/\\/g, "\\\\");
   return escape === "backslash" ? `'${escaped.replace(/'/g, "\\'")}'` : `'${escaped.replace(/'/g, "''")}'`;
+}
+
+/**
+ * What a backslash escape decodes to in the two dialects that have them.
+ *
+ * `\%` and `\_` are the documented exceptions: MySQL keeps BOTH characters, because the
+ * pair exists for `LIKE` and not for the string. Anything not named here decodes to the
+ * escaped character itself.
+ */
+const BACKSLASH_ESCAPES: Readonly<Record<string, string>> = {
+  "0": "\u0000",
+  b: "\b",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+  Z: "\u001a",
+  "\\": "\\",
+  "'": "'",
+  '"': '"',
+  "%": "\\%",
+  _: "\\_",
+};
+
+/**
+ * The value inside a single-quoted literal, or `undefined` when `text` is not exactly one.
+ *
+ * The inverse of `quoteLiteral`, and it is here rather than beside its caller because the
+ * escape rules it undoes are the ones this module already measures per dialect. A second
+ * copy elsewhere is how one of them ends up half right (#795).
+ *
+ * The `undefined` answer is half the contract, not an error path. A catalog that reports a
+ * default as the expression AS WRITTEN hands this function string literals and bare
+ * expressions through the same column, so "is this one literal" is the question the caller
+ * needs answered, and the answer has to come from the grammar. A literal that CLOSES before
+ * the end of the text is not one literal: `'a' = 'b'` is an expression, and stripping its
+ * outer quotes would produce `a' = 'b`, a value nobody wrote.
+ *
+ * One left-to-right scan rather than a chain of replaces. `quoteLiteral` has to order its
+ * two escapes, for the reason written above it; a scanner has no second pass to order.
+ */
+export function unquoteLiteral(text: string, dialect: DatabaseType | undefined): string | undefined {
+  const escape = dialect ? LITERAL_ESCAPE[dialect] : "standard";
+  // The prefix is part of the literal this dialect writes, so it is part of what is read.
+  const body = escape === "unicode" && text.startsWith("N") ? text.slice(1) : text;
+  if (body.length < 2 || !body.startsWith("'")) return undefined;
+
+  const doubles = escape !== "backslash";
+  const backslashes = escape === "double-and-backslash" || escape === "backslash";
+
+  let value = "";
+  let at = 1;
+  while (at < body.length) {
+    const char = body[at];
+    if (char === "'") {
+      if (doubles && body[at + 1] === "'") {
+        value += "'";
+        at += 2;
+        continue;
+      }
+      // The literal closed. It is the WHOLE text only if nothing follows the closing quote.
+      return at === body.length - 1 ? value : undefined;
+    }
+    if (backslashes && char === "\\" && at + 1 < body.length) {
+      const escaped = body[at + 1] as string;
+      value += BACKSLASH_ESCAPES[escaped] ?? escaped;
+      at += 2;
+      continue;
+    }
+    value += char;
+    at += 1;
+  }
+  // Ran off the end without closing, which a trailing backslash is one way to do.
+  return undefined;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { positionalPlaceholder, quoteLiteral } from "@/lib/sql/values";
+import { positionalPlaceholder, quoteLiteral, unquoteLiteral } from "@/lib/sql/values";
+import type { DatabaseType } from "@/lib/types";
 
 // A value reaching SQL generation is arbitrary text — a pasted cell, an imported
 // result, a natural key read back from the table. Doubling the quote is only half
@@ -146,5 +147,88 @@ describe("positionalPlaceholder", () => {
     expect(positionalPlaceholder("mongodb", 1)).toBeNull();
     expect(positionalPlaceholder("redis", 1)).toBeNull();
     expect(positionalPlaceholder("libredb", 1)).toBeNull();
+  });
+});
+
+// The inverse of `quoteLiteral`, and it lives here because the escape rules it undoes are
+// already measured in this module. A catalog that reports a default as the literal AS
+// WRITTEN, which MariaDB does and MySQL does not, is read back through this (issue #795).
+describe("unquoteLiteral", () => {
+  test("decodes a literal in the doubling dialects", () => {
+    expect(unquoteLiteral("'abc'", "postgres")).toBe("abc");
+    expect(unquoteLiteral("'it''s'", "postgres")).toBe("it's");
+    expect(unquoteLiteral("''", "postgres")).toBe("");
+    // A backslash is DATA here, so it survives untouched.
+    expect(unquoteLiteral("'a\\b'", "postgres")).toBe("a\\b");
+  });
+
+  test("decodes the backslash escapes where the dialect reads a backslash as one", () => {
+    // Measured on MariaDB 12.3.2, 2026-09-20: a column whose default is the three
+    // characters a, backslash, b reports COLUMN_DEFAULT as 'a\\b', hex 27615C5C6227.
+    expect(unquoteLiteral("'a\\\\b'", "mysql")).toBe("a\\b");
+    expect(unquoteLiteral("'a\\\\'", "mysql")).toBe("a\\");
+    expect(unquoteLiteral("'a\\nb'", "mysql")).toBe("a\nb");
+    expect(unquoteLiteral("'a\\tb'", "mysql")).toBe("a\tb");
+    expect(unquoteLiteral("'a\\0b'", "mysql")).toBe("a\u0000b");
+    expect(unquoteLiteral("'a\\Zb'", "mysql")).toBe("a\u001ab");
+    expect(unquoteLiteral("'a\\rb'", "mysql")).toBe("a\rb");
+    expect(unquoteLiteral("'a\\bb'", "mysql")).toBe("a\bb");
+    expect(unquoteLiteral("'a\\\"b'", "mysql")).toBe('a"b');
+    expect(unquoteLiteral("'a\\'b'", "mysql")).toBe("a'b");
+    // MySQL DOCUMENTS these two as keeping both characters, for LIKE.
+    expect(unquoteLiteral("'a\\%b'", "mysql")).toBe("a\\%b");
+    expect(unquoteLiteral("'a\\_b'", "mysql")).toBe("a\\_b");
+    // Any other escaped character is itself.
+    expect(unquoteLiteral("'a\\qb'", "mysql")).toBe("aqb");
+    // Doubling works too, and MariaDB normalises a backslash-escaped quote INTO it:
+    // measured 2026-09-20, DEFAULT 'a\'b' reads back as 'a''b'.
+    expect(unquoteLiteral("'a''b'", "mysql")).toBe("a'b");
+  });
+
+  test("decodes the backslash-only grammar, where doubling is not an escape", () => {
+    expect(unquoteLiteral("'a\\'b'", "couchbase")).toBe("a'b");
+    expect(unquoteLiteral("'a\\\\b'", "couchbase")).toBe("a\\b");
+    // Two literals side by side, not one with a doubled quote, so this is not one literal.
+    expect(unquoteLiteral("'a''b'", "couchbase")).toBeUndefined();
+  });
+
+  test("accepts the Unicode prefix SQL Server's literals carry", () => {
+    expect(unquoteLiteral("N'abc'", "mssql")).toBe("abc");
+    expect(unquoteLiteral("N'it''s'", "mssql")).toBe("it's");
+    expect(unquoteLiteral("'abc'", "mssql")).toBe("abc");
+  });
+
+  test("answers undefined for text that is not exactly one literal", () => {
+    // What a catalog reports for an expression default or a number, which the caller
+    // passes through as written rather than decoding.
+    expect(unquoteLiteral("42", "mysql")).toBeUndefined();
+    expect(unquoteLiteral("current_timestamp()", "mysql")).toBeUndefined();
+    expect(unquoteLiteral("concat('x','y')", "mysql")).toBeUndefined();
+    // The literal closes before the end, so stripping the outer quotes would corrupt it.
+    expect(unquoteLiteral("('a' = 'b')", "mysql")).toBeUndefined();
+    expect(unquoteLiteral("'a' = 'b'", "mysql")).toBeUndefined();
+    // Never closed, and one lone quote.
+    expect(unquoteLiteral("'abc", "mysql")).toBeUndefined();
+    expect(unquoteLiteral("'", "mysql")).toBeUndefined();
+    expect(unquoteLiteral("", "mysql")).toBeUndefined();
+    // A trailing backslash escapes the closing quote, so the literal never closes.
+    expect(unquoteLiteral("'abc\\'", "mysql")).toBeUndefined();
+  });
+
+  test("an unknown dialect decodes the standard form, matching what quoteLiteral writes", () => {
+    expect(unquoteLiteral("'a\\b'", undefined)).toBe("a\\b");
+    expect(unquoteLiteral("'it''s'", undefined)).toBe("it's");
+  });
+
+  // The binding test. The two halves can now only break together, which is what stops a
+  // third, half-right copy of the escape rules from being written somewhere else.
+  test("round-trips every value quoteLiteral can produce, on every dialect", () => {
+    const values = ["", "abc", "it's", "a''b", "a\\b", "a\\", "'", "\\", "a\nb", "a\tb", "a\u0000b", "O'Brien\\"];
+    const dialects: DatabaseType[] = ["postgres", "mysql", "mssql", "couchbase", "duckdb", "clickhouse", "trino"];
+    for (const dialect of dialects) {
+      for (const value of values) {
+        expect(unquoteLiteral(quoteLiteral(value, dialect), dialect)).toBe(value);
+      }
+    }
   });
 });

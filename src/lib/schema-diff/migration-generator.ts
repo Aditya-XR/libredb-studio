@@ -220,6 +220,23 @@ function commentName(name: string): string {
   return name.replace(/[\r\n\u2028\u2029]/g, " ");
 }
 
+/**
+ * The text that goes after DEFAULT: the engine's own SQL where the provider measured it, and
+ * the raw field otherwise.
+ *
+ * `targetDefault` is the VALUE the column defaults to, and a value is not SQL. Measured on
+ * MariaDB 12.3.2: `CREATE TABLE t (note varchar(20) DEFAULT abc)` is ERROR 1054 (42S22)
+ * Unknown column 'abc' in 'DEFAULT', while `DEFAULT 'abc'` is accepted. Dialects whose
+ * provider declares no expression fall back to the raw field and are unchanged.
+ *
+ * Every caller gates on `=== undefined` and never on truthiness, because the empty string is
+ * a default a column really has. `diffColumns` compares the same quantity by presence, so a
+ * truthiness gate here would report a change the migration then silently does not carry.
+ */
+function defaultSql(col: ColumnDiff): string | undefined {
+  return col.targetDefaultSql ?? col.targetDefault;
+}
+
 function generateColumnDef(col: ColumnDiff, dialect: DatabaseType): string {
   const type = col.targetType || col.sourceType || (dialect === "oracle" ? "VARCHAR2(255)" : "TEXT");
   // A CQL column definition is a name and a type, full stop. Measured on 5.0.9:
@@ -229,7 +246,8 @@ function generateColumnDef(col: ColumnDiff, dialect: DatabaseType): string {
   // component cannot be null) and there are no defaults at all.
   if (dialect === "cassandra") return `${escapeIdentifier(col.columnName, dialect)} ${type}`;
   const nullable = col.targetNullable === false ? " NOT NULL" : "";
-  const defaultVal = col.targetDefault ? ` DEFAULT ${col.targetDefault}` : "";
+  const declaredDefault = defaultSql(col);
+  const defaultVal = declaredDefault === undefined ? "" : ` DEFAULT ${declaredDefault}`;
   // Oracle's column grammar puts DEFAULT before inline constraints such as NOT NULL.
   const modifiers = dialect === "oracle" ? `${defaultVal}${nullable}` : `${nullable}${defaultVal}`;
   return `${escapeIdentifier(col.columnName, dialect)} ${type}${modifiers}`;
@@ -499,14 +517,16 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
       } else if (dialect === "mysql") {
         const type = col.targetType || col.sourceType || "TEXT";
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
-        const defaultVal = col.targetDefault ? ` DEFAULT ${col.targetDefault}` : "";
+        const declaredDefault = defaultSql(col);
+        const defaultVal = declaredDefault === undefined ? "" : ` DEFAULT ${declaredDefault}`;
         lines.push(
           `ALTER TABLE ${id} MODIFY COLUMN ${escapeIdentifier(col.columnName, dialect)} ${type}${nullable}${defaultVal};`,
         );
       } else if (dialect === "oracle") {
         const type = col.targetType || col.sourceType || "VARCHAR2(255)";
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
-        const defaultVal = col.targetDefault ? ` DEFAULT ${col.targetDefault}` : "";
+        const declaredDefault = defaultSql(col);
+        const defaultVal = declaredDefault === undefined ? "" : ` DEFAULT ${declaredDefault}`;
         lines.push(
           `ALTER TABLE ${id} MODIFY (${escapeIdentifier(col.columnName, dialect)} ${type}${defaultVal}${nullable});`,
         );
@@ -514,9 +534,10 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         const type = col.targetType || col.sourceType || "NVARCHAR(MAX)";
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
         lines.push(`ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} ${type}${nullable};`);
-        if (col.sourceDefault !== col.targetDefault && col.targetDefault) {
+        const declaredDefault = defaultSql(col);
+        if (col.sourceDefault !== col.targetDefault && declaredDefault !== undefined) {
           lines.push(
-            `ALTER TABLE ${id} ADD DEFAULT ${col.targetDefault} FOR ${escapeIdentifier(col.columnName, dialect)};`,
+            `ALTER TABLE ${id} ADD DEFAULT ${declaredDefault} FOR ${escapeIdentifier(col.columnName, dialect)};`,
           );
         }
       } else if (dialect === "clickhouse") {
@@ -528,12 +549,13 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         const column = escapeIdentifier(col.columnName, dialect);
         const type = col.targetType || col.sourceType || "String";
         let declared = "";
-        if (col.targetDefault) {
-          const kind = clickhouseDefaultKind(col.targetDefault);
-          declared = kind === "DEFAULT" ? ` DEFAULT ${col.targetDefault}` : ` ${col.targetDefault}`;
+        const declaredDefault = defaultSql(col);
+        if (declaredDefault !== undefined) {
+          const kind = clickhouseDefaultKind(declaredDefault);
+          declared = kind === "DEFAULT" ? ` DEFAULT ${declaredDefault}` : ` ${declaredDefault}`;
         }
         lines.push(`ALTER TABLE ${id} MODIFY COLUMN ${column} ${type}${declared};`);
-        if (col.sourceDefault && !col.targetDefault) {
+        if (col.sourceDefault && declaredDefault === undefined) {
           const kind = clickhouseDefaultKind(col.sourceDefault);
           if (CLICKHOUSE_REMOVABLE_KINDS.includes(kind)) {
             lines.push(`ALTER TABLE ${id} MODIFY COLUMN ${column} REMOVE ${kind};`);
@@ -562,9 +584,10 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
           }
         }
         if (col.sourceDefault !== col.targetDefault) {
-          if (col.targetDefault) {
+          const declaredDefault = defaultSql(col);
+          if (declaredDefault !== undefined) {
             lines.push(
-              `ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} SET DEFAULT ${col.targetDefault};`,
+              `ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} SET DEFAULT ${declaredDefault};`,
             );
           } else {
             lines.push(`ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} DROP DEFAULT;`);

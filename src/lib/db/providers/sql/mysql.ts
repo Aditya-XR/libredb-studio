@@ -55,6 +55,7 @@ import { comparePaths } from "../../object-path";
 import { formatBytes } from "../../utils/pool-manager";
 import { measuredNullableAggregate } from "../../utils/measured-aggregate";
 import { CACHE_HIT_RATIO_UNAVAILABLE, formatCacheHitRatio, measuredNumber } from "@/lib/monitoring-cache-ratio";
+import { unquoteLiteral } from "@/lib/sql/values";
 
 /**
  * mysql2 3.23 narrowed `execute`'s values parameter from `any` to a concrete
@@ -886,7 +887,8 @@ const OBJECT_COLUMNS_SQL = `
           DATA_TYPE AS data_type,
           IS_NULLABLE AS is_nullable,
           COLUMN_DEFAULT AS column_default,
-          COLUMN_KEY AS column_key
+          COLUMN_KEY AS column_key,
+          EXTRA AS extra
         FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
         ORDER BY ORDINAL_POSITION`;
@@ -1002,7 +1004,8 @@ function bulkDetailSql(spellings: number, bounded: boolean): BulkDetailStatement
           c.DATA_TYPE AS data_type,
           c.IS_NULLABLE AS is_nullable,
           c.COLUMN_DEFAULT AS column_default,
-          c.COLUMN_KEY AS column_key
+          c.COLUMN_KEY AS column_key,
+          c.EXTRA AS extra
         FROM (${target}) d
         JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA = ? AND c.TABLE_NAME = d.name
         ORDER BY d.name, c.ORDINAL_POSITION`,
@@ -1140,24 +1143,37 @@ const MARIADB_EXTRA_OBJECT_KINDS: readonly ObjectKindSpec[] = [
 const MARIADB_VERSION = /mariadb/i;
 
 /**
- * The kinds a server with this `VERSION()` string has.
+ * Which server in this family this is.
+ *
+ * A type id cannot answer it: `DatabaseType` has no `mariadb` entry, and choosing MySQL in
+ * the connection dialog is the documented way to reach a MariaDB server
+ * (docs/providers/mysql.md 1.1). Branching on the type id here would be both forbidden
+ * inside `src/lib/db` and unable to tell the two servers apart in the first place.
+ */
+type MySQLFlavour = "mysql" | "mariadb";
+
+/**
+ * The flavour a server with this `VERSION()` string is, and THE ONLY PLACE
+ * `MARIADB_VERSION` is read.
+ *
+ * An unmeasured version answers `"mysql"`, which is what an unconnected provider gets:
+ * `POST /api/db/provider-meta` reads capabilities off a provider it never connects (#457).
+ * MySQL is the safe default of the two for `objectKinds`, because declaring a kind the
+ * server does not have draws a folder that can never fill, while missing one costs two
+ * folders a MariaDB user regains the moment the connection is live.
+ */
+function flavourFor(version: string | undefined): MySQLFlavour {
+  return version !== undefined && MARIADB_VERSION.test(version) ? "mariadb" : "mysql";
+}
+
+/**
+ * The kinds a server of this flavour has.
  *
  * THIS IS THE ONE PROVIDER WHOSE `objectKinds` IS NOT A CONSTANT, and the resolution is from
- * the server rather than from the type id because there is no second type id to resolve
- * from: `DatabaseType` has no `mariadb` entry and choosing MySQL in the connection dialog is
- * the documented way to reach a MariaDB server (docs/providers/mysql.md 1.1). Branching on
- * the type id here would be both forbidden inside `src/lib/db` and unable to tell the two
- * servers apart in the first place.
- *
- * An unmeasured version answers the MySQL set, which is what an unconnected provider gets:
- * `POST /api/db/provider-meta` reads capabilities off a provider it never connects (#457).
- * The MySQL set is the safe default of the two, because declaring a kind the server does not
- * have draws a folder that can never fill, while missing one costs two folders a MariaDB
- * user regains the moment the connection is live.
+ * the server rather than from the type id, for the reason `MySQLFlavour` records.
  */
-function objectKindsFor(version: string | undefined): readonly ObjectKindSpec[] {
-  if (version === undefined || !MARIADB_VERSION.test(version)) return MYSQL_OBJECT_KINDS;
-  return [...MYSQL_OBJECT_KINDS, ...MARIADB_EXTRA_OBJECT_KINDS];
+function objectKindsFor(flavour: MySQLFlavour): readonly ObjectKindSpec[] {
+  return flavour === "mariadb" ? [...MYSQL_OBJECT_KINDS, ...MARIADB_EXTRA_OBJECT_KINDS] : MYSQL_OBJECT_KINDS;
 }
 
 /**
@@ -1167,7 +1183,7 @@ function objectKindsFor(version: string | undefined): readonly ObjectKindSpec[] 
  * Nothing here rejects, for the reason `probeExplainFormat` does not: a version string the
  * server would not give is a fact about which folders the browser can draw, not about the
  * connection, and `connect()` must not fail for it. The cost of the absent case is
- * `objectKindsFor`'s MySQL default, which every server in this family does have.
+ * `flavourFor`'s MySQL default, which every server in this family does have.
  */
 const probeServerVersion = async (queryable: MySQLQueryable): Promise<string | undefined> => {
   try {
@@ -1667,6 +1683,10 @@ interface DetailColumnRow extends RowDataPacket {
   is_nullable: string;
   column_default: string | null;
   column_key: string;
+  /** Optional because the mocks of the OTHER column reads in the suite do not carry it, and
+   *  because a row without it says nothing about the column being generated, which is a
+   *  true reading rather than a fallback. */
+  extra?: string | null;
 }
 
 /** One referencing column of one foreign key, with the database the reference lands in. */
@@ -1692,6 +1712,88 @@ interface DetailRows {
 }
 
 /**
+ * How a server of one flavour spells a column default in `information_schema.COLUMNS`.
+ *
+ * Measured 2026-09-20 on MariaDB 12.3.2-MariaDB-ubu2404 and MySQL 26.7.0, one probe table
+ * per server, `HEX(COLUMN_DEFAULT)` read beside the text.
+ *
+ * MySQL reports the VALUE: a column with no default is SQL NULL, and `DEFAULT 'abc'` reads
+ * back as the three characters `abc`. MariaDB reports the DEFAULT EXPRESSION AS WRITTEN: a
+ * NULLABLE column with no default reads back as the four-character keyword `NULL`, and
+ * `DEFAULT 'abc'` reads back as `'abc'`, quotes included. So the same four characters mean
+ * opposite things on the two servers, and every string default differs by its quotes (#795).
+ *
+ * This is a table and not a conditional so that the next divergence adds a FIELD here
+ * rather than a branch at a call site.
+ */
+interface CatalogDefaultReading {
+  /** What `COLUMN_DEFAULT` holds for a column that has no default. */
+  readonly absence: "sql-null" | "null-keyword";
+  /** Whether a string default arrives evaluated, or as the SQL literal as written. */
+  readonly literal: "evaluated" | "as-written";
+}
+
+const CATALOG_DEFAULT_READING: Record<MySQLFlavour, CatalogDefaultReading> = {
+  mysql: { absence: "sql-null", literal: "evaluated" },
+  mariadb: { absence: "null-keyword", literal: "as-written" },
+};
+
+/**
+ * The two `EXTRA` spellings that mean the column is generated, and the reason the match is
+ * on the WHOLE value.
+ *
+ * Measured on both servers: a generated column reads `STORED GENERATED` or `VIRTUAL
+ * GENERATED`, identically. But MySQL also writes `DEFAULT_GENERATED` for an ORDINARY
+ * expression default, and `DEFAULT_GENERATED on update CURRENT_TIMESTAMP` for an on-update
+ * one, where MariaDB writes nothing at all. A rule matching the substring `GENERATED` would
+ * therefore erase a MySQL default the user really set.
+ */
+const GENERATED_COLUMN_EXTRA = new Set(["STORED GENERATED", "VIRTUAL GENERATED"]);
+
+/**
+ * One catalog row's default, as BOTH readings a column can have: the value it really
+ * defaults to, and the SQL text that produces that value where this server's catalog text is
+ * valid SQL. An empty object is a column with no default at all, and neither field is set.
+ *
+ * The order is part of the contract:
+ *
+ *  1. SQL NULL is absence on both servers, whatever else the row says.
+ *  2. A generated column has no insert default on EITHER server, so this rule carries no
+ *     flavour and is true everywhere. It comes before the keyword rule because MariaDB
+ *     reports the same four characters for both cases.
+ *  3. The keyword, on the flavour that spells absence with it.
+ *  4. A literal, on the flavour that reports literals as written. `unquoteLiteral` answers
+ *     `undefined` for anything that is not exactly one literal, which is what lets an
+ *     expression default such as `concat('x','y')` through untouched.
+ */
+function catalogDefault(
+  raw: string | null,
+  extra: string | null | undefined,
+  reading: CatalogDefaultReading,
+): { defaultValue?: string; defaultExpression?: string } {
+  if (raw === null) return {};
+  // `undefined` is a row that carries no EXTRA at all, which is the shape every OTHER mock
+  // in the suite produces and a truthful reading: nothing said this column was generated.
+  if (extra !== null && extra !== undefined && GENERATED_COLUMN_EXTRA.has(extra.trim().toUpperCase())) {
+    return {};
+  }
+  if (reading.absence === "null-keyword" && raw === "NULL") return {};
+  // MariaDB's catalog text is always valid SQL for MariaDB: measured on 12.3.2, every form
+  // it reports - `'abc'`, `''`, `42`, `b'1'`, `x'616263'`, `'2020-01-01'`,
+  // `current_timestamp()`, `concat('x','y')` - can be pasted back after the word DEFAULT. So
+  // the expression is the raw text, unchanged, and the value is it decoded.
+  if (reading.literal === "as-written") {
+    return { defaultValue: unquoteLiteral(raw, "mysql") ?? raw, defaultExpression: raw };
+  }
+  // MySQL reports the VALUE, and no column of the row says whether that text is also SQL:
+  // `abc` is a value and is not valid after DEFAULT, while `b'1'` and `0x616263` ARE SQL,
+  // and all three arrive with an EMPTY `EXTRA`. So this flavour declares no SQL text at all
+  // rather than a guessed one. Do not "complete" this arm without a measurement that tells
+  // the two apart.
+  return { defaultValue: raw };
+}
+
+/**
  * Three catalog row sets turned into one `ObjectDetail`, shared by the single and the bulk
  * read.
  *
@@ -1710,13 +1812,18 @@ interface DetailRows {
  * a path. Qualifying the cross-database case is not cosmetic: a bare name there addresses a
  * table in the wrong database, and InnoDB does accept a foreign key into another one.
  */
-function objectDetailFromRows(path: readonly string[], schema: string, rows: DetailRows): ObjectDetail {
+function objectDetailFromRows(
+  path: readonly string[],
+  schema: string,
+  rows: DetailRows,
+  reading: CatalogDefaultReading,
+): ObjectDetail {
   const columns: ColumnSchema[] = rows.columns.map((row) => ({
     name: row.column_name,
     type: row.data_type,
     nullable: row.is_nullable === "YES",
     isPrimary: row.column_key === "PRI",
-    defaultValue: row.column_default ?? undefined,
+    ...catalogDefault(row.column_default, row.extra, reading),
   }));
 
   const byIndex = new Map<string, IndexSchema>();
@@ -1784,12 +1891,12 @@ export class MySQLProvider extends SQLBaseProvider {
   private measuredExplainFormat: ExplainFormat | undefined = "mysql-json";
 
   /**
-   * What this server called itself, measured by `probeServerVersion()` at connect, and the
-   * only thing that decides whether `objectKinds` carries MariaDB's two extra kinds. It
-   * starts undefined, which `objectKindsFor()` reads as the MySQL set: an unconnected
-   * provider has not asked any server anything yet.
+   * Which server this is, derived at connect from `probeServerVersion()`. It starts as
+   * `"mysql"`, the answer for a provider that has not asked any server anything yet, for
+   * the reason `flavourFor` records. The DERIVED fact is what is stored, the same way
+   * `measuredExplainFormat` stores a grammar and not the text of the probe that found it.
    */
-  private measuredServerVersion: string | undefined;
+  private measuredFlavour: MySQLFlavour = "mysql";
 
   // Transaction support: dedicated connection held outside pool
   private txConn: PoolConnection | null = null;
@@ -1840,7 +1947,7 @@ export class MySQLProvider extends SQLBaseProvider {
       containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
       // Six kinds on MySQL and eight on MariaDB, resolved from what the server called
       // itself and never from the type id (#789). See `objectKindsFor`.
-      objectKinds: objectKindsFor(this.measuredServerVersion),
+      objectKinds: objectKindsFor(this.measuredFlavour),
     };
   }
 
@@ -1924,7 +2031,7 @@ export class MySQLProvider extends SQLBaseProvider {
       // Which server this is, which is what decides the object-kind declaration (#789).
       // Measured rather than derived from the type id, because there is no `mariadb` type
       // id to derive from.
-      this.measuredServerVersion = await probeServerVersion(conn);
+      this.measuredFlavour = flavourFor(await probeServerVersion(conn));
       conn.release();
 
       this.setConnected(true);
@@ -2405,7 +2512,12 @@ export class MySQLProvider extends SQLBaseProvider {
       const columns = await this.runObjectQuery<DetailColumnRow[]>(conn, OBJECT_COLUMNS_SQL, binds);
       const foreignKeys = await this.runObjectQuery<DetailForeignKeyRow[]>(conn, OBJECT_FOREIGN_KEYS_SQL, binds);
       const indexes = await this.runObjectQuery<DetailIndexRow[]>(conn, OBJECT_INDEXES_SQL, binds);
-      return objectDetailFromRows(path, schema, { columns, foreignKeys, indexes });
+      return objectDetailFromRows(
+        path,
+        schema,
+        { columns, foreignKeys, indexes },
+        CATALOG_DEFAULT_READING[this.measuredFlavour],
+      );
     } finally {
       conn.release();
     }
@@ -2491,11 +2603,16 @@ export class MySQLProvider extends SQLBaseProvider {
 
       const details = described
         .map((row) =>
-          objectDetailFromRows(objectPath(container, row), schema, {
-            columns: columns.get(row.name) ?? [],
-            foreignKeys: foreignKeys.get(row.name) ?? [],
-            indexes: indexes.get(row.name) ?? [],
-          }),
+          objectDetailFromRows(
+            objectPath(container, row),
+            schema,
+            {
+              columns: columns.get(row.name) ?? [],
+              foreignKeys: foreignKeys.get(row.name) ?? [],
+              indexes: indexes.get(row.name) ?? [],
+            },
+            CATALOG_DEFAULT_READING[this.measuredFlavour],
+          ),
         )
         .sort((left, right) => comparePaths(left.path, right.path));
       return truncated ? { details, truncated: { limit, reason: callerBoundTruncationReason(limit) } } : { details };

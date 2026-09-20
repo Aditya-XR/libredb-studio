@@ -7,7 +7,7 @@ import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:
 import { callerBoundTruncationReason, isSourcePartUnavailable } from "@/lib/db/object-kinds";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseConnection } from "@/lib/types";
+import type { ColumnSchema, DatabaseConnection } from "@/lib/types";
 import type { DatabaseProvider, ObjectKindSpec } from "@/lib/db/types";
 import { DatabaseConfigError } from "@/lib/db/errors";
 import { CACHE_HIT_RATIO_UNAVAILABLE } from "@/lib/monitoring-cache-ratio";
@@ -3292,6 +3292,98 @@ function sourceReply(sql: string, mariadb: boolean): unknown[] {
 }
 
 /**
+ * The #795 measurement, as a column set both catalog surfaces answer with.
+ *
+ * Measured 2026-09-20 on MariaDB 12.3.2-MariaDB-ubu2404 and MySQL 26.7.0, one probe table
+ * per server, `HEX(COLUMN_DEFAULT)` read beside the text so no display layer could hide a
+ * byte. MySQL reports the VALUE and MariaDB the expression AS WRITTEN, so the same DDL
+ * arrives here as two different strings and has to leave as one.
+ */
+const COLUMN_DEFAULT_MEASUREMENT = [
+  // DDL: `INT NULL`. MariaDB spells absence as the four-character keyword.
+  { name: "def_absent", type: "int", maria: "NULL", mysql: null, extra: "", expected: undefined },
+  // DDL: `VARCHAR(20) DEFAULT 'NULL'`. The four characters, as a value.
+  { name: "def_null_string", type: "varchar", maria: "'NULL'", mysql: "NULL", extra: "", expected: "NULL" },
+  { name: "def_text", type: "varchar", maria: "'abc'", mysql: "abc", extra: "", expected: "abc" },
+  { name: "def_empty", type: "varchar", maria: "''", mysql: "", extra: "", expected: "" },
+  { name: "def_quote", type: "varchar", maria: "'it''s'", mysql: "it's", extra: "", expected: "it's" },
+  // DDL: `DEFAULT 'a\\b'`, whose value is the three characters a, backslash, b. MariaDB
+  // doubles the backslash, exactly as `quoteLiteral` does for this family.
+  { name: "def_backslash", type: "varchar", maria: "'a\\\\b'", mysql: "a\\b", extra: "", expected: "a\\b" },
+  { name: "def_newline", type: "varchar", maria: "'a\\nb'", mysql: "a\nb", extra: "", expected: "a\nb" },
+  { name: "def_number", type: "int", maria: "42", mysql: "42", extra: "", expected: "42" },
+  // A generated column. MariaDB says the keyword, MySQL says SQL NULL, and neither has an
+  // insert default. `EXTRA` is the discriminator and both servers spell it the same way.
+  { name: "def_generated", type: "int", maria: "NULL", mysql: null, extra: "STORED GENERATED", expected: undefined },
+] as const;
+
+/**
+ * The expression default, which is the one row whose ANSWER differs by server rather than
+ * only its raw form: MySQL evaluates `CURRENT_TIMESTAMP` to itself and MariaDB writes
+ * `current_timestamp()`. Its `EXTRA` differs too, and MySQL's `DEFAULT_GENERATED` is the
+ * trap a substring match on GENERATED would fall into.
+ */
+const EXPRESSION_DEFAULT = {
+  name: "def_expression",
+  type: "timestamp",
+  maria: { raw: "current_timestamp()", extra: "", expected: "current_timestamp()" },
+  mysql: { raw: "CURRENT_TIMESTAMP", extra: "DEFAULT_GENERATED", expected: "CURRENT_TIMESTAMP" },
+} as const;
+
+/** The catalog rows for the measurement, as the named server reports them. */
+function measuredDefaultRows(mariadb: boolean): Record<string, unknown>[] {
+  const expression = mariadb ? EXPRESSION_DEFAULT.maria : EXPRESSION_DEFAULT.mysql;
+  return [
+    ...COLUMN_DEFAULT_MEASUREMENT.map((column) => ({
+      column_name: column.name,
+      data_type: column.type,
+      is_nullable: "YES",
+      column_default: mariadb ? column.maria : column.mysql,
+      column_key: "",
+      extra: column.extra,
+    })),
+    {
+      column_name: EXPRESSION_DEFAULT.name,
+      data_type: EXPRESSION_DEFAULT.type,
+      is_nullable: "YES",
+      column_default: expression.raw,
+      column_key: "",
+      extra: expression.extra,
+    },
+  ];
+}
+
+/**
+ * What those rows must become, on either server.
+ *
+ * MariaDB carries the catalog text on as `defaultExpression` because it measured that the
+ * text is valid SQL there, and MySQL carries none: `abc` is a value rather than SQL, `b'1'`
+ * and `0x616263` are SQL, and EXTRA is empty for all three, so that server cannot tell them
+ * apart and must not claim to.
+ */
+function measuredDefaultColumns(mariadb: boolean): ColumnSchema[] {
+  const expression = mariadb ? EXPRESSION_DEFAULT.maria : EXPRESSION_DEFAULT.mysql;
+  return [
+    ...COLUMN_DEFAULT_MEASUREMENT.map((column) => ({
+      name: column.name,
+      type: column.type,
+      nullable: true,
+      isPrimary: false,
+      defaultValue: column.expected,
+      defaultExpression: mariadb && column.expected !== undefined ? column.maria : undefined,
+    })),
+    {
+      name: EXPRESSION_DEFAULT.name,
+      type: EXPRESSION_DEFAULT.type,
+      nullable: true,
+      isPrimary: false,
+      defaultValue: expression.expected,
+      defaultExpression: mariadb ? expression.raw : undefined,
+    },
+  ];
+}
+
+/**
  * The fixture the two `docker/*-init/01-object-fixture.sql` files build, answered from the
  * mock so the contract can be driven without a server in the loop.
  *
@@ -3369,6 +3461,7 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
           column_default: null,
           column_key: "PRI",
         },
+        ...measuredDefaultRows(options.mariadb).map((row) => ({ object_name: "customers", ...row })),
       ],
       order_archive: [
         {
@@ -3599,19 +3692,15 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
       return [[{ name: "orders_nightly" }], []];
     }
     if (normalized.includes("information_schema.columns")) {
-      return [
-        [
-          { column_name: "id", data_type: "int", is_nullable: "NO", column_default: null, column_key: "PRI" },
-          {
-            column_name: "total",
-            data_type: "decimal",
-            is_nullable: "YES",
-            column_default: "0.00",
-            column_key: "MUL",
-          },
-        ],
-        [],
-      ];
+      // The bulk read's rows carry `object_name`, which the single-object read does not
+      // project. Dropping it here keeps ONE measured column set behind both surfaces, which
+      // is the property the two reads exist to preserve.
+      const named = String((params ?? [])[1]);
+      const rows = (columnsByObject[named] ?? []).map((row) => {
+        const { object_name: _objectName, ...rest } = row as Record<string, unknown>;
+        return rest;
+      });
+      return [rows, []];
     }
     if (normalized.includes("key_column_usage")) {
       return [
@@ -4273,6 +4362,69 @@ describe("MySQL object listing and detail", () => {
     expect((failure as Error).message).toContain("SELECT command denied");
     expect((failure as { query?: string }).query).toContain("information_schema.EVENTS");
     await provider.disconnect();
+  });
+
+  test("a MariaDB column default reads back as the value the column defaults to (#795)", async () => {
+    const provider = await connectedTo(true);
+
+    const detail = await provider.describeObject(["app", "customers"], "table");
+
+    expect(detail.columns.slice(1)).toEqual(measuredDefaultColumns(true));
+    await provider.disconnect();
+  });
+
+  test("a MySQL column default is already the value, and is not decoded (#795)", async () => {
+    const provider = await connectedTo(false);
+
+    const detail = await provider.describeObject(["app", "customers"], "table");
+
+    // Including the expression default, whose EXTRA is DEFAULT_GENERATED on this server: a
+    // rule matching the substring GENERATED would erase a default the user really set.
+    expect(detail.columns.slice(1)).toEqual(measuredDefaultColumns(false));
+    await provider.disconnect();
+  });
+
+  test("a MySQL column carries no defaultExpression, because the catalog text is not SQL (#795)", async () => {
+    const provider = await connectedTo(false);
+
+    const detail = await provider.describeObject(["app", "customers"], "table");
+
+    // Every column, not only the interesting ones: the claim is that this server declares no
+    // SQL text at all. `abc` is a value and is not valid after DEFAULT, while `b'1'` and
+    // `0x616263` are SQL, and all three arrive with an empty EXTRA, so nothing in the row
+    // tells the two apart. An absent field is the honest answer.
+    for (const column of detail.columns) {
+      expect(Object.hasOwn(column, "defaultExpression")).toBe(false);
+    }
+    await provider.disconnect();
+  });
+
+  test("a MariaDB column carries the catalog text as the SQL that produces its default (#795)", async () => {
+    const provider = await connectedTo(true);
+
+    const detail = await provider.describeObject(["app", "customers"], "table");
+    const byName = new Map(detail.columns.map((column) => [column.name, column]));
+
+    // The two readings of one column: `abc` is what a display shows, `'abc'` is what a
+    // reader emitting SQL must write after DEFAULT.
+    expect(byName.get("def_text")).toMatchObject({ defaultValue: "abc", defaultExpression: "'abc'" });
+    expect(byName.get("def_empty")).toMatchObject({ defaultValue: "", defaultExpression: "''" });
+    // A column with no default declares neither field, so no DEFAULT clause can be built from it.
+    expect(Object.hasOwn(byName.get("def_absent") ?? {}, "defaultExpression")).toBe(false);
+    expect(Object.hasOwn(byName.get("def_absent") ?? {}, "defaultValue")).toBe(false);
+    await provider.disconnect();
+  });
+
+  test("the bulk read decodes defaults the same way the single read does (#795)", async () => {
+    for (const mariadb of [true, false]) {
+      const provider = await connectedTo(mariadb);
+
+      const batch = await provider.describeObjects(["app"], "table");
+      const customers = batch.details.find((detail) => detail.path[1] === "customers");
+
+      expect(customers?.columns.slice(1)).toEqual(measuredDefaultColumns(mariadb));
+      await provider.disconnect();
+    }
   });
 
   test("a table's detail carries its columns, primary key, foreign keys and indexes", async () => {

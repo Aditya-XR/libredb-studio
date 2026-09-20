@@ -49,6 +49,23 @@ CREATE TABLE orders (
   CONSTRAINT orders_region_fk FOREIGN KEY (region_id) REFERENCES reporting.regions (id)
 );
 
+-- The #795 measurement, as a table a live check can read back. Every row here is a case the
+-- two servers report differently, or a case that looks like one and is not. Do not collapse
+-- it into fewer columns: each one is a distinct arm of `catalogDefault()`.
+CREATE TABLE column_defaults (
+  def_absent      INT         NULL,
+  def_not_null    INT         NOT NULL,
+  def_null_string VARCHAR(20) DEFAULT 'NULL',
+  def_text        VARCHAR(20) DEFAULT 'abc',
+  def_empty       VARCHAR(20) DEFAULT '',
+  def_quote       VARCHAR(20) DEFAULT 'it''s',
+  def_backslash   VARCHAR(20) DEFAULT 'a\\b',
+  def_newline     VARCHAR(20) DEFAULT 'a\nb',
+  def_number      INT         DEFAULT 42,
+  def_expression  TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+  def_generated   INT         AS (1 + 1) STORED
+);
+
 CREATE VIEW order_summary AS
   SELECT c.name AS customer, SUM(o.total) AS total
   FROM orders o JOIN customers c ON c.id = o.customer_id
