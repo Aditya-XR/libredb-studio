@@ -383,6 +383,17 @@ describe("LibSQLProvider capabilities", () => {
     expect(capabilities.defaultPort).toBe(8080);
   });
 
+  test("pages with LIMIT n OFFSET m, the grammar it shares with SQLite", () => {
+    // #816: declared true because `prepareQuery` really applies a positive offset.
+    // Measured across every type-id in tests/unit/db/result-pagination-capability.test.ts.
+    const provider = new LibSQLProvider(connection());
+    expect(provider.getCapabilities().supportsResultPagination).toBe(true);
+
+    const pageTwo = provider.prepareQuery("SELECT * FROM t", { limit: 50, offset: 50 });
+    expect(pageTwo.query).toBe("SELECT * FROM t LIMIT 50 OFFSET 50");
+    expect(pageTwo.wasLimited).toBe(true);
+  });
+
   test("declares no transaction, because the stream closes with each statement", () => {
     expect(new LibSQLProvider(connection()).getCapabilities().supportsTransactions).toBe(false);
   });

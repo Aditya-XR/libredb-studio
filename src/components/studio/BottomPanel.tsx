@@ -15,6 +15,7 @@ import { SavedQueries } from "@/components/SavedQueries";
 import { ChunkBoundary, ViewLoading } from "@/components/LazyView";
 import { lazyRetry } from "@/lib/lazy";
 import { describeExportScope } from "@/lib/export/scope";
+import { pageOfferFor } from "@/components/results-grid/page-offer";
 import type { ResultExportFormat } from "@/lib/export/result-export";
 
 import { resolveExplainPlan } from "@/lib/explain";
@@ -288,9 +289,22 @@ export function BottomPanel({
    * export, so this is the grid's artifact and no other's.
    */
   const exportArtifact = mode === "results" && hydratedResult !== null ? agentArtifact : null;
+  /**
+   * The next-page offer these rows carry, which is what the grid gates its control on.
+   *
+   * Computed here as well as in `ResultsGrid` because two surfaces speak about the same
+   * offer and must not disagree: the export dialog's "load them first" names an action
+   * only this offer makes available. Both call `pageOfferFor`, so there is one definition
+   * of the condition and not two (#816).
+   */
+  const gridPageOffer = pageOfferFor(
+    displayedResult?.pagination,
+    metadata?.capabilities.supportsResultPagination,
+    hydratedHere ? undefined : onLoadMore,
+  );
   // How much of the result an export would write — the count the button carries and
   // the shortfall the menu states. Derived here so both read the same numbers.
-  const exportScope = describeExportScope(displayedResult ?? { rows: [] });
+  const exportScope = describeExportScope(displayedResult ?? { rows: [] }, gridPageOffer !== undefined);
 
   /**
    * Hands one format entry to whichever destination the user chose.
@@ -571,6 +585,12 @@ export function BottomPanel({
                 result={displayedResult}
                 onLoadMore={hydratedHere ? undefined : onLoadMore}
                 isLoadingMore={isLoadingMore}
+                supportsResultPagination={metadata?.capabilities.supportsResultPagination}
+                // The statement these ROWS came from, for the ordering notice. Withheld
+                // for a hydrated result for the same reason `onLoadMore` is: those rows
+                // are an agent run's, and the tab's own statement did not produce them.
+                resultQuery={hydratedHere ? undefined : currentTab.resultQuery}
+                databaseType={activeConnection?.type}
                 maskingEnabled={maskingEnabled}
                 onToggleMasking={onToggleMasking}
                 userRole={userRole}

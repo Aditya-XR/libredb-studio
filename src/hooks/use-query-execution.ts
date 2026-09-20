@@ -614,6 +614,16 @@ export function useQueryExecution({
               resultQuery: queryToExecute,
               result: {
                 ...resultData,
+                // THE SHAPE COMES FROM THE ROWS ON SCREEN, NOT FROM THE PAGE THAT ARRIVED.
+                //
+                // A page of the same statement cannot legitimately name different columns,
+                // and an empty page often names none at all: SQLite answers `... LIMIT 50
+                // OFFSET 100` on a hundred-row table with `rows: 0, fields: []`. Spreading
+                // that over the tab left the grid holding its hundred rows under zero
+                // columns - the strip read "100 rows / 0 columns" and the table rendered
+                // header-less, cell-less stripes. A table whose size is an exact multiple
+                // of the page size reaches that state in one click.
+                fields: resultData.fields.length > 0 ? resultData.fields : t.result.fields,
                 rows: newAllRows,
                 rowCount: newAllRows.length,
               },
@@ -714,7 +724,12 @@ export function useQueryExecution({
           return false;
         }
 
-        const title = "Query Error";
+        // A LOST PAGE IS NOT A LOST QUERY (#816). Under the generic title the user reads
+        // their own statement as having failed, when the rows on screen are intact and
+        // only the next page did not arrive. `use-query-adapter.ts` raises the same
+        // wording for the same failure, so the standalone app and the embedded workspace
+        // say one thing.
+        const title = isLoadMore ? "Load More Error" : "Query Error";
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         // Fallback string check for cancellation errors not caught by response code
         if (errorMessage.includes("Query was cancelled") || errorMessage.includes("cancelled")) {
@@ -895,7 +910,10 @@ export function useQueryExecution({
     // appended another table's rows under these columns and left the tab holding rows from
     // two tables while naming one (#881).
     executeQuery(currentTab.resultQuery ?? currentTab.query, currentTab.id, false, {
-      limit: 500,
+      // The size of the page already on screen, not a constant. A table preview is 50
+      // rows and a hand-run statement is 500, and a hardcoded 500 made the second page
+      // ten times the first while the footer's own label promised 500 either way (#816).
+      limit: currentTab.result.pagination.limit,
       offset: currentOffset,
     });
   }, [currentTab, executeQuery]);

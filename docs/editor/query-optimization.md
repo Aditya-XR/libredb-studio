@@ -6,6 +6,7 @@ LibreDB Studio includes enterprise-grade query optimization features to prevent 
 
 - [Query Pagination System](#query-pagination-system)
 - [Silent Auto-Limiting](#silent-auto-limiting)
+- [Where the page size comes from](#where-the-page-size-comes-from)
 - [Destructive-Statement Confirmation](#destructive-statement-confirmation)
 - [Load More Functionality](#load-more-functionality)
 - [Result-Level Signals](#result-level-signals)
@@ -25,14 +26,15 @@ All SELECT queries are automatically paginated to prevent browser freezes when d
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `DEFAULT_QUERY_LIMIT` | 500 | Default rows per page |
+| `DEFAULT_QUERY_LIMIT` | 500 | Rows per page when the caller asks for no particular size |
+| `PREVIEW_PAGE_SIZE` | 50 | Rows a tree click asks for, sent as the `limit` execution option (`src/hooks/use-tab-manager.ts`) |
 | `MAX_UNLIMITED_ROWS` | 100,000 | Maximum rows for "Load All" |
 
 ### How It Works
 
 1. User executes a SELECT query
-2. System automatically adds `LIMIT 500` if no LIMIT exists (an `OFFSET` clause is only appended when the offset is greater than 0). The clause is inserted at the end of the statement itself, before any trailing comment or `;` — see [Where the bound is placed](#where-the-bound-is-placed)
-3. If user already specified a LIMIT, it's preserved (no override)
+2. System automatically adds `LIMIT <page size>` if no LIMIT exists (an `OFFSET` clause is only appended when the offset is greater than 0). The clause is inserted at the end of the statement itself, before any trailing comment or `;` — see [Where the bound is placed](#where-the-bound-is-placed)
+3. If user already specified a LIMIT, it's preserved (no override) — and the requested offset is discarded with it, which is why no further page is offered for such a statement
 4. Results display with pagination metadata
 
 ---
@@ -52,14 +54,23 @@ Instead of showing warning popups for large datasets, LibreDB Studio silently li
 When auto-limiting is applied:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│ Results   500 rows  │  AUTO-LIMITED  │  Load More  │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 50 rows • load 50 more   4 columns   AUTO-LIMITED   ORDER NOT GUARANTEED     │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+Everything the grid says about the bound is in the one stats strip above the table, and nothing is
+added below it: the strip is there whether or not a further page exists, so the table does not move
+when one does.
 
 - **AUTO-LIMITED badge** - Shows when the system added a LIMIT
 - **Row count** - Displays actual returned rows
-- **Load More button** - Appears when more data is available
+- **Ordering notice** - `ORDER NOT GUARANTEED`, beside the badge, only where a Load More is offered
+  and the statement carries no outer `ORDER BY`; the full sentence is on its `title` and in an
+  `sr-only` span — see [Row order across pages](#row-order-across-pages)
+- **Load More control** - The `load n more` button folded into the row count, where the text
+  `(more available)` used to sit. It appears when more data is available AND the provider can serve
+  it, and its label names the page size it will fetch
 
 ### Query Limiter Utility
 
@@ -389,6 +400,40 @@ on its own to page through it.
 
 ---
 
+## Where the page size comes from
+
+The bound a statement runs under is an **execution option**, never text the product wrote into the
+statement for you.
+
+It was not always. `generateTableQuery` used to emit the tree click's preview cap as SQL —
+`SELECT * FROM t LIMIT 50`, `FETCH FIRST 50 ROWS ONLY` on Oracle, `SELECT TOP 50` on SQL Server — and
+that is what disengaged pagination end to end (#816). A statement carrying its own bound is returned
+**untouched** by the limiter, which discards the requested offset with it, while `prepareQuery` still
+reports the caller's default as the `limit`. Measured on PostgreSQL, asking for offset 50:
+
+```
+in : SELECT * FROM public.orders LIMIT 50;
+out: SELECT * FROM public.orders LIMIT 50;              wasLimited=false appliedOffset=0
+in : SELECT * FROM public.orders;
+out: SELECT * FROM public.orders LIMIT 500 OFFSET 50;   wasLimited=true  appliedOffset=50
+```
+
+Nothing downstream could tell a cap the product generated from a bound the user typed, because both
+were text in the same string, and any rule that read intent out of the text would be a guess. So the
+ambiguity was removed at the source:
+
+| Statement | Where its bound lives | Page two |
+|-----------|----------------------|----------|
+| A tree click's preview | `options.limit = 50`, sent with the request | Offered, if the provider can serve it |
+| A statement the user ran with no bound | `options.limit = 500` (the route's default) | Offered, if the provider can serve it |
+| A statement the user wrote `LIMIT n` into | the text, and it is left alone | Not offered: the bound is the user's, and it is hard |
+| A statement the limiter declined to rewrite | nowhere; it runs unbounded | Not offered: there is no bound to advance |
+
+The generated preview statement is therefore something you can copy out of the editor and run
+elsewhere unchanged — which it is worth knowing means every row, with no cap, when you do.
+
+---
+
 ## Destructive-Statement Confirmation
 
 Before a destructive statement runs, studio opens a confirmation dialog carrying an AI risk
@@ -524,29 +569,50 @@ query a host application runs through it reaches the gate.
 
 ## Load More Functionality
 
+### When the control appears
+
+Three things must all hold, and `ResultsGrid` checks them as one predicate so the control and the
+ordering notice beside it cannot disagree:
+
+| Condition | Where it comes from | Why |
+|-----------|--------------------|-----|
+| `supportsResultPagination === true` | the connection's `ProviderCapabilities` | Five providers cannot serve page two. Cassandra and Elasticsearch throw on a positive offset; MongoDB, Redis and LibreDB answer it with page one. An absent flag reads as unsupported |
+| `pagination.hasMore` | `POST /api/db/query` | Which now requires `wasLimited` as well as a full page — see below |
+| the surface supplies `onLoadMore` | `BottomPanel` | A result hydrated from an agent run has no statement of its own to page |
+
 ### User Flow
 
-1. Execute query → 500 rows displayed
-2. Click "Load More" → Next 500 rows appended
+1. Execute query → one page displayed, 50 rows from a tree click and 500 from a hand-run statement
+2. Click `load n more`, in the stats strip beside the row count → the next page, of the same size,
+   appended
 3. Repeat until all data loaded or satisfied
+
+The control's label names the size it will fetch, read from `pagination.limit`, because the two page
+sizes are not interchangeable: a 50-row preview offering "Load More (500 rows)" is a promise the
+click does not keep. While a page is in flight the control is disabled and reads `Loading...`, so a
+second click cannot ask for the same offset twice.
+
+The control sits in the stats strip rather than in a bar of its own below the table. A footer that
+came and went with `hasMore` moved the grid by its own height between queries, and it said a second
+time what the row count beside it already said.
 
 ### API Request
 
 ```typescript
-// Initial query
+// Initial query — a tree click, which asks for the preview page size
 POST /api/db/query
 {
   "connection": {...},
   "sql": "SELECT * FROM orders",
-  "options": { "limit": 500, "offset": 0 }
+  "options": { "limit": 50, "offset": 0 }
 }
 
-// Load More
+// Load More — the SAME page size, read back off the first page's pagination
 POST /api/db/query
 {
   "connection": {...},
   "sql": "SELECT * FROM orders",
-  "options": { "limit": 500, "offset": 500 }
+  "options": { "limit": 50, "offset": 50 }
 }
 ```
 
@@ -562,17 +628,40 @@ holding rows from two tables while naming one.
 {
   "rows": [...],
   "fields": ["id", "name", ...],
-  "rowCount": 500,
+  "rowCount": 50,
   "executionTime": 45,
   "pagination": {
-    "limit": 500,
+    "limit": 50,
     "offset": 0,
-    "hasMore": true,        // More rows available
-    "totalReturned": 500,
-    "wasLimited": true      // System added LIMIT
+    "hasMore": true,        // wasLimited AND a full page came back
+    "totalReturned": 50,
+    "wasLimited": true      // the bound in the statement is OURS
   }
 }
 ```
+
+`hasMore` is `wasLimited && rows.length === limit`, and the first half is load-bearing. We can only
+offer page two of a bound this layer applied, because only then do we know how to advance it. A
+statement returned untouched — one carrying the user's own `LIMIT 50`, or a ClickHouse query whose
+trailing `FORMAT`/`SETTINGS` clause the limiter declines to cut into — runs identically at every
+offset, so a Load More over it would append the rows already on screen.
+
+### Row order across pages
+
+Studio does not inject, require or suggest an `ORDER BY` in order to paginate. On a table of millions
+of rows a sort can be fatal, and paying for it is the user's call.
+
+With an `ORDER BY`, pages are stable. Without one, rows may repeat or be skipped between pages. That
+is accepted rather than prevented, and it is not an error — but it is also not allowed to look like
+the ordered case: where a Load More is offered and the statement carries no outer `ORDER BY`, the
+stats bar says so once, beside the AUTO-LIMITED badge. Whether the statement orders its result is read
+by `src/lib/sql/result-order.ts`, under the connection's own grammar, so an `ORDER BY` inside a
+literal, a comment, a subquery or a window function's `OVER (…)` does not count as one.
+
+SQL Server deserves a note. Page one is `SELECT TOP n` and page two is `OFFSET … FETCH NEXT` with an
+injected `ORDER BY (SELECT NULL)`, which exists only because T-SQL requires an `ORDER BY` before
+`OFFSET` and promises nothing about order. Two structurally different statements, so an unordered
+SQL Server query overlaps more readily than an unordered PostgreSQL one. Accepted under the same rule.
 
 ### Load All Option
 
@@ -758,11 +847,20 @@ Interactive, collapsible execution plan with:
 src/
 ├── lib/db/utils/
 │   └── query-limiter.ts      # Query parsing and LIMIT injection
+├── lib/sql/
+│   └── result-order.ts       # Whether a statement orders its OWN result
+├── lib/query-generators.ts   # The tree click's statement — no row bound of its own
+├── hooks/
+│   ├── use-tab-manager.ts    # PREVIEW_PAGE_SIZE, sent as an execution option
+│   └── use-query-execution.ts # Append, currentOffset, Load More (standalone)
+├── workspace/hooks/
+│   └── use-query-adapter.ts  # The same, for the embedded shell
 ├── app/api/db/
-│   └── query/route.ts        # Query API with pagination
+│   └── query/route.ts        # Query API with pagination; hasMore requires wasLimited
 ├── components/
 │   ├── Studio.tsx            # Query execution orchestration
-│   ├── ResultsGrid.tsx       # Results display with Load More
+│   ├── ResultsGrid.tsx       # Results display; the one predicate behind Load More
+│   ├── results-grid/StatsBar.tsx  # AUTO-LIMITED badge, ordering notice, Load More control
 │   └── VisualExplain.tsx     # EXPLAIN visualization
 └── lib/types.ts              # QueryPagination interface
 ```

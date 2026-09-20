@@ -946,12 +946,18 @@ describe("OpenSearch faults", () => {
 // ============================================================================
 
 describe("OpenSearchProvider shares the Elasticsearch implementation", () => {
-  test("declares the same capabilities as the other type-id, except the one declared divergence", () => {
+  test("declares the same capabilities as the other type-id, except the two declared divergences", () => {
     // The guard: one implementation serves both type-ids, so a capability that
     // differs without being deliberate means a behaviour difference was smuggled
-    // into the wrong place. `identifierQuoting` is the ONE exception, and it is
-    // subtracted here explicitly rather than by relaxing the comparison, so a
-    // second divergence still fails this test.
+    // into the wrong place. `identifierQuoting` and `supportsResultPagination` are
+    // the ONLY exceptions, and they are subtracted here explicitly rather than by
+    // relaxing the comparison, so a third divergence still fails this test.
+    //
+    // Why supportsResultPagination diverges: OpenSearch SQL accepts an `OFFSET`
+    // clause and Elasticsearch SQL does not (`ELASTICSEARCH_PRODUCT.acceptsOffsetClause`
+    // is false, and `prepareQuery` throws rather than answering page two with page
+    // one). The declaration reads `this.product.acceptsOffsetClause` so it cannot
+    // drift from the refusal it describes (#816).
     //
     // Why it diverges: measured on OpenSearch 3.8.0, a double-quoted identifier is
     // a STRING LITERAL, so `WHERE "customer" = 'acme'` answers HTTP 200 with
@@ -959,14 +965,22 @@ describe("OpenSearchProvider shares the Elasticsearch implementation", () => {
     // derives its dialect from `defaultPort`, and both products are 9200 - so
     // without a declared quote style the generated query would silently return no
     // rows for data that exists.
-    const { identifierQuoting: osQuoting, ...opensearch } = new OpenSearchProvider(makeConnection()).getCapabilities();
-    const { identifierQuoting: esQuoting, ...elasticsearch } = new ElasticsearchProvider(
-      makeConnection({ type: ELASTICSEARCH }),
-    ).getCapabilities();
+    const {
+      identifierQuoting: osQuoting,
+      supportsResultPagination: osPaging,
+      ...opensearch
+    } = new OpenSearchProvider(makeConnection()).getCapabilities();
+    const {
+      identifierQuoting: esQuoting,
+      supportsResultPagination: esPaging,
+      ...elasticsearch
+    } = new ElasticsearchProvider(makeConnection({ type: ELASTICSEARCH })).getCapabilities();
 
     expect(opensearch).toEqual(elasticsearch);
     expect(osQuoting).toBe("backtick");
     expect(esQuoting).toBe("double");
+    expect(osPaging).toBe(true);
+    expect(esPaging).toBe(false);
     expect(opensearch.queryLanguage).toBe("sql");
     expect(opensearch.supportsExplain).toBe(false);
     // Neither grammar has BEGIN and both are reached over stateless HTTP (#464).

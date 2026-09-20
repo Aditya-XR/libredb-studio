@@ -394,6 +394,44 @@ describe("POST /api/db/query", () => {
     expect(data.pagination.totalReturned).toBe(50);
   });
 
+  /**
+   * `hasMore` requires that the bound is OURS (#816).
+   *
+   * A statement the limiter DECLINED to rewrite comes back `wasLimited: false` with the
+   * user's own bound still in the text — a ClickHouse query ending in `SETTINGS`, or a
+   * hand-written `LIMIT 50`. Without this conjunct such a statement, returning exactly
+   * `prepared.limit` rows, offered a Load More whose click re-ran it unchanged and
+   * appended the rows already on screen. The two neighbouring tests both run with the
+   * mock's default `wasLimited: true`, so neither can see this arm.
+   */
+  test("pagination hasMore is false at exactly limit rows when the bound is not ours", async () => {
+    const declinedProvider = createMockProvider({
+      prepareQueryResult: { query: "SELECT * FROM users LIMIT 50", wasLimited: false, limit: 50, offset: 0 },
+    });
+    mockGetOrCreateProvider.mockResolvedValueOnce(declinedProvider as never);
+    (declinedProvider.query as ReturnType<typeof mock>).mockResolvedValueOnce({
+      rows: Array.from({ length: 50 }, (_, i) => ({ id: i + 1 })),
+      fields: ["id"],
+      rowCount: 50,
+      executionTime: 10,
+    });
+
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: { connection: validConnection, sql: "SELECT * FROM users LIMIT 50" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{
+      pagination: { hasMore: boolean; totalReturned: number; wasLimited: boolean };
+    }>(res);
+
+    expect(res.status).toBe(200);
+    expect(data.pagination.wasLimited).toBe(false);
+    expect(data.pagination.totalReturned).toBe(50);
+    expect(data.pagination.hasMore).toBe(false);
+  });
+
   test("pagination hasMore is false when rows.length less than limit", async () => {
     const threeRows = [{ id: 1 }, { id: 2 }, { id: 3 }];
     (mockProvider.query as ReturnType<typeof mock>).mockResolvedValueOnce({

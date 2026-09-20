@@ -329,6 +329,10 @@ export class LibreDBProvider extends BaseDatabaseProvider {
       // (get/put/delete/prefix/range), so there is no `UPDATE ... SET` for the
       // inline row editor to emit (issue #269).
       supportsInlineRowEdit: false,
+      // This provider adds no `prepareQuery` override, so it inherits the base one, which
+      // ECHOES the requested offset back while applying nothing. A `true` here would be
+      // the one silent failure #816 is about: a control whose every click re-reads page one.
+      supportsResultPagination: false,
       // The command grammar has no transaction verb.
       supportsTransactions: false,
       // The embedded engine's catalog declares namespaces and columns, and nothing

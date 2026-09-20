@@ -139,7 +139,20 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const hasMore = result.rows.length === prepared.limit;
+    // PAGE TWO IS ONLY OFFERED FOR A BOUND THIS LAYER APPLIED (#816).
+    //
+    // `wasLimited` is the limiter saying it rewrote the statement, and it is the only
+    // thing that makes advancing the bound meaningful: a statement returned untouched —
+    // one carrying the user's own `LIMIT 50`, or a ClickHouse query whose trailing
+    // `FORMAT`/`SETTINGS` clause the limiter declines to cut into — runs the same way at
+    // every offset. Without this conjunct such a statement, answering with exactly
+    // `prepared.limit` rows, offered a Load More whose click re-ran it unchanged and
+    // appended the rows already on screen, which the user cannot tell from new ones.
+    //
+    // One rule, per statement, with no branching on database type: if the bound is ours,
+    // pagination is offered; if it is the user's, or the statement could not be
+    // rewritten, it is not.
+    const hasMore = prepared.wasLimited && result.rows.length === prepared.limit;
 
     return NextResponse.json({
       ...result,

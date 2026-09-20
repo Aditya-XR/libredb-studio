@@ -1292,6 +1292,7 @@ render those words and send an operation SQL Server declares (#496).
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `supportsCreateTable` | `true` (from base) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core T-SQL DML |
+| `supportsResultPagination` | `true` — `OFFSET m ROWS FETCH NEXT n ROWS ONLY`, built by this provider's own `prepareQuery` override. Page one is `SELECT TOP n`, so the two pages are structurally different statements, and page two carries the `ORDER BY (SELECT NULL)` T-SQL demands before `OFFSET` — which promises nothing about order (#816) |
 | `supportsTransactions` | `true` — the `mssql` package's `Transaction` over one held pool connection, so the trio and the SANDBOX toggle are offered (#464) |
 | `declaresForeignKeys` | `true` — inherited from the base capabilities; read from `sys.foreign_keys`, so an empty list is about the schema or the role, not the engine |
 | `supportsMaintenance` | `true` |
@@ -1652,8 +1653,10 @@ and an OFFLINE database. Every one of those is there because some claim in
 [§7](#the-object-surface-789) cannot be measured without it.
 
 It also seeds ROWS, two each in `libredb_objects.app.customers`, `libredb_objects.dbo.audit_trail`
-and `libredb_objects_two.warehouse.stock`. Those three cover the three addresses a generated
-`SELECT TOP 50` has to write: the login's default schema, another schema in the connected database,
+and `libredb_objects_two.warehouse.stock`. Those three cover the three addresses the generated
+preview statement has to write — `SELECT TOP 50 * FROM …` when that measurement was taken, and a bare
+`SELECT * FROM …` since #816 moved the row bound into the `limit` execution option: the login's
+default schema, another schema in the connected database,
 and another database entirely. An empty table returns nothing for a correct address and for a wrong
 one, so the rows are what makes the click measurable at all.
 

@@ -41,9 +41,13 @@ const sampleColumns: ColumnSchema[] = [
 // ============================================================================
 
 describe("generateTableQuery", () => {
-  test("SQL (postgres/mysql/sqlite) uses LIMIT 50", () => {
+  test("SQL (postgres/mysql/sqlite) carries no row bound of its own", () => {
+    // #816: the preview cap travels as the `limit` EXECUTION OPTION, not as text. A
+    // bound in the statement is indistinguishable from one the user typed, and the
+    // limiter returns a self-bounded statement untouched - dropping the offset with
+    // it, so page two would be page one. See the module docblock.
     const result = generateTableQuery(["users"], makeCaps({ defaultPort: 5432 }));
-    expect(result).toBe("SELECT * FROM users LIMIT 50;");
+    expect(result).toBe("SELECT * FROM users;");
   });
 
   test("JSON (MongoDB) generates JSON find query", () => {
@@ -54,17 +58,17 @@ describe("generateTableQuery", () => {
     expect(parsed.options.limit).toBe(50);
   });
 
-  test("Oracle (port 1521) uses FETCH FIRST 50 ROWS ONLY", () => {
+  test("Oracle (port 1521) carries no row bound either", () => {
     const result = generateTableQuery(["users"], makeCaps({ defaultPort: 1521 }));
-    expect(result).toContain("FETCH FIRST 50 ROWS ONLY");
+    expect(result).not.toContain("FETCH FIRST");
     // Oracle folds unquoted identifiers to UPPERCASE, so a lowercase name is
     // quoted to preserve it.
     expect(result).toContain('SELECT * FROM "users"');
   });
 
-  test("MSSQL (port 1433) uses TOP 50", () => {
+  test("MSSQL (port 1433) carries no TOP", () => {
     const result = generateTableQuery(["users"], makeCaps({ defaultPort: 1433 }));
-    expect(result).toBe("SELECT TOP 50 * FROM users;");
+    expect(result).toBe("SELECT * FROM users;");
   });
 
   // #424 Phase 1, measured 2026-08-19 against Elasticsearch 9.1.4 and OpenSearch
@@ -75,7 +79,7 @@ describe("generateTableQuery", () => {
   // runs on both, so one answer serves both products.
   test("a dialect that declares no terminator gets no trailing semicolon", () => {
     const caps = makeCaps({ defaultPort: 9200, statementTerminator: "none" });
-    expect(generateTableQuery(["orders"], caps)).toBe("SELECT * FROM orders LIMIT 50");
+    expect(generateTableQuery(["orders"], caps)).toBe("SELECT * FROM orders");
   });
 
   test('LibreDB dialect: a ":*" prefix group scans with prefix', () => {
@@ -303,14 +307,12 @@ describe("Couchbase (SQL++) generation", () => {
   ];
 
   test("generateTableQuery aliases the keyspace and projects the document key", () => {
-    expect(generateTableQuery(["hotel"], couchbaseCaps)).toBe(
-      "SELECT META(d).id AS __id, d.* FROM `hotel` AS d LIMIT 50;",
-    );
+    expect(generateTableQuery(["hotel"], couchbaseCaps)).toBe("SELECT META(d).id AS __id, d.* FROM `hotel` AS d;");
   });
 
   test("generateTableQuery quotes every segment of a scope-qualified collection", () => {
     expect(generateTableQuery(["inventory", "hotel"], couchbaseCaps)).toBe(
-      "SELECT META(d).id AS __id, d.* FROM `inventory`.`hotel` AS d LIMIT 50;",
+      "SELECT META(d).id AS __id, d.* FROM `inventory`.`hotel` AS d;",
     );
   });
 
@@ -356,14 +358,14 @@ describe("Couchbase (SQL++) generation", () => {
 describe("ClickHouse (8123) generation", () => {
   const clickhouseCaps = makeCaps({ defaultPort: 8123 });
 
-  test("generateTableQuery uses the plain LIMIT form", () => {
-    expect(generateTableQuery(["events"], clickhouseCaps)).toBe("SELECT * FROM events LIMIT 50;");
+  test("generateTableQuery emits the bare statement", () => {
+    expect(generateTableQuery(["events"], clickhouseCaps)).toBe("SELECT * FROM events;");
   });
 
   test("generateTableQuery qualifies and quotes a database-scoped table per segment", () => {
     // Cross-database tables are addressed as `database.table`, so the dot must stay
     // a separator; ClickHouse is case-sensitive, so a mixed-case name needs quoting.
-    expect(generateTableQuery(["demo", "Events"], clickhouseCaps)).toBe('SELECT * FROM demo."Events" LIMIT 50;');
+    expect(generateTableQuery(["demo", "Events"], clickhouseCaps)).toBe('SELECT * FROM demo."Events";');
   });
 
   test("generateSelectQuery emits a double-quoted column list and LIMIT 100", () => {
@@ -376,10 +378,19 @@ describe("ClickHouse (8123) generation", () => {
     );
   });
 
-  test("the trailing LIMIT is the last clause, so a user-appended FORMAT stays legal", () => {
-    // `... FORMAT TSV LIMIT 1` is a syntax error; `... LIMIT 1 FORMAT TSV` is not.
+  test("no generated bound at all, so there is none to misplace (#264 re-aimed)", () => {
+    // The old shape of this guard pinned the generated `LIMIT 50` as the LAST clause,
+    // because `... FORMAT TSV LIMIT 1` is a syntax error while `... LIMIT 1 FORMAT TSV`
+    // is not. #816 removed the generated bound, so there is nothing here to misplace.
+    //
+    // THE HAZARD MOVED, it did not go away: the limiter still appends a bound to
+    // whatever the user typed. Its answer for a statement ending in `FORMAT` or
+    // `SETTINGS` - return it untouched with `wasLimited: false`, which is why the
+    // route then offers no Load More - is pinned in
+    // tests/integration/db/clickhouse-provider.test.ts, not here.
     const out = generateTableQuery(["events"], clickhouseCaps);
-    expect(out.trimEnd().endsWith("LIMIT 50;")).toBe(true);
+    expect(out).toBe("SELECT * FROM events;");
+    expect(out).not.toContain("LIMIT");
   });
 
   test("quoteIdentifier keeps plain lowercase bare and double-quotes anything else", () => {
@@ -406,8 +417,8 @@ describe("ClickHouse (8123) generation", () => {
 describe("Druid (8888) generation", () => {
   const druidCaps = makeCaps({ defaultPort: 8888 });
 
-  test("generateTableQuery quotes the datasource and uses the plain LIMIT form", () => {
-    expect(generateTableQuery(["libredb_demo"], druidCaps)).toBe('SELECT * FROM "libredb_demo" LIMIT 50;');
+  test("generateTableQuery quotes the datasource and emits the bare statement", () => {
+    expect(generateTableQuery(["libredb_demo"], druidCaps)).toBe('SELECT * FROM "libredb_demo";');
   });
 
   // The trap that makes the default branch correct for Druid rather than merely
@@ -517,7 +528,7 @@ describe("Trino (declared capabilities, port 8080) generation", () => {
     // Not cosmetic. Measured: `SELECT * FROM tpch.sf1.nation LIMIT 50;` is
     // "line 1:39: mismatched input ';'. Expecting: <EOF>" - the terminator is not in
     // Trino's grammar, so a generated statement carrying one cannot run at all.
-    expect(generateTableQuery(["nation"], trinoCaps)).toBe("SELECT * FROM nation LIMIT 50");
+    expect(generateTableQuery(["nation"], trinoCaps)).toBe("SELECT * FROM nation");
   });
 
   test("generateSelectQuery emits the column list unquoted and no terminator", () => {
@@ -571,10 +582,13 @@ describe("Apache Cassandra (port 9042) generation", () => {
   const cassandraCaps = makeCaps({ defaultPort: 9042 });
 
   test("the fallthrough statement is valid CQL, terminator included", () => {
-    // Measured: `SELECT * FROM probe.customers LIMIT 50;` returns rows - CQL accepts
-    // a trailing semicolon on a single statement - and `LIMIT n` is its own row bound.
-    // So no `statementTerminator` is declared and no branch is added.
-    expect(generateTableQuery(["customers"], cassandraCaps)).toBe("SELECT * FROM customers LIMIT 50;");
+    // Measured: `SELECT * FROM probe.customers;` returns rows - CQL accepts a trailing
+    // semicolon on a single statement - so no `statementTerminator` is declared and no
+    // branch is added. The preview cap is no longer in the text at all: it travels as the
+    // `limit` execution option and the limiter appends the `LIMIT 50` this dialect takes
+    // (#816), which is what keeps Cassandra's preview at 50 rows without a control it
+    // cannot serve.
+    expect(generateTableQuery(["customers"], cassandraCaps)).toBe("SELECT * FROM customers;");
   });
 
   test("a keyspace-qualified name keeps its separator", () => {
@@ -647,9 +661,7 @@ describe("quoteIdentifier", () => {
   });
 
   test("generateTableQuery quotes a mixed-case Postgres table", () => {
-    expect(generateTableQuery(["Customer"], makeCaps({ defaultPort: 5432 }))).toBe(
-      'SELECT * FROM "Customer" LIMIT 50;',
-    );
+    expect(generateTableQuery(["Customer"], makeCaps({ defaultPort: 5432 }))).toBe('SELECT * FROM "Customer";');
   });
 
   test("schema-qualified names are quoted per-segment, not as one identifier", () => {
@@ -664,7 +676,7 @@ describe("quoteIdentifier", () => {
   test("generateTableQuery on a schema-qualified table does NOT wrap the dot (regression)", () => {
     // Was producing the broken `"employees.department"`; must be `employees.department`.
     expect(generateTableQuery(["employees", "department"], makeCaps({ defaultPort: 5432 }))).toBe(
-      "SELECT * FROM employees.department LIMIT 50;",
+      "SELECT * FROM employees.department;",
     );
   });
 
@@ -1059,7 +1071,7 @@ describe("the generated statement addresses an object by its path", () => {
     // clicking `app.customers` generated `SELECT TOP 50 * FROM customers;` and the
     // server answered `Invalid object name 'customers'.`
     expect(generateTableQuery(["libredb_objects", "app", "customers"], mssqlCaps)).toBe(
-      "SELECT TOP 50 * FROM libredb_objects.app.customers;",
+      "SELECT * FROM libredb_objects.app.customers;",
     );
   });
 
@@ -1067,22 +1079,18 @@ describe("the generated statement addresses an object by its path", () => {
     // Reproduced on ClickHouse 25.8 with the connection defaulted to `demo`: clicking
     // `reporting.regions` generated `SELECT * FROM regions LIMIT 50;` and the server
     // answered `Code: 60 ... Maybe you meant reporting.regions?`.
-    expect(generateTableQuery(["reporting", "regions"], clickhouseCaps)).toBe(
-      "SELECT * FROM reporting.regions LIMIT 50;",
-    );
+    expect(generateTableQuery(["reporting", "regions"], clickhouseCaps)).toBe("SELECT * FROM reporting.regions;");
   });
 
   test("Oracle qualifies a table in another owner", () => {
-    expect(generateTableQuery(["REPORTING", "REPORT_DAILY"], oracleCaps)).toBe(
-      "SELECT * FROM REPORTING.REPORT_DAILY FETCH FIRST 50 ROWS ONLY",
-    );
+    expect(generateTableQuery(["REPORTING", "REPORT_DAILY"], oracleCaps)).toBe("SELECT * FROM REPORTING.REPORT_DAILY");
   });
 
   test("qualification is emitted INSIDE the default container too", () => {
     // Deliberate, and the reason the fix is here rather than at the call site: no
     // capability declares which container a connection defaulted to, and the qualified
     // form is valid wherever the bare one is.
-    expect(generateTableQuery(["demo", "orders"], clickhouseCaps)).toBe("SELECT * FROM demo.orders LIMIT 50;");
+    expect(generateTableQuery(["demo", "orders"], clickhouseCaps)).toBe("SELECT * FROM demo.orders;");
   });
 
   test("Generate Query qualifies the same way Select Top N does", () => {
@@ -1097,13 +1105,11 @@ describe("the generated statement addresses an object by its path", () => {
   test("a dot inside a NAME is not read as a qualifier", () => {
     // The live case: ClickHouse holds `.inner_id.fake` in `demo`. Splitting the name
     // generated `SELECT * FROM "".inner_id.fake LIMIT 50;`, a syntax error at position 15.
-    expect(generateTableQuery(["demo", ".inner_id.fake"], clickhouseCaps)).toBe(
-      'SELECT * FROM demo.".inner_id.fake" LIMIT 50;',
-    );
+    expect(generateTableQuery(["demo", ".inner_id.fake"], clickhouseCaps)).toBe('SELECT * FROM demo.".inner_id.fake";');
   });
 
   test("a one-segment path whose name holds dots stays ONE identifier", () => {
-    expect(generateTableQuery([".inner_id.fake"], clickhouseCaps)).toBe('SELECT * FROM ".inner_id.fake" LIMIT 50;');
+    expect(generateTableQuery([".inner_id.fake"], clickhouseCaps)).toBe('SELECT * FROM ".inner_id.fake";');
   });
 
   test("no string-splitting spelling of a name survives anywhere in the module", () => {
@@ -1117,11 +1123,13 @@ describe("the generated statement addresses an object by its path", () => {
   // --- C. the Oracle terminator (pre-existing, not a PR regression) ---------
 
   test("Oracle emits no trailing semicolon", () => {
-    // node-oracledb answers ORA-00933 for `... FETCH FIRST 50 ROWS ONLY;`, so clicking a
-    // table on Oracle never worked. Reproduced in the browser on Oracle 26ai Free.
+    // node-oracledb answers ORA-00933 for a trailing `;`, so clicking a table on Oracle
+    // never worked. Reproduced in the browser on Oracle 26ai Free. #816 removed the
+    // generated row bound from this statement; the terminator rule is untouched and this
+    // assertion keeps its polarity, because the `;` is what the engine rejects.
     const out = generateTableQuery(["APP", "APP_CUSTOMERS"], oracleCaps);
     expect(out.endsWith(";")).toBe(false);
-    expect(out).toBe("SELECT * FROM APP.APP_CUSTOMERS FETCH FIRST 50 ROWS ONLY");
+    expect(out).toBe("SELECT * FROM APP.APP_CUSTOMERS");
   });
 
   test("Generate Query on Oracle emits no trailing semicolon either", () => {
@@ -1179,7 +1187,7 @@ describe("the dialects that address one key or collection, not a qualified name"
     // keyspace is addressed bucket.scope.collection (`COUCHBASE_CONTAINER_LEVELS`), and
     // SQL++ needs every part of it.
     expect(generateTableQuery(["travel", "inventory", "hotel"], makeCaps({ defaultPort: 8091 }))).toBe(
-      "SELECT META(d).id AS __id, d.* FROM `travel`.`inventory`.`hotel` AS d LIMIT 50;",
+      "SELECT META(d).id AS __id, d.* FROM `travel`.`inventory`.`hotel` AS d;",
     );
   });
 });

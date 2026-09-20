@@ -1843,6 +1843,8 @@ export class MySQLProvider extends SQLBaseProvider {
       ...(this.measuredExplainFormat === undefined ? {} : { explainFormat: this.measuredExplainFormat }),
       supportsConnectionString: true,
       supportsInlineRowEdit: true,
+      // `LIMIT n OFFSET m`, applied by the shared limiter in `SQLBaseProvider.prepareQuery`.
+      supportsResultPagination: true,
       // The driver's own connection.beginTransaction() over one held connection.
       supportsTransactions: true,
       maintenanceOperations: ["analyze", "optimize", "check", "kill"],

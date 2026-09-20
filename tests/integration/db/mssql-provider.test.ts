@@ -744,6 +744,9 @@ describe("MSSQLProvider", () => {
       // `UPDATE t SET c = v WHERE pk = v` is core T-SQL DML — the shape the inline
       // row editor builds (#269).
       expect(caps.supportsInlineRowEdit).toBe(true);
+      // `OFFSET m ROWS FETCH NEXT n ROWS ONLY` from this provider's own override; page
+      // one is `SELECT TOP n`, so the two pages are structurally different statements (#816).
+      expect(caps.supportsResultPagination).toBe(true);
       // The mssql Transaction object over one held pool connection (#464).
       expect(caps.supportsTransactions).toBe(true);
       // Inherited from the base capabilities: this engine declares foreign keys, so

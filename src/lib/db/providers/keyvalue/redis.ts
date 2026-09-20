@@ -778,6 +778,9 @@ export class RedisProvider extends BaseDatabaseProvider {
       // Redis commands are not SQL, so the inline row editor's `UPDATE ... SET` has
       // nothing here to run against (issue #269).
       supportsInlineRowEdit: false,
+      // `prepareQuery` pins both `limit` and `offset`: a Redis read is a command, not a
+      // statement with a bound this layer can advance.
+      supportsResultPagination: false,
       // MULTI/EXEC exists in Redis and is not exposed here.
       supportsTransactions: false,
       // Redis has no constraints of any kind, and this provider's "tables" are key

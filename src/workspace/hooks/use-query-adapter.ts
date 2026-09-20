@@ -85,6 +85,17 @@ export function useQueryAdapter({
       tabId?: string,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       _isExplain: boolean = false,
+      /**
+       * Carried to the host verbatim (#816).
+       *
+       * This surface took no options at all, and a tree click's preview cap used to be
+       * text inside the statement, so nothing was lost. With the cap moved out of the
+       * SQL (`PREVIEW_PAGE_SIZE` in `use-tab-manager.ts`) this is the only channel it
+       * has, and a host that ignores `limit` answers a tree click with every row of the
+       * table — which is why the prop's own docblock in `src/workspace/types.ts` now
+       * says so.
+       */
+      executionOptions?: { limit?: number; offset?: number; unlimited?: boolean },
     ) => {
       const targetTabId = tabId || activeTabId;
       const tabToExec = tabs.find((t) => t.id === targetTabId) || currentTab;
@@ -128,7 +139,13 @@ export function useQueryAdapter({
       const startTime = Date.now();
 
       try {
-        const result = await onQueryExecute(activeConnection.id, queryToExecute);
+        // The third argument is OMITTED rather than sent as `undefined` when this run
+        // carries no options. `onQueryExecute` is a published host prop, and a run that
+        // asks for nothing has to reach a host exactly as it always did.
+        const result =
+          executionOptions === undefined
+            ? await onQueryExecute(activeConnection.id, queryToExecute)
+            : await onQueryExecute(activeConnection.id, queryToExecute, executionOptions);
 
         // Check if cancelled while awaiting
         if (cancelledRef.current) return;
@@ -323,7 +340,10 @@ export function useQueryAdapter({
     const pagedStatement = currentTab.resultQuery ?? currentTab.query;
 
     onQueryExecute(activeConnection.id, pagedStatement, {
-      limit: 500,
+      // The size of the page already on screen, not a constant. A table preview is 50
+      // rows and a hand-run statement is 500, and a hardcoded 500 made the second page
+      // ten times the first while the footer's own label promised 500 either way (#816).
+      limit: currentTab.result.pagination.limit,
       offset: currentOffset,
     })
       .then((result) => {
@@ -340,10 +360,23 @@ export function useQueryAdapter({
               ...t,
               result: {
                 rows: newAllRows,
-                fields: result.fields,
+                // THE SHAPE COMES FROM THE ROWS ON SCREEN, NOT FROM THE PAGE THAT ARRIVED.
+                //
+                // A page of the same statement cannot legitimately name different columns,
+                // and an empty page often names none at all: SQLite answers `... LIMIT 50
+                // OFFSET 100` on a hundred-row table with `rows: 0, fields: []`. Taking the
+                // page's own list left the grid holding its hundred rows under zero columns
+                // - the strip read "100 rows / 0 columns" and the table rendered
+                // header-less, cell-less stripes. The standalone hook carries the same
+                // guard, for the same reason (#816).
+                fields: result.fields.length > 0 ? result.fields : (t.result?.fields ?? []),
                 rowCount: newAllRows.length,
                 executionTime: t.result?.executionTime || 0,
                 pagination: result.pagination,
+                // The first-page commit above carries these, and this one did not: a
+                // paged result silently lost the engine warnings and the declared column
+                // types the first page had shown (#285's class, on the paging path).
+                ...carriedChannels(result),
               },
               resultQuery: pagedStatement,
               allRows: newAllRows,

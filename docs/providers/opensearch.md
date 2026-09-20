@@ -603,7 +603,8 @@ confirmation gate reads a statement's spans to decide whether a write is hiding 
 an unreadable span is a **prompt** rather than silence.
 
 **A trailing semicolon is accepted.** `SELECT 1;` is HTTP 200 here and a `parsing_exception` upstream —
-so the generated statement (`SELECT * FROM probe_orders LIMIT 50;`) ran on this product and failed on
+so the generated statement, which at the time of that measurement was
+`SELECT * FROM probe_orders LIMIT 50;`, ran on this product and failed on
 the other ([elasticsearch.md §5.4](./elasticsearch.md#54-dialect-traps-a-user-will-hit)). This product
 nevertheless declares `statementTerminator: "none"` along with the upstream one, because the absence of
 the terminator is accepted **here too** (measured) and one answer that runs on both beats a branch on
@@ -1312,11 +1313,13 @@ be told work happened.
 
 ## 9. Capabilities & labels
 
-### `getCapabilities()` ([index.ts:388](../../src/lib/db/providers/sql/search/index.ts))
+### `getCapabilities()` ([index.ts:680](../../src/lib/db/providers/sql/search/index.ts))
 
-One answer for both products, because every flag here measured the same on both. The single
-difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it in, so it lives on
-`SearchProduct` and is read by `prepareQuery()` alone
+Two flags diverge between the products; every other one measured the same on both.
+`identifierQuoting` is one of them, below.
+`OFFSET` is the other, and since #816 it has a field of its own: `supportsResultPagination` is
+declared as `this.product.acceptsOffsetClause`, so the declaration and the `prepareQuery()`
+refusal are the same value and cannot drift apart
 ([§5.5](#55-offset-works-here-which-is-why-paging-does)).
 
 | Capability | Value | Why |
@@ -1326,6 +1329,7 @@ difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it
 | `supportsExternalQueryLimiting` | `true` | **Both** limiter forms are correct here, `LIMIT n` and `LIMIT n OFFSET m` |
 | `supportsCreateTable` | **`false`** | Not in the grammar ([§5.6](#56-this-grammar-has-delete-and-it-is-off)) |
 | `supportsInlineRowEdit` | **`false`** | `UPDATE` is not in the grammar, so the editor's statement could only ever produce an error (#269) |
+| `supportsResultPagination` | **`true`** | OpenSearch SQL accepts an `OFFSET` clause, which is the one capability where this product diverges from Elasticsearch. Declared as `this.product.acceptsOffsetClause`, so it cannot drift from the refusal the shared `prepareQuery` enforces (#816) |
 | `supportsTransactions` | **`false`** | `BEGIN` is not in the grammar and the surface is stateless HTTP. Measured 2026-08-19 on OpenSearch 3.8.0: `POST /api/db/transaction` answered HTTP 400, *"Transaction control is not supported for this database type"*, for both `begin` and `rollback` — the measurement #U13 came from |
 | `declaresForeignKeys` | **`false`** | The engine has no such constraint in its model, so the empty `foreignKeys` means "impossible here" rather than "none declared, or none visible to this role" — the distinction #414 was about |
 | `supportsMaintenance` | **`false`** | Nothing in `MaintenanceType` is SQL-reachable ([§8](#8-maintenance)) |

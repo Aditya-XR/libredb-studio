@@ -273,8 +273,14 @@ name, and the key is not part of the result at all. Generated queries therefore 
 and project the key ([`query-generators.ts`](../../src/lib/query-generators.ts)):
 
 ```sql
-SELECT META(d).id AS __id, d.* FROM `travel`.`inventory`.`hotel` AS d LIMIT 50;
+SELECT META(d).id AS __id, d.* FROM `travel`.`inventory`.`hotel` AS d;
 ```
+
+It carries no row bound. Since #816 the preview cap travels as the `limit` execution option rather
+than as text in the statement, so the limiter can recognise the bound as its own and advance it for
+page two; a bound in the statement is indistinguishable from one the user typed, and a self-bounded
+statement comes back unrewritten with the requested offset discarded. This provider declares
+`supportsResultPagination: true`, so the results grid offers Load More over the preview.
 
 The alias `__id` matches `COUCHBASE_DOCUMENT_KEY_COLUMN` in the introspection module
 ([`introspect.ts`](../../src/lib/db/providers/document/couchbase/introspect.ts)), so the schema tree
@@ -1131,6 +1137,7 @@ stays absent, and that card never renders either.
 | `supportsExternalQueryLimiting` | `true` |
 | `supportsCreateTable` | `false` |
 | `supportsInlineRowEdit` | `false` — SQL++ has `UPDATE <keyspace> SET ... WHERE ...`, but the shared editor's `WHERE <pk> = <value>` would filter on `__id`, the key **projection alias**, which is not a document field ([§13](#13-known-limitations--future-work)) |
+| `supportsResultPagination` | `true` — SQL++ takes `LIMIT n OFFSET m`, and this provider's `prepareQuery` routes through the shared limiter to emit it (#816) |
 | `supportsTransactions` | `false` — the query service is reached over stateless HTTP and no session spans two requests, so the transaction trio and SANDBOX are not offered (#464) |
 | `declaresForeignKeys` | `false` — SQL++ has no referential constraint; collections are schemaless and the columns reported here are inferred from a document sample |
 | `supportsMaintenance` | `true` |

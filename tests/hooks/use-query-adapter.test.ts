@@ -812,6 +812,140 @@ describe("useQueryAdapter", () => {
     expect(mockToastError).toHaveBeenCalled();
   });
 
+  // ── result pagination (#816) ────────────────────────────────────────────────
+
+  /**
+   * Page two is the size of page one, in BOTH shells.
+   *
+   * `limit: 500` was hardcoded at this call site. A table preview now asks for 50, so a
+   * hardcoded 500 made the second page ten times the first, and the footer's own label
+   * said "500 rows" while claiming to continue a 50-row page. The size to reuse is the
+   * one the result reports, which is the one the route applied.
+   */
+  test("handleLoadMore asks for the page size the first page came back with", async () => {
+    const tabWithMore = makeTab({
+      result: {
+        rows: [{ id: 1 }],
+        fields: ["id"],
+        rowCount: 1,
+        executionTime: 10,
+        pagination: { limit: 50, offset: 0, hasMore: true, totalReturned: 50, wasLimited: true },
+      },
+      currentOffset: 50,
+    });
+    const { tabs, setTabs } = createMutableTabs([tabWithMore]);
+    const onQueryExecute = mock(() => Promise.resolve(makeQueryResult()));
+
+    const { result } = renderHook(() =>
+      useQueryAdapter(makeHookParams({ onQueryExecute, tabs, setTabs, currentTab: tabWithMore })),
+    );
+
+    await act(async () => {
+      result.current.handleLoadMore();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    expect(onQueryExecute).toHaveBeenCalledWith("conn-1", "SELECT * FROM users", { limit: 50, offset: 50 });
+  });
+
+  /**
+   * Criterion 8, the half a toast does not cover: a failed page must leave the rows and
+   * the offset exactly as they were, so a retry asks for the same page rather than
+   * skipping one. The standalone hook has the mirror of this test.
+   */
+  test("a failed page keeps the loaded rows and does not advance currentOffset", async () => {
+    const tabWithMore = makeTab({
+      result: {
+        rows: [{ id: 1 }, { id: 2 }],
+        fields: ["id"],
+        rowCount: 2,
+        executionTime: 10,
+        pagination: { limit: 50, offset: 0, hasMore: true, totalReturned: 2, wasLimited: true },
+      },
+      allRows: [{ id: 1 }, { id: 2 }],
+      currentOffset: 50,
+    });
+    const { tabs, setTabs } = createMutableTabs([tabWithMore]);
+    const onQueryExecute = mock(() => Promise.reject(new Error("connection reset")));
+
+    const { result } = renderHook(() =>
+      useQueryAdapter(makeHookParams({ onQueryExecute, tabs, setTabs, currentTab: tabWithMore })),
+    );
+
+    await act(async () => {
+      result.current.handleLoadMore();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    expect(mockToastError).toHaveBeenCalled();
+    expect(tabs[0].result!.rows).toHaveLength(2);
+    expect(tabs[0].allRows).toHaveLength(2);
+    expect(tabs[0].currentOffset).toBe(50);
+    expect(tabs[0].isLoadingMore).toBe(false);
+  });
+
+  /**
+   * The channels a paged commit used to drop.
+   *
+   * The first-page commit spreads `carriedChannels(result)`; this one rebuilt the result
+   * from five keys and did not, so appending a page silently removed the engine warnings
+   * and the declared column types the first page had shown (#285's class, on the paging
+   * path). Pre-existing, in the exact commit #816 rewrites, so it is fixed here.
+   */
+  test("a paged commit keeps the warnings and column types the page carries", async () => {
+    const tabWithMore = makeTab({
+      result: {
+        rows: [{ id: 1 }],
+        fields: ["id"],
+        rowCount: 1,
+        executionTime: 10,
+        pagination: { limit: 50, offset: 0, hasMore: true, totalReturned: 1, wasLimited: true },
+        warnings: [{ message: "one shard was unavailable" }],
+        columnTypes: { id: "int4" },
+      },
+      currentOffset: 50,
+    });
+    const { tabs, setTabs } = createMutableTabs([tabWithMore]);
+    const nextPage = makeQueryResult({
+      rows: [{ id: 2 }],
+      pagination: { limit: 50, offset: 50, hasMore: false, totalReturned: 1, wasLimited: true },
+      warnings: [{ message: "one shard was unavailable" }],
+      columns: [{ name: "id", type: "int4" }],
+    });
+    const onQueryExecute = mock(() => Promise.resolve(nextPage));
+
+    const { result } = renderHook(() =>
+      useQueryAdapter(makeHookParams({ onQueryExecute, tabs, setTabs, currentTab: tabWithMore })),
+    );
+
+    await act(async () => {
+      result.current.handleLoadMore();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    expect(tabs[0].result!.columnTypes).toEqual({ id: "int4" });
+    expect(tabs[0].result!.warnings).toHaveLength(1);
+  });
+
+  /**
+   * The channel the preview cap travels down in the EMBEDDED shell.
+   *
+   * This `executeQuery` took no execution options at all and called `onQueryExecute` with
+   * none, so moving the preview bound out of the SQL text would have been a no-op here:
+   * the tree click would have asked for the route's default 500 rows. The host contract
+   * (`StudioWorkspaceProps.onQueryExecute`) has always accepted them.
+   */
+  test("executeQuery forwards its execution options to the host", async () => {
+    const onQueryExecute = mock(() => Promise.resolve(makeQueryResult()));
+    const { result } = renderHook(() => useQueryAdapter(makeHookParams({ onQueryExecute })));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users", "tab-1", false, { limit: 50 });
+    });
+
+    expect(onQueryExecute).toHaveBeenCalledWith("conn-1", "SELECT * FROM users", { limit: 50 });
+  });
+
   // ── handleUnlimitedQuery guards ─────────────────────────────────────────────
 
   test("handleUnlimitedQuery no-ops without a pending query", () => {

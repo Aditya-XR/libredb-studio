@@ -28,14 +28,34 @@ export interface ExportScope {
   shortfall: string | null;
 }
 
-export function describeExportScope(result: Pick<QueryResult, "rows" | "pagination">): ExportScope {
+export function describeExportScope(
+  result: Pick<QueryResult, "rows" | "pagination">,
+  /**
+   * Whether the surface holding these rows can actually fetch the next page: the grid's
+   * own `pageOfferFor` decision, passed in rather than re-derived.
+   *
+   * It is the second half of the same narrowing as the `hasMore` conjunct below.
+   * `hasMore` answers "is there another page of this statement", and on Cassandra and
+   * Elasticsearch the answer is yes while no control exists to fetch it: their provider
+   * declares `supportsResultPagination: false`, and since the preview cap left the SQL
+   * text their 50-row table preview fills its bound exactly and reports `hasMore: true`.
+   * Without this, the dialog told those users to load rows that nothing can load.
+   */
+  nextPageFetchable: boolean,
+): ExportScope {
   const rowCount = result.rows.length;
   const countLabel = GROUPED.format(rowCount);
   const unit = rowCount === 1 ? "row" : "rows";
-  // `hasMore` is the engine's own answer about THIS run: the statement was limited
-  // and the limit was reached. `wasLimited` without `hasMore` means the limit was
-  // applied and the result fit inside it, which is not a shortfall.
-  const truncated = result.pagination?.hasMore === true;
+  // `hasMore` is the route's own answer about THIS run: OUR bound was applied and it
+  // was reached, so a next page can be asked for. `wasLimited` without `hasMore` means
+  // the bound was applied and the result fit inside it, which is not a shortfall.
+  //
+  // It narrowed with #816: the route now requires `wasLimited` too, so a statement
+  // carrying its OWN bound and filling it exactly — `SELECT * FROM t LIMIT 500` giving
+  // 500 rows — reads as complete here where it once warned of rows on the server. That
+  // is the correction, not a loss: no Load More exists for such a statement, so the
+  // shortfall sentence below was naming an action the UI does not offer.
+  const truncated = nextPageFetchable && result.pagination?.hasMore === true;
 
   return {
     rowCount,

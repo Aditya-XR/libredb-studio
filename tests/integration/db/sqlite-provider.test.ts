@@ -409,6 +409,8 @@ describe("SQLiteProvider", () => {
       // `UPDATE t SET c = v WHERE pk = v` is core SQLite DML — the shape the inline
       // row editor builds (#269).
       expect(caps.supportsInlineRowEdit).toBe(true);
+      // `LIMIT n OFFSET m` from the shared limiter (#816).
+      expect(caps.supportsResultPagination).toBe(true);
       // False although SQLite HAS transactions: this provider holds no session for
       // one, so POST /api/db/transaction refuses the call and the controls must not
       // be offered (#464). The flag describes the provider's surface, not the engine.

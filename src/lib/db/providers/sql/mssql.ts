@@ -1517,6 +1517,12 @@ export class MSSQLProvider extends SQLBaseProvider {
       supportsExplain: false,
       supportsConnectionString: true,
       supportsInlineRowEdit: true,
+      // `OFFSET m ROWS FETCH NEXT n ROWS ONLY`, built by this provider's own
+      // `prepareQuery` override. Page one is `SELECT TOP n`, so the two pages are
+      // structurally different statements, and page two carries the `ORDER BY (SELECT
+      // NULL)` T-SQL demands before `OFFSET` - which promises nothing about order, the
+      // condition the grid states for itself.
+      supportsResultPagination: true,
       // The mssql package's Transaction object over one held pool connection.
       supportsTransactions: true,
       maintenanceOperations: ["analyze", "check", "optimize", "kill"],

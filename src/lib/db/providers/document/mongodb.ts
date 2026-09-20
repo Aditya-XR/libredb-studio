@@ -629,6 +629,9 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       // The query language is JSON commands, not SQL, so the inline row editor's
       // `UPDATE ... SET` has nothing here to run against (issue #269).
       supportsInlineRowEdit: false,
+      // `prepareQuery` pins `offset` to 0 and returns the command untouched, so page two
+      // would be page one. The find document's own `limit` stays the bound here.
+      supportsResultPagination: false,
       // Multi-document transactions need a client session this provider does not hold.
       supportsTransactions: false,
       // MongoDB has no foreign key constraint at all, so the empty `foreignKeys` every

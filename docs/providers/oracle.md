@@ -175,6 +175,12 @@ The generator carried that `;` from the day its Oracle branch was written, so cl
 Oracle had never once worked. This is a declaration rather than a branch in the generator: nothing
 in `src/lib/query-generators.ts` needs to know which engine it is writing for (#789).
 
+The row bound in the statement above has since gone: #816 moved the preview cap into the `limit`
+execution option, so what the generator writes today is `SELECT * FROM APP.APP_CUSTOMERS` — still
+with no `;`, which is the half of that measurement the engine cares about. The Oracle branch itself
+was removed with the bound, because once there is no `FETCH FIRST` to spell it did nothing the
+shared return does not already do.
+
 It bounds the GENERATORS only. A `;` a user types is still stripped by the editor's statement reader
 before the statement is sent, and the raw API passes text through untouched.
 
@@ -1811,6 +1817,7 @@ is what lets the Operations tab render those words and send an operation Oracle 
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `supportsCreateTable` | `true` (from base) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core Oracle DML |
+| `supportsResultPagination` | `true` — `OFFSET m ROWS FETCH NEXT n ROWS ONLY` from this provider's own `prepareQuery` override; page one is `FETCH FIRST n ROWS ONLY` (#816) |
 | `supportsTransactions` | `true` — Oracle is always in a transaction and the held connection commits or rolls back, so the trio and the SANDBOX toggle are offered (#464) |
 | `declaresForeignKeys` | `true` — inherited from the base capabilities; read from `ALL_CONSTRAINTS`, so an empty list is about the schema or the owner, not the engine |
 | `supportsMaintenance` | `true` |
