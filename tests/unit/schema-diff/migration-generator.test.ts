@@ -1404,6 +1404,25 @@ describe("generateMigrationSQL: a default is emitted as SQL, not as its value", 
     expect(sql).not.toContain("DEFAULT");
   });
 
+  // The same pre-existing defect from the other side, and the reason the emission gates test
+  // PRESENCE and not truthiness. `diffColumns` reports a column whose default changed TO the
+  // empty string, so a truthiness gate drops the clause and the migration silently does not
+  // carry the change the panel promised. Presence keeps the two halves saying one thing. What
+  // MySQL emits for it is still not SQL, for the reason above, and a statement the server
+  // rejects is the honest form of that defect rather than one that quietly does nothing.
+  test("a MySQL empty-string default still emits a clause rather than vanishing from the migration", () => {
+    const sql = generateMigrationSQL(makeAddedColumnDiff({ targetDefault: "" }), "mysql");
+    expect(sql).toContain("ADD COLUMN `note` varchar(20) DEFAULT ;");
+  });
+
+  test("a MODIFY COLUMN carries an empty-string default the same way", () => {
+    const sql = generateMigrationSQL(
+      makeModifiedColumnDiff({ targetType: "varchar(20)", targetDefault: "", targetDefaultSql: "''" }),
+      "mysql",
+    );
+    expect(sql).toContain("MODIFY COLUMN `note` varchar(20) NULL DEFAULT '';");
+  });
+
   // Pinning a PRE-EXISTING DEFECT, deliberately left untouched by #795. MySQL's
   // COLUMN_DEFAULT is the evaluated value and its EXTRA cannot say whether that text is SQL:
   // `abc` is a value, `b'1'` and `0x616263` are SQL, and all three carry an empty EXTRA. So

@@ -58,6 +58,12 @@ function diffColumns(sourceCols: readonly ColumnSchema[], targetCols: readonly C
     // same string and reports no change for a real difference, in both directions. Reading
     // the text first also makes a snapshot taken before the decoding, which stored the
     // catalog text in `defaultValue`, compare EQUAL to the same unchanged table read today.
+    // One stale case it does NOT settle, measured and accepted rather than repaired: a
+    // pre-decoding MariaDB snapshot stored the four-character keyword `NULL` for a column
+    // with NO default, and today that column carries neither field, so such a snapshot
+    // reports one "Default changed: NULL -> none" per no-default column and one MODIFY that
+    // changes nothing. Reading the keyword as absence here would put back the very ambiguity
+    // #795 removed, since `NULL` is also a value a column can really default to.
     const sourceDefault = sourceCol.defaultExpression ?? sourceCol.defaultValue;
     const targetDefault = targetCol.defaultExpression ?? targetCol.defaultValue;
     if (sourceDefault !== targetDefault) {

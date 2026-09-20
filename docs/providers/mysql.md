@@ -935,11 +935,17 @@ A generated column is absence on both, recognised by `EXTRA` being exactly `STOR
 On MariaDB the remaining text is decoded by `unquoteLiteral()` (`src/lib/sql/values.ts`), the inverse of the `quoteLiteral()` this repo already uses for this family, so the doubled quote and the escaping backslash are both undone; text that is not exactly one literal, such as `current_timestamp()` or `concat('x','y')`, passes through as written.
 
 **Each column carries both readings, and only where they were measured.**
-`defaultValue` is the value the column defaults to, which is what the object browser shows, and this family is the only one that decodes it: every other provider leaves the engine's catalog text in that field.
+`defaultValue` is the value the column defaults to, which is what the object browser shows, and this family is the only one that decodes it.
+Most other providers leave the engine's catalog text in that field; ClickHouse is the exception either way, because it builds a clause-naming string such as `MATERIALIZED a + b` that is neither (issue #1032).
 `defaultExpression` is the SQL text that produces it, which is what a reader emitting DDL, the schema-diff migration generator above all, must write after the word `DEFAULT`, and a provider carries it exactly where it decoded the value out of it.
 On MariaDB both are set: the catalog text is always valid SQL there, every form in the table above included, so the expression is the raw text unchanged.
 On MySQL only `defaultValue` is set, and that is deliberate: `abc` is a value and is not valid after `DEFAULT`, while `b'1'` and `0x616263` are SQL, and all three arrive with an EMPTY `EXTRA`, so nothing in the row tells them apart.
 An absent `defaultExpression` says the provider did not decode, never "there is no expression", so a reader falls back to `defaultValue` as the text; on MySQL that fallback keeps the pre-existing unquoted `DEFAULT abc` rather than inventing a quoting rule the catalog cannot justify, and whether that text is SQL stays genuinely unknown.
+
+One consequence for a stored snapshot, measured and accepted rather than repaired.
+A snapshot taken before this change stored MariaDB's catalog text in `defaultValue`, and the comparison reads the SQL text first, so `'abc'` against today's `'abc'` compares equal and reports nothing.
+A column with NO default is the exception: the old reading stored the four-character keyword `NULL` there and the current one stores neither field, so such a snapshot reports one spurious default change per no-default column, with a `MODIFY COLUMN` that changes nothing.
+Reading that keyword as absence would put back the ambiguity this section exists to remove, since `NULL` is also a value a column can really default to.
 
 One limit this does not repair, because the engine does not allow it.
 MySQL's own parenthesised expression defaults read back charset-introduced and backslash-escaped, `concat(_latin1\'x\',_latin1\'y\')`, which is not what the user wrote and is not round-trippable.

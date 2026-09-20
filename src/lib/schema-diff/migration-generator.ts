@@ -228,6 +228,10 @@ function commentName(name: string): string {
  * MariaDB 12.3.2: `CREATE TABLE t (note varchar(20) DEFAULT abc)` is ERROR 1054 (42S22)
  * Unknown column 'abc' in 'DEFAULT', while `DEFAULT 'abc'` is accepted. Dialects whose
  * provider declares no expression fall back to the raw field and are unchanged.
+ *
+ * Every caller gates on `=== undefined` and never on truthiness, because the empty string is
+ * a default a column really has. `diffColumns` compares the same quantity by presence, so a
+ * truthiness gate here would report a change the migration then silently does not carry.
  */
 function defaultSql(col: ColumnDiff): string | undefined {
   return col.targetDefaultSql ?? col.targetDefault;
@@ -243,7 +247,7 @@ function generateColumnDef(col: ColumnDiff, dialect: DatabaseType): string {
   if (dialect === "cassandra") return `${escapeIdentifier(col.columnName, dialect)} ${type}`;
   const nullable = col.targetNullable === false ? " NOT NULL" : "";
   const declaredDefault = defaultSql(col);
-  const defaultVal = declaredDefault ? ` DEFAULT ${declaredDefault}` : "";
+  const defaultVal = declaredDefault === undefined ? "" : ` DEFAULT ${declaredDefault}`;
   // Oracle's column grammar puts DEFAULT before inline constraints such as NOT NULL.
   const modifiers = dialect === "oracle" ? `${defaultVal}${nullable}` : `${nullable}${defaultVal}`;
   return `${escapeIdentifier(col.columnName, dialect)} ${type}${modifiers}`;
@@ -514,7 +518,7 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         const type = col.targetType || col.sourceType || "TEXT";
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
         const declaredDefault = defaultSql(col);
-        const defaultVal = declaredDefault ? ` DEFAULT ${declaredDefault}` : "";
+        const defaultVal = declaredDefault === undefined ? "" : ` DEFAULT ${declaredDefault}`;
         lines.push(
           `ALTER TABLE ${id} MODIFY COLUMN ${escapeIdentifier(col.columnName, dialect)} ${type}${nullable}${defaultVal};`,
         );
@@ -522,7 +526,7 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         const type = col.targetType || col.sourceType || "VARCHAR2(255)";
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
         const declaredDefault = defaultSql(col);
-        const defaultVal = declaredDefault ? ` DEFAULT ${declaredDefault}` : "";
+        const defaultVal = declaredDefault === undefined ? "" : ` DEFAULT ${declaredDefault}`;
         lines.push(
           `ALTER TABLE ${id} MODIFY (${escapeIdentifier(col.columnName, dialect)} ${type}${defaultVal}${nullable});`,
         );
@@ -531,7 +535,7 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
         lines.push(`ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} ${type}${nullable};`);
         const declaredDefault = defaultSql(col);
-        if (col.sourceDefault !== col.targetDefault && declaredDefault) {
+        if (col.sourceDefault !== col.targetDefault && declaredDefault !== undefined) {
           lines.push(
             `ALTER TABLE ${id} ADD DEFAULT ${declaredDefault} FOR ${escapeIdentifier(col.columnName, dialect)};`,
           );
@@ -546,12 +550,12 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         const type = col.targetType || col.sourceType || "String";
         let declared = "";
         const declaredDefault = defaultSql(col);
-        if (declaredDefault) {
+        if (declaredDefault !== undefined) {
           const kind = clickhouseDefaultKind(declaredDefault);
           declared = kind === "DEFAULT" ? ` DEFAULT ${declaredDefault}` : ` ${declaredDefault}`;
         }
         lines.push(`ALTER TABLE ${id} MODIFY COLUMN ${column} ${type}${declared};`);
-        if (col.sourceDefault && !declaredDefault) {
+        if (col.sourceDefault && declaredDefault === undefined) {
           const kind = clickhouseDefaultKind(col.sourceDefault);
           if (CLICKHOUSE_REMOVABLE_KINDS.includes(kind)) {
             lines.push(`ALTER TABLE ${id} MODIFY COLUMN ${column} REMOVE ${kind};`);
@@ -581,7 +585,7 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         }
         if (col.sourceDefault !== col.targetDefault) {
           const declaredDefault = defaultSql(col);
-          if (declaredDefault) {
+          if (declaredDefault !== undefined) {
             lines.push(
               `ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} SET DEFAULT ${declaredDefault};`,
             );

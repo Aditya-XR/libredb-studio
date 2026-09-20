@@ -315,14 +315,19 @@ export interface ColumnSchema {
    *
    * On most providers it is the engine's own catalog TEXT, copied out unchanged: PostgreSQL
    * reports `nextval('app.orders_id_seq'::regclass)` here, SQL Server `((0))`, DuckDB and
-   * libSQL and SQLite the quoted literal, ClickHouse the kind-prefixed expression. On MySQL
-   * and MariaDB ALONE it is the DECODED value, `abc` rather than `'abc'`, because MariaDB
-   * reports the default as the expression its author wrote and showing that to a reader
-   * showed a default nobody wrote (#795).
+   * libSQL and SQLite the quoted literal. On MySQL and MariaDB it is the DECODED value,
+   * `abc` rather than `'abc'`, because MariaDB reports the default as the expression its
+   * author wrote and showing that to a reader showed a default nobody wrote (#795).
    *
-   * That decoding is exactly why {@link defaultExpression} exists: once a provider decodes,
-   * this field is no longer something a reader can paste after the word DEFAULT, so the
-   * provider that decoded carries the text alongside it.
+   * ClickHouse is neither. `readDefault` in `clickhouse/introspect.ts` answers the bare
+   * expression for kind `DEFAULT` and CONSTRUCTS `MATERIALIZED a + b` for the other kinds,
+   * so the field there names its own clause and is not pasteable after the word DEFAULT.
+   * The migration generator has `clickhouseDefaultKind` for exactly that, and the half of it
+   * that was never applied is issue #1032.
+   *
+   * Decoding is why {@link defaultExpression} exists: once a provider decodes, this field is
+   * no longer something a reader can paste after the word DEFAULT, so the provider that
+   * decoded carries the text alongside it.
    */
   defaultValue?: string;
   /**
@@ -337,13 +342,17 @@ export interface ColumnSchema {
    * expression `'abc'`, and `CREATE TABLE t (note varchar(20) DEFAULT abc)` is ERROR 1054 on
    * that server while `DEFAULT 'abc'` is accepted (measured on 12.3.2).
    *
-   * A provider sets it ONLY where {@link defaultValue} is NOT the catalog text, that is where
-   * the provider decoded it. Absence is therefore not negligence and not "there is no
-   * expression": it says this provider did not decode, so `defaultValue` already IS the
-   * text, and a reader emitting SQL should use that. MySQL is the one engine where absence
-   * still leaves something unknown - it reports the evaluated value with an EXTRA that
-   * cannot say whether that text is SQL - so it declares nothing here rather than inventing
-   * a quoting rule.
+   * A provider sets it where it DECODED {@link defaultValue} out of the catalog text. Absence
+   * is therefore not negligence and not "there is no expression": on the providers that copy
+   * the catalog out unchanged it says `defaultValue` already IS the text, and a reader
+   * emitting SQL should use that.
+   *
+   * Two engines are absent for their own reasons rather than that one. MySQL reports the
+   * evaluated value with an EXTRA that cannot say whether the text is SQL - `abc` is a value,
+   * `b'1'` and `0x616263` are SQL, all three carry an empty EXTRA - so it declares nothing
+   * here rather than inventing a quoting rule, and what that costs is issue #1031. ClickHouse
+   * builds a clause-naming string rather than a value, which is a third case this field does
+   * not model; see {@link defaultValue} and issue #1032.
    */
   defaultExpression?: string;
 }
