@@ -501,6 +501,39 @@ describe("SQLBaseProvider", () => {
       expect(result.offset).toBe(100);
     });
 
+    /**
+     * The clause the SHARED path emits for page two (#816). Every provider that does not
+     * override `prepareQuery` pages through exactly this, so it is the one place the
+     * form is pinned; the per-dialect overrides and the twelve declared values are
+     * measured in `tests/unit/db/result-pagination-capability.test.ts`.
+     */
+    test("a positive offset emits LIMIT n OFFSET m and reports the bound as ours", () => {
+      const p = new TestSQLProvider(makeConfig("postgres"));
+      const result = p.prepareQuery("SELECT * FROM users", { limit: 50, offset: 50 });
+
+      expect(result.query).toBe("SELECT * FROM users LIMIT 50 OFFSET 50");
+      expect(result.wasLimited).toBe(true);
+      expect(result.limit).toBe(50);
+      expect(result.offset).toBe(50);
+    });
+
+    /**
+     * A statement carrying the USER's bound comes back untouched — and `limit` still
+     * reports the caller's default, not the 50 in the text. That gap is exactly why
+     * `hasMore` cannot be `rows.length === limit` alone: 50 rows against a reported
+     * limit of 500 read as "no more" by luck, and a statement whose own bound happened
+     * to equal the default read as "more" while the offset would be dropped.
+     * `wasLimited: false` is the honest signal, and the route now requires it.
+     */
+    test("a statement carrying its own bound is untouched and not ours to page", () => {
+      const p = new TestSQLProvider(makeConfig("postgres"));
+      const result = p.prepareQuery("SELECT * FROM users LIMIT 50", { limit: 500, offset: 50 });
+
+      expect(result.query).toBe("SELECT * FROM users LIMIT 50");
+      expect(result.wasLimited).toBe(false);
+      expect(result.limit).toBe(500);
+    });
+
     test("unlimited mode uses MAX_UNLIMITED_ROWS", () => {
       const p = new TestSQLProvider(makeConfig("postgres"));
       const result = p.prepareQuery("SELECT * FROM users", { unlimited: true });

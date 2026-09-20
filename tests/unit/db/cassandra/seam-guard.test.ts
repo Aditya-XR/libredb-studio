@@ -22,6 +22,9 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createDatabaseProvider } from "@/lib/db/factory";
+import { QueryError } from "@/lib/db/errors";
+import { CENSUS_CONNECTION } from "../../../helpers/census-connection";
 
 const ROOT = join(import.meta.dir, "..", "..", "..", "..");
 const PROVIDER_DIR = join(ROOT, "src", "lib", "db", "providers", "sql", "cassandra");
@@ -107,5 +110,41 @@ describe("the Cassandra driver stays behind one file", () => {
     // - so this asks about code, like every check above.
     expect(codeLinesNaming("transport.ts", "cassandra-driver")).toEqual([]);
     expect(codeLinesNaming("transport.ts", "import")).toEqual([]);
+  });
+});
+
+/**
+ * The page-two refusal, and the capability that must agree with it (#816).
+ *
+ * Cassandra is the engine the whole `supportsResultPagination` design exists for.
+ * `supportsExternalQueryLimiting` is `true` here — a bound CAN be injected — and
+ * `prepareQuery` still throws on any positive offset, because CQL has no `OFFSET`
+ * clause. Reading the old flag as "can be paged" is exactly the mistake that would put
+ * a Load More on this provider, so both are asserted together: the two flags disagree,
+ * on purpose, and the new one is the one the grid reads.
+ *
+ * It sits in this file because the issue's Tests section names it. Nothing here scans
+ * source text, and the refusal's own message and message-shape coverage stays in
+ * `tests/integration/db/cassandra-provider.test.ts`.
+ */
+describe("Cassandra refuses page two, and says so in its capabilities", () => {
+  const provider = async () => await createDatabaseProvider(CENSUS_CONNECTION.cassandra);
+
+  test("a bound can be injected, and the first page still gets one", async () => {
+    const caps = (await provider()).getCapabilities();
+    expect(caps.supportsExternalQueryLimiting).toBe(true);
+
+    const pageOne = (await provider()).prepareQuery("SELECT * FROM t", { limit: 50, offset: 0 });
+    expect(pageOne.query).toBe("SELECT * FROM t LIMIT 50");
+    expect(pageOne.wasLimited).toBe(true);
+  });
+
+  test("a positive offset is refused rather than answered with page one", async () => {
+    const p = await provider();
+    expect(() => p.prepareQuery("SELECT * FROM t", { limit: 50, offset: 50 })).toThrow(QueryError);
+  });
+
+  test("the capability agrees with the refusal", async () => {
+    expect((await provider()).getCapabilities().supportsResultPagination).toBe(false);
   });
 });

@@ -809,6 +809,9 @@ describe("MongoDBProvider", () => {
       // No SQL at all here: the query language is JSON commands, so the inline row
       // editor's `UPDATE ... SET` has nothing to run against (#269).
       expect(caps.supportsInlineRowEdit).toBe(false);
+      // `prepareQuery` pins `offset` to 0 and returns the command untouched, so page two
+      // would be page one. The control is hidden rather than offered (#816).
+      expect(caps.supportsResultPagination).toBe(false);
       // Multi-document transactions need a client session this provider does not
       // hold, so the trio and the sandbox toggle are withheld (#464).
       expect(caps.supportsTransactions).toBe(false);

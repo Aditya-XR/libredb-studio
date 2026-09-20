@@ -350,6 +350,9 @@ export class CouchbaseProvider extends BaseDatabaseProvider {
       // report success. Addressing a document needs `META(d).id` or `USE KEYS`, i.e.
       // per-dialect statement building, which is issue #279.
       supportsInlineRowEdit: false,
+      // `LIMIT n OFFSET m`: SQL++ takes both, and this provider's `prepareQuery`
+      // override routes through the same shared limiter to emit them.
+      supportsResultPagination: true,
       // The HTTP query service is stateless per request; no session spans two of them.
       supportsTransactions: false,
       // SQL++ has no referential constraint: collections are schemaless, and the

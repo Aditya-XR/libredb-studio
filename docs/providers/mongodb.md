@@ -945,6 +945,7 @@ request here.
 | `supportsExternalQueryLimiting` | `false` |
 | `supportsCreateTable` | `false` |
 | `supportsInlineRowEdit` | `false` — the query language is JSON commands, so there is no `UPDATE ... SET` for the results grid's inline editor to emit |
+| `supportsResultPagination` | `false` — `prepareQuery` pins `offset` to 0 and returns the command untouched, so page two would be page one. The find document's own `limit` stays the bound here (#816) |
 | `supportsTransactions` | `false` — multi-document transactions need a client session this provider does not hold, so BEGIN/COMMIT/ROLLBACK and SANDBOX are not offered; they used to be, and answered HTTP 400 (#464) |
 | `declaresForeignKeys` | `false` — MongoDB has no foreign key constraint at all, so an empty `foreignKeys` list here is the engine's model and not this database's shape |
 | `supportsMaintenance` | `true` |

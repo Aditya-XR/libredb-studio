@@ -823,6 +823,7 @@ Measured through the provider against both deployments (fixture: 2 tables, 3 and
 | `explainFormat` | `"sqlite-queryplan"` | SQLite's 4-column `id/parent/notused/detail` query plan strategy |
 | `supportsConnectionString` | `true` | `libsql://<database>-<org>.turso.io?authToken=<jwt>` |
 | `supportsInlineRowEdit` | `true` | Results grid inline edits supported |
+| `supportsResultPagination` | `true` | `LIMIT n OFFSET m`, the grammar it shares with SQLite (#816) |
 | `supportsTransactions` | `false` | Stateless request stream closed with each statement; no interactive session held |
 | `maintenanceOperations` | `["reindex", "check"]` | Only `REINDEX` and `PRAGMA integrity_check` are permitted by server allowlist |
 | `maintenanceOperationSpecs` | `reindex` (`perEntity: true`, `global: true`), `check` (`perEntity: false`, `global: true`) | Placement rules for per-table and global maintenance actions |

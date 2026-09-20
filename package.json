@@ -1,6 +1,6 @@
 {
   "name": "@libredb/studio",
-  "version": "0.16.0",
+  "version": "0.16.1",
   "description": "The database editor that deploys next to your data, not onto your laptop.",
   "keywords": [
     "sql",
@@ -142,7 +142,8 @@
     "start": "next start",
     "format": "biome format .",
     "format:fix": "biome format --write .",
-    "lint": "oxlint && eslint .",
+    "lint": "oxlint && eslint . && node scripts/only-check.mjs",
+    "only:check": "node scripts/only-check.mjs",
     "lint:oxc": "oxlint",
     "typecheck": "tsc --noEmit",
     "test": "bun tests/run-tests.ts",

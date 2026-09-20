@@ -536,6 +536,16 @@ control that only emits invalid input. That is the defect class
   ([#269](https://github.com/libredb/libredb-studio/issues/269)): it answers that statement with code
   `48` `NOT_IMPLEMENTED` because a row mutation there is `ALTER TABLE ... UPDATE`, and Druid has no
   row-level DML at all, so both offered an editor that could only fail.
+- `supportsResultPagination` must answer one question and one only: does **your** `prepareQuery` really
+  apply a positive `offset`? Do not read it off `supportsExternalQueryLimiting`, which answers whether
+  a bound can be injected at all — Cassandra declares that one `true` and throws on any `offset > 0`,
+  because CQL has no `OFFSET`. Call your own `prepareQuery(sql, { limit: 50, offset: 50 })` before you
+  write the value: if it throws, pins the offset to 0, or returns the statement unchanged, the answer
+  is `false`, and `false` hides the Load More control rather than offering one that can only re-fetch
+  page one ([#816](https://github.com/libredb/libredb-studio/issues/816)). LibreDB was the quiet trap:
+  it inherits the base `prepareQuery`, which echoes the requested offset back while applying nothing.
+  `tests/unit/db/result-pagination-capability.test.ts` measures every type-id against its declaration,
+  so a wrong value fails there rather than in a user's grid.
 - If `supportsExplain` is `true`, `buildSql()` **must not** return `null` for the `analyze` mode. The
   direct Explain action always builds with `analyze`
   in `executeQuery()` ([`use-query-execution.ts`](../src/hooks/use-query-execution.ts)) and refuses
@@ -654,6 +664,7 @@ If it appears in routes, components, or utilities — you're doing it wrong. Use
 | EXPLAIN | If `supportsExplain: true`, verify EXPLAIN button works |
 | Create Table | If `supportsCreateTable: true`, verify the + button appears |
 | Inline row edit | If `supportsInlineRowEdit: true`, verify the EDIT toggle appears and one edited row runs one statement the engine accepts |
+| Result pagination | If `supportsResultPagination: true`, open a table with more than 50 rows from the tree, click Load More once and verify the appended rows are ones you had not already seen; if `false`, verify no Load More appears |
 | Transactions | If `supportsTransactions: true`, verify BEGIN/COMMIT/ROLLBACK and SANDBOX appear in the toolbar and that a BEGIN succeeds; if `false`, verify all four are absent |
 | Maintenance | Open Database Maintenance, verify correct operations show |
 | AI Explain | If `supportsExplain: true`, open Visual EXPLAIN and verify the AI explanation streams |
@@ -675,6 +686,7 @@ Every field and what it controls:
 | `supportsExternalQueryLimiting` | `boolean` | Whether route applies LIMIT to queries (SQL) or provider handles it (MongoDB) |
 | `supportsCreateTable` | `boolean` | "Create Table" button in SchemaExplorer |
 | `supportsInlineRowEdit` | `boolean?` | Whether the results grid offers inline row editing. `false` hides the EDIT toggle and every editable cell — set it where the engine has no `UPDATE <table> SET <col> = <val> WHERE <pk> = <val>` statement, which is what `use-inline-editing.ts` builds. Optional only because the interface is published and a required addition breaks external implementers; every provider here declares it, and an absent flag reads as unsupported |
+| `supportsResultPagination` | `boolean?` | Whether your `prepareQuery` really applies a positive `offset`. `false` hides the results grid's Load More control. Not the same question as `supportsExternalQueryLimiting`; measure it, do not infer it. Optional and gated on `=== true` for the same published-interface reason as the flag above |
 | `supportsTransactions` | `boolean?` | Whether THIS PROVIDER implements the interactive transaction session `POST /api/db/transaction` drives (`beginTransaction`/`commitTransaction`/`rollbackTransaction` over one held connection). `false` withholds the editor toolbar's BEGIN/COMMIT/ROLLBACK trio **and** the SANDBOX toggle, which auto-rolls-back through the same route. It is about the provider's surface, not the engine: SQLite has `BEGIN` and still declares `false`. Optional for the published-interface reason above; the UI gates on `=== true`, so an absent flag and an unresolved metadata fetch both read as no transactions (#464) |
 | `declaresForeignKeys` | `boolean?` | Whether this engine has foreign keys in its model at all. `false` says an empty foreign-key list means "no such constraint exists here", not "this schema declares none" — set it on every engine without referential constraints. Optional for the published-interface reason above; consumers gate on `=== false`, so an absent flag reads as "may declare them" |
 | `tablesAreDerivedGroupings` | `boolean?` | Whether this provider's relation-shaped rows are objects the engine holds, or groupings this server derived from a bounded scan. `true` on Redis and LibreDB only. Where it is true the schema explorer hides every menu item that *addresses* the row — `Profile Table`, `Generate Test Data`, and both per-row maintenance items, all of which name the row to a route that needs a real object — and keeps the ones that merely name it (`Select`, `Generate`, `Copy Name`, `Generate Code`). The agent layer states it to a plan run in one sentence. Consumers gate on `=== true`, so an absent flag reads as "ordinary objects" |

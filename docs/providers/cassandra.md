@@ -1158,6 +1158,7 @@ because there are no table statistics to list at all.)
   supportsExternalQueryLimiting: true,
   supportsCreateTable: false,        // the modal cannot emit valid CQL, and a diff cannot derive the partition key (§5.5)
   supportsInlineRowEdit: false,      // one guessed key column is not a CQL primary key (§5.5)
+  supportsResultPagination: false,   // CQL has no OFFSET; prepareQuery throws rather than answer page two with page one (#816)
   supportsTransactions: false,       // CQL has no transaction; BATCH is not one (#464)
   declaresForeignKeys: false,        // the clause does not exist (§6.2)
   supportsMaintenance: false,        // every operation is a nodetool action (§8)

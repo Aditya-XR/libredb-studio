@@ -38,6 +38,13 @@ export interface WorkspaceConnection {
    * Additive and optional, like every field on this published interface. Absent
    * reads exactly as it did before the field existed — studio treats the provider
    * as unknown and falls back to SQL and to the base labels.
+   *
+   * `supportsResultPagination` is read from here (#816). It is gated on `=== true`, so a
+   * host that declares no capabilities, or declares them without that field, gets no Load
+   * More control. That is deliberate rather than an omission: only the host knows whether
+   * its `onQueryExecute` really applies a positive `offset`, and a control that re-fetches
+   * page one is worse than none. Declare it `true` once your implementation pages, and
+   * report `pagination.wasLimited` honestly — the control also requires that.
    */
   capabilities?: ProviderCapabilities;
   /** This provider's UI wording, as `getLabels()` reports it. See `capabilities`. */
@@ -352,6 +359,24 @@ export interface StudioWorkspaceProps {
   connections: WorkspaceConnection[];
   currentUser?: WorkspaceUser;
 
+  /**
+   * Runs one statement and answers with its rows.
+   *
+   * HONOUR `options.limit`. It is optional in the type and it has always been, but what travels in
+   * it changed with #816: the statement the workspace sends for a schema-tree click no longer
+   * carries a row bound of its own. It used to read `SELECT * FROM t LIMIT 50`, and a host that
+   * ignored the options was bounded by the text anyway; today the same click sends
+   * `SELECT * FROM t` with `{ limit: 50 }`, and a host that ignores it returns every row of the
+   * table.
+   *
+   * The bound left the text because nothing downstream could tell a preview cap the product
+   * generated from a bound the user typed, and a statement carrying its own bound is one no page
+   * after the first can be requested for.
+   *
+   * `offset` is what a Load More click asks for, and `limit` on that call is the size of the page
+   * already on screen. A host that cannot apply a positive `offset` should report
+   * `pagination.wasLimited: false`, which is what keeps the control from being offered at all.
+   */
   onQueryExecute: (
     connectionId: string,
     sql: string,

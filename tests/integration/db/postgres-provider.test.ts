@@ -2735,6 +2735,8 @@ describe("PostgresProvider", () => {
       // `UPDATE t SET c = v WHERE pk = v` is core PostgreSQL DML — exactly the
       // statement shape the inline row editor builds (#269).
       expect(caps.supportsInlineRowEdit).toBe(true);
+      // `LIMIT n OFFSET m` from the shared limiter (#816).
+      expect(caps.supportsResultPagination).toBe(true);
       // BEGIN/COMMIT/ROLLBACK run over one held pool client here, so the toolbar's
       // transaction trio and the sandbox toggle are offered (#464).
       expect(caps.supportsTransactions).toBe(true);
@@ -3993,7 +3995,7 @@ describe("object surface", () => {
       //
       // The rows are the DRIVER'S rows and the naming is left to `postgres.ts`, which is
       // the whole point: the provider spells a name schema-qualified except in `public`
-      // (`postgres.ts:2047`), so a fixture that returned finished names would assert the
+      // (`postgres.ts:2022`), so a fixture that returned finished names would assert the
       // fixture's spelling rather than the engine's. `public.audit_log` is the spelling
       // PostgreSQL NEVER produces, and this epic has already taken a Critical for writing
       // it, so the `public` row is here to be stripped: it reaches the reading as a bare
@@ -4300,6 +4302,40 @@ describe("PostgreSQL object listing and detail", () => {
     ]);
     expect(asked).toHaveLength(2);
     expect(asked[1]).not.toContain("pg_total_relation_size");
+    await provider.disconnect();
+  });
+
+  test("a server whose pg_class has no reltuples loses the count, not the folder", async () => {
+    // RisingWave 3.0.4, measured: its pg_class carries oid, relname, relnamespace,
+    // relowner, relpersistence, relkind, relpages, relam, reltablespace, reloptions,
+    // relispartition and relpartbound - no reltuples, and no pg_total_relation_size()
+    // either, so this listing is refused twice for two different reasons. The engine
+    // reports an unbindable column as a missing FROM-clause entry for the alias, which
+    // reads like a join defect and is not one: the join binds, the column does not.
+    const asked: string[] = [];
+    mockQueryFn = async (sql) => {
+      if (!sql.includes("relkind")) return { rows: [] };
+      asked.push(sql);
+      if (sql.includes("pg_total_relation_size")) {
+        throw new Error("Failed to bind expression: pg_total_relation_size(c.oid)");
+      }
+      if (sql.includes("reltuples")) {
+        throw new Error(
+          'Failed to bind expression: c.reltuples: Item not found: missing FROM-clause entry for table "c"',
+        );
+      }
+      return { rows: [{ name: "orders" }] };
+    };
+    const provider = makeProvider();
+    await provider.connect();
+
+    expect(await provider.listObjects(["app"], "table")).toEqual([
+      // Neither number was measured, so neither is claimed. The folder still lists.
+      { path: ["app", "orders"], name: "orders", kind: "table", rowCount: undefined, sizeBytes: undefined },
+    ]);
+    expect(asked).toHaveLength(3);
+    expect(asked[2]).not.toContain("reltuples");
+    expect(asked[2]).not.toContain("pg_total_relation_size");
     await provider.disconnect();
   });
 

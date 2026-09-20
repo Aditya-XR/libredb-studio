@@ -351,11 +351,15 @@ function redisScan(base: string): string {
  * "Select Top N" and "Generate Query" - because those are the statements this file
  * writes on the user's behalf.
  *
- * The Oracle and the fallthrough returns both ask this; SQL Server and Couchbase keep a
- * literal `;`, because both accept one. Oracle did not, and that is the one measurement
- * that moved: `SELECT * FROM app_customers FETCH FIRST 50 ROWS ONLY;` answers ORA-00933,
- * so clicking a table on Oracle had never once worked. See
- * `ProviderCapabilities.statementTerminator` for both measurements.
+ * `generateTableQuery`'s returns all ask this now. They did not always: Oracle and SQL
+ * Server had branches of their own to spell their row bound, and #816 removed the bound,
+ * which left the two branches doing nothing the shared return did not. `generateSelectQuery`
+ * still keeps a literal `;` in its SQL Server and Couchbase branches, because both accept
+ * one and neither branch has been touched.
+ *
+ * Oracle is the measurement that moved: `SELECT * FROM app_customers FETCH FIRST 50
+ * ROWS ONLY;` answers ORA-00933, so clicking a table on Oracle had never once worked.
+ * See `ProviderCapabilities.statementTerminator` for both measurements.
  */
 function terminator(capabilities: ProviderCapabilities): string {
   return capabilities.statementTerminator === "none" ? "" : ";";
@@ -388,6 +392,19 @@ function libredbNewlineNote(base: string): string | null {
  * labels it (standing ruling 2). Every dialect below that addresses by qualification gets
  * the whole path, and the three that address a single key or collection get the object's
  * own segment.
+ *
+ * NO SQL RETURN HERE CARRIES A ROW BOUND (#816). It used to: `LIMIT 50`, `FETCH FIRST 50
+ * ROWS ONLY`, `SELECT TOP 50`. Nothing downstream could then tell that preview cap from a
+ * bound the user typed, because both are text in the same string — and the limiter
+ * returns a self-bounded statement UNTOUCHED, discarding the offset with it, so the page
+ * after the first was the first again. The cap travels as the `limit` EXECUTION OPTION
+ * instead (`PREVIEW_PAGE_SIZE` in `use-tab-manager.ts`), which leaves a user-written
+ * `LIMIT n` with exactly one meaning: a hard bound we do not page past.
+ *
+ * The two JSON-language branches keep their own bound, and that is not an exception to
+ * the rule. Neither MongoDB nor Redis can be asked for page two at all
+ * (`supportsResultPagination: false`, measured), so their bound is the only one there is
+ * and no control is offered that a preview cap in the text could disengage.
  */
 export function generateTableQuery(
   path: readonly string[],
@@ -420,23 +437,17 @@ export function generateTableQuery(
     return JSON.stringify({ collection: tableName, operation: "find", filter: {}, options: { limit: 50 } }, null, 2);
   }
   const table = quoteObjectPath(path, capabilities);
-  // Couchbase (SQL++)
+  // Couchbase (SQL++). The one SQL branch left, and it is about the PROJECTION: the
+  // document key is not a column, so the grid has nothing to show without the alias.
   if (capabilities.defaultPort === COUCHBASE_PORT) {
-    return `SELECT ${COUCHBASE_KEY_PROJECTION}, ${COUCHBASE_ALIAS}.* FROM ${table} AS ${COUCHBASE_ALIAS} LIMIT 50;`;
+    return `SELECT ${COUCHBASE_KEY_PROJECTION}, ${COUCHBASE_ALIAS}.* FROM ${table} AS ${COUCHBASE_ALIAS}${terminator(capabilities)}`;
   }
-  // Oracle
-  if (capabilities.defaultPort === 1521) {
-    return `SELECT * FROM ${table} FETCH FIRST 50 ROWS ONLY${terminator(capabilities)}`;
-  }
-  // MSSQL
-  if (capabilities.defaultPort === 1433) {
-    return `SELECT TOP 50 * FROM ${table};`;
-  }
-  // PostgreSQL / MySQL / SQLite / ClickHouse / Elasticsearch / OpenSearch. The
-  // trailing LIMIT matters for ClickHouse specifically: it also accepts `FORMAT x`
-  // and `SETTINGS ...` as trailing clauses, and a LIMIT placed after either is a
-  // syntax error, so the limit must stay last (issue #264).
-  return `SELECT * FROM ${table} LIMIT 50${terminator(capabilities)}`;
+  // Every other SQL dialect, Oracle and SQL Server included. They had branches of their
+  // own only to spell their row bound — `FETCH FIRST 50 ROWS ONLY` and `SELECT TOP 50` —
+  // and with no bound to spell, one statement serves all of them. Issue #264's rule, that
+  // a ClickHouse bound must sit after any `FORMAT` or `SETTINGS` clause, is moot for the
+  // same reason: there is no generated bound to misplace.
+  return `SELECT * FROM ${table}${terminator(capabilities)}`;
 }
 
 /**
@@ -541,6 +552,13 @@ function redisCheatsheet(tableName: string, columns: readonly ColumnSchema[]): s
  * Takes the object's PATH for the same reason `generateTableQuery` does, and the two stay
  * in step: a user who clicks a row and a user who asks for the statement must be handed
  * the same address.
+ *
+ * IT KEEPS ITS `LIMIT 100`, and #816 left it there deliberately. The bound left
+ * `generateTableQuery` because that statement is RUN on the user's behalf, so its cap was
+ * the product's own and had to be distinguishable from one the user typed. This one is
+ * written into the editor and run only if the user presses Run, at which point it is a
+ * statement they chose to execute and its bound is theirs: a hard bound, honoured, and not
+ * paged past. Removing it would instead hand them an unbounded scan they never asked for.
  */
 export function generateSelectQuery(
   path: readonly string[],

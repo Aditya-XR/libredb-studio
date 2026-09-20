@@ -325,6 +325,11 @@ export abstract class BaseDatabaseProvider implements DatabaseProvider {
       supportsExternalQueryLimiting: true,
       supportsCreateTable: true,
       supportsInlineRowEdit: true,
+      // False, and NOT the permissive default the flag above takes: the `prepareQuery`
+      // below returns the statement untouched and never applies an offset, so a subclass
+      // that does not override BOTH would offer a page-two control its own query path
+      // answers with page one (#816).
+      supportsResultPagination: false,
       // False, unlike supportsInlineRowEdit above: this class implements no
       // transaction methods, so a subclass that does not add them has none, and
       // POST /api/db/transaction refuses the call. The four that hold a session for

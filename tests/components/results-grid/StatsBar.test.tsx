@@ -5,7 +5,7 @@ import "../../helpers/mock-navigation";
 import React from "react";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cleanup, fireEvent, render } from "@testing-library/react";
-import { LoadMoreFooter, StatsBar } from "@/components/results-grid/StatsBar";
+import { StatsBar } from "@/components/results-grid/StatsBar";
 import type { QueryResult } from "@/lib/types";
 import type { CellChange } from "@/components/ResultsGrid";
 
@@ -313,24 +313,154 @@ describe("results-grid/StatsBar", () => {
   });
 });
 
-describe("results-grid/LoadMoreFooter", () => {
+/**
+ * THE LOAD MORE CONTROL (#816, and the UI ruling on top of it).
+ *
+ * These are the `load-more-footer` cases from `tests/components/ResultsGrid.test.tsx`,
+ * MOVED rather than deleted. They could not stay: that file mock.module's this whole
+ * module, so its assertions were against a stub footer of its own making and would have
+ * gone on passing against a control that no longer exists. Here the real component
+ * renders. What stays in `ResultsGrid.test.tsx` is the decision it makes - whether an
+ * offer is handed down at all - which is that file's own subject.
+ *
+ * There is no chrome below the grid any more. The control is the `(more available)` text
+ * that already sat beside the row count, so the grid is the same height whether or not
+ * another page exists.
+ */
+describe("results-grid/StatsBar - the load-more control (#816)", () => {
   afterEach(() => {
     cleanup();
   });
 
-  test("renders nothing when hasMore is false", () => {
-    const { container } = render(<LoadMoreFooter hasMore={false} onLoadMore={mock(() => {})} />);
-    expect(container.textContent).toBe("");
+  const statsBar = (pageOffer?: { onLoadMore: () => void; pageSize: number }, isLoadingMore?: boolean) => (
+    <StatsBar
+      result={makeResult()}
+      filteredRowCount={2}
+      activeFilterCount={0}
+      onClearFilters={mock(() => {})}
+      viewMode="table"
+      onSetViewMode={mock(() => {})}
+      wrapText={false}
+      onToggleWrapText={mock(() => {})}
+      hasSensitive={false}
+      effectiveMaskingEnabled={false}
+      userCanToggle={false}
+      pageOffer={pageOffer}
+      isLoadingMore={isLoadingMore}
+    />
+  );
+
+  test("names the page size the click will actually fetch", () => {
+    // It was the literal "Load More (500 rows)". A table preview asks for 50, so that
+    // label promised ten times what the click delivered from the moment the preview cap
+    // stopped being written into the statement text.
+    const { queryByText } = render(statsBar({ onLoadMore: mock(() => {}), pageSize: 50 }));
+
+    expect(queryByText("load 50 more")).not.toBeNull();
+    expect(queryByText("load 500 more")).toBeNull();
   });
 
-  test("calls onLoadMore and shows loading state", () => {
-    const onLoadMore = mock(() => {});
-    const { queryByText, rerender } = render(<LoadMoreFooter hasMore onLoadMore={onLoadMore} isLoadingMore={false} />);
-    expect(queryByText("Load More (500 rows)")).not.toBeNull();
-    fireEvent.click(queryByText("Load More (500 rows)")!);
-    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  test("the control is a button in the stats strip, beside the row count", () => {
+    // The ruling in one assertion: no chrome below the grid. The control shares a parent
+    // with "2 rows", which is the strip itself, so nothing was added under the table.
+    const { getByText } = render(statsBar({ onLoadMore: mock(() => {}), pageSize: 50 }));
+    const control = getByText("load 50 more");
 
-    rerender(<LoadMoreFooter hasMore onLoadMore={onLoadMore} isLoadingMore />);
-    expect(queryByText("Loading...")).not.toBeNull();
+    expect(control.tagName).toBe("BUTTON");
+    expect(control.closest("span")!.textContent).toContain("2 rows");
+  });
+
+  test("clicking it asks for the next page", () => {
+    const onLoadMore = mock(() => {});
+    const { getByText } = render(statsBar({ onLoadMore, pageSize: 50 }));
+
+    fireEvent.click(getByText("load 50 more"));
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  test("a page in flight disables the control and says so", () => {
+    const onLoadMore = mock(() => {});
+    const { getByText, queryByText } = render(statsBar({ onLoadMore, pageSize: 50 }, true));
+
+    expect(queryByText("load 50 more")).toBeNull();
+    const control = getByText("Loading...");
+    expect((control.closest("button") as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(control);
+    expect(onLoadMore).not.toHaveBeenCalled();
+  });
+
+  test("renders no control, and no leftover row-count aside, when there is no offer", () => {
+    // `hasMore` alone is not the condition any more. `makeResult()` reports it true, and
+    // the strip still says nothing about another page: the offer is `ResultsGrid`'s
+    // three-way decision and it is the only thing this component reads.
+    const { container, queryByText, getByText } = render(statsBar(undefined));
+
+    expect(queryByText("load 2 more")).toBeNull();
+    expect(container.textContent).not.toContain("more available");
+    // And nothing clickable was left behind in the row-count span: that span is where
+    // the control lives when there is an offer, so a control rendered unconditionally
+    // fails here rather than only being mislabelled.
+    expect(
+      getByText(/2 rows/)
+        .closest("span")!
+        .querySelector("button"),
+    ).toBeNull();
+  });
+});
+
+/**
+ * Criterion 7: the grid says ONCE, beside the AUTO-LIMITED badge, that order across pages
+ * is not guaranteed. Whether it is said is `ResultsGrid`'s decision and is asserted there;
+ * this is about the sentence itself.
+ */
+describe("results-grid/StatsBar — the ordering notice (#816)", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  const statsBar = (orderAcrossPagesUnspecified?: boolean) => (
+    <StatsBar
+      result={makeResult()}
+      filteredRowCount={2}
+      activeFilterCount={0}
+      onClearFilters={mock(() => {})}
+      viewMode="table"
+      onSetViewMode={mock(() => {})}
+      wrapText={false}
+      onToggleWrapText={mock(() => {})}
+      hasSensitive={false}
+      effectiveMaskingEnabled={false}
+      userCanToggle={false}
+      orderAcrossPagesUnspecified={orderAcrossPagesUnspecified}
+    />
+  );
+
+  const BADGE = "ORDER NOT GUARANTEED";
+  const NOTICE = "Without an ORDER BY the engine may return rows that repeat or are skipped between pages.";
+
+  test("states the condition once, beside the auto-limited badge", () => {
+    const { queryAllByText, queryByTitle, getByText } = render(statsBar(true));
+
+    expect(queryAllByText(BADGE)).toHaveLength(1);
+    // Beside the badge, in the same left-hand group, so the two read as one sentence
+    // about the same bound rather than as a warning of their own.
+    expect(getByText(BADGE).parentElement).toBe(getByText("AUTO-LIMITED").parentElement);
+    // Terse in the strip, whole to anyone who hovers or listens: the sentence is on the
+    // title and in an sr-only span, the idiom the warning badge beside it already uses.
+    // A sentence of this length inline wraps the strip on a narrow panel, and a strip
+    // that changes height with the query is what deleting the footer was for.
+    expect(queryByTitle(NOTICE)).not.toBeNull();
+    expect(getByText(BADGE).textContent).toBe(`${BADGE}: ${NOTICE}`);
+  });
+
+  test("says nothing when the grid did not ask for it", () => {
+    const shown = render(statsBar(false));
+    expect(shown.queryByText(BADGE)).toBeNull();
+    expect(shown.queryByTitle(NOTICE)).toBeNull();
+    cleanup();
+    const absent = render(statsBar());
+    expect(absent.queryByText(BADGE)).toBeNull();
+    expect(absent.queryByTitle(NOTICE)).toBeNull();
   });
 });

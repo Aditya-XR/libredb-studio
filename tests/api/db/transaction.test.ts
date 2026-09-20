@@ -139,6 +139,15 @@ describe("POST /api/db/transaction", () => {
       rowCount: 1,
       executionTime: 10,
     }));
+    // The implementation, not just the call log: `mockClear()` above leaves a previous
+    // test's `mockImplementation` in place, and the pagination tests below install one.
+    // Restores `createMockProvider`'s default.
+    (mockTxProvider.prepareQuery as ReturnType<typeof mock>).mockImplementation((query: string) => ({
+      query: `${query} LIMIT 50`,
+      wasLimited: true,
+      limit: 50,
+      offset: 0,
+    }));
   });
 
   test("returns 401 when no session exists", async () => {
@@ -222,6 +231,73 @@ describe("POST /api/db/transaction", () => {
     expect(data.fields).toBeDefined();
     expect(data.pagination).toBeDefined();
     expect(data.pagination.wasLimited).toBeDefined();
+  });
+
+  /**
+   * `hasMore` requires that the bound is OURS, on THIS route too (#816).
+   *
+   * Neither the design nor its review names this endpoint, and it computes the same
+   * `hasMore` off the same `prepareQuery` call as `/api/db/query`. It is not a
+   * hypothetical second copy: `use-query-execution.ts:391` sends a run here whenever a
+   * transaction is open or the playground is driving, Load More included, so a control
+   * offered on a statement the limiter declined to rewrite would re-run it unchanged and
+   * append the rows already on screen. One field, one meaning, both routes.
+   */
+  test("offers no next page inside a transaction when the limiter left the statement alone", async () => {
+    (mockTxProvider.prepareQuery as ReturnType<typeof mock>).mockImplementation((query: string) => ({
+      query,
+      wasLimited: false,
+      limit: 2,
+      offset: 0,
+    }));
+    (mockTxProvider.queryInTransaction as ReturnType<typeof mock>).mockImplementation(async () => ({
+      rows: [{ id: 1 }, { id: 2 }],
+      fields: ["id"],
+      rowCount: 2,
+      executionTime: 3,
+    }));
+
+    const req = createMockRequest("/api/db/transaction", {
+      method: "POST",
+      body: { connection: validConnection, action: "query", sql: "SELECT * FROM users LIMIT 2" },
+    });
+
+    const data = await parseResponseJSON<{
+      pagination: { hasMore: boolean; wasLimited: boolean; limit: number };
+    }>(await POST(req as never));
+
+    // Exactly `limit` rows came back, which is the whole of the old condition.
+    expect(data.pagination.limit).toBe(2);
+    expect(data.pagination.wasLimited).toBe(false);
+    expect(data.pagination.hasMore).toBe(false);
+  });
+
+  test("still offers the next page inside a transaction when the bound is the limiter's", async () => {
+    // The control, paired with the negative above so neither can pass by accident.
+    (mockTxProvider.prepareQuery as ReturnType<typeof mock>).mockImplementation((query: string) => ({
+      query: `${query} LIMIT 2`,
+      wasLimited: true,
+      limit: 2,
+      offset: 0,
+    }));
+    (mockTxProvider.queryInTransaction as ReturnType<typeof mock>).mockImplementation(async () => ({
+      rows: [{ id: 1 }, { id: 2 }],
+      fields: ["id"],
+      rowCount: 2,
+      executionTime: 3,
+    }));
+
+    const req = createMockRequest("/api/db/transaction", {
+      method: "POST",
+      body: { connection: validConnection, action: "query", sql: "SELECT * FROM users" },
+    });
+
+    const data = await parseResponseJSON<{ pagination: { hasMore: boolean; wasLimited: boolean } }>(
+      await POST(req as never),
+    );
+
+    expect(data.pagination.wasLimited).toBe(true);
+    expect(data.pagination.hasMore).toBe(true);
   });
 
   // A row edit applied while a transaction is open takes this endpoint, so the

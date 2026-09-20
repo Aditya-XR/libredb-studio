@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1–D98, U17 · 44
+- [Drivers and connections](#drivers-and-connections) — D1–D98, U17 · 43
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U21 · 12
@@ -369,12 +369,12 @@ Found 2026-08-27 by the audit that closed the curated health projection's cap-as
 removed MySQL's fabricated "Performance schema not available" row; three providers still ship the
 same shape, in the same field:
 
-- `src/lib/db/providers/sql/postgres.ts:1239` - a database without `pg_stat_statements` answers
+- `src/lib/db/providers/sql/postgres.ts:1241` - a database without `pg_stat_statements` answers
   `[{ query: "pg_stat_statements extension not enabled", calls: 0, avgTime: "N/A" }]`.
-- `src/lib/db/providers/document/mongodb.ts:791` - a database whose profiler is off answers
+- `src/lib/db/providers/document/mongodb.ts:785` - a database whose profiler is off answers
   `[{ query: "Profiler not enabled. Run db.setProfilingLevel(1) to enable." }]`, and the outer catch
   at `:830` answers `[{ query: "Error fetching health info" }]` for a read that failed entirely.
-- `src/lib/db/providers/sql/sqlite.ts:721-731` - EVERY SQLite database answers two synthetic rows,
+- `src/lib/db/providers/sql/sqlite.ts:707-717` - EVERY SQLite database answers two synthetic rows,
   `Integrity: OK|FAILED` and `Journal Mode: <mode>`, about statements that were never executed.
 
 A sentence wearing a row's clothes is the fabrication the absence rule (#477) forbids, and here it is
@@ -392,8 +392,8 @@ file, and falsifies `src/lib/db/compatibility.ts:267`, `docs/providers/postgres.
 and `tests/helpers/sqlite-node-harness.ts:104`, all of which pin the current sentences.
 
 **The other path swallows instead of fabricating, and that is not better.** On the `slow-queries`
-reading the agent actually uses, `src/lib/db/providers/keyvalue/redis.ts:635-637` and
-`src/lib/db/providers/document/mongodb.ts:1047-1049` `return []` from their catch where MySQL now
+reading the agent actually uses, `src/lib/db/providers/keyvalue/redis.ts:622-624` and
+`src/lib/db/providers/document/mongodb.ts:1041-1043` `return []` from their catch where MySQL now
 rejects. So a denied grant reaches the model as an empty reading, and the run prompt tells it
 `"A reading that comes back EMPTY is an answer, not a failure - no blocked session, no slow query,
 no unused index is what a healthy server looks like"` (`src/lib/agent/investigation.ts:1485`). It
@@ -424,12 +424,12 @@ MongoDB's `getOverview()` catch now omits it too.
   `databaseSize: TRINO_UNAVAILABLE_TEXT`, and `sql/search/index.ts:849` pairs `sizeBytes ?? 0` with
   `databaseSize: SEARCH_UNKNOWN_TEXT` for both `elasticsearch` and `opensearch`.
 - Swallowed into an initialiser the way D40's connection counts were: `sql/mssql.ts:1111`,
-  `sql/oracle.ts:1178`, `sql/sqlite.ts:808`.
+  `sql/oracle.ts:1154`, `sql/sqlite.ts:794`.
 - Coerced by a helper that returns 0 for an absent row: `sql/druid/introspect.ts:578` and
   `sql/clickhouse/index.ts:833` through their local `asNumber`.
-- Coerced inline: `sql/postgres.ts:1397` and `sql/mysql.ts:1156` (`parseInt(... || "0")`),
+- Coerced inline: `sql/postgres.ts:1360` and `sql/mysql.ts:1158` (`parseInt(... || "0")`),
   `sql/libsql/introspect.ts:399` and `document/couchbase/index.ts:606` (`?? 0`),
-  `keyvalue/redis.ts:603`, and `embedded/libredb.ts:709`, whose `fileSizeBytes()` returns 0 when the
+  `keyvalue/redis.ts:590`, and `embedded/libredb.ts:709`, whose `fileSizeBytes()` returns 0 when the
   `statSync` throws.
 
 **The consumer makes it visible.** `src/components/monitoring/tabs/StorageTab.tsx` keys its entire
@@ -510,7 +510,7 @@ correct in isolation and only the running product puts them together.
 `TablesTab.tsx:390` calls `handleMaintenance(type, table.tableName)` - the BARE table name - from a
 row whose very next line (`:350`) renders `table.schemaName` beside it. Every provider's
 `qualifyMaintenanceTarget` then supplies a default schema for an unqualified target:
-`postgres.ts:1285` returns `"public." + escapeIdentifier(target)`, and
+`postgres.ts:1287` returns `"public." + escapeIdentifier(target)`, and
 `duckdb/index.ts:712` returns `"main"."<target>"`. So the statement names a table that is not there.
 
 Measured on DuckDB v1.5.5, clicking **Analyze Table** on the `analytics.events` row:
@@ -1226,12 +1226,12 @@ Every other `file.ts:NNNN` in the repository is hand-copied prose, and a sample 
 
 | Citation | Cited in | Anchor actually at |
 |---|---|---|
-| `postgres.ts:915` (`queryReadOnly`) | `docs/AGENT_GUIDE.md:925` | 2396 |
-| `postgres.ts:889` (`BEGIN READ ONLY`) | `docs/AGENT_ANALYST_DESIGN.md:400`, `:718` | 2415 |
-| `postgres.ts:892` (`SET LOCAL statement_timeout`) | `src/lib/agent/tools.ts:1552` | 2418 |
-| `postgres.ts:2095-2099` (`{ ...baseConfig, connectionString }`) | `src/lib/db/connection-fingerprint.ts:67`, `tests/api/db/objects/edit-apply.test.ts:91`, `tests/unit/lib/db/connection-fingerprint.test.ts` x3 | 2256-2262 |
-| `postgres.ts:1239` (`pg_stat_statements extension not enabled`) | `docs/BACKLOG.md:326` | 4001 |
-| `postgres.ts:1285` (`"public." + escapeIdentifier`) | `docs/BACKLOG.md:467` | 4048 |
+| `postgres.ts:917` (`queryReadOnly`) | `docs/AGENT_GUIDE.md:925` | 2396 |
+| `postgres.ts:891` (`BEGIN READ ONLY`) | `docs/AGENT_ANALYST_DESIGN.md:400`, `:718` | 2415 |
+| `postgres.ts:894` (`SET LOCAL statement_timeout`) | `src/lib/agent/tools.ts:1552` | 2418 |
+| `postgres.ts:2070-2074` (`{ ...baseConfig, connectionString }`) | `src/lib/db/connection-fingerprint.ts:67`, `tests/api/db/objects/edit-apply.test.ts:91`, `tests/unit/lib/db/connection-fingerprint.test.ts` x3 | 2256-2262 |
+| `postgres.ts:1241` (`pg_stat_statements extension not enabled`) | `docs/BACKLOG.md:326` | 4001 |
+| `postgres.ts:1287` (`"public." + escapeIdentifier`) | `docs/BACKLOG.md:467` | 4048 |
 | `source-applier.ts:155` (the silent-status sentence) | `tests/components/object-source/ApplyPreviewDialog.test.tsx:1092` | `whenSilent`, elsewhere |
 | `StudioWorkspace.tsx:494` (`<main className="flex-1 overflow-hidden relative">`) | `docs/BACKLOG.md:1360` | 823 |
 | `StudioWorkspace.tsx:833` (the `ObjectSourceView` mount) | `docs/BACKLOG.md:1145` | 919 |
@@ -1257,7 +1257,7 @@ accept, a single line, a range and a comma pair, and one negative that fails whe
 
 ### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses two exports
 
-`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 37 hits, measured 2026-09-15. Six of
+`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 38 hits, re-measured 2026-09-20. Seven of
 them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`,
 the agent routes' pattern). Twenty-nine write out the same five-key object - `getSession`, `signJWT`,
 `verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token
@@ -1380,20 +1380,6 @@ There is nothing to fix inside this repository: the queue that is dropped belong
 What can be done is to re-probe, and to stop the claim drifting back to "whole output" in the meantime.
 
 **Done when:** the focused repro has been run against a bun newer than 1.4.2 under the same load, and either it is whole 10 times out of 10 and this entry closes, or the entry names the newest version it still reproduces on and is reported upstream.
-
-### D97. A committed `.only` makes a file report PASS with the rest of its tests never run
-
-Measured 2026-09-15 on bun 1.4.2, while reviewing #837.
-bun honours `.only` by default, and nothing in the runner, the lint configuration or the required checks refuses one that reaches `main`.
-A fixture holding `it.only`, a failing `it`, a `describe.todo` and a `describe.concurrent` with two more tests wrote a junit report of `tests="1" failures="0"`, exited 0, and the runner printed `PASS 0.0s tests/unit/only.test.ts 1 pass`; the same file without the `.only` registers five tests.
-So four registered tests, one of them failing, are absent from the report, from the run's totals and from CI's verdict, and the run is green.
-
-The runner cannot close this from the report it reads, which is why `toOutcome`'s docblock now names `.only` as the shape the report cannot see.
-bun's report is honest about the one test it ran; the file that should have been refused is the one on disk.
-It has to be refused before the run, and there are two cheap shapes: an `eslint-plugin-no-only-tests` rule (or oxlint's `jest/no-focused-tests`) scoped to `tests/**` and `e2e/**`, or a grep over the same paths inside the required `Lint, Typecheck and Build` check, which costs one command and no new dependency.
-The coverage gate is not a reliable second line of defence either: whether it goes red depends on which lines the unrun tests were the only cover for, which is a property of the file rather than of the `.only` (reasoned, not measured).
-
-**Done when:** a file carrying `it.only`, `test.only` or `describe.only` under `tests/` or `e2e/` fails a required check, and a test pins that gate by driving it over a fixture that carries one, with a control fixture that does not and passes.
 
 ## Value interpolation
 
@@ -2051,7 +2037,7 @@ that the moderation lag is accepted permanently and this entry is deleted.
 
 ---
 
-### REL4. `backlog-structure.test.ts` scans gitignored files, so a local draft fails a gate CI cannot
+### REL4. Two tests scan gitignored files, so a local draft fails a gate CI cannot
 
 The citation scan globs `docs/**/*.md` and reads whatever is on disk. `.gitignore:133` excludes
 `docs/superpowers/`, where plans, specs and run reports are written during a working session, and
@@ -2068,10 +2054,17 @@ real damage.
 `tests/unit/agent-documentation.test.ts` asks the same question of `docs/AGENT.md` alone and does
 not have the problem, because it names one file rather than a glob.
 
-**Done when:** the scan enumerates tracked files, for example by driving the glob through
-`git ls-files` and intersecting, so a working tree with local drafts under `docs/` gives the same
-verdict as a clean checkout. The scan's own floor assertion (`scanned.length > 200`) stays, so a
-broken enumeration still fails loudly rather than passing vacuously.
+`tests/unit/published-credentials.test.ts` is the same defect in a second test, measured while
+cutting 0.16.1. It walks the working tree for published passwords, and `deploy/rancher/results/` -
+gitignored at `.gitignore:162`, written by the Rancher E2E run skill - holds the per-scenario
+`secrets.txt` files that run generates. Six offenders in `assigns no admin or user password
+anywhere` and one in `hands no working password to a login example`, all from paths CI never checks
+out. Its floor assertion needs the same treatment as the citation scan's.
+
+**Done when:** both scans enumerate tracked files, for example by driving the glob through
+`git ls-files` and intersecting, so a working tree with local drafts under `docs/` or `deploy/`
+gives the same verdict as a clean checkout. Each scan's own floor assertion stays, so a broken
+enumeration still fails loudly rather than passing vacuously.
 
 ## Chart configuration surface
 

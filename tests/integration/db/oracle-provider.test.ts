@@ -994,9 +994,10 @@ describe("OracleProvider", () => {
       // The declaration and its one consumer, so a future edit that drops the field is a
       // failure here rather than an ORA-00933 the next user meets by clicking.
       const caps = provider.getCapabilities();
-      expect(generateTableQuery(["APP", "APP_CUSTOMERS"], caps)).toBe(
-        "SELECT * FROM APP.APP_CUSTOMERS FETCH FIRST 50 ROWS ONLY",
-      );
+      // The polarity of this guard is unchanged: no trailing `;`, because that is what
+      // Oracle answers ORA-00933 for. What moved is the row bound, which #816 took out of
+      // the generated text and into the `limit` execution option.
+      expect(generateTableQuery(["APP", "APP_CUSTOMERS"], caps)).toBe("SELECT * FROM APP.APP_CUSTOMERS");
       expect(generateSelectQuery(["APP", "APP_CUSTOMERS"], [], caps)).toBe(
         "SELECT\n  *\nFROM APP.APP_CUSTOMERS\nWHERE 1=1\nFETCH FIRST 100 ROWS ONLY",
       );
@@ -1018,6 +1019,9 @@ describe("OracleProvider", () => {
       // `UPDATE t SET c = v WHERE pk = v` is core Oracle DML — the shape the inline
       // row editor builds (#269).
       expect(caps.supportsInlineRowEdit).toBe(true);
+      // `OFFSET m ROWS FETCH NEXT n ROWS ONLY` from this provider's own override; page
+      // one is `FETCH FIRST n ROWS ONLY` (#816).
+      expect(caps.supportsResultPagination).toBe(true);
       // One held connection carries the transaction, so the trio is offered (#464).
       expect(caps.supportsTransactions).toBe(true);
       // Inherited from the base capabilities: this engine declares foreign keys, so
@@ -2870,7 +2874,7 @@ describe("object surface", () => {
       //
       // The rows are the DRIVER'S rows and the naming is left to `oracle.ts`, which spells
       // a flat name BARE: the read is scoped to the connection owner by `WHERE OWNER = :1`
-      // (`oracle.ts:1516`), so the owner is a fact about the statement rather than a
+      // (`oracle.ts:1492`), so the owner is a fact about the statement rather than a
       // qualifier on the answer, and every name comes back unqualified against a
       // `[owner, name]` path. A fixture that returned `APP.APP_ORDERS` would assert a
       // spelling this provider never produces.

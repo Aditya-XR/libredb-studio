@@ -992,6 +992,10 @@ describe("ElasticsearchProvider metadata", () => {
       supportsExternalQueryLimiting: true,
       supportsCreateTable: false,
       supportsInlineRowEdit: false,
+      // Elasticsearch SQL has no `OFFSET` clause: `prepareQuery` THROWS rather than
+      // answer page two with page one, and this hides the control that would
+      // provoke it. OpenSearch, the same implementation, declares true (#816).
+      supportsResultPagination: false,
       supportsTransactions: false,
       declaresForeignKeys: false,
       supportsMaintenance: false,
@@ -1047,7 +1051,8 @@ describe("ElasticsearchProvider metadata", () => {
     const capabilities = new ElasticsearchProvider(makeConnection()).getCapabilities();
 
     expect(capabilities.statementTerminator).toBe("none");
-    expect(generateTableQuery(["orders"], capabilities)).toBe("SELECT * FROM orders LIMIT 50");
+    // No row bound since #816: the preview cap rides the `limit` execution option.
+    expect(generateTableQuery(["orders"], capabilities)).toBe("SELECT * FROM orders");
   });
 
   test("declares no explain format at all, which is what hides the button and the tab", () => {
