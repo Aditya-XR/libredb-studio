@@ -433,8 +433,8 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       ...(type === "mssql" && instanceName ? { instanceName } : {}),
       ...(type === "cassandra" && localDataCenter ? { localDataCenter } : {}),
       ...(type === "mongodb" && authSource ? { authSource } : {}),
-      ...(type === "elasticsearch" && apiKeyId ? { apiKeyId } : {}),
-      ...(type === "elasticsearch" && apiKeySecret ? { apiKeySecret } : {}),
+      ...(addressedFields.has("apiKeyId") && apiKeyId ? { apiKeyId } : {}),
+      ...(addressedFields.has("apiKeySecret") && apiKeySecret ? { apiKeySecret } : {}),
       // Written only when it says something, like every other optional field here: a
       // stored `false` is noise on every connection ever saved.
       ...(skipObjectScan ? { skipObjectScan } : {}),

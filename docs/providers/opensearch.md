@@ -426,6 +426,7 @@ The form offers exactly four fields
 | `host` | **Yes** | `validate()` ([index.ts:529](../../src/lib/db/providers/sql/search/index.ts)) throws `DatabaseConfigError` — "OpenSearch requires a host" |
 | `port` | No | Defaults to `9200` ([index.ts:151](../../src/lib/db/providers/sql/search/index.ts)); the fork kept the upstream port. The container fixture publishes **9201** on the host, which is a collision on that machine rather than a fact about the product |
 | `user` / `password` | No | Sent as HTTP Basic **only when `user` is set**, for the security plugin. Measured with the plugin disabled: a bogus `Basic` header is *ignored* (HTTP 200), so credentials are genuinely optional. Note that a **default** distribution enables the plugin, serves HTTPS with a self-signed certificate and requires an admin password — see [§4.3](#43-tls) |
+| `apiKeyId` / `apiKeySecret` | — | **Not offered, and refused if set.** Elasticsearch's `Authorization: ApiKey` scheme ([elasticsearch.md §3.7a](./elasticsearch.md#37a-api-key-auth-708)). Nothing here has measured whether this product's security plugin accepts it, so a seed or stored connection that carries the pair is refused (`DatabaseConfigError`) rather than sent as Basic or as a guessed header. The seed schema and the seed projection refuse it the same way, so it cannot list as a connection that silently falls back. |
 | `ssl` | No | Any mode but `disable` switches the transport to `https` ([§4.3](#43-tls)) |
 | `database` | — | **Not offered, and ignored if set** — see below |
 

@@ -281,8 +281,10 @@ export interface DatabaseConnection {
   /**
    * Elasticsearch only (#708): an API key pair, sent as `Authorization: ApiKey
    * base64(apiKeyId:apiKeySecret)` in preference to `user`/`password` when both halves
-   * are set. Half a pair (one field with no other) is not a shorter key, so it falls
-   * back to `user`/`password` rather than sending a key built from an empty secret.
+   * are set (each half trimmed first). Half a pair (one field with no other) is not a
+   * shorter key, so it falls back to `user`/`password` rather than sending a key built
+   * from an empty secret. OpenSearch refuses the pair: nothing has measured whether
+   * its security plugin accepts the same scheme.
    *
    * `apiKeyId` is classified `secret` in connection-secrets.ts, not `public` the way
    * `user` is: unlike a name an operator chose, it is one generated, opaque half of a

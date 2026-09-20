@@ -138,6 +138,30 @@ describe("credential-resolver vault scheme", () => {
     expect(resolved.user).toBe("vaultuser");
   });
 
+  it("resolves a ${vault:...} reference on the Elasticsearch API key secret", async () => {
+    process.env.VAULT_ADDR = "http://127.0.0.1:8200";
+    process.env.VAULT_TOKEN = "root";
+
+    const resolved = await resolveVaultCredentials(
+      {
+        ...baseConn,
+        type: "elasticsearch",
+        apiKeyId: "seed-key-id",
+        apiKeySecret: "${vault:secret/data/prod/elastic#apiKeySecret}",
+      },
+      {
+        fetch: (async () =>
+          new Response(JSON.stringify({ data: { data: { apiKeySecret: "vault-key-secret" } } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })) as unknown as typeof fetch,
+      },
+    );
+
+    expect(resolved.apiKeyId).toBe("seed-key-id");
+    expect(resolved.apiKeySecret).toBe("vault-key-secret");
+  });
+
   it("raises on a ${vault:...} reference with no #key", async () => {
     process.env.VAULT_ADDR = "http://127.0.0.1:8200";
     process.env.VAULT_TOKEN = "root";

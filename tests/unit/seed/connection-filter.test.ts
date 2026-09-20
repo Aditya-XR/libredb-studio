@@ -82,6 +82,44 @@ describe("filterByRoles: engine-specific fields", () => {
 
     expect(managed.authSource).toBe("admin");
   });
+
+  it("carries an Elasticsearch connection's API key pair through to the managed connection", () => {
+    // Same silent-loss shape as authSource above (#708). Deleting either half from
+    // the mapper left every suite green: the seed validated, the connection listed,
+    // and the transport fell back to user/password on a key that works.
+    const [managed] = filterByRoles(
+      [
+        {
+          ...baseConn,
+          type: "elasticsearch",
+          port: 9200,
+          apiKeyId: "seed-key-id",
+          apiKeySecret: "seed-key-secret",
+        },
+      ],
+      ["user"],
+    );
+
+    expect(managed.apiKeyId).toBe("seed-key-id");
+    expect(managed.apiKeySecret).toBe("seed-key-secret");
+  });
+
+  it("refuses an API key pair on OpenSearch rather than projecting it", () => {
+    expect(() =>
+      filterByRoles(
+        [
+          {
+            ...baseConn,
+            type: "opensearch",
+            port: 9200,
+            apiKeyId: "seed-key-id",
+            apiKeySecret: "seed-key-secret",
+          },
+        ],
+        ["user"],
+      ),
+    ).toThrow(/Elasticsearch-only/);
+  });
   it("carries a Trino connection's session schema through to the managed connection", () => {
     const [managed] = filterByRoles(
       [{ ...baseConn, type: "trino", port: 8080, database: "memory", schema: "default" }],

@@ -68,6 +68,7 @@
  * no unmeasured fault name is listed in the tables below.
  */
 
+import { DatabaseConfigError } from "@/lib/db/errors";
 import type { DatabaseConnection } from "@/lib/db/types";
 import {
   type SearchClusterHealth,
@@ -1121,9 +1122,22 @@ export class SearchHttpTransport implements SearchTransport {
     // that was added on purpose. A HALF-configured pair is not a shorter key - it is
     // one field left over from switching schemes - so it falls through to Basic/none
     // exactly as if it were never set, rather than sending `ApiKey base64("id:")`.
+    //
+    // Both halves are trimmed first: a trailing newline in either half measured as
+    // HTTP 401 on a key that works once the whitespace is gone. OpenSearch is not a
+    // silent drop - the dialect flag is false, so a pair that arrived here (a seed
+    // with no type gate, a stored connection) is refused rather than sent as Basic.
+    const apiKeyId = config.apiKeyId?.trim() ?? "";
+    const apiKeySecret = config.apiKeySecret?.trim() ?? "";
+    if (!this.spec.supportsApiKeyAuth && (apiKeyId || apiKeySecret)) {
+      throw new DatabaseConfigError(
+        `${this.spec.label} does not accept API key authentication. Elasticsearch publishes Authorization: ApiKey; nothing here has measured whether OpenSearch's security plugin accepts that scheme, so the pair is refused rather than sent as Basic or as a guessed header.`,
+        this.dialect,
+      );
+    }
     this.authorization =
-      this.spec.supportsApiKeyAuth && config.apiKeyId && config.apiKeySecret
-        ? `ApiKey ${Buffer.from(`${config.apiKeyId}:${config.apiKeySecret}`).toString("base64")}`
+      this.spec.supportsApiKeyAuth && apiKeyId && apiKeySecret
+        ? `ApiKey ${Buffer.from(`${apiKeyId}:${apiKeySecret}`).toString("base64")}`
         : config.user
           ? `Basic ${Buffer.from(`${config.user}:${config.password ?? ""}`).toString("base64")}`
           : undefined;

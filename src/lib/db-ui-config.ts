@@ -227,7 +227,7 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     // apiKeyId/apiKeySecret here and not on opensearch below (#708): the transport
     // sends them only when its dialect spec says the product accepts the ApiKey wire
     // scheme, which nothing has measured for OpenSearch. Offering the fields there
-    // would let an operator fill in a pair the transport can never send.
+    // would let an operator fill in a pair the transport refuses rather than sends.
     connectionFields: ["host", "port", "user", "password", "apiKeyId", "apiKeySecret"],
   },
   opensearch: {

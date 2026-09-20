@@ -1235,9 +1235,7 @@ describe("ElasticsearchProvider validation", () => {
   // Elasticsearch's published wire contract for its own auth scheme (elastic.co/docs/
   // deploy-manage/api-keys/elasticsearch-api-keys), the same status the Basic-auth
   // tests above are in - they assert what THIS CODE sends, not what a server does with
-  // it. OpenSearch is out of scope: nothing here has measured whether its security
-  // plugin accepts the same scheme, and the UI never offers these fields for it (see
-  // db-ui-config.ts), so there is no reachable state that would need one.
+  // it. OpenSearch refuses the pair rather than dropping it: see the sibling file.
   test("sends an API key pair as an ApiKey header, in preference to user/password", async () => {
     const provider = await connectProvider({
       apiKeyId: "EWkMhKACjF5eHMlg6Car",
@@ -1251,6 +1249,35 @@ describe("ElasticsearchProvider validation", () => {
     expect(Buffer.from(header.replace("ApiKey ", ""), "base64").toString()).toBe(
       "EWkMhKACjF5eHMlg6Car:y9cTq7AQ4u16CO_sKM0Knp",
     );
+    await provider.disconnect();
+  });
+
+  test("trims both API key halves before the half-filled guard and the encode", async () => {
+    // A trailing newline in either half measured as HTTP 401 on a key that works
+    // once the whitespace is gone. Trim has to happen before the truthiness check,
+    // otherwise `"id\\n"` plus `""` would look complete and encode the newline.
+    const provider = await connectProvider({
+      apiKeyId: "seed-key-id\n",
+      apiKeySecret: " seed-key-secret ",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("ApiKey ")).toBe(true);
+    expect(Buffer.from(header.replace("ApiKey ", ""), "base64").toString()).toBe("seed-key-id:seed-key-secret");
+    await provider.disconnect();
+  });
+
+  test("whitespace-only halves are empty, not a shorter key", async () => {
+    const provider = await connectProvider({
+      apiKeyId: "  \n",
+      apiKeySecret: "seed-key-secret",
+      user: "reader",
+      password: "s3cret",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("Basic ")).toBe(true);
+    expect(Buffer.from(header.replace("Basic ", ""), "base64").toString()).toBe("reader:s3cret");
     await provider.disconnect();
   });
 
