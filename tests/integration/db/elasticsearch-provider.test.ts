@@ -1236,10 +1236,18 @@ describe("ElasticsearchProvider validation", () => {
   // deploy-manage/api-keys/elasticsearch-api-keys), the same status the Basic-auth
   // tests above are in - they assert what THIS CODE sends, not what a server does with
   // it. OpenSearch refuses the pair rather than dropping it: see the sibling file.
+  //
+  // The halves read as fixtures rather than as a realistic key on purpose. A
+  // base64-shaped literal of that length trips gitleaks' `generic-api-key` rule, and
+  // the only way to keep one is a `.gitleaksignore` fingerprint, which is pinned to a
+  // commit SHA: it covers the commit that introduced the literal and nothing else, so
+  // the same literal re-added later, or carried into a squashed commit, is a finding
+  // again. What this test asserts is the ENCODING, which does not care what the halves
+  // look like. Do not "restore realism" here.
   test("sends an API key pair as an ApiKey header, in preference to user/password", async () => {
     const provider = await connectProvider({
-      apiKeyId: "EWkMhKACjF5eHMlg6Car",
-      apiKeySecret: "y9cTq7AQ4u16CO_sKM0Knp",
+      apiKeyId: "elastic-api-key-id-fixture",
+      apiKeySecret: "elastic-api-key-secret-fixture",
       user: "reader",
       password: "s3cret",
     });
@@ -1247,7 +1255,7 @@ describe("ElasticsearchProvider validation", () => {
     const header = sent[0].auth ?? "";
     expect(header.startsWith("ApiKey ")).toBe(true);
     expect(Buffer.from(header.replace("ApiKey ", ""), "base64").toString()).toBe(
-      "EWkMhKACjF5eHMlg6Car:y9cTq7AQ4u16CO_sKM0Knp",
+      "elastic-api-key-id-fixture:elastic-api-key-secret-fixture",
     );
     await provider.disconnect();
   });
