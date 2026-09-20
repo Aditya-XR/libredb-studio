@@ -16,6 +16,7 @@ function diffColumns(sourceCols: readonly ColumnSchema[], targetCols: readonly C
         targetType: col.type,
         targetNullable: col.nullable,
         targetDefault: col.defaultValue,
+        targetDefaultSql: col.defaultExpression,
         targetIsPrimary: col.isPrimary,
         changes: [`Added column "${name}" (${col.type})`],
       });
@@ -67,6 +68,7 @@ function diffColumns(sourceCols: readonly ColumnSchema[], targetCols: readonly C
         targetNullable: targetCol.nullable,
         sourceDefault: sourceCol.defaultValue,
         targetDefault: targetCol.defaultValue,
+        targetDefaultSql: targetCol.defaultExpression,
         sourceIsPrimary: sourceCol.isPrimary,
         targetIsPrimary: targetCol.isPrimary,
         changes,
@@ -232,6 +234,7 @@ export function diffSchemas(source: readonly StoredObject[], target: readonly St
           targetType: c.type,
           targetNullable: c.nullable,
           targetDefault: c.defaultValue,
+          targetDefaultSql: c.defaultExpression,
           targetIsPrimary: c.isPrimary,
           changes: [`Added column "${c.name}" (${c.type})`],
         })),

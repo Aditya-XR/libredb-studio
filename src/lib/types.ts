@@ -310,6 +310,24 @@ export interface ColumnSchema {
   nullable: boolean;
   isPrimary: boolean;
   defaultValue?: string;
+  /**
+   * The SQL TEXT that produces {@link defaultValue}, as the engine's own catalog spells it,
+   * where a provider measured that the text is valid SQL for that engine.
+   *
+   * It exists for the same reason `baseType` does: a reader that is DECIDING needs a
+   * different field from a reader that is DISPLAYING. `defaultValue` is the VALUE the column
+   * defaults to, which is what the object browser and the diff summary show; this is what
+   * goes after the word DEFAULT, and a reader EMITTING SQL must prefer it. The two are
+   * genuinely different strings: MariaDB's `DEFAULT 'abc'` has the value `abc` and the
+   * expression `'abc'`, and `CREATE TABLE t (note varchar(20) DEFAULT abc)` is ERROR 1054 on
+   * that server while `DEFAULT 'abc'` is accepted (measured on 12.3.2).
+   *
+   * A provider sets it ONLY where it measured that its catalog text is valid SQL. Absence
+   * means unknown, never "there is no expression": MySQL reports the evaluated value with an
+   * EXTRA that cannot say whether the text is SQL, so it declares nothing here rather than
+   * inventing a quoting rule.
+   */
+  defaultExpression?: string;
 }
 
 export interface IndexSchema {

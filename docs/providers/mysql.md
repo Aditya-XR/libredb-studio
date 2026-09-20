@@ -934,6 +934,13 @@ SQL NULL is absence on both.
 A generated column is absence on both, recognised by `EXTRA` being exactly `STORED GENERATED` or `VIRTUAL GENERATED`: the match is on the whole value because MySQL also writes `DEFAULT_GENERATED` for an ordinary expression default, where MariaDB writes nothing.
 On MariaDB the remaining text is decoded by `unquoteLiteral()` (`src/lib/sql/values.ts`), the inverse of the `quoteLiteral()` this repo already uses for this family, so the doubled quote and the escaping backslash are both undone; text that is not exactly one literal, such as `current_timestamp()` or `concat('x','y')`, passes through as written.
 
+**Each column carries both readings, and only where they were measured.**
+`defaultValue` is the value the column defaults to, which is what the object browser shows.
+`defaultExpression` is the SQL text that produces it, which is what a reader emitting DDL, the schema-diff migration generator above all, must write after the word `DEFAULT`.
+On MariaDB both are set: the catalog text is always valid SQL there, every form in the table above included, so the expression is the raw text unchanged.
+On MySQL only `defaultValue` is set, and that is deliberate: `abc` is a value and is not valid after `DEFAULT`, while `b'1'` and `0x616263` are SQL, and all three arrive with an EMPTY `EXTRA`, so nothing in the row tells them apart.
+An absent `defaultExpression` means unknown, never "there is no expression", and the generator then falls back to the value as it did before, which on MySQL keeps the pre-existing unquoted `DEFAULT abc` rather than inventing a quoting rule the catalog cannot justify.
+
 One limit this does not repair, because the engine does not allow it.
 MySQL's own parenthesised expression defaults read back charset-introduced and backslash-escaped, `concat(_latin1\'x\',_latin1\'y\')`, which is not what the user wrote and is not round-trippable.
 Those pass through as reported.

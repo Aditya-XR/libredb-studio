@@ -9,6 +9,15 @@ export interface ColumnDiff {
   targetNullable?: boolean;
   sourceDefault?: string;
   targetDefault?: string;
+  /**
+   * The SQL text that produces `targetDefault`, carried from `ColumnSchema.defaultExpression`
+   * and preferred by every site that emits a DEFAULT clause. Absent where the provider could
+   * not say, and then the generator falls back to `targetDefault`.
+   *
+   * The target only: `sourceDefault` is compared and read for a ClickHouse REMOVE keyword,
+   * and is never interpolated into emitted SQL.
+   */
+  targetDefaultSql?: string;
   sourceIsPrimary?: boolean;
   targetIsPrimary?: boolean;
   changes: string[];

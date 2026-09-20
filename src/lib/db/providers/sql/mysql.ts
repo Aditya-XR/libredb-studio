@@ -1751,8 +1751,9 @@ const CATALOG_DEFAULT_READING: Record<MySQLFlavour, CatalogDefaultReading> = {
 const GENERATED_COLUMN_EXTRA = new Set(["STORED GENERATED", "VIRTUAL GENERATED"]);
 
 /**
- * One catalog row's default, as the value the column really defaults to, or `undefined`
- * when it has none.
+ * One catalog row's default, as BOTH readings a column can have: the value it really
+ * defaults to, and the SQL text that produces that value where this server's catalog text is
+ * valid SQL. An empty object is a column with no default at all, and neither field is set.
  *
  * The order is part of the contract:
  *
@@ -1769,16 +1770,27 @@ function catalogDefault(
   raw: string | null,
   extra: string | null | undefined,
   reading: CatalogDefaultReading,
-): string | undefined {
-  if (raw === null) return undefined;
+): { defaultValue?: string; defaultExpression?: string } {
+  if (raw === null) return {};
   // `undefined` is a row that carries no EXTRA at all, which is the shape every OTHER mock
   // in the suite produces and a truthful reading: nothing said this column was generated.
   if (extra !== null && extra !== undefined && GENERATED_COLUMN_EXTRA.has(extra.trim().toUpperCase())) {
-    return undefined;
+    return {};
   }
-  if (reading.absence === "null-keyword" && raw === "NULL") return undefined;
-  if (reading.literal === "as-written") return unquoteLiteral(raw, "mysql") ?? raw;
-  return raw;
+  if (reading.absence === "null-keyword" && raw === "NULL") return {};
+  // MariaDB's catalog text is always valid SQL for MariaDB: measured on 12.3.2, every form
+  // it reports - `'abc'`, `''`, `42`, `b'1'`, `x'616263'`, `'2020-01-01'`,
+  // `current_timestamp()`, `concat('x','y')` - can be pasted back after the word DEFAULT. So
+  // the expression is the raw text, unchanged, and the value is it decoded.
+  if (reading.literal === "as-written") {
+    return { defaultValue: unquoteLiteral(raw, "mysql") ?? raw, defaultExpression: raw };
+  }
+  // MySQL reports the VALUE, and no column of the row says whether that text is also SQL:
+  // `abc` is a value and is not valid after DEFAULT, while `b'1'` and `0x616263` ARE SQL,
+  // and all three arrive with an EMPTY `EXTRA`. So this flavour declares no SQL text at all
+  // rather than a guessed one. Do not "complete" this arm without a measurement that tells
+  // the two apart.
+  return { defaultValue: raw };
 }
 
 /**
@@ -1811,7 +1823,7 @@ function objectDetailFromRows(
     type: row.data_type,
     nullable: row.is_nullable === "YES",
     isPrimary: row.column_key === "PRI",
-    defaultValue: catalogDefault(row.column_default, row.extra, reading),
+    ...catalogDefault(row.column_default, row.extra, reading),
   }));
 
   const byIndex = new Map<string, IndexSchema>();

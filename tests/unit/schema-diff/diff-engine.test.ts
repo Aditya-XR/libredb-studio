@@ -460,3 +460,55 @@ describe("diffSchemas: the object model", () => {
     expect(diffSchemas(flat, kinded).hasChanges).toBe(false);
   });
 });
+
+// ============================================================================
+// The SQL text of a default (#795)
+// ============================================================================
+
+describe("diffSchemas: a column's default carries both readings", () => {
+  // `defaultValue` is the value a display shows and `defaultExpression` is the SQL that
+  // produces it, so the diff has to carry both on to the generator: dropping the second
+  // would leave the generator interpolating a value where SQL belongs.
+  const withDefault = {
+    name: "note",
+    type: "varchar(20)",
+    nullable: true,
+    isPrimary: false,
+    defaultValue: "abc",
+    defaultExpression: "'abc'",
+  };
+
+  test("an added table's columns carry the SQL text", () => {
+    const diff = diffSchemas([], [makeTable({ name: "users", columns: [withDefault] })]);
+
+    expect(diff.tables[0].columns[0]).toMatchObject({ targetDefault: "abc", targetDefaultSql: "'abc'" });
+  });
+
+  test("a column added to an existing table carries the SQL text", () => {
+    const diff = diffSchemas(
+      [makeTable({ name: "users", columns: [] })],
+      [makeTable({ name: "users", columns: [withDefault] })],
+    );
+
+    expect(diff.tables[0].columns[0]).toMatchObject({ targetDefault: "abc", targetDefaultSql: "'abc'" });
+  });
+
+  test("a modified column carries the SQL text", () => {
+    const diff = diffSchemas(
+      [makeTable({ name: "users", columns: [{ ...withDefault, defaultValue: "xyz", defaultExpression: "'xyz'" }] })],
+      [makeTable({ name: "users", columns: [withDefault] })],
+    );
+
+    expect(diff.tables[0].columns[0]).toMatchObject({ targetDefault: "abc", targetDefaultSql: "'abc'" });
+  });
+
+  test("a provider that reports no expression leaves the field absent", () => {
+    const diff = diffSchemas(
+      [],
+      [makeTable({ name: "users", columns: [{ ...withDefault, defaultExpression: undefined }] })],
+    );
+
+    expect(diff.tables[0].columns[0].targetDefaultSql).toBeUndefined();
+    expect(diff.tables[0].columns[0].targetDefault).toBe("abc");
+  });
+});
