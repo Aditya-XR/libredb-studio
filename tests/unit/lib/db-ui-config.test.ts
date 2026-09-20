@@ -120,6 +120,26 @@ describe("db-ui-config", () => {
       expect(getDBConfig("trino").connectionFields).toContain("database");
     });
 
+    test("elasticsearch offers the API key pair, and OpenSearch does not", () => {
+      // #708. Deleting either half from elasticsearch's list (or adding either to
+      // opensearch's) is the silent loss the maintainer measured: every other suite
+      // stayed green. The form reads this list; the transport refuses the pair on
+      // OpenSearch rather than sending it.
+      expect(getDBConfig("elasticsearch").connectionFields).toEqual([
+        "host",
+        "port",
+        "user",
+        "password",
+        "apiKeyId",
+        "apiKeySecret",
+      ]);
+      expect(getDBConfig("opensearch").connectionFields).toEqual(["host", "port", "user", "password"]);
+      expect(takesConnectionField("elasticsearch", "apiKeyId")).toBe(true);
+      expect(takesConnectionField("elasticsearch", "apiKeySecret")).toBe(true);
+      expect(takesConnectionField("opensearch", "apiKeyId")).toBe(false);
+      expect(takesConnectionField("opensearch", "apiKeySecret")).toBe(false);
+    });
+
     test("mongodb asks where the credentials live, alongside the database to open", () => {
       // Two different questions on MongoDB, and only there: users are created in a
       // database of their own, and the driver checks them against whichever database
@@ -317,7 +337,16 @@ describe("db-ui-config", () => {
       test("agrees with the list it reads, for every type and every field", () => {
         // Derived rather than enumerated: the predicate must not develop an opinion of its
         // own about any engine.
-        const FIELDS = ["host", "port", "user", "password", "database", "connectionString"] as const;
+        const FIELDS = [
+          "host",
+          "port",
+          "user",
+          "password",
+          "database",
+          "connectionString",
+          "apiKeyId",
+          "apiKeySecret",
+        ] as const;
         for (const type of ALL_TYPES) {
           for (const field of FIELDS) {
             expect(takesConnectionField(type, field)).toBe(getDBConfig(type).connectionFields.includes(field));

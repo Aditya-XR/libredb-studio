@@ -240,6 +240,42 @@ describe("SeedConnectionSchema: Cassandra's localDataCenter", () => {
   });
 });
 
+describe("SeedConnectionSchema: Elasticsearch's API key pair", () => {
+  it("accepts a seeded Elasticsearch connection that carries the pair", () => {
+    const result = SeedConnectionSchema.safeParse({
+      id: "logs",
+      name: "Logs",
+      type: "elasticsearch",
+      host: "es.internal",
+      port: 9200,
+      apiKeyId: "seed-key-id",
+      apiKeySecret: "seed-key-secret",
+      roles: ["*"],
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.apiKeyId).toBe("seed-key-id");
+      expect(result.data.apiKeySecret).toBe("seed-key-secret");
+    }
+  });
+
+  it("rejects the pair on OpenSearch rather than stripping it", () => {
+    const result = SeedConnectionSchema.safeParse({
+      id: "logs",
+      name: "Logs",
+      type: "opensearch",
+      host: "os.internal",
+      port: 9200,
+      apiKeyId: "seed-key-id",
+      apiKeySecret: "seed-key-secret",
+      roles: ["*"],
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
 describe("SeedConnectionSchema: Trino's schema", () => {
   it("accepts a seeded connection that names its session schema", () => {
     const result = SeedConnectionSchema.safeParse({

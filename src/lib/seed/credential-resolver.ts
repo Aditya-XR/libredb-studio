@@ -5,7 +5,19 @@ import { readVaultSecret, VaultError, type VaultDeps } from "./vault-client";
 const ENV_VAR_PATTERN = /^\$\{([A-Z_][A-Z0-9_]*)\}$/;
 const VAULT_PREFIX = "${vault:";
 const VAULT_REF_PATTERN = /^\$\{vault:([^#{}]+)#([^{}]+)\}$/;
-const RESOLVABLE_FIELDS = ["password", "connectionString", "user", "host", "database"] as const;
+const RESOLVABLE_FIELDS = [
+  "password",
+  "connectionString",
+  "user",
+  "host",
+  "database",
+  // Elasticsearch API key pair (#708). A seeded `${ELASTIC_API_KEY_ID}` / `${vault:...}`
+  // that is not on this list is sent literally and the cluster answers 401 on a key
+  // that works. Both halves, not one: either left unresolved is a half-filled pair
+  // the transport will silently fall back from.
+  "apiKeyId",
+  "apiKeySecret",
+] as const;
 
 type ResolvableField = (typeof RESOLVABLE_FIELDS)[number];
 
@@ -17,6 +29,8 @@ interface VaultResolvableConnection {
   user?: string;
   host?: string;
   database?: string;
+  apiKeyId?: string;
+  apiKeySecret?: string;
 }
 
 const warnedPlaintext = new Set<string>();

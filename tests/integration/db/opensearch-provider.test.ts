@@ -58,7 +58,7 @@ import { ElasticsearchProvider, OpenSearchProvider } from "@/lib/db/providers/sq
 import { SearchHttpTransport } from "@/lib/db/providers/sql/search/http-transport";
 import { type SearchErrorCategory, SearchTransportError } from "@/lib/db/providers/sql/search/transport";
 import type { ProviderCapabilities } from "@/lib/db/types";
-import { ConnectionError, QueryCancelledError, QueryError, TimeoutError } from "@/lib/db/errors";
+import { ConnectionError, DatabaseConfigError, QueryCancelledError, QueryError, TimeoutError } from "@/lib/db/errors";
 import { isSourcePartUnavailable } from "@/lib/db/object-kinds";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 
@@ -938,6 +938,31 @@ describe("OpenSearch faults", () => {
 
     expect(fault.category).toBe("unreachable");
     expect(fault.message).toContain("Incorrect HTTP method for uri [/_sql?format=json]");
+  });
+});
+
+// ============================================================================
+// API key auth is Elasticsearch-only (#708)
+// ============================================================================
+
+describe("OpenSearchProvider refuses an API key pair", () => {
+  test("connect refuses a pair rather than dropping it with no error", async () => {
+    // Seed/types and the seed projection used to take the pair with no type gate,
+    // and the transport then sent Basic (or nothing) as if the key had never been
+    // set. Refuse at the transport instead: nothing here has measured whether
+    // OpenSearch's security plugin accepts Authorization: ApiKey.
+    const provider = new OpenSearchProvider(
+      makeConnection({ apiKeyId: "seed-key-id", apiKeySecret: "seed-key-secret" }),
+    );
+
+    await expect(provider.connect()).rejects.toBeInstanceOf(DatabaseConfigError);
+    await expect(provider.connect()).rejects.toThrow(/does not accept API key authentication/);
+  });
+
+  test("a half-filled pair is refused the same way, not treated as leftover Basic", async () => {
+    const provider = new OpenSearchProvider(makeConnection({ apiKeyId: "seed-key-id", user: "admin" }));
+
+    await expect(provider.connect()).rejects.toBeInstanceOf(DatabaseConfigError);
   });
 });
 

@@ -34,7 +34,7 @@ const MOCK_CONNECTION_FIELDS: Record<string, string[]> = {
   // convenience.
   redis: ["host", "port", "user", "password", "database"],
   druid: ["host", "port", "user", "password"],
-  elasticsearch: ["host", "port", "user", "password"],
+  elasticsearch: ["host", "port", "user", "password", "apiKeyId", "apiKeySecret"],
   opensearch: ["host", "port", "user", "password"],
 };
 const mockFields = (type: string): string[] =>
@@ -1903,6 +1903,61 @@ describe("useConnectionForm", () => {
     rerender({ ...defaultProps, isOpen: false });
 
     expect(result.current.authSource).toBe("");
+  });
+
+  // ── buildConnection with the Elasticsearch API key pair ─────────────────
+
+  test("buildConnection includes the Elasticsearch API key pair", async () => {
+    const fetchMock = mockGlobalFetch({
+      "/api/db/test-connection": { ok: true, json: { success: true, latency: 20 } },
+    });
+
+    const { result } = renderHook(() => useConnectionForm(defaultProps));
+
+    act(() => {
+      result.current.setType("elasticsearch");
+      result.current.setApiKeyId("seed-key-id");
+      result.current.setApiKeySecret("seed-key-secret");
+    });
+
+    await act(async () => {
+      await result.current.handleTestConnection();
+    });
+
+    const testCall = fetchMock.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/test-connection"),
+    );
+    const body = JSON.parse(testCall![1]!.body as string);
+    expect(body.apiKeyId).toBe("seed-key-id");
+    expect(body.apiKeySecret).toBe("seed-key-secret");
+  });
+
+  test("an API key pair typed for another engine is not sent", async () => {
+    // The fields are on elasticsearch's connectionFields list, not on a type
+    // branch inside buildConnection. Carrying them onto OpenSearch would store a
+    // pair that engine refuses.
+    const fetchMock = mockGlobalFetch({
+      "/api/db/test-connection": { ok: true, json: { success: true, latency: 20 } },
+    });
+
+    const { result } = renderHook(() => useConnectionForm(defaultProps));
+
+    act(() => {
+      result.current.setType("opensearch");
+      result.current.setApiKeyId("seed-key-id");
+      result.current.setApiKeySecret("seed-key-secret");
+    });
+
+    await act(async () => {
+      await result.current.handleTestConnection();
+    });
+
+    const testCall = fetchMock.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/test-connection"),
+    );
+    const body = JSON.parse(testCall![1]!.body as string);
+    expect(body.apiKeyId).toBeUndefined();
+    expect(body.apiKeySecret).toBeUndefined();
   });
 
   test("buildConnection includes the Trino schema", async () => {

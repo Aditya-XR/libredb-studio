@@ -152,6 +152,10 @@ function getDefaultForm() {
     setServiceName: mock(() => {}),
     instanceName: "",
     setInstanceName: mock(() => {}),
+    apiKeyId: "",
+    setApiKeyId: mock(() => {}),
+    apiKeySecret: "",
+    setApiKeySecret: mock(() => {}),
     showSSH: false,
     setShowSSH: mock(() => {}),
     sshEnabled: false,
@@ -200,7 +204,7 @@ const MOCK_CONNECTION_FIELDS: Record<string, string[]> = {
   duckdb: ["database"],
   libsql: ["host", "port", "password", "connectionString"],
   druid: ["host", "port", "user", "password"],
-  elasticsearch: ["host", "port", "user", "password"],
+  elasticsearch: ["host", "port", "user", "password", "apiKeyId", "apiKeySecret"],
   opensearch: ["host", "port", "user", "password"],
 };
 const mockFields = (type: string): string[] =>

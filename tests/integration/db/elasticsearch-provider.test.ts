@@ -1231,6 +1231,80 @@ describe("ElasticsearchProvider validation", () => {
     await provider.disconnect();
   });
 
+  // #708. Not a live-cluster measurement: `Authorization: ApiKey base64(id:secret)` is
+  // Elasticsearch's published wire contract for its own auth scheme (elastic.co/docs/
+  // deploy-manage/api-keys/elasticsearch-api-keys), the same status the Basic-auth
+  // tests above are in - they assert what THIS CODE sends, not what a server does with
+  // it. OpenSearch refuses the pair rather than dropping it: see the sibling file.
+  //
+  // The halves read as fixtures rather than as a realistic key on purpose. A
+  // base64-shaped literal of that length trips gitleaks' `generic-api-key` rule, and
+  // the only way to keep one is a `.gitleaksignore` fingerprint, which is pinned to a
+  // commit SHA: it covers the commit that introduced the literal and nothing else, so
+  // the same literal re-added later, or carried into a squashed commit, is a finding
+  // again. What this test asserts is the ENCODING, which does not care what the halves
+  // look like. Do not "restore realism" here.
+  test("sends an API key pair as an ApiKey header, in preference to user/password", async () => {
+    const provider = await connectProvider({
+      apiKeyId: "elastic-api-key-id-fixture",
+      apiKeySecret: "elastic-api-key-secret-fixture",
+      user: "reader",
+      password: "s3cret",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("ApiKey ")).toBe(true);
+    expect(Buffer.from(header.replace("ApiKey ", ""), "base64").toString()).toBe(
+      "elastic-api-key-id-fixture:elastic-api-key-secret-fixture",
+    );
+    await provider.disconnect();
+  });
+
+  test("trims both API key halves before the half-filled guard and the encode", async () => {
+    // A trailing newline in either half measured as HTTP 401 on a key that works
+    // once the whitespace is gone. Trim has to happen before the truthiness check,
+    // otherwise `"id\\n"` plus `""` would look complete and encode the newline.
+    const provider = await connectProvider({
+      apiKeyId: "seed-key-id\n",
+      apiKeySecret: " seed-key-secret ",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("ApiKey ")).toBe(true);
+    expect(Buffer.from(header.replace("ApiKey ", ""), "base64").toString()).toBe("seed-key-id:seed-key-secret");
+    await provider.disconnect();
+  });
+
+  test("whitespace-only halves are empty, not a shorter key", async () => {
+    const provider = await connectProvider({
+      apiKeyId: "  \n",
+      apiKeySecret: "seed-key-secret",
+      user: "reader",
+      password: "s3cret",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("Basic ")).toBe(true);
+    expect(Buffer.from(header.replace("Basic ", ""), "base64").toString()).toBe("reader:s3cret");
+    await provider.disconnect();
+  });
+
+  // A half-configured pair is not a shorter key, it is a broken one - falls back to
+  // Basic/none exactly as a plain `user`/`password` connection would, rather than
+  // sending `ApiKey base64("id:")` for a secret that was never actually set.
+  test("falls back to user/password when the API key pair is only half set", async () => {
+    const provider = await connectProvider({
+      apiKeyId: "EWkMhKACjF5eHMlg6Car",
+      user: "reader",
+      password: "s3cret",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("Basic ")).toBe(true);
+    expect(Buffer.from(header.replace("Basic ", ""), "base64").toString()).toBe("reader:s3cret");
+    await provider.disconnect();
+  });
+
   test("brackets a bare IPv6 host, which is otherwise not a legal URL authority", async () => {
     const provider = new ElasticsearchProvider(makeConnection({ host: "::1" }));
     await provider.connect();
