@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useCallback, useRef, type Dispatch, type SetStateAction } from "react";
+import { useState, useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import type { DatabaseConnection, QueryTab } from "@/lib/types";
 import type { WorkspaceQueryResult, WorkspaceFeatures } from "@/workspace/types";
 import type { BottomPanelMode } from "@/components/studio/BottomPanel";
 import { useToast } from "@/hooks/use-toast";
+import { newLocalId } from "@/lib/ids";
 import { isDangerousQuery } from "@/components/QuerySafetyDialog";
 import { maybeInviteToStar } from "@/lib/community/star-prompt-toast";
 
@@ -68,6 +69,53 @@ export function useQueryAdapter({
   void _features;
   const cancelledRef = useRef(false);
 
+  /**
+   * The id of the LAST run started on each tab, which is to say the run that owns the
+   * tab's results.
+   *
+   * `cancelledRef` is a single boolean for the whole hook, so it can answer "did the user
+   * press Cancel" and nothing else. It cannot answer "is this result still the one the
+   * tab is waiting for", and that is the question a late response has to be asked. The
+   * user clicks Load More, gives up waiting and presses Run; Run replaces the grid; then
+   * the overtaken page resolves, appends its now-stale rows on top of the new ones and
+   * rewrites `resultQuery` to the paged statement. The tab ends up holding rows from two
+   * statements while naming one, which is the failure the commit below already cites
+   * #881 for, reached down the paging path instead.
+   *
+   * `use-query-execution` answers this with its own `lastRunRef`, and aborts as well.
+   * This surface cannot abort: the host owns the fetch behind `onQueryExecute`. Ownership
+   * is therefore the only mechanism available here, and it is the one that closes the
+   * window in any case, because an abort does not un-resolve a response already on its
+   * way back.
+   *
+   * Keyed by TAB for the same reason the standalone map is: tabs execute independently,
+   * so a run started in one tab must not disown a run in another.
+   */
+  const lastRunRef = useRef(new Map<string, string>());
+
+  /**
+   * Claim a tab for a new run, and hand back the question every commit of that run must
+   * ask before it writes: does this run still own the tab?
+   */
+  const beginRun = useCallback((tabId: string) => {
+    const runId = newLocalId();
+    lastRunRef.current.set(tabId, runId);
+    return () => lastRunRef.current.get(tabId) === runId;
+  }, []);
+
+  // Nothing this hook started should outlive it, for the reason `use-query-execution`
+  // states where it aborts every run on unmount: "a fetch left running after the studio
+  // unmounts resolves into a setState on a component that is gone". This surface cannot
+  // abort, because the host owns the fetch behind `onQueryExecute`, so dropping the claims
+  // is how the same rule is kept here: a run whose claim is gone no longer owns its tab,
+  // and every commit arm below asks that question before it writes (#816).
+  useEffect(() => {
+    const lastRuns = lastRunRef.current;
+    return () => {
+      lastRuns.clear();
+    };
+  }, []);
+
   const [safetyCheckQuery, setSafetyCheckQuery] = useState<string | null>(null);
   const [unlimitedWarningOpen, setUnlimitedWarningOpen] = useState(false);
   const [pendingUnlimitedQuery, setPendingUnlimitedQuery] = useState<{
@@ -122,14 +170,28 @@ export function useQueryAdapter({
       }
 
       cancelledRef.current = false;
+      const ownsTab = beginRun(targetTabId);
 
-      // Set tab executing state
+      // Set tab executing state.
+      //
+      // Claiming the tab takes over BOTH flags in one write, for the reason the claim in
+      // `handleLoadMore` states in the other direction: a page in flight set
+      // `isLoadingMore: true`, the ownership check above has just disowned it, and a
+      // disowned page may not write - so it can no longer clear the flag it set. Writing
+      // only `isExecuting` here left the tab spinning a Load More, for the whole of this
+      // run, over a page whose rows will never be shown.
+      //
+      // `isLoadingMore: false` rather than the standalone's `isLoadMore` ternary, because
+      // this hook's paging does not come through here at all: `handleLoadMore` makes its
+      // own claim and its own request. A run reaching this point REPLACES the grid even
+      // when it carries an offset, so it is never the page (#816).
       setTabs((prev) =>
         prev.map((t) =>
           t.id === targetTabId
             ? {
                 ...t,
                 isExecuting: true,
+                isLoadingMore: false,
               }
             : t,
         ),
@@ -147,8 +209,8 @@ export function useQueryAdapter({
             ? await onQueryExecute(activeConnection.id, queryToExecute)
             : await onQueryExecute(activeConnection.id, queryToExecute, executionOptions);
 
-        // Check if cancelled while awaiting
-        if (cancelledRef.current) return;
+        // Check if cancelled, or overtaken by a newer run on this tab, while awaiting
+        if (cancelledRef.current || !ownsTab()) return;
 
         const executionTime = result.executionTime || Date.now() - startTime;
 
@@ -187,8 +249,9 @@ export function useQueryAdapter({
         // the block and unable to throw: the result is already in the tab.
         maybeInviteToStar();
       } catch (error) {
-        // Skip updates if cancelled
-        if (cancelledRef.current) return;
+        // Skip updates if cancelled, or if a newer run now owns the tab: clearing its
+        // flags or raising a toast for a run nobody is waiting for is the same write.
+        if (cancelledRef.current || !ownsTab()) return;
 
         setTabs((prev) =>
           prev.map((t) =>
@@ -206,7 +269,7 @@ export function useQueryAdapter({
         toast({ title: "Query Error", description: errorMessage, variant: "destructive" });
       }
     },
-    [activeConnection, tabs, currentTab, activeTabId, toast, onQueryExecute, setTabs],
+    [activeConnection, tabs, currentTab, activeTabId, toast, onQueryExecute, setTabs, beginRun],
   );
 
   // Force execute (bypass safety check)
@@ -225,13 +288,27 @@ export function useQueryAdapter({
       }
 
       cancelledRef.current = false;
+      const ownsTab = beginRun(activeTabId);
 
+      // Claiming the tab takes over BOTH flags in one write, for the same reason the claims
+      // in `executeQuery` and `handleLoadMore` state: `beginRun` immediately above has just
+      // disowned whatever was in flight, and a disowned page may not write, so it can no
+      // longer clear the `isLoadingMore: true` it set itself. Writing only `isExecuting`
+      // here left the tab spinning a Load More, for the whole of this run, over a page
+      // whose rows will never be shown - and the control is `disabled={isLoadingMore}` in
+      // `StatsBar`, so it sat dead until some later run settled the flag. This is a run
+      // entry point a user reaches without trying: it is the safety dialog's Proceed in
+      // `StudioWorkspace` (#816).
+      //
+      // `isLoadingMore: false` rather than a ternary, because this path never carries an
+      // offset: it re-runs the statement the dialog asked about and REPLACES the grid.
       setTabs((prev) =>
         prev.map((t) =>
           t.id === activeTabId
             ? {
                 ...t,
                 isExecuting: true,
+                isLoadingMore: false,
               }
             : t,
         ),
@@ -242,7 +319,7 @@ export function useQueryAdapter({
 
       onQueryExecute(activeConnection.id, query)
         .then((result) => {
-          if (cancelledRef.current) return;
+          if (cancelledRef.current || !ownsTab()) return;
 
           const executionTime = result.executionTime || Date.now() - startTime;
 
@@ -273,7 +350,7 @@ export function useQueryAdapter({
           maybeInviteToStar();
         })
         .catch((error) => {
-          if (cancelledRef.current) return;
+          if (cancelledRef.current || !ownsTab()) return;
 
           setTabs((prev) =>
             prev.map((t) =>
@@ -291,7 +368,7 @@ export function useQueryAdapter({
           toast({ title: "Query Error", description: errorMessage, variant: "destructive" });
         });
     },
-    [activeConnection, activeTabId, toast, onQueryExecute, setTabs],
+    [activeConnection, activeTabId, toast, onQueryExecute, setTabs, beginRun],
   );
 
   // Cancel running query (best-effort via ref flag)
@@ -300,7 +377,21 @@ export function useQueryAdapter({
 
     setTabs((prev) =>
       prev.map((t) =>
-        t.isExecuting
+        // A PAGING TAB IS A RUNNING TAB, and reading `isExecuting` alone missed it.
+        //
+        // The gap predates this PR, and the claim write in `handleLoadMore` did not create
+        // it: at the merge base (474c2e3e) this arm already read `isExecuting` alone, and
+        // that claim already wrote nothing but `isLoadingMore: true`, so a tab fetching a
+        // page carried the `isExecuting: false` its previous run had settled and was
+        // skipped here exactly the same way. The claim now writing that flag explicitly
+        // only put into the source a value the tab already held.
+        //
+        // What the gap cost, then and now: Cancel skipped the one tab the user had just
+        // cancelled. The page then landed, its success arm refused itself on the flag set
+        // above, and nothing was left to clear `isLoadingMore` - so Load More, which is
+        // `disabled={isLoadingMore}` in `StatsBar`, stayed dead until the next Run happened
+        // to clear it. Reading both flags is what makes Cancel reach a paging tab (#816).
+        t.isExecuting || t.isLoadingMore
           ? {
               ...t,
               isExecuting: false,
@@ -317,7 +408,21 @@ export function useQueryAdapter({
   const handleLoadMore = useCallback(() => {
     if (!currentTab.result?.pagination?.hasMore) return;
     if (!activeConnection) return;
+    // Restates the condition the rendered control already enforces: the button that calls
+    // this is `disabled={isLoadingMore}` in `StatsBar`, and the flag is wired end to end.
+    // It reads render state rather than a ref, so it cannot be more than that - two calls
+    // in the same tick would both read the value from before the claim below and both
+    // pass. It is a second line behind the disabled control, not a replacement for it, and
+    // a caller that renders no such control has to enforce the invariant itself (#816).
+    if (currentTab.isLoadingMore) return;
 
+    // The same reset `executeQuery`, `forceExecuteQuery` and `handleUnlimitedQuery` make,
+    // and for the same reason: `cancelledRef` is one sticky hook-wide boolean, and a page
+    // is an entry point too. Left set by an earlier Cancel it would make this page refuse
+    // its own commit, leaving `isLoadingMore` set - which the guard above then reads as a
+    // page still in flight, so one Cancel disabled Load More for good (#816).
+    cancelledRef.current = false;
+    const ownsTab = beginRun(currentTab.id);
     const currentOffset = currentTab.currentOffset || currentTab.result.rows.length;
 
     setTabs((prev) =>
@@ -325,6 +430,14 @@ export function useQueryAdapter({
         t.id === currentTab.id
           ? {
               ...t,
+              // Claiming the tab takes over BOTH flags, in one write, exactly as the
+              // standalone does it (`isExecuting: !isLoadMore, isLoadingMore: isLoadMore`).
+              // A Run still in flight set `isExecuting: true`, and the ownership check
+              // below now refuses its settle, so it can no longer clear that flag itself:
+              // without this the tab shows a spinner and a CANCEL button for a run it has
+              // already disowned, until this page's own commit happens to clear a flag the
+              // page never set (#816).
+              isExecuting: false,
               isLoadingMore: true,
             }
           : t,
@@ -335,8 +448,10 @@ export function useQueryAdapter({
     // since - the editor buffer is rewritten on every keystroke.
     //
     // Read once, here, and carried into the commit below. Reading it again when the page
-    // arrives would label these rows with whatever statement had started in the meantime,
-    // and this surface has no supersession check to catch that.
+    // arrives would label these rows with whatever statement had started in the meantime.
+    // The ownership check in that commit answers the other half of the same failure: it
+    // refuses a page the tab has since disowned, and pinning the statement here keeps the
+    // label true for a page that still owns it and does land (#816).
     const pagedStatement = currentTab.resultQuery ?? currentTab.query;
 
     onQueryExecute(activeConnection.id, pagedStatement, {
@@ -347,7 +462,12 @@ export function useQueryAdapter({
       offset: currentOffset,
     })
       .then((result) => {
-        if (cancelledRef.current) return;
+        // A Run started while this page was in flight owns the tab now, and this page is
+        // a page of a statement the grid no longer shows. Appending it would leave the
+        // tab holding rows from two statements while naming one, and rewrite
+        // `resultQuery` to the paged one (#881's class). The host owns the fetch, so
+        // there is nothing to abort - refusing the write is the whole guard.
+        if (cancelledRef.current || !ownsTab()) return;
 
         setTabs((prev) =>
           prev.map((t) => {
@@ -388,7 +508,9 @@ export function useQueryAdapter({
         );
       })
       .catch((error) => {
-        if (cancelledRef.current) return;
+        // Same ownership rule on the failure arm: a page nobody is waiting for must not
+        // clear the new run's flags or raise a toast about itself.
+        if (cancelledRef.current || !ownsTab()) return;
 
         setTabs((prev) =>
           prev.map((t) =>
@@ -405,7 +527,7 @@ export function useQueryAdapter({
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         toast({ title: "Load More Error", description: errorMessage, variant: "destructive" });
       });
-  }, [currentTab, activeConnection, onQueryExecute, setTabs, toast]);
+  }, [currentTab, activeConnection, onQueryExecute, setTabs, toast, beginRun]);
 
   // Unlimited query handler
   const handleUnlimitedQuery = useCallback(() => {
@@ -415,13 +537,27 @@ export function useQueryAdapter({
     const { query, tabId } = pendingUnlimitedQuery;
 
     cancelledRef.current = false;
+    const ownsTab = beginRun(tabId);
 
+    // The same claim rule as `executeQuery` and `forceExecuteQuery`, for the same reason:
+    // `beginRun` above disowns a page in flight, a disowned page may not write, and so it
+    // can no longer clear the `isLoadingMore: true` it set itself. Without this write the
+    // tab spins a Load More over a page whose rows will never be shown, and the control is
+    // `disabled={isLoadingMore}` in `StatsBar`, so it stays dead until some later run
+    // settles the flag (#816).
+    //
+    // Nothing in `src/` opens the unlimited warning or sets a pending query today, in
+    // either product, so there is no click that reaches this claim: do not go looking for
+    // the repro. It is fixed and covered anyway, because the hook exports the handler and
+    // the dialog wired to it is already rendered in both products, so the day something
+    // sets a pending query this becomes the fourth live claim on a tab.
     setTabs((prev) =>
       prev.map((t) =>
         t.id === tabId
           ? {
               ...t,
               isExecuting: true,
+              isLoadingMore: false,
             }
           : t,
       ),
@@ -429,7 +565,7 @@ export function useQueryAdapter({
 
     onQueryExecute(activeConnection.id, query, { unlimited: true })
       .then((result) => {
-        if (cancelledRef.current) return;
+        if (cancelledRef.current || !ownsTab()) return;
 
         setTabs((prev) =>
           prev.map((t) => {
@@ -461,7 +597,7 @@ export function useQueryAdapter({
         maybeInviteToStar();
       })
       .catch((error) => {
-        if (cancelledRef.current) return;
+        if (cancelledRef.current || !ownsTab()) return;
 
         setTabs((prev) =>
           prev.map((t) =>
@@ -481,7 +617,7 @@ export function useQueryAdapter({
 
     setUnlimitedWarningOpen(false);
     setPendingUnlimitedQuery(null);
-  }, [pendingUnlimitedQuery, activeConnection, onQueryExecute, setTabs, toast]);
+  }, [pendingUnlimitedQuery, activeConnection, onQueryExecute, setTabs, toast, beginRun]);
 
   return {
     executeQuery,

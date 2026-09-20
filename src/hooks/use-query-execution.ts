@@ -902,6 +902,14 @@ export function useQueryExecution({
   // Load More handler
   const handleLoadMore = useCallback(() => {
     if (!currentTab.result?.pagination?.hasMore) return;
+    // Restates the condition the rendered control already enforces: the button that calls
+    // this is `disabled={isLoadingMore}` in `StatsBar`, and the flag is wired end to end.
+    // It reads render state rather than a ref, so it cannot be more than that - two calls
+    // in the same tick would both read the value from before `executeQuery` claims the
+    // tab and both pass. It is a second line behind the disabled control, not a
+    // replacement for it, and a caller that renders no such control has to enforce the
+    // invariant itself (#816).
+    if (currentTab.isLoadingMore) return;
 
     const currentOffset = currentTab.currentOffset || currentTab.result.rows.length;
     // The next page of the STATEMENT THAT BUILT THIS GRID, not of whatever has been typed

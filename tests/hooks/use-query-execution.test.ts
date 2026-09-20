@@ -1657,6 +1657,36 @@ describe("useQueryExecution", () => {
     expect(queryCalls.length).toBe(0);
   });
 
+  /**
+   * The guard restates the condition the rendered control already enforces: the button is
+   * `disabled={isLoadingMore}` in `StatsBar` and the flag is wired end to end. It reads
+   * render state, not a ref, so it is a second line behind that control rather than a
+   * replacement for it - which is what this asserts, and all it asserts. The embedded
+   * adapter has the mirror of this.
+   */
+  test("handleLoadMore does nothing while a page is already in flight", async () => {
+    const fetchMock = mockGlobalFetch({});
+    const tabLoading = createTab({
+      result: {
+        ...mockQueryResult,
+        pagination: { limit: 500, offset: 0, hasMore: true, totalReturned: 2, wasLimited: true },
+      },
+      isLoadingMore: true,
+    });
+    const params = createDefaultParams({ tabs: [tabLoading], currentTab: tabLoading });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    const queryCalls = fetchMock.mock.calls.filter(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
+    );
+    expect(queryCalls.length).toBe(0);
+  });
+
   // ── handleUnlimitedQuery executes pending unlimited query ──────────────
 
   test("handleUnlimitedQuery executes pending unlimited query", async () => {

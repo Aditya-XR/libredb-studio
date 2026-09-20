@@ -727,6 +727,36 @@ describe("useQueryAdapter", () => {
     expect(params.onQueryExecute).not.toHaveBeenCalled();
   });
 
+  /**
+   * The guard restates the condition the rendered control already enforces: the button is
+   * `disabled={isLoadingMore}` in `StatsBar` and the flag is wired end to end. It reads
+   * render state, not a ref, so it is a second line behind that control rather than a
+   * replacement for it - which is what this asserts, and all it asserts.
+   */
+  test("handleLoadMore returns early while a page is already in flight", () => {
+    const tabLoading = makeTab({
+      result: {
+        rows: [{ id: 1 }],
+        fields: ["id"],
+        rowCount: 1,
+        executionTime: 10,
+        pagination: { limit: 50, offset: 0, hasMore: true, totalReturned: 1, wasLimited: true },
+      },
+      currentOffset: 50,
+      isLoadingMore: true,
+    });
+    const { tabs, setTabs } = createMutableTabs([tabLoading]);
+    const params = makeHookParams({ tabs, setTabs, currentTab: tabLoading });
+
+    const { result } = renderHook(() => useQueryAdapter(params));
+
+    act(() => {
+      result.current.handleLoadMore();
+    });
+
+    expect(params.onQueryExecute).not.toHaveBeenCalled();
+  });
+
   // ── handleLoadMore appends rows on success ──────────────────────────────────
 
   test("handleLoadMore appends rows to the current tab and preserves other tabs", async () => {
