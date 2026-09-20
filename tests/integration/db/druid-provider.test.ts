@@ -506,6 +506,8 @@ describe("DruidProvider metadata", () => {
       supportsExternalQueryLimiting: true,
       supportsCreateTable: false,
       supportsInlineRowEdit: false,
+      // Druid SQL takes both clauses, emitted by the shared limiter (#816).
+      supportsResultPagination: true,
       supportsTransactions: false,
       declaresForeignKeys: false,
       supportsMaintenance: false,

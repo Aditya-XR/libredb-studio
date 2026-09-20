@@ -21,6 +21,31 @@ interface ClosedTab {
   workspaceKey: string;
 }
 
+/**
+ * How many rows a tree click asks for (#816).
+ *
+ * It used to be written into the generated statement — `LIMIT 50`, `FETCH FIRST 50 ROWS
+ * ONLY`, `SELECT TOP 50` — and that is exactly what disengaged pagination: a statement
+ * carrying its own bound is returned untouched by the limiter, which drops the requested
+ * offset with it, so the page after the first was the first again. Carried as an
+ * EXECUTION OPTION instead, the preview cap is a bound this layer applied and can
+ * advance, and a `LIMIT n` in the editor means only what the user meant by it.
+ *
+ * It matches the "Select Top 50" label in `ProviderLabels.selectAction`.
+ */
+export const PREVIEW_PAGE_SIZE = 50;
+
+/**
+ * How a shell runs the statement a tree click just opened.
+ *
+ * Wider than the two arguments this used to take, because the page size now travels
+ * beside the query rather than inside it. Both shells satisfy it with their own
+ * `executeQuery` — `useQueryExecution` in `Studio.tsx`, `useQueryAdapter` in
+ * `StudioWorkspace.tsx` — and the embedded one forwards the options to its host's
+ * `onQueryExecute`, which has always accepted them (`src/workspace/types.ts`).
+ */
+export type RunTabStatement = (query: string, tabId: string, isExplain?: boolean, options?: { limit?: number }) => void;
+
 const DEFAULT_TAB: QueryTab = {
   id: "default",
   name: "Query 1",
@@ -328,7 +353,7 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
    * Takes executeQuery as a callback param to avoid a circular dependency.
    */
   const handleTableClick = useCallback(
-    (path: readonly string[], executeQueryFn: (query: string, tabId: string) => void) => {
+    (path: readonly string[], executeQueryFn: RunTabStatement) => {
       const capabilities = metadata?.capabilities;
       const tableName = objectSegment(path);
       // Look the object up exactly as handleGenerateSelect does: the Redis generator is
@@ -338,7 +363,7 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
       const columns = table?.columns || [];
       const newQuery = capabilities
         ? generateTableQuery(path, capabilities, columns)
-        : `SELECT * FROM ${path.join(".")} LIMIT 50;`;
+        : `SELECT * FROM ${path.join(".")};`;
 
       const newId = newLocalId();
       const newTab: QueryTab = {
@@ -351,7 +376,10 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
       };
       setTabs((prev) => [...prev, newTab]);
       setActiveTabId(newId);
-      setTimeout(() => executeQueryFn(newQuery, newId), 100);
+      // The preview cap travels HERE and not in `newQuery`. `isExplain` is false
+      // explicitly because the options are the fourth argument, and a tree click is a
+      // results run.
+      setTimeout(() => executeQueryFn(newQuery, newId, false, { limit: PREVIEW_PAGE_SIZE }), 100);
     },
     [metadata, schema],
   );

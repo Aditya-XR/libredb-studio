@@ -105,19 +105,28 @@ mock.module("@/components/results-grid/StatsBar", () => ({
             "Clear Filters",
           )
         : null,
-    ),
-  LoadMoreFooter: (props: Record<string, unknown>) =>
-    props.hasMore
-      ? React.createElement(
-          "div",
-          { "data-testid": "load-more-footer" },
-          React.createElement(
+      // The notice itself is rendered and worded in StatsBar; what this file is about is
+      // the DECISION ResultsGrid makes, so the mock only reports the prop it was handed.
+      props.orderAcrossPagesUnspecified
+        ? React.createElement("span", { "data-testid": "order-notice" }, "order notice")
+        : null,
+      // Same for the load-more control. It used to be a separate `LoadMoreFooter` export
+      // rendered BELOW the grid, and this file stubbed that too; the control now lives in
+      // the stats strip, so the only thing left for ResultsGrid to get right is whether it
+      // hands down an offer at all, and with what page size. Rendering it inside the
+      // stats-bar stub is also what lets a test assert the grid grew no chrome below.
+      props.pageOffer
+        ? React.createElement(
             "button",
-            { onClick: props.onLoadMore as () => void, "data-testid": "load-more-btn" },
-            "Load More (500 rows)",
-          ),
-        )
-      : null,
+            {
+              "data-testid": "page-offer",
+              "data-loading": String(props.isLoadingMore === true),
+              onClick: (props.pageOffer as { onLoadMore: () => void }).onLoadMore,
+            },
+            `offer ${(props.pageOffer as { pageSize: number }).pageSize}`,
+          )
+        : null,
+    ),
 }));
 
 // ── Mock @tanstack/react-virtual ────────────────────────────────────────────
@@ -269,12 +278,48 @@ describe("ResultsGrid", () => {
       React.createElement(ResultsGrid, {
         result: mockPaginatedResult,
         onLoadMore,
+        supportsResultPagination: true,
       }),
     );
 
-    const loadMoreBtn = queryByTestId("load-more-btn");
-    expect(loadMoreBtn).not.toBeNull();
-    expect(loadMoreBtn!.textContent).toContain("Load More");
+    const offer = queryByTestId("page-offer");
+    expect(offer).not.toBeNull();
+    // The offer carries the page size the result reports, not a hardcoded 500: a 50-row
+    // table preview used to promise "Load More (500 rows)" and then fetch 50.
+    expect(offer!.textContent).toBe("offer 50");
+  });
+
+  // ── 6b. An offer adds nothing below the grid ──────────────────────────────
+
+  test("an offer adds no chrome below the grid", () => {
+    /*
+      THE UI RULING'S FIRST CRITERION, measured as a DIFFERENCE rather than as a property
+      of this file's stub.
+
+      Asserting that the offer element sits inside the stats bar cannot fail here: the
+      StatsBar stub above builds it as its own child, so it is a descendant whatever
+      `ResultsGrid` does. What the ruling actually says is that the grid gains no chrome
+      and keeps its height whether or not another page is available, and that is a
+      comparison: the grid's own children must be the same set either way. A `LoadMoreFooter`
+      restored below the table is a new sibling here and fails.
+    */
+    const shape = (root: Element) =>
+      Array.from(root.children).map((child) => `${child.tagName}#${child.getAttribute("data-testid") ?? ""}`);
+
+    const withoutOffer = render(React.createElement(ResultsGrid, { result: mockPaginatedResult }));
+    expect(withoutOffer.queryByTestId("page-offer")).toBeNull();
+    const plain = shape(withoutOffer.container.firstElementChild!);
+    cleanup();
+
+    const withOffer = render(
+      React.createElement(ResultsGrid, {
+        result: mockPaginatedResult,
+        onLoadMore: mock(() => {}),
+        supportsResultPagination: true,
+      }),
+    );
+    expect(withOffer.queryByTestId("page-offer")).not.toBeNull();
+    expect(shape(withOffer.container.firstElementChild!)).toEqual(plain);
   });
 
   // ── 7. Load More button fires onLoadMore ──────────────────────────────────
@@ -285,11 +330,12 @@ describe("ResultsGrid", () => {
       React.createElement(ResultsGrid, {
         result: mockPaginatedResult,
         onLoadMore,
+        supportsResultPagination: true,
       }),
     );
 
-    const loadMoreBtn = getByTestId("load-more-btn");
-    fireEvent.click(loadMoreBtn);
+    // The callback reaches the strip intact, not just the decision to show a control.
+    fireEvent.click(getByTestId("page-offer"));
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 
@@ -341,11 +387,169 @@ describe("ResultsGrid", () => {
 
   // ── 11. No Load More when no pagination ───────────────────────────────────
 
-  test("no Load More footer when pagination not present", () => {
+  test("no Load More when the result carries no pagination at all", () => {
     const { queryByTestId } = render(React.createElement(ResultsGrid, { result: mockResult }));
 
-    const loadMore = queryByTestId("load-more-footer");
-    expect(loadMore).toBeNull();
+    expect(queryByTestId("page-offer")).toBeNull();
+  });
+
+  // ── the capability gate and the order notice (#816) ───────────────────────
+
+  /**
+   * The control appears only where page two is REACHABLE.
+   *
+   * `supportsExternalQueryLimiting` is not this flag: Cassandra declares that one true
+   * and throws on any positive offset. The five providers that cannot page declare
+   * `supportsResultPagination: false`, and an ABSENT flag reads the same as false — the
+   * #269 rule, so a host or a stale metadata read cannot open the control by omission.
+   */
+  test.each([
+    ["the provider cannot page", { supportsResultPagination: false }],
+    ["the flag is absent altogether", {}],
+  ])("no Load More when %s, even with hasMore", (_label, capability) => {
+    const { queryByTestId } = render(
+      React.createElement(ResultsGrid, {
+        result: mockPaginatedResult,
+        onLoadMore: mock(() => {}),
+        ...capability,
+      }),
+    );
+
+    expect(queryByTestId("page-offer")).toBeNull();
+  });
+
+  test("hands the in-flight state to the strip that renders the control", () => {
+    // Without this the control keeps its idle label and stays clickable while a page is
+    // already on the wire, and a second click asks for the same offset twice.
+    const { getByTestId } = render(
+      React.createElement(ResultsGrid, {
+        result: mockPaginatedResult,
+        onLoadMore: mock(() => {}),
+        supportsResultPagination: true,
+        isLoadingMore: true,
+      }),
+    );
+
+    expect(getByTestId("page-offer").getAttribute("data-loading")).toBe("true");
+  });
+
+  test("no Load More when the result reports no further page", () => {
+    const { queryByTestId } = render(
+      React.createElement(ResultsGrid, {
+        result: { ...mockPaginatedResult, pagination: { ...mockPaginatedResult.pagination!, hasMore: false } },
+        onLoadMore: mock(() => {}),
+        supportsResultPagination: true,
+      }),
+    );
+
+    expect(queryByTestId("page-offer")).toBeNull();
+  });
+
+  test("no Load More when the surface withholds the callback", () => {
+    // A result hydrated from an agent run comes this way: BottomPanel passes no
+    // `onLoadMore`, because there is no statement here to ask for another page of.
+    const { queryByTestId } = render(
+      React.createElement(ResultsGrid, {
+        result: mockPaginatedResult,
+        supportsResultPagination: true,
+      }),
+    );
+
+    expect(queryByTestId("page-offer")).toBeNull();
+  });
+
+  /**
+   * Criterion 7. Without an `ORDER BY` the engine may return pages that overlap or skip,
+   * and Studio does not inject one to prevent it. It states the condition instead — once,
+   * beside the existing AUTO-LIMITED badge, and only where a second page can actually be
+   * asked for. A notice about pages the user cannot reach describes nothing.
+   */
+  test("says order across pages is not guaranteed for an unordered pageable result", () => {
+    const { queryByTestId } = render(
+      React.createElement(ResultsGrid, {
+        result: mockPaginatedResult,
+        onLoadMore: mock(() => {}),
+        supportsResultPagination: true,
+        resultQuery: "SELECT * FROM users",
+      }),
+    );
+
+    expect(queryByTestId("page-offer")).not.toBeNull();
+    expect(queryByTestId("order-notice")).not.toBeNull();
+  });
+
+  test("says nothing when the statement orders its own result", () => {
+    const { queryByTestId } = render(
+      React.createElement(ResultsGrid, {
+        result: mockPaginatedResult,
+        onLoadMore: mock(() => {}),
+        supportsResultPagination: true,
+        resultQuery: "SELECT * FROM users ORDER BY id",
+      }),
+    );
+
+    expect(queryByTestId("page-offer")).not.toBeNull();
+    expect(queryByTestId("order-notice")).toBeNull();
+  });
+
+  test("reads the statement under the connection's own dialect", () => {
+    // `#` opens a comment in MySQL and is ordinary text in PostgreSQL (#292), so the
+    // same statement is ordered under one dialect and not the other.
+    const props = {
+      result: mockPaginatedResult,
+      onLoadMore: mock(() => {}),
+      supportsResultPagination: true,
+      resultQuery: "SELECT * FROM users # ORDER BY id",
+    };
+
+    expect(
+      render(React.createElement(ResultsGrid, { ...props, databaseType: "mysql" })).queryByTestId("order-notice"),
+    ).not.toBeNull();
+    cleanup();
+    expect(
+      render(React.createElement(ResultsGrid, { ...props, databaseType: "postgres" })).queryByTestId("order-notice"),
+    ).toBeNull();
+  });
+
+  /**
+   * The gate that #933 got wrong and its own test could not see, because its fixture
+   * always had `hasMore: true`. An auto-limited unordered result that fits in ONE page
+   * printed "order across pages is not guaranteed" with no Load More anywhere and no
+   * second page in existence.
+   */
+  test.each([
+    ["no further page exists", { pagination: { ...mockPaginatedResult.pagination!, hasMore: false } }, {}],
+    ["the provider cannot page", {}, { supportsResultPagination: false }],
+    ["the surface withholds the callback", {}, { onLoadMore: undefined }],
+  ])("says nothing about pages when %s", (_label, resultPatch, propPatch) => {
+    const { queryByTestId } = render(
+      React.createElement(ResultsGrid, {
+        result: { ...mockPaginatedResult, ...resultPatch },
+        onLoadMore: mock(() => {}),
+        supportsResultPagination: true,
+        resultQuery: "SELECT * FROM users",
+        ...propPatch,
+      }),
+    );
+
+    expect(queryByTestId("page-offer")).toBeNull();
+    expect(queryByTestId("order-notice")).toBeNull();
+  });
+
+  test("says nothing when the statement that produced the rows is unknown", () => {
+    // No `resultQuery` means the shell could not name the statement. Claiming its order
+    // either way would be a guess, and the quieter guess is the one that does not
+    // reassure.
+    const { queryByTestId } = render(
+      React.createElement(ResultsGrid, {
+        result: mockPaginatedResult,
+        onLoadMore: mock(() => {}),
+        supportsResultPagination: true,
+      }),
+    );
+
+    expect(queryByTestId("page-offer")).not.toBeNull();
+    expect(queryByTestId("order-notice")).toBeNull();
   });
 
   // ── 12. Empty state message is descriptive ────────────────────────────────

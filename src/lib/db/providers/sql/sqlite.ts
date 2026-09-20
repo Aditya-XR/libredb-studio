@@ -1005,6 +1005,8 @@ export class SQLiteProvider extends SQLBaseProvider {
       explainFormat: "sqlite-queryplan",
       supportsConnectionString: false,
       supportsInlineRowEdit: true,
+      // `LIMIT n OFFSET m`, applied by the shared limiter in `SQLBaseProvider.prepareQuery`.
+      supportsResultPagination: true,
       // SQLite HAS transactions; this provider holds no session for one, so
       // POST /api/db/transaction refuses the call and the controls stay hidden.
       supportsTransactions: false,

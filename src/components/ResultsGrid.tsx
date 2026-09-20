@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo, useState, useRef, useCallback, useEffect } from "react";
-import { QueryResult } from "@/lib/types";
+import { QueryResult, type DatabaseType } from "@/lib/types";
 import {
   type ColumnDef,
   type SortingState,
@@ -28,8 +28,10 @@ import {
 } from "@/lib/data-masking";
 import { ResultCard } from "@/components/results-grid/ResultCard";
 import { RowDetailSheet } from "@/components/results-grid/RowDetailSheet";
-import { StatsBar, LoadMoreFooter } from "@/components/results-grid/StatsBar";
+import { StatsBar } from "@/components/results-grid/StatsBar";
 import { describeWarning, formatCellValue } from "@/components/results-grid/utils";
+import { hasResultOrder } from "@/lib/sql/result-order";
+import { pageOfferFor } from "@/components/results-grid/page-offer";
 
 export interface CellChange {
   rowIndex: number;
@@ -84,6 +86,25 @@ interface ResultsGridProps {
   result: QueryResult;
   onLoadMore?: () => void;
   isLoadingMore?: boolean;
+  /**
+   * Whether the provider these rows came from can be asked for the page AFTER this one
+   * (`ProviderCapabilities.supportsResultPagination`, #816).
+   *
+   * Gated on `=== true`, so an absent flag hides the control: five providers cannot page
+   * at all — two throw and three answer a page request with page one — and a control that
+   * can only re-fetch what is already on screen is worse than no control (#269's rule).
+   */
+  supportsResultPagination?: boolean;
+  /**
+   * The statement that produced these rows, for the ordering notice only.
+   *
+   * The tab's `resultQuery` and not the editor buffer: the buffer is rewritten on every
+   * keystroke, and the condition being stated is about the rows on screen. Absent when
+   * the surface cannot name the statement, and then nothing is claimed either way.
+   */
+  resultQuery?: string;
+  /** The dialect `resultQuery` is read under; `#` and `[…]` mean different things (#292). */
+  databaseType?: DatabaseType;
   maskingEnabled?: boolean;
   onToggleMasking?: () => void;
   userRole?: string;
@@ -139,6 +160,9 @@ export function ResultsGrid({
   result,
   onLoadMore,
   isLoadingMore,
+  supportsResultPagination,
+  resultQuery,
+  databaseType,
   maskingEnabled,
   onToggleMasking,
   userRole,
@@ -589,6 +613,35 @@ export function ResultsGrid({
     overscan: 5,
   });
 
+  /**
+   * THE PAGE-TWO OFFER, or undefined where there is none (#816).
+   *
+   * One value rather than the same three-way conjunction written out at each use, and
+   * that is the whole point: the control and the ordering notice below are two statements
+   * about the SAME offer, and written separately they drift. The notice is the one that
+   * goes wrong quietly — an auto-limited unordered result that fits in a single page
+   * announces that order across pages is not guaranteed, beside no control, about a page
+   * that does not exist.
+   *
+   * `pageOfferFor` and not an inline conjunction because the export dialog asks the same
+   * question one layer up (`src/lib/export/scope.ts`), about the same rows.
+   */
+  const pageOffer = pageOfferFor(result.pagination, supportsResultPagination, onLoadMore);
+
+  /**
+   * Whether to state, once, that order across pages is not guaranteed.
+   *
+   * Studio will not inject, require or suggest an `ORDER BY` to paginate: on a table of
+   * millions of rows a sort can be fatal, and paying for it is the user's call. Without
+   * one the engine may return rows that repeat or are skipped between pages. That is
+   * accepted, not blocked — but it must not pretend to be the ordered case.
+   *
+   * Unknown statement, no claim: with no `resultQuery` the surface cannot read the order,
+   * and staying quiet is the guess that does not reassure.
+   */
+  const orderAcrossPagesUnspecified =
+    pageOffer !== undefined && resultQuery !== undefined && !hasResultOrder(resultQuery, databaseType);
+
   if (!result || result.rows.length === 0) {
     // A warning here is the whole story: an engine can answer 200 with every
     // segment unavailable, and the stats bar that normally carries the badge is
@@ -640,6 +693,9 @@ export function ResultsGrid({
         pendingChanges={pendingChanges}
         onApplyChanges={onApplyChanges}
         onDiscardChanges={onDiscardChanges}
+        orderAcrossPagesUnspecified={orderAcrossPagesUnspecified}
+        pageOffer={pageOffer}
+        isLoadingMore={isLoadingMore}
       />
 
       <div ref={cardContainerRef} className={cn("flex-1 overflow-auto p-4 md:hidden", viewMode !== "card" && "hidden")}>
@@ -848,10 +904,6 @@ export function ResultsGrid({
           </div>
         </div>
       </div>
-
-      {result.pagination?.hasMore && onLoadMore && (
-        <LoadMoreFooter hasMore={true} onLoadMore={onLoadMore} isLoadingMore={isLoadingMore} />
-      )}
 
       {selectedRow && (
         <RowDetailSheet

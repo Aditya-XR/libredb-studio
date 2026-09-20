@@ -583,8 +583,13 @@ Query", the first two things a user clicks on an index — and both were refused
 `extraneous input ';'` (measured in the browser, 2026-08-19). So
 `ProviderCapabilities.statementTerminator` is `"none"` on both products and
 [`query-generators.ts`](../../src/lib/query-generators.ts) asks the capability instead of the engine
-name: the generated statement now ends at `LIMIT 50`. Both spellings run on the fork, which is why one
-answer serves both type-ids rather than a branch on `dialect`.
+name. Both spellings run on the fork, which is why one answer serves both type-ids rather than a
+branch on `dialect`.
+
+The bound in that measurement has since gone too: #816 moved the preview cap out of the statement and
+into the `limit` execution option, so the generated statement is now `SELECT * FROM probe_orders` —
+no `LIMIT`, no `;`. The terminator measurement above is unaffected and still the reason for the
+declaration.
 
 A semicolon a **user** types is unaffected by that declaration and still runs, because the editor's
 statement reader strips the terminator before the statement is sent. The raw `POST /api/db/query`
@@ -1306,11 +1311,13 @@ be told work happened.
 
 ## 9. Capabilities & labels
 
-### `getCapabilities()` ([index.ts:388](../../src/lib/db/providers/sql/search/index.ts))
+### `getCapabilities()` ([index.ts:680](../../src/lib/db/providers/sql/search/index.ts))
 
-One answer for both products, because every flag here measured the same on both. The single
-difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it in, so it lives on
-`SearchProduct` and is read by `prepareQuery()` alone.
+Two flags diverge between the products; every other one measured the same on both.
+`identifierQuoting` is one of them, below.
+`OFFSET` is the other, and since #816 it has a field of its own: `supportsResultPagination` is
+declared as `this.product.acceptsOffsetClause`, so the declaration and the `prepareQuery()`
+refusal are the same value and cannot drift apart.
 
 | Capability | Value | Why |
 |---|---|---|
@@ -1319,6 +1326,7 @@ difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it
 | `supportsExternalQueryLimiting` | `true` | `LIMIT n` is correct here; the one form that is not is refused by `prepareQuery()` ([§5.5](#55-the-preparequery-override-there-is-no-second-page)) |
 | `supportsCreateTable` | **`false`** | Not in the grammar ([§5.6](#56-this-grammar-does-not-write)) |
 | `supportsInlineRowEdit` | **`false`** | `UPDATE` is not in the grammar, so the editor's statement could only ever produce an error (#269) |
+| `supportsResultPagination` | **`false`** | Elasticsearch SQL has no `OFFSET` clause. `prepareQuery` throws rather than answer page two with page one, and this flag hides the control that would provoke it. OpenSearch, the same implementation, declares `true` (#816) |
 | `supportsTransactions` | **`false`** | `BEGIN` is not in the grammar and the surface is stateless HTTP; the trio and SANDBOX are withheld instead of answering HTTP 400 (#464) |
 | `declaresForeignKeys` | **`false`** | The engine has no such constraint in its model, so the empty `foreignKeys` means "impossible here" rather than "none declared, or none visible to this role" — the distinction #414 was about |
 | `supportsMaintenance` | **`false`** | Nothing in `MaintenanceType` is SQL-reachable ([§8](#8-maintenance)) |
@@ -1326,7 +1334,7 @@ difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it
 | `supportsConnectionString` | **`false`** | No URI convention, and `http(s)://` is ClickHouse's ([§4.2](#42-there-is-no-connection-string-and-that-is-deliberate)) |
 | `defaultPort` | `9200` | Both schemes ([§4.3](#43-tls)) |
 | `identifierQuoting` | **`double`** | Declared because the port cannot say: the fork ships on 9200 too and quotes differently, and a wrong guess there returns **no rows** rather than an error ([opensearch.md §5.4](./opensearch.md#54-dialect-traps-a-user-will-hit)) |
-| `statementTerminator` | **`none`** | This grammar has no `;`, and the generated `SELECT * FROM probe_orders LIMIT 50;` was refused — the schema tree's first click ([§5.4](#54-dialect-traps-a-user-will-hit)) |
+| `statementTerminator` | **`none`** | This grammar has no `;`, and the generated statement of the day, `SELECT * FROM probe_orders LIMIT 50;`, was refused — the schema tree's first click. #816 later took the bound out of that statement too, leaving the terminator as the reason ([§5.4](#54-dialect-traps-a-user-will-hit)) |
 | `containerLevels` | **`[]`** | An index is not inside anything, and both products' own SQL surfaces say so ([§6](#the-object-surface-789)) |
 | `objectKinds` | `index`, `alias`, `stream`, `pipeline`, `template` | The five objects a search cluster publishes over REST; `index` is the only one that accepts row writes ([§6](#the-object-surface-789)) |
 | `schemaRefreshPattern` | `\b(DELETE)\b` | Can never fire on this product — its grammar has no DELETE. It is there for the fork ([§5.6](#56-this-grammar-does-not-write)) |
@@ -1595,8 +1603,10 @@ because the provider exposes no `cancelQuery` ([§3.8](#38-the-deadline-is-the-c
   ([§3.4](#34-the-success-envelope-positional-rows-and-a-duplicate-name-that-must-not-vanish)). It is
   dropped even where the fork supplies it, so no surface behaves differently between the two.
 - **A trailing semicolon is a syntax error**, including in the statement
-  `generateTableQuery()` produces for a search connection — measured, `SELECT * FROM probe_orders
-  LIMIT 50;` answers `parsing_exception`, "extraneous input ';'"
+  `generateTableQuery()` produces for a search connection — measured against the statement of the day,
+  `SELECT * FROM probe_orders LIMIT 50;`, which answers `parsing_exception`, "extraneous input ';'".
+  That statement is now `SELECT * FROM probe_orders`: #816 moved the preview cap into the `limit`
+  execution option, and the terminator declaration is what still keeps the `;` off it
   ([§5.4](#54-dialect-traps-a-user-will-hit)).
 - **There is a paging ceiling.** A statement whose result the engine spreads over more than
   `MAX_PAGES = 1000` pages is **refused** rather than truncated, after the cursor is closed. At the

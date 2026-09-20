@@ -473,6 +473,9 @@ describe("capabilities", () => {
     // amount = 1 WHERE customer_id = 3` - a plausible guess on a real table - is
     // "Some partition key parts are missing: id".
     expect(capabilities.supportsInlineRowEdit).toBe(false);
+    // CQL has no OFFSET clause and `prepareQuery` throws on a positive offset, so the
+    // control that would provoke that refusal is never rendered (#816).
+    expect(capabilities.supportsResultPagination).toBe(false);
     // CQL has no transaction; BATCH is not one (#464).
     expect(capabilities.supportsTransactions).toBe(false);
   });

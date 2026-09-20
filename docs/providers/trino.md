@@ -318,6 +318,7 @@ What that produces, deliberately and consistently:
 | `ColumnSchema.isPrimary` | `false` | No key is declared for any column |
 | `declaresForeignKeys` | `false` | So the ER diagram draws boxes and no edges *as the engine's answer*, not as a schema that happens to be empty (#414) |
 | `supportsInlineRowEdit` | `false` | The inline editor builds `UPDATE … WHERE <pk> = <val>`. With no column that identifies one row, an edit would silently rewrite every row that matches, so the control is not offered |
+| `supportsResultPagination` | `true` | `OFFSET m LIMIT n` — Trino refuses the clauses in the other order, so this provider transposes what the shared limiter emitted ([§3.5](#35-offset-comes-before-limit)) (#816) |
 | `DatabaseOverview.indexCount` | `0` | — |
 
 ### 3.9 The bytes are somewhere else, so the size panels say so
@@ -1602,6 +1603,7 @@ are undeclared.
 | `supportsExternalQueryLimiting` | `true` | `LIMIT` is injected by the shared limiter, transposed ([§3.5](#35-offset-comes-before-limit)) |
 | `supportsCreateTable` | `true` | In the grammar, live-verified on `memory` ([§5.5](#55-writes-belong-to-the-connector-not-to-the-engine)) |
 | `supportsInlineRowEdit` | `false` | No primary key exists to build a one-row `WHERE` ([§3.8](#38-no-keys-no-indexes--and-why-that-is-a-fact-about-the-engine)) |
+| `supportsResultPagination` | `true` | `OFFSET m LIMIT n`, transposed by this provider ([§3.5](#35-offset-comes-before-limit)); the results grid offers Load More (#816) |
 | `supportsTransactions` | `false` | Trino has `START TRANSACTION`, but a transaction lives in an HTTP session header this provider does not carry between statements, so the trio and SANDBOX are not offered (#464) |
 | `declaresForeignKeys` | `false` | Not in the model at all ([§3.8](#38-no-keys-no-indexes--and-why-that-is-a-fact-about-the-engine)) |
 | `supportsMaintenance` | `true` | |

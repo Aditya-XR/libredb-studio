@@ -327,7 +327,11 @@ Execute SQL query on connected database.
 }
 ```
 
-The `pagination` object reports the auto-limiting applied by the server (default 500 rows). `wasLimited` is `true` when the server injected a `LIMIT` the query didn't specify; `hasMore` indicates more rows are available — re-request with a higher `offset` to page. See [`docs/editor/query-optimization.md`](editor/query-optimization.md).
+The `pagination` object reports the auto-limiting applied by the server. `limit` is `options.limit` when the caller sent one and 500 otherwise; the app's own tree click sends 50. `wasLimited` is `true` when the server injected a `LIMIT` the query didn't specify.
+
+`hasMore` is `wasLimited && rows.length === limit`, and both halves matter. A statement the server returned **untouched** — one carrying its own `LIMIT n`, or one whose end the limiter declined to cut into — runs identically at every `offset`, because the requested offset is discarded along with the rewrite. `hasMore` is `false` for those however many rows come back, and re-requesting with a higher `offset` would return the same rows again. Where `hasMore` is `true`, re-request with `offset` advanced by the number of rows you received. See [`docs/editor/query-optimization.md`](editor/query-optimization.md).
+
+Not every engine can serve a positive `offset`. Cassandra and Elasticsearch answer one with HTTP 400 rather than silently returning page one; MongoDB, Redis and LibreDB ignore it. `GET /api/db/provider-meta` reports each one's `capabilities.supportsResultPagination`, which is the same flag the app reads before offering its Load More control.
 
 **Bound parameters (optional):**
 ```json
@@ -451,7 +455,8 @@ is no JSON envelope. Two things differ from the other SQL providers:
     "password": "password123",
     "database": "travel"
   },
-  "sql": "SELECT META(d).id AS __id, d.* FROM `travel`.`inventory`.`hotel` AS d LIMIT 50"
+  "sql": "SELECT META(d).id AS __id, d.* FROM `travel`.`inventory`.`hotel` AS d",
+  "options": { "limit": 50 }
 }
 ```
 
@@ -491,7 +496,8 @@ providers:
     "password": "",
     "database": "default"
   },
-  "sql": "SELECT * FROM events LIMIT 50"
+  "sql": "SELECT * FROM events",
+  "options": { "limit": 50 }
 }
 ```
 
@@ -528,7 +534,8 @@ things differ from the other SQL providers:
     "host": "localhost",
     "port": 8888
   },
-  "sql": "SELECT * FROM \"libredb_demo\" LIMIT 50"
+  "sql": "SELECT * FROM \"libredb_demo\"",
+  "options": { "limit": 50 }
 }
 ```
 

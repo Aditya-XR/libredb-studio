@@ -184,6 +184,16 @@ describe("DuckDBProvider capabilities", () => {
     expect(capabilities.singleWriterFile).toBe(true);
   });
 
+  test("pages with LIMIT n OFFSET m", () => {
+    // #816: declared true because `prepareQuery` really applies a positive offset.
+    // Measured across every type-id in tests/unit/db/result-pagination-capability.test.ts.
+    expect(capabilities.supportsResultPagination).toBe(true);
+
+    const pageTwo = new DuckDBProvider(makeConfig()).prepareQuery("SELECT * FROM t", { limit: 50, offset: 50 });
+    expect(pageTwo.query).toBe("SELECT * FROM t LIMIT 50 OFFSET 50");
+    expect(pageTwo.wasLimited).toBe(true);
+  });
+
   test("declares double-quote identifier quoting rather than relying on the null-port heuristic", () => {
     // `defaultPort: null` is shared with sqlite, and query-generators.ts derives the
     // dialect from the port unless the capability is declared.

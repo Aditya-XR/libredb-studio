@@ -1399,6 +1399,9 @@ export class OracleProvider extends SQLBaseProvider {
       supportsExplain: false,
       supportsConnectionString: true,
       supportsInlineRowEdit: true,
+      // `OFFSET m ROWS FETCH NEXT n ROWS ONLY`, built by this provider's own
+      // `prepareQuery` override; page one is `FETCH FIRST n ROWS ONLY`.
+      supportsResultPagination: true,
       // Oracle is always in a transaction; the held connection commits or rolls back.
       supportsTransactions: true,
       maintenanceOperations: ["analyze", "optimize", "kill"],

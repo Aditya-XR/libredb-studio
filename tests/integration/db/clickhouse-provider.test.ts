@@ -32,6 +32,7 @@ import {
 import type { DatabaseProvider, ObjectSourceDocument } from "@/lib/db/types";
 import type { DatabaseConnection, DatabaseType } from "@/lib/types";
 import { ClickHouseProvider } from "@/lib/db/providers/sql/clickhouse";
+import { generateTableQuery } from "@/lib/query-generators";
 import { CLICKHOUSE_CONTAINER_LEVELS, CLICKHOUSE_OBJECT_KINDS } from "@/lib/db/providers/sql/clickhouse/objects";
 import { maintenanceControl } from "@/lib/db/types";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
@@ -438,6 +439,10 @@ describe("ClickHouseProvider metadata", () => {
       supportsExternalQueryLimiting: true,
       supportsCreateTable: false,
       supportsInlineRowEdit: false,
+      // `LIMIT n OFFSET m` from the shared limiter (#816). A statement ending in
+      // `FORMAT` or `SETTINGS` comes back `wasLimited: false`, and the route's
+      // `hasMore` requires that, so those offer no Load More without a type branch.
+      supportsResultPagination: true,
       supportsTransactions: false,
       declaresForeignKeys: false,
       supportsMaintenance: true,
@@ -949,6 +954,37 @@ describe("ClickHouseProvider query preparation", () => {
     expect(prepared.query).toBe(sql);
     expect(prepared.wasLimited).toBe(false);
     expect(prepared.limit).toBe(25);
+  });
+
+  /**
+   * WHERE ISSUE #264's HAZARD WENT (#816).
+   *
+   * The generator used to write `SELECT * FROM events LIMIT 50;` and a test in
+   * `tests/unit/lib/query-generators.test.ts` pinned that bound as the LAST clause,
+   * because `... FORMAT TSV LIMIT 1` is a hard syntax error. #816 removed the generated
+   * bound, so that guard had nothing left to guard, and the hazard now lives here: the
+   * preview is `SELECT * FROM events;`, and a user who appends `FORMAT TSV` to it makes a
+   * statement the limiter DECLINES to rewrite at any offset.
+   *
+   * Two consequences, both deliberate and both asserted below. The statement runs with no
+   * row bound at all, which on a large table costs more than it used to. And because it
+   * comes back `wasLimited: false`, the route's `hasMore` is false whatever the row count,
+   * so no Load More is offered for a statement that would answer every click with page
+   * one. The second is the point of the change; the first is its price.
+   */
+  test("the generated preview plus a user FORMAT clause runs unbounded and cannot be paged", () => {
+    const generated = generateTableQuery(["events"], provider().getCapabilities());
+    expect(generated).toBe("SELECT * FROM events;");
+
+    const edited = "SELECT * FROM events FORMAT TSV";
+    for (const offset of [0, 50]) {
+      const prepared = provider().prepareQuery(edited, { limit: 50, offset });
+
+      expect(prepared.query).toBe(edited);
+      // No bound reached the engine, and the limiter says so. `hasMore` requires
+      // `wasLimited`, so the grid offers nothing to click.
+      expect(prepared.wasLimited).toBe(false);
+    }
   });
 
   test.each([

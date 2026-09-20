@@ -674,6 +674,9 @@ describe("RedisProvider", () => {
       // Redis commands are not SQL, so the inline row editor's `UPDATE ... SET`
       // has nothing to run against (#269).
       expect(caps.supportsInlineRowEdit).toBe(false);
+      // `prepareQuery` pins both limit and offset: a Redis read is a command, not a
+      // statement whose bound this layer can advance (#816).
+      expect(caps.supportsResultPagination).toBe(false);
       // MULTI/EXEC exists in Redis and is not exposed through this provider (#464).
       expect(caps.supportsTransactions).toBe(false);
       // Redis has no constraints at all, and its "tables" are key prefixes this

@@ -245,6 +245,30 @@ export interface ProviderCapabilities {
    */
   supportsInlineRowEdit?: boolean;
   /**
+   * Whether this provider can be asked for the page AFTER the first one — whether
+   * `prepareQuery(sql, { limit, offset })` with a positive `offset` really applies it.
+   *
+   * It is NOT `supportsExternalQueryLimiting`, which answers whether a bound can be
+   * injected at all. Cassandra declares that one `true` and still throws on any
+   * `offset > 0`, because CQL has no `OFFSET` clause.
+   *
+   * False hides the Load More control entirely rather than offering one that can only
+   * re-fetch page one — issue #269's rule, applied to #816. Measured 2026-09-20 by
+   * calling each provider's own `prepareQuery` with `offset: 50`: Cassandra and
+   * Elasticsearch throw; MongoDB and Redis pin `offset` to 0 and return the statement
+   * untouched; LibreDB inherits `BaseDatabaseProvider.prepareQuery`, which echoes the
+   * offset back while applying nothing — the silent case the refusals exist to prevent.
+   * The other twelve emit a real offset clause. Pinned as a behaviour, not as a
+   * declaration, in `tests/unit/db/result-pagination-capability.test.ts`.
+   *
+   * Optional for the same published-interface reason as `supportsInlineRowEdit`
+   * (`src/exports/types.ts`): a required field added after the fact stops every external
+   * implementer compiling. Every provider in this repo declares it, and the UI gates on
+   * `=== true`, so an absent flag reads as unsupported rather than inheriting a
+   * permissive default.
+   */
+  supportsResultPagination?: boolean;
+  /**
    * Whether THIS PROVIDER implements the interactive transaction session that
    * `POST /api/db/transaction` drives — `beginTransaction()` / `commitTransaction()`
    * / `rollbackTransaction()` over one held connection. It is a statement about the
