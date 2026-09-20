@@ -136,7 +136,8 @@ const unconnected = (type: DatabaseType): DatabaseConnection =>
   }) as DatabaseConnection;
 
 /**
- * MariaDB's own `VERSION()` string, measured on `mariadb:latest` 12.3.2 by the mysql task.
+ * The flavour a MariaDB server is measured as, which is the derived fact the provider stores
+ * once it has read `SELECT VERSION()`.
  *
  * SECOND OWNER, DISCLOSED RATHER THAN HOISTED. `tests/isolated/object-source-declarations.test.ts`
  * carries the same constant and the same private-field write, because the census needs the MariaDB
@@ -146,27 +147,27 @@ const unconnected = (type: DatabaseType): DatabaseConnection =>
  * this note is the pointer between them.
  *
  * The duplication cannot drift in SILENCE, which is the part that matters and which was measured
- * in fix round 1: a copy whose string stops matching `objectKindsFor`'s `/mariadb/i` makes its own
- * file go red by name. Here that is `toContain("mysql/package")` in the membership test; in the
- * census it is the named throw plus the MariaDB triple set. So a re-measured version updated in
- * one file only fails the other rather than quietly censusing six kinds.
+ * in fix round 1: a flavour the provider no longer knows is a type error at the write, and a write
+ * that lands on nothing leaves the MySQL default answering. Here that is `toContain("mysql/package")`
+ * in the membership test; in the census it is the named throw plus the MariaDB triple set. So a
+ * rename applied in one file only fails the other rather than quietly censusing six kinds.
  */
-const MARIADB_VERSION_STRING = "12.3.2-MariaDB-ubu2404";
+const MARIADB_FLAVOUR = "mariadb";
 
 /**
- * The mysql provider with a MariaDB server's version already measured onto it.
+ * The mysql provider with a MariaDB server's flavour already measured onto it.
  *
  * Isolated here rather than written inline inside the fleet loop, so this file holds ONE place
  * that knows about MariaDB instead of a type-id branch in the middle of a population walk. The
- * private `measuredServerVersion` is written directly rather than stubbing `getCapabilities`,
+ * private `measuredFlavour` is written directly rather than stubbing `getCapabilities`,
  * because a stub would answer a kind list this test typed and the point of the guard is that the
  * code produces it. If the field is ever renamed the write lands on nothing, the MySQL six answer,
  * and the membership test's `mysql/package` control fails by name.
  */
 const MARIADB_CAPABLE_TYPE: DatabaseType = "mysql";
 
-const withMeasuredMariaDBVersion = <T>(provider: T): T => {
-  (provider as unknown as { measuredServerVersion: string | undefined }).measuredServerVersion = MARIADB_VERSION_STRING;
+const withMeasuredMariaDBFlavour = <T>(provider: T): T => {
+  (provider as unknown as { measuredFlavour: "mysql" | "mariadb" }).measuredFlavour = MARIADB_FLAVOUR;
   return provider;
 };
 
@@ -175,7 +176,7 @@ const withMeasuredMariaDBVersion = <T>(provider: T): T => {
  *
  * The MariaDB branch is included, because `createDatabaseProvider("mysql")` is unconnected and
  * `objectKindsFor(undefined)` answers the MySQL six: MariaDB's `package` and `sequence` would
- * otherwise never be language-checked at all. `withMeasuredMariaDBVersion` above is the only place
+ * otherwise never be language-checked at all. `withMeasuredMariaDBFlavour` above is the only place
  * in this file that knows which type-id that is.
  */
 async function everyDeclaredSourceLanguage(): Promise<
@@ -184,7 +185,7 @@ async function everyDeclaredSourceLanguage(): Promise<
   const found: { readonly where: string; readonly language: string }[] = [];
   for (const type of [...EXTERNAL_DATABASE_TYPES, "libredb"] as readonly DatabaseType[]) {
     const built = await createDatabaseProvider(unconnected(type));
-    const provider = type === MARIADB_CAPABLE_TYPE ? withMeasuredMariaDBVersion(built) : built;
+    const provider = type === MARIADB_CAPABLE_TYPE ? withMeasuredMariaDBFlavour(built) : built;
     for (const kind of declaredKinds(provider.getCapabilities())) {
       if (kind.sourceLanguage !== undefined) found.push({ where: `${type}/${kind.id}`, language: kind.sourceLanguage });
     }

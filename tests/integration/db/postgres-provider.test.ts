@@ -7126,8 +7126,8 @@ describe("PostgreSQL object edit (#789 Phase 3)", () => {
       // equals `plan.unit.steps[0].text`. That test PASSES against a design that rebuilds at apply
       // time, because nothing changed between the two calls, so it certifies nothing.
       //
-      // THE LIVE POPULATION THAT CONTAINS THE CASE: `objectKindsFor(version)` in
-      // `src/lib/db/providers/sql/mysql.ts` resolves from `measuredServerVersion`, set in
+      // THE LIVE POPULATION THAT CONTAINS THE CASE: `objectKindsFor(flavour)` in
+      // `src/lib/db/providers/sql/mysql.ts` resolves from `measuredFlavour`, set in
       // `connect()`, and `POST /api/db/provider-meta` reads capabilities off a provider it never
       // connects. That is the shipped mechanism by which two reads of one provider legitimately
       // answer differently, and it is measured end to end on a live MariaDB 12.3.2.

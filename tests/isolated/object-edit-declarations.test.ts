@@ -31,11 +31,12 @@
  *
  * THE MARIADB LEVER, and it is measured rather than a worry. `createDatabaseProvider("mysql")`
  * is UNCONNECTED, and mysql is the one provider whose `objectKinds` is not a constant:
- * `objectKindsFor(undefined)` answers the MySQL six and structurally EXCLUDES MariaDB's
+ * `objectKindsFor("mysql")` answers the MySQL six and structurally EXCLUDES MariaDB's
  * `package` and `sequence`. A census that never drove the MariaDB branch could certify that
  * nothing on mysql accepts an edit while the branch a real MariaDB server resolves declared one.
  * The branch is driven below the same way the Phase 2 census drives it, by writing the private
- * `measuredServerVersion` field that `connect()` writes.
+ * `measuredFlavour` field that `connect()` writes, which holds the flavour derived from the
+ * server's version string rather than the string itself.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
@@ -52,8 +53,8 @@ import {
 import { CENSUS_CONNECTION } from "../helpers/census-connection";
 
 /**
- * The version string a MariaDB server answers `SELECT VERSION()` with, measured on
- * `mariadb:latest` (12.3.2) by the mysql provider task on 2026-09-11.
+ * The flavour a MariaDB server is measured as, which is the derived fact the provider stores
+ * once it has read `SELECT VERSION()`.
  *
  * THIRD OWNER, DISCLOSED RATHER THAN HOISTED, and the two others say the same about each other:
  * `tests/isolated/object-source-declarations.test.ts` and
@@ -62,11 +63,12 @@ import { CENSUS_CONNECTION } from "../helpers/census-connection";
  * to be written again rather than hoist it while another implementer holds the checkout, and a
  * shared module would be a file this task does not own.
  *
- * No copy can drift in silence: a string that stops matching `objectKindsFor`'s `/mariadb/i`
- * makes its own file go red by name. Here it is the named throw in the MariaDB test, which
- * refuses to compare an editable set it never reached the two extra kinds in.
+ * No copy can drift in silence: a flavour the provider no longer knows is a type error at the
+ * write below, and a write that lands on nothing leaves the MySQL default answering. Here that
+ * is the named throw in the MariaDB test, which refuses to compare an editable set it never
+ * reached the two extra kinds in.
  */
-const MARIADB_VERSION_STRING = "12.3.2-MariaDB-ubu2404";
+const MARIADB_FLAVOUR = "mariadb";
 
 /** `<type-id>/<kind id>`, the shape both halves of the expectation are compared in. */
 const pair = (type: DatabaseType, kind: ObjectKindSpec): string => `${type}/${kind.id}`;
@@ -77,7 +79,7 @@ const EXPECTED_PAIRS: readonly string[] = EXPECTED_EDITABLE_KINDS.map(([type, ki
 /**
  * The mysql provider's kinds as a MariaDB server resolves them, which no unconnected read shows.
  *
- * The measured version is a PRIVATE field written by `connect()`. It is set directly rather than
+ * The measured flavour is a PRIVATE field written by `connect()`. It is set directly rather than
  * through a stub of `getCapabilities`, because a stub would return a kind list this test typed,
  * and the whole point of a census is that the code produces the list. Writing the field drives
  * the real `objectKindsFor` branch. If the field is ever renamed, this write lands on nothing,
@@ -86,7 +88,7 @@ const EXPECTED_PAIRS: readonly string[] = EXPECTED_EDITABLE_KINDS.map(([type, ki
  */
 async function mariadbKinds(): Promise<readonly ObjectKindSpec[]> {
   const provider = await createDatabaseProvider(CENSUS_CONNECTION.mysql);
-  (provider as unknown as { measuredServerVersion: string | undefined }).measuredServerVersion = MARIADB_VERSION_STRING;
+  (provider as unknown as { measuredFlavour: "mysql" | "mariadb" }).measuredFlavour = MARIADB_FLAVOUR;
   return declaredKinds(provider.getCapabilities());
 }
 
@@ -255,7 +257,7 @@ describe("the fleet census of object edit declarations", () => {
     const extras = mariadb.filter((kind) => !unconnected.some((other) => other.id === kind.id)).map((kind) => kind.id);
     if (extras.length === 0) {
       throw new Error(
-        `the MariaDB branch resolved the same kinds as the unconnected provider, so ${MARIADB_VERSION_STRING} ` +
+        `the MariaDB branch resolved the same kinds as the unconnected provider, so the measured flavour ${MARIADB_FLAVOUR} ` +
           "no longer reaches it and this test certifies nothing",
       );
     }

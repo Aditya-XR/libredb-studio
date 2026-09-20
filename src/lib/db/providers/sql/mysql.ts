@@ -1140,24 +1140,37 @@ const MARIADB_EXTRA_OBJECT_KINDS: readonly ObjectKindSpec[] = [
 const MARIADB_VERSION = /mariadb/i;
 
 /**
- * The kinds a server with this `VERSION()` string has.
+ * Which server in this family this is.
+ *
+ * A type id cannot answer it: `DatabaseType` has no `mariadb` entry, and choosing MySQL in
+ * the connection dialog is the documented way to reach a MariaDB server
+ * (docs/providers/mysql.md 1.1). Branching on the type id here would be both forbidden
+ * inside `src/lib/db` and unable to tell the two servers apart in the first place.
+ */
+type MySQLFlavour = "mysql" | "mariadb";
+
+/**
+ * The flavour a server with this `VERSION()` string is, and THE ONLY PLACE
+ * `MARIADB_VERSION` is read.
+ *
+ * An unmeasured version answers `"mysql"`, which is what an unconnected provider gets:
+ * `POST /api/db/provider-meta` reads capabilities off a provider it never connects (#457).
+ * MySQL is the safe default of the two for `objectKinds`, because declaring a kind the
+ * server does not have draws a folder that can never fill, while missing one costs two
+ * folders a MariaDB user regains the moment the connection is live.
+ */
+function flavourFor(version: string | undefined): MySQLFlavour {
+  return version !== undefined && MARIADB_VERSION.test(version) ? "mariadb" : "mysql";
+}
+
+/**
+ * The kinds a server of this flavour has.
  *
  * THIS IS THE ONE PROVIDER WHOSE `objectKinds` IS NOT A CONSTANT, and the resolution is from
- * the server rather than from the type id because there is no second type id to resolve
- * from: `DatabaseType` has no `mariadb` entry and choosing MySQL in the connection dialog is
- * the documented way to reach a MariaDB server (docs/providers/mysql.md 1.1). Branching on
- * the type id here would be both forbidden inside `src/lib/db` and unable to tell the two
- * servers apart in the first place.
- *
- * An unmeasured version answers the MySQL set, which is what an unconnected provider gets:
- * `POST /api/db/provider-meta` reads capabilities off a provider it never connects (#457).
- * The MySQL set is the safe default of the two, because declaring a kind the server does not
- * have draws a folder that can never fill, while missing one costs two folders a MariaDB
- * user regains the moment the connection is live.
+ * the server rather than from the type id, for the reason `MySQLFlavour` records.
  */
-function objectKindsFor(version: string | undefined): readonly ObjectKindSpec[] {
-  if (version === undefined || !MARIADB_VERSION.test(version)) return MYSQL_OBJECT_KINDS;
-  return [...MYSQL_OBJECT_KINDS, ...MARIADB_EXTRA_OBJECT_KINDS];
+function objectKindsFor(flavour: MySQLFlavour): readonly ObjectKindSpec[] {
+  return flavour === "mariadb" ? [...MYSQL_OBJECT_KINDS, ...MARIADB_EXTRA_OBJECT_KINDS] : MYSQL_OBJECT_KINDS;
 }
 
 /**
@@ -1167,7 +1180,7 @@ function objectKindsFor(version: string | undefined): readonly ObjectKindSpec[] 
  * Nothing here rejects, for the reason `probeExplainFormat` does not: a version string the
  * server would not give is a fact about which folders the browser can draw, not about the
  * connection, and `connect()` must not fail for it. The cost of the absent case is
- * `objectKindsFor`'s MySQL default, which every server in this family does have.
+ * `flavourFor`'s MySQL default, which every server in this family does have.
  */
 const probeServerVersion = async (queryable: MySQLQueryable): Promise<string | undefined> => {
   try {
@@ -1784,12 +1797,12 @@ export class MySQLProvider extends SQLBaseProvider {
   private measuredExplainFormat: ExplainFormat | undefined = "mysql-json";
 
   /**
-   * What this server called itself, measured by `probeServerVersion()` at connect, and the
-   * only thing that decides whether `objectKinds` carries MariaDB's two extra kinds. It
-   * starts undefined, which `objectKindsFor()` reads as the MySQL set: an unconnected
-   * provider has not asked any server anything yet.
+   * Which server this is, derived at connect from `probeServerVersion()`. It starts as
+   * `"mysql"`, the answer for a provider that has not asked any server anything yet, for
+   * the reason `flavourFor` records. The DERIVED fact is what is stored, the same way
+   * `measuredExplainFormat` stores a grammar and not the text of the probe that found it.
    */
-  private measuredServerVersion: string | undefined;
+  private measuredFlavour: MySQLFlavour = "mysql";
 
   // Transaction support: dedicated connection held outside pool
   private txConn: PoolConnection | null = null;
@@ -1840,7 +1853,7 @@ export class MySQLProvider extends SQLBaseProvider {
       containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
       // Six kinds on MySQL and eight on MariaDB, resolved from what the server called
       // itself and never from the type id (#789). See `objectKindsFor`.
-      objectKinds: objectKindsFor(this.measuredServerVersion),
+      objectKinds: objectKindsFor(this.measuredFlavour),
     };
   }
 
@@ -1924,7 +1937,7 @@ export class MySQLProvider extends SQLBaseProvider {
       // Which server this is, which is what decides the object-kind declaration (#789).
       // Measured rather than derived from the type id, because there is no `mariadb` type
       // id to derive from.
-      this.measuredServerVersion = await probeServerVersion(conn);
+      this.measuredFlavour = flavourFor(await probeServerVersion(conn));
       conn.release();
 
       this.setConnected(true);
