@@ -659,6 +659,22 @@ function makeModifiedColumnDiff(col: Partial<ColumnDiff>): SchemaDiff {
   };
 }
 
+function makeClickhouseAddedColumnDiff(col: Partial<ColumnDiff>): SchemaDiff {
+  return {
+    tables: [
+      {
+        action: "modified",
+        tableName: "events",
+        columns: [{ action: "added", columnName: "y", changes: ["Added"], ...col }],
+        indexes: [],
+        foreignKeys: [],
+      },
+    ],
+    summary: { added: 0, removed: 0, modified: 1 },
+    hasChanges: true,
+  };
+}
+
 describe("generateMigrationSQL: ClickHouse ALTER", () => {
   test("modified column uses MODIFY COLUMN, not PostgreSQL ALTER COLUMN", () => {
     const sql = generateMigrationSQL(makeModifiedTableDiff(), "clickhouse");
@@ -707,6 +723,66 @@ describe("generateMigrationSQL: ClickHouse ALTER", () => {
       "clickhouse",
     );
     expect(sql).toContain('ALTER TABLE "events" MODIFY COLUMN "note" Int32 MATERIALIZED toYear(d);');
+    expect(sql).not.toContain("DEFAULT MATERIALIZED");
+  });
+
+  test("an added column with a MATERIALIZED default is emitted verbatim too", () => {
+    const sql = generateMigrationSQL(
+      makeClickhouseAddedColumnDiff({ targetType: "Int32", targetDefault: "MATERIALIZED toYear(d)" }),
+      "clickhouse",
+    );
+    expect(sql).toContain('ALTER TABLE "events" ADD COLUMN "y" Int32 MATERIALIZED toYear(d);');
+    expect(sql).not.toContain("DEFAULT MATERIALIZED");
+  });
+
+  test("an added column with an ALIAS or EPHEMERAL default names its own clause", () => {
+    const alias = generateMigrationSQL(
+      makeClickhouseAddedColumnDiff({ targetType: "Int32", targetDefault: "ALIAS toYear(d)" }),
+      "clickhouse",
+    );
+    expect(alias).toContain('ADD COLUMN "y" Int32 ALIAS toYear(d);');
+    const ephemeral = generateMigrationSQL(
+      makeClickhouseAddedColumnDiff({ targetType: "String", targetDefault: "EPHEMERAL 'e'" }),
+      "clickhouse",
+    );
+    expect(ephemeral).toContain("ADD COLUMN \"y\" String EPHEMERAL 'e';");
+    expect(alias + ephemeral).not.toContain("DEFAULT ALIAS");
+    expect(alias + ephemeral).not.toContain("DEFAULT EPHEMERAL");
+  });
+
+  test("an added column with a plain default keeps the DEFAULT keyword", () => {
+    const sql = generateMigrationSQL(
+      makeClickhouseAddedColumnDiff({ targetType: "String", targetDefault: "'n/a'" }),
+      "clickhouse",
+    );
+    expect(sql).toContain("ADD COLUMN \"y\" String DEFAULT 'n/a';");
+  });
+
+  test("CREATE TABLE emits a MATERIALIZED column without the DEFAULT keyword", () => {
+    const diff: SchemaDiff = {
+      tables: [
+        {
+          action: "added",
+          tableName: "events",
+          columns: [
+            { action: "added", columnName: "d", targetType: "Date", changes: ["Added"] },
+            {
+              action: "added",
+              columnName: "y",
+              targetType: "Int32",
+              targetDefault: "MATERIALIZED toYear(d)",
+              changes: ["Added"],
+            },
+          ],
+          indexes: [],
+          foreignKeys: [],
+        },
+      ],
+      summary: { added: 1, removed: 0, modified: 0 },
+      hasChanges: true,
+    };
+    const sql = generateMigrationSQL(diff, "clickhouse");
+    expect(sql).toContain('"y" Int32 MATERIALIZED toYear(d)');
     expect(sql).not.toContain("DEFAULT MATERIALIZED");
   });
 
