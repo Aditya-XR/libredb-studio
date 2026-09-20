@@ -912,14 +912,32 @@ A `VIEW` carries neither a row count nor a size: measured, `information_schema.T
 nobody took. `TABLE_ROWS` on a base table is the engine's own estimate, the same nature as
 PostgreSQL's `reltuples`.
 
-**One known defect this surface inherits rather than repairs:** MariaDB reports
-`COLUMN_DEFAULT` as the DEFAULT EXPRESSION AS WRITTEN where MySQL reports the VALUE, and the two
-disagree in both directions. A nullable MariaDB column with no default reads as having the default
-`NULL`, and the string `NULL` means opposite things on the two servers; less visibly, MariaDB keeps
-the quotes, so `DEFAULT 'abc'` reads back as `'abc'` there and `abc` on MySQL. A repair that
-special-cases only `NULL` therefore leaves every string default wrong by two characters.
-Measured both ways and filed as **#795**, whose comment carries the
-full measurement table and what "done" looks like.
+**MariaDB and MySQL do not report a column default the same way, and this surface reads both (#795).**
+MySQL reports the VALUE: a column with no default is SQL NULL, and `DEFAULT 'abc'` reads back as `abc`.
+MariaDB reports the DEFAULT EXPRESSION AS WRITTEN, so a nullable column with no default reads back as the four-character keyword `NULL` and `DEFAULT 'abc'` reads back as `'abc'`, quotes included.
+Measured 2026-09-20 on MariaDB 12.3.2 and MySQL 26.7.0, `HEX(COLUMN_DEFAULT)` read beside the text:
+
+| DDL | the value the column defaults to | MySQL | MariaDB |
+| --- | --- | --- | --- |
+| `INT NULL` | none | SQL NULL | `NULL`, four characters |
+| `INT NOT NULL` | none | SQL NULL | SQL NULL |
+| `DEFAULT 'NULL'` | `NULL` | `NULL` | `'NULL'` |
+| `DEFAULT 'abc'` | `abc` | `abc` | `'abc'` |
+| `DEFAULT 'it''s'` | `it's` | `it's` | `'it''s'` |
+| `DEFAULT 'a\\b'` | `a\b` | `a\b` | `'a\\b'` |
+| `DEFAULT 42` | `42` | `42` | `42` |
+| `DEFAULT CURRENT_TIMESTAMP` | the expression | `CURRENT_TIMESTAMP` | `current_timestamp()` |
+| `AS (1+1) STORED` | none | SQL NULL | `NULL`, four characters |
+
+`CATALOG_DEFAULT_READING` holds that difference as a per-flavour record, resolved once from the flavour measured at connect, and `catalogDefault()` reads the record.
+SQL NULL is absence on both.
+A generated column is absence on both, recognised by `EXTRA` being exactly `STORED GENERATED` or `VIRTUAL GENERATED`: the match is on the whole value because MySQL also writes `DEFAULT_GENERATED` for an ordinary expression default, where MariaDB writes nothing.
+On MariaDB the remaining text is decoded by `unquoteLiteral()` (`src/lib/sql/values.ts`), the inverse of the `quoteLiteral()` this repo already uses for this family, so the doubled quote and the escaping backslash are both undone; text that is not exactly one literal, such as `current_timestamp()` or `concat('x','y')`, passes through as written.
+
+One limit this does not repair, because the engine does not allow it.
+MySQL's own parenthesised expression defaults read back charset-introduced and backslash-escaped, `concat(_latin1\'x\',_latin1\'y\')`, which is not what the user wrote and is not round-trippable.
+Those pass through as reported.
+MariaDB's equivalent reads back as `concat('x','y')`, so the two servers show the same column differently, and the MySQL side is the engine's shape rather than a gap here.
 
 #### `describeObjects()` describes a whole folder in four statements (#789)
 
