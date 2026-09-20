@@ -55,6 +55,7 @@ import { comparePaths } from "../../object-path";
 import { formatBytes } from "../../utils/pool-manager";
 import { measuredNullableAggregate } from "../../utils/measured-aggregate";
 import { CACHE_HIT_RATIO_UNAVAILABLE, formatCacheHitRatio, measuredNumber } from "@/lib/monitoring-cache-ratio";
+import { unquoteLiteral } from "@/lib/sql/values";
 
 /**
  * mysql2 3.23 narrowed `execute`'s values parameter from `any` to a concrete
@@ -886,7 +887,8 @@ const OBJECT_COLUMNS_SQL = `
           DATA_TYPE AS data_type,
           IS_NULLABLE AS is_nullable,
           COLUMN_DEFAULT AS column_default,
-          COLUMN_KEY AS column_key
+          COLUMN_KEY AS column_key,
+          EXTRA AS extra
         FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
         ORDER BY ORDINAL_POSITION`;
@@ -1002,7 +1004,8 @@ function bulkDetailSql(spellings: number, bounded: boolean): BulkDetailStatement
           c.DATA_TYPE AS data_type,
           c.IS_NULLABLE AS is_nullable,
           c.COLUMN_DEFAULT AS column_default,
-          c.COLUMN_KEY AS column_key
+          c.COLUMN_KEY AS column_key,
+          c.EXTRA AS extra
         FROM (${target}) d
         JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA = ? AND c.TABLE_NAME = d.name
         ORDER BY d.name, c.ORDINAL_POSITION`,
@@ -1680,6 +1683,10 @@ interface DetailColumnRow extends RowDataPacket {
   is_nullable: string;
   column_default: string | null;
   column_key: string;
+  /** Optional because the mocks of the OTHER column reads in the suite do not carry it, and
+   *  because a row without it says nothing about the column being generated, which is a
+   *  true reading rather than a fallback. */
+  extra?: string | null;
 }
 
 /** One referencing column of one foreign key, with the database the reference lands in. */
@@ -1705,6 +1712,76 @@ interface DetailRows {
 }
 
 /**
+ * How a server of one flavour spells a column default in `information_schema.COLUMNS`.
+ *
+ * Measured 2026-09-20 on MariaDB 12.3.2-MariaDB-ubu2404 and MySQL 26.7.0, one probe table
+ * per server, `HEX(COLUMN_DEFAULT)` read beside the text.
+ *
+ * MySQL reports the VALUE: a column with no default is SQL NULL, and `DEFAULT 'abc'` reads
+ * back as the three characters `abc`. MariaDB reports the DEFAULT EXPRESSION AS WRITTEN: a
+ * NULLABLE column with no default reads back as the four-character keyword `NULL`, and
+ * `DEFAULT 'abc'` reads back as `'abc'`, quotes included. So the same four characters mean
+ * opposite things on the two servers, and every string default differs by its quotes (#795).
+ *
+ * This is a table and not a conditional so that the next divergence adds a FIELD here
+ * rather than a branch at a call site.
+ */
+interface CatalogDefaultReading {
+  /** What `COLUMN_DEFAULT` holds for a column that has no default. */
+  readonly absence: "sql-null" | "null-keyword";
+  /** Whether a string default arrives evaluated, or as the SQL literal as written. */
+  readonly literal: "evaluated" | "as-written";
+}
+
+const CATALOG_DEFAULT_READING: Record<MySQLFlavour, CatalogDefaultReading> = {
+  mysql: { absence: "sql-null", literal: "evaluated" },
+  mariadb: { absence: "null-keyword", literal: "as-written" },
+};
+
+/**
+ * The two `EXTRA` spellings that mean the column is generated, and the reason the match is
+ * on the WHOLE value.
+ *
+ * Measured on both servers: a generated column reads `STORED GENERATED` or `VIRTUAL
+ * GENERATED`, identically. But MySQL also writes `DEFAULT_GENERATED` for an ORDINARY
+ * expression default, and `DEFAULT_GENERATED on update CURRENT_TIMESTAMP` for an on-update
+ * one, where MariaDB writes nothing at all. A rule matching the substring `GENERATED` would
+ * therefore erase a MySQL default the user really set.
+ */
+const GENERATED_COLUMN_EXTRA = new Set(["STORED GENERATED", "VIRTUAL GENERATED"]);
+
+/**
+ * One catalog row's default, as the value the column really defaults to, or `undefined`
+ * when it has none.
+ *
+ * The order is part of the contract:
+ *
+ *  1. SQL NULL is absence on both servers, whatever else the row says.
+ *  2. A generated column has no insert default on EITHER server, so this rule carries no
+ *     flavour and is true everywhere. It comes before the keyword rule because MariaDB
+ *     reports the same four characters for both cases.
+ *  3. The keyword, on the flavour that spells absence with it.
+ *  4. A literal, on the flavour that reports literals as written. `unquoteLiteral` answers
+ *     `undefined` for anything that is not exactly one literal, which is what lets an
+ *     expression default such as `concat('x','y')` through untouched.
+ */
+function catalogDefault(
+  raw: string | null,
+  extra: string | null | undefined,
+  reading: CatalogDefaultReading,
+): string | undefined {
+  if (raw === null) return undefined;
+  // `undefined` is a row that carries no EXTRA at all, which is the shape every OTHER mock
+  // in the suite produces and a truthful reading: nothing said this column was generated.
+  if (extra !== null && extra !== undefined && GENERATED_COLUMN_EXTRA.has(extra.trim().toUpperCase())) {
+    return undefined;
+  }
+  if (reading.absence === "null-keyword" && raw === "NULL") return undefined;
+  if (reading.literal === "as-written") return unquoteLiteral(raw, "mysql") ?? raw;
+  return raw;
+}
+
+/**
  * Three catalog row sets turned into one `ObjectDetail`, shared by the single and the bulk
  * read.
  *
@@ -1723,13 +1800,18 @@ interface DetailRows {
  * a path. Qualifying the cross-database case is not cosmetic: a bare name there addresses a
  * table in the wrong database, and InnoDB does accept a foreign key into another one.
  */
-function objectDetailFromRows(path: readonly string[], schema: string, rows: DetailRows): ObjectDetail {
+function objectDetailFromRows(
+  path: readonly string[],
+  schema: string,
+  rows: DetailRows,
+  reading: CatalogDefaultReading,
+): ObjectDetail {
   const columns: ColumnSchema[] = rows.columns.map((row) => ({
     name: row.column_name,
     type: row.data_type,
     nullable: row.is_nullable === "YES",
     isPrimary: row.column_key === "PRI",
-    defaultValue: row.column_default ?? undefined,
+    defaultValue: catalogDefault(row.column_default, row.extra, reading),
   }));
 
   const byIndex = new Map<string, IndexSchema>();
@@ -2418,7 +2500,12 @@ export class MySQLProvider extends SQLBaseProvider {
       const columns = await this.runObjectQuery<DetailColumnRow[]>(conn, OBJECT_COLUMNS_SQL, binds);
       const foreignKeys = await this.runObjectQuery<DetailForeignKeyRow[]>(conn, OBJECT_FOREIGN_KEYS_SQL, binds);
       const indexes = await this.runObjectQuery<DetailIndexRow[]>(conn, OBJECT_INDEXES_SQL, binds);
-      return objectDetailFromRows(path, schema, { columns, foreignKeys, indexes });
+      return objectDetailFromRows(
+        path,
+        schema,
+        { columns, foreignKeys, indexes },
+        CATALOG_DEFAULT_READING[this.measuredFlavour],
+      );
     } finally {
       conn.release();
     }
@@ -2504,11 +2591,16 @@ export class MySQLProvider extends SQLBaseProvider {
 
       const details = described
         .map((row) =>
-          objectDetailFromRows(objectPath(container, row), schema, {
-            columns: columns.get(row.name) ?? [],
-            foreignKeys: foreignKeys.get(row.name) ?? [],
-            indexes: indexes.get(row.name) ?? [],
-          }),
+          objectDetailFromRows(
+            objectPath(container, row),
+            schema,
+            {
+              columns: columns.get(row.name) ?? [],
+              foreignKeys: foreignKeys.get(row.name) ?? [],
+              indexes: indexes.get(row.name) ?? [],
+            },
+            CATALOG_DEFAULT_READING[this.measuredFlavour],
+          ),
         )
         .sort((left, right) => comparePaths(left.path, right.path));
       return truncated ? { details, truncated: { limit, reason: callerBoundTruncationReason(limit) } } : { details };
