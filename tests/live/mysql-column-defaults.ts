@@ -2,6 +2,13 @@
  * Opt-in live guard for #795: does a real server still report column defaults the way the
  * provider's `CATALOG_DEFAULT_READING` says it does?
  *
+ * It checks BOTH readings the provider publishes, because a column carries both. The value,
+ * against `EXPECTED` below. And the SQL TEXT, by replaying each reported `COLUMN_DEFAULT`
+ * back at the SAME server after the word `DEFAULT`: that is the reading the schema-diff
+ * migration generator pastes, and `literal: "as-written"` is exactly the claim that it can
+ * be pasted. Without the replay a server that stopped reporting pasteable SQL would leave
+ * this script green.
+ *
  * WHY THIS EXISTS, AND WHY IT CANNOT BE A UNIT TEST. The provider's reading rule is a claim
  * about what two ENGINES emit, and a mock answers whatever its author already thought of.
  * The first repair of this defect handled the doubled quote and not the escaping backslash,
@@ -63,6 +70,51 @@ function urls(): string[] {
     .filter((url) => url.length > 0);
 }
 
+/**
+ * Replay every reported `COLUMN_DEFAULT` at the server that reported it.
+ *
+ * `CATALOG_DEFAULT_READING` claims `literal: "as-written"` for this flavour, which is the
+ * claim that the catalog text is valid SQL HERE, and `ColumnSchema.defaultExpression`
+ * carries it to the migration generator on that basis. The only honest test of "valid SQL
+ * for this engine" is the engine: create a throwaway table whose one column takes the
+ * reported text as its default, and let the server rule.
+ *
+ * The column type comes from `COLUMN_TYPE` and not `DATA_TYPE`: `DATA_TYPE` drops the
+ * length, so `varchar` alone would fail the CREATE for a reason that has nothing to do with
+ * the default.
+ */
+async function replayDefaults(
+  conn: mysql.Connection,
+  version: string,
+  rows: readonly mysql.RowDataPacket[],
+): Promise<string[]> {
+  const failures: string[] = [];
+  let ordinal = 0;
+  for (const row of rows) {
+    if (row.raw === null) continue;
+    const name = String(row.name);
+    const raw = String(row.raw);
+    const columnType = String(row.columnType);
+    const table = `libredb_default_replay_${process.pid}_${ordinal++}`;
+    try {
+      await conn.query(`CREATE TABLE \`${table}\` (c ${columnType} DEFAULT ${raw})`);
+      console.log(`${name}: replayed, the server accepted DEFAULT ${raw}`);
+    } catch (error) {
+      failures.push(
+        `${version}: ${name} reported COLUMN_DEFAULT ${JSON.stringify(raw)}, and the SAME server refused it ` +
+          `after the word DEFAULT on a ${columnType} column: ${error instanceof Error ? error.message : String(error)}. ` +
+          `CATALOG_DEFAULT_READING in src/lib/db/providers/sql/mysql.ts claims literal: "as-written" for this ` +
+          `flavour, and the schema-diff migration generator pastes that text, so one of the two must change.`,
+      );
+    } finally {
+      // Always, including on the failure path: a rejected CREATE leaves nothing, but a later
+      // failure in this loop must not leave the earlier tables behind.
+      await conn.query(`DROP TABLE IF EXISTS \`${table}\``);
+    }
+  }
+  return failures;
+}
+
 async function probeServer(url: string): Promise<string[]> {
   const failures: string[] = [];
   const conn = await mysql.createConnection(url);
@@ -73,7 +125,8 @@ async function probeServer(url: string): Promise<string[]> {
     console.log(`\n=== ${version} (read as ${flavour}) ===`);
 
     const [rows] = await conn.query<mysql.RowDataPacket[]>(
-      "SELECT COLUMN_NAME AS name, COLUMN_DEFAULT AS raw, EXTRA AS extra FROM information_schema.COLUMNS " +
+      "SELECT COLUMN_NAME AS name, COLUMN_DEFAULT AS raw, EXTRA AS extra, COLUMN_TYPE AS columnType " +
+        "FROM information_schema.COLUMNS " +
         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'column_defaults' ORDER BY ORDINAL_POSITION",
     );
     // An empty answer would pass every assertion below, so it is a failure and not a pass.
@@ -102,6 +155,16 @@ async function probeServer(url: string): Promise<string[]> {
         );
       }
     }
+
+    if (flavour === "mariadb") {
+      failures.push(...(await replayDefaults(conn, version, rows)));
+    } else {
+      console.log(
+        "replay skipped on this flavour: MySQL reports the VALUE, so `DEFAULT abc` would be rejected " +
+          "by the engine's own rules rather than by a regression here. That gap is issue #1031; the " +
+          "provider sets no `defaultExpression` on MySQL for the same reason.",
+      );
+    }
   } finally {
     await conn.end();
   }
@@ -116,7 +179,11 @@ for (const url of urls()) {
 console.log("");
 if (failures.length > 0) {
   for (const failure of failures) console.error(`FAIL ${failure}`);
-  console.error(`\n${failures.length} column default(s) did not read back as the value the column defaults to.`);
+  console.error(
+    `\n${failures.length} column default reading(s) did not hold: a value read back wrong, or a catalog text this flavour reports as SQL was refused after DEFAULT.`,
+  );
   process.exit(1);
 }
-console.log("Every measured column default read back as its value on every server.");
+console.log(
+  "Every measured column default read back as its value, and every catalog text a flavour reports as SQL was accepted back after DEFAULT by the server that reported it.",
+);

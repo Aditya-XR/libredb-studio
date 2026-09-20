@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { diffSchemas } from "@/lib/schema-diff/diff-engine";
 import type { StoredObject } from "@/lib/db/detailed-object";
+import type { ColumnSchema } from "@/lib/types";
 
 // ============================================================================
 // Helpers
@@ -242,6 +243,50 @@ describe("diffSchemas: modified columns", () => {
     const col = result.tables[0].columns.find((c) => c.columnName === "status")!;
     expect(col.action).toBe("modified");
     expect(col.changes.some((c) => c.includes("Default changed"))).toBe(true);
+  });
+
+  // The comparison must read the same quantity the migration generator emits, the SQL text,
+  // and must tell an EMPTY default apart from NO default. A MariaDB column declared
+  // `DEFAULT ''` reports the value "" and the expression "''"; a column with no default at
+  // all reports neither field. A truthiness fallback collapses those two onto the same
+  // string and reports no change for a difference that is really there.
+  function defaultChanges(source: Partial<ColumnSchema>, target: Partial<ColumnSchema>): string[] {
+    const base = { name: "note", type: "varchar(20)", nullable: true, isPrimary: false };
+    const result = diffSchemas(
+      [makeTable({ name: "users", columns: [{ ...base, ...source }] })],
+      [makeTable({ name: "users", columns: [{ ...base, ...target }] })],
+    );
+    const col = result.tables[0]?.columns.find((c) => c.columnName === "note");
+    return (col?.changes ?? []).filter((c) => c.startsWith("Default changed"));
+  }
+
+  test("adding an empty-string default is a change", () => {
+    expect(defaultChanges({}, { defaultValue: "", defaultExpression: "''" })).toEqual(["Default changed: none → ''"]);
+  });
+
+  test("dropping an empty-string default is a change", () => {
+    expect(defaultChanges({ defaultValue: "", defaultExpression: "''" }, {})).toEqual(["Default changed: '' → none"]);
+  });
+
+  test("a snapshot taken before the decoding compares equal to the unchanged table", () => {
+    // An old snapshot stored MariaDB's catalog text in `defaultValue`; a reading taken today
+    // decodes it there and keeps the text in `defaultExpression`. Same column, no change.
+    expect(defaultChanges({ defaultValue: "'abc'" }, { defaultValue: "abc", defaultExpression: "'abc'" })).toEqual([]);
+  });
+
+  test("a real default change is still reported", () => {
+    expect(
+      defaultChanges(
+        { defaultValue: "abc", defaultExpression: "'abc'" },
+        { defaultValue: "xyz", defaultExpression: "'xyz'" },
+      ),
+    ).toEqual(["Default changed: 'abc' → 'xyz'"]);
+  });
+
+  test("a provider that sets no expression is unaffected", () => {
+    const pg = "nextval('app.orders_id_seq'::regclass)";
+    expect(defaultChanges({ defaultValue: pg }, { defaultValue: pg })).toEqual([]);
+    expect(defaultChanges({ defaultValue: pg }, { defaultValue: "0" })).toEqual([`Default changed: ${pg} → 0`]);
   });
 });
 
