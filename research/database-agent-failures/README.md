@@ -19,6 +19,9 @@ Authors: Cevheri Bozoglan, Yusuf Gundogdu, Abdullah Kaya, Koray Sirin.
 Eleven days, 39 open-weight models served locally plus one hosted control, 8,199 runs, 110,711
 ledger events, 14,008 refused tool calls. All of it is in the released dataset above.
 
+The six task surfaces are investigate, analyze, plan, optimize, operate and assess; the sweep logs
+under `anc/sweep-logs/` are named `<model>-<surface>.log`.
+
 ## Layout
 
 | Path | What it is |
