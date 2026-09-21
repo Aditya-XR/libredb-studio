@@ -36,7 +36,7 @@ None of it is a GitHub issue.
 - [Documentation](#documentation) — DOC3–DOC4 · 2
 - [Release pipeline](#release-pipeline) — REL1–REL4 · 4
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
-- [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H8 · 2
+- [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H12 · 3
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
@@ -2140,6 +2140,30 @@ considered each introduced a worse flaw.
 
 **Done when:** a cheaper, audit-visible eviction policy is found that does not reopen the oldest-first
 bypass.
+
+---
+
+### H12. A `jwtVerify` failure in the proxy leaves a log line and no audit event
+
+The proxy refuses a request on three grounds and audits two of them. `src/proxy.ts` emits
+`origin_mismatch` at `:65` and `insufficient_role` at `:156`, both through `emitAuditEvent`. The third
+is the trailing `catch` at `:173-176`: a token that fails `jwtVerify` because it is forged, tampered,
+expired or truncated falls into `logger.warn("JWT verification failed, redirecting to login")` and
+redirects. Nothing reaches the audit channel.
+
+An operator reading `GET /api/admin/audit` sees origin and role refusals and no forged-token attempts
+at all, which is the direction the blind spot matters: those are the probes a deployment most wants
+counted. The stdout line still exists and still lands in the aggregator, so the evidence is not lost,
+only off the surface an operator is pointed at.
+
+Recorded here rather than fixed with the note, because closing it is a behaviour change rather than a
+wording one: the catch has to distinguish a verification failure from a missing token, since
+`/login` redirects with no cookie are ordinary logged-out traffic and the note already excludes them.
+Whatever emits needs its own test in `tests/security/auth-audit.test.ts`, and the emit is metered
+through the anon bucket like every other `permission_denied` line.
+
+**Done when:** the verification-failure arm of that catch emits an audit event naming the route and
+the reason, distinct from a missing token, with the row 1.4 residual in `docs/SECURITY.md` deleted.
 
 ---
 
