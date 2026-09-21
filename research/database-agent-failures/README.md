@@ -12,6 +12,7 @@ Authors: Cevheri Bozoglan, Yusuf Gundogdu, Abdullah Kaya, Koray Sirin.
 | Dataset | published, [10.57967/hf/10485](https://doi.org/10.57967/hf/10485) |
 | Preprint | announced 2026-09-21, cs.SE primary with cs.DB cross-list |
 | arXiv id | [2609.21341](https://arxiv.org/abs/2609.21341) |
+| License | CC BY 4.0 |
 
 ## Layout
 
