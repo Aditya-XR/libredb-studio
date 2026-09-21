@@ -850,7 +850,7 @@ Minimal by nature — SQLite keeps almost no server-style runtime statistics.
 | Method | Source | Notes |
 |--------|--------|-------|
 | `getHealth()` | `fs.statSync` / page PRAGMAs, `PRAGMA integrity_check`, `PRAGMA journal_mode` | reports integrity + journal mode as info rows; `activeConnections: 1`, cache-hit `N/A` |
-| `getOverview()` | `sqlite_version()`, file size, `sqlite_master` counts | `uptime: N/A`, `maxConnections: 1` |
+| `getOverview()` | `sqlite_version()`, file size, `sqlite_master` counts | `uptime: N/A`, `maxConnections: 1`; `databaseSizeBytes` is **omitted** and `databaseSize` stays `N/A`, never a `0`, when the size read fails — [§7.3](#73-when-the-database-size-is-not-measurable) |
 | `getPerformanceMetrics()` | — | **no cache-hit ratio, no QPS, no buffer-pool usage** — all three are omitted, so both monitoring tabs show "N/A / Not measured" for them ([§7.1](#71-there-is-no-cache-hit-ratio-and-there-cannot-be)); only `deadlocks: 0` is reported, which is a fact about the engine |
 | `getSlowQueries()` | — | always `[]` (SQLite has no query stats) |
 | `getActiveSessions()` | — | the single current process session |
@@ -960,6 +960,40 @@ for `small` (4 KB), a guess presented as a measurement. A `0` would have been th
 fabrication in a different digit, which is why the fields are absent rather than zero.
 `totalSize`/`totalSizeBytes` remain required by `TableStats`, so they carry the same `"N/A"` / `0`
 placeholder `indexSize` already used, and every consumer gates on the absent `tableSizeBytes`.
+
+### 7.3 When the database size is not measurable
+
+`getOverview()` sizes the database two ways, by `dbPath`:
+
+```ts
+// File-backed
+databaseSizeBytes = fs.statSync(dbPath).size;
+// :memory: — no file to stat
+SELECT (page_count * page_size) as size FROM pragma_page_count(), pragma_page_size();
+```
+
+Through 0.16.2 the local was initialized to `0` and each `catch` left it there, so `statSync` throwing
+— the file not yet created on connect, a permission refusal, any other reason a stat can fail — or the
+`:memory:` PRAGMA read throwing published a measured-looking zero indistinguishable from a genuinely
+empty database (#546). `DatabaseOverview.databaseSizeBytes` is optional precisely so this can be said
+instead — *"absence and zero are different facts"*, its docblock in
+[`src/lib/db/types.ts`](../../src/lib/db/types.ts) — and until now this method could not say it.
+
+The monitoring **Storage** tab
+([`src/components/monitoring/tabs/StorageTab.tsx`](../../src/components/monitoring/tabs/StorageTab.tsx))
+is what the difference buys: it keys its whole breakdown off `databaseSizeBytes !== undefined`, so on
+the absence it renders "No storage size information available." On the fabricated `0` it drew the
+breakdown instead, against a total that contradicted the real per-table bytes `getTableStats()`
+reports separately.
+
+**`databaseSize`, the formatted string, moves with the figure.** It is initialized to `"N/A"` and only
+`formatBytes()` replaces it, matching `getHealth()`'s own `databaseSize` in this file, which already
+used `"N/A"`/`"Unknown"` on failure — `getOverview()` was the odd one out.
+
+A database that really measures `0` is a **reading** and is kept: the `:memory:` PRAGMA answering a
+real zero-page result, or (in principle) a zero-length file, still reach `formatBytes(0)`. The absence
+is spelled `=== undefined` plus a conditional spread, never a falsy test — a falsy test would erase
+that very measurement.
 
 ---
 

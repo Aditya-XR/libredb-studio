@@ -553,6 +553,69 @@ describe("LibreDBProvider — monitoring", () => {
     await provider.disconnect();
   });
 
+  // `fileSizeBytes()` used to return 0 on any statSync failure - no dbPath, the
+  // file gone, a permission refusal, anything - so getOverview() published a
+  // measured-looking zero indistinguishable from an empty database (#546).
+  // `DatabaseOverview.databaseSizeBytes` is optional exactly so a failed read can
+  // say nothing instead (src/lib/db/types.ts); `StorageStats.sizeBytes` has no
+  // such escape (required number), so it keeps 0 as its own fallback.
+  describe("when the database file cannot be stat'd", () => {
+    test("getOverview omits databaseSizeBytes, and databaseSize reads N/A", async () => {
+      const provider = new LibreDBProvider(makeConn(tmpFile));
+      await provider.connect();
+
+      const spy = spyOn(fs, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+        // The catalog scan does not go through statSync, so the rest of the
+        // overview is unaffected by the mocked failure.
+        expect(overview.tableCount).toBe(3);
+      } finally {
+        spy.mockRestore();
+        await provider.disconnect();
+      }
+    });
+
+    test("getHealth reads N/A rather than a formatted zero", async () => {
+      const provider = new LibreDBProvider(makeConn(tmpFile));
+      await provider.connect();
+
+      const spy = spyOn(fs, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        expect((await provider.getHealth()).databaseSize).toBe("N/A");
+      } finally {
+        spy.mockRestore();
+        await provider.disconnect();
+      }
+    });
+
+    test("getStorageStats keeps sizeBytes at 0, its own required-field fallback", async () => {
+      const provider = new LibreDBProvider(makeConn(tmpFile));
+      await provider.connect();
+
+      const spy = spyOn(fs, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        const storage = await provider.getStorageStats();
+        expect(storage[0].sizeBytes).toBe(0);
+        // The formatted string moves with the same absence getHealth/getOverview
+        // report, even though the byte figure itself is coerced back to 0 here.
+        expect(storage[0].size).toBe("N/A");
+      } finally {
+        spy.mockRestore();
+        await provider.disconnect();
+      }
+    });
+  });
+
   test("runMaintenance is unsupported", async () => {
     const provider = new LibreDBProvider(makeConn(tmpFile));
     await provider.connect();

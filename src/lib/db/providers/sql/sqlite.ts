@@ -1932,22 +1932,32 @@ export class SQLiteProvider extends SQLBaseProvider {
 
     // Get database size
     const dbPath = this.getDatabasePath();
-    let databaseSizeBytes = 0;
+    // Left undefined and spread conditionally rather than initialised to 0 (#546):
+    // `DatabaseOverview.databaseSizeBytes` is optional because absence and zero are
+    // different facts (src/lib/db/types.ts), and a read that never answered - the
+    // file does not exist yet, statSync fails for another reason, or the PRAGMA
+    // read throws - says nothing about the database's actual size. StorageTab.tsx
+    // keys its whole breakdown off `databaseSizeBytes !== undefined`, so the old `0`
+    // initializer drew that breakdown over a database this provider never measured.
+    let databaseSizeBytes: number | undefined;
 
     if (dbPath !== ":memory:") {
       try {
         const stats = fs.statSync(dbPath);
         databaseSizeBytes = stats.size;
       } catch {
-        // File might not exist yet
+        // The size stays absent: the catch cannot tell "file does not exist yet"
+        // apart from any other statSync failure.
       }
     } else {
       try {
         const sizeStmt = this.db!.prepare(MEMORY_DB_SIZE_SQL);
         const result = sizeStmt.get() as { size: number };
+        // `|| 0`, not left absent: page_count * page_size answering a real zero is
+        // a measured reading here, kept rather than erased.
         databaseSizeBytes = result?.size || 0;
       } catch {
-        // Ignore
+        // The size stays absent.
       }
     }
 
@@ -1966,8 +1976,11 @@ export class SQLiteProvider extends SQLBaseProvider {
       uptime: "N/A",
       activeConnections: 1,
       maxConnections: 1,
-      databaseSize: formatBytes(databaseSizeBytes),
-      databaseSizeBytes,
+      // "N/A", not formatBytes(0): moves with the figure, so an unanswered read
+      // does not print a confident "0 Bytes" beside the Storage tab's own absence
+      // message.
+      databaseSize: databaseSizeBytes === undefined ? "N/A" : formatBytes(databaseSizeBytes),
+      ...(databaseSizeBytes === undefined ? {} : { databaseSizeBytes }),
       tableCount,
       indexCount,
     };

@@ -23,6 +23,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+/** A namespace import, not the named `statSync` above: `spyOn` needs an object it can
+ * reassign a property on, and this is the same module object the provider's own
+ * `import * as fs from "fs"` reads `statSync` off. */
+import * as fsNode from "node:fs";
 
 /** The repository root, anchored to this file so nothing here depends on the launcher's cwd. */
 const REPO_ROOT = resolve(import.meta.dir, "../../..");
@@ -911,6 +915,37 @@ describe("SQLiteProvider", () => {
       const overview = await provider.getOverview();
       expect(overview.databaseSizeBytes).toBeGreaterThan(0);
       expect(overview.tableCount).toBe(1);
+    });
+
+    // `databaseSizeBytes` used to be initialised to 0 and left there by an empty
+    // catch, so a read that never answered published a measured-looking zero
+    // indistinguishable from a genuinely empty database (#546). It is optional
+    // exactly so a failed read can say nothing instead (src/lib/db/types.ts).
+    //
+    // `statSync` is mocked rather than deleting the file out from under the
+    // connection: a bun:sqlite handle over a removed file answers "disk I/O
+    // error" on the VERY NEXT query too (measured), which would take the table
+    // and index counts down with it and test a different failure than this one.
+    test("getOverview omits databaseSizeBytes, and databaseSize reads N/A, when the file cannot be stat'd", async () => {
+      const dbPath = join(fileTmpDir, "unreadable.db");
+      provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
+      await provider.connect();
+      await provider.query("CREATE TABLE v (id INTEGER PRIMARY KEY)");
+
+      const spy = spyOn(fsNode, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+        // The table/index counts come from the open handle, not statSync, so the
+        // rest of the overview is unaffected by the mocked failure.
+        expect(overview.tableCount).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test("getStorageStats lists the main database plus WAL and SHM sidecar files", async () => {
