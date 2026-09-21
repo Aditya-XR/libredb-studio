@@ -69,3 +69,15 @@ reports both. Changing that order changes which class is smallest, so do not cha
 admitted at its full 262,144-token window and held 51 GB on a 64 GB machine. In any ordinary log
 that run is indistinguishable from a model that timed out; we believe this confound affects
 published local-model benchmarks generally, ours included.
+
+## Citation
+
+    @misc{libredb2026databaseagent,
+      title  = {What Stops a Small Language Model From Driving a Database Agent},
+      author = {Bozoglan, Cevheri and Gundogdu, Yusuf and Kaya, Abdullah and Sirin, Koray},
+      year   = {2026},
+      eprint = {2609.21341},
+      archivePrefix = {arXiv},
+      primaryClass  = {cs.SE},
+      url    = {https://arxiv.org/abs/2609.21341}
+    }
