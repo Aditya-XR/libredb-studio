@@ -32,6 +32,7 @@ import { StatsBar } from "@/components/results-grid/StatsBar";
 import { describeWarning, formatCellValue } from "@/components/results-grid/utils";
 import { hasResultOrder } from "@/lib/sql/result-order";
 import { pageOfferFor } from "@/components/results-grid/page-offer";
+import { useDismissOnOutsideClick } from "@/hooks/use-dismiss-on-outside-click";
 
 export interface CellChange {
   rowIndex: number;
@@ -181,6 +182,27 @@ export function ResultsGrid({
   const [selectedRow, setSelectedRow] = useState<{ row: Record<string, unknown>; index: number } | null>(null);
   const [columnFilters, setColumnFilters] = useState<Map<string, string>>(new Map());
   const [activeFilterCol, setActiveFilterCol] = useState<string | null>(null);
+  /**
+   * Which fields are hidden, as TanStack's own visibility map (#870).
+   *
+   * `columnVisibilityFeature` has been in `tableFeatureSet` since the grid was written and
+   * nothing ever wrote to it, so `row.getVisibleCells()` could only ever return them all.
+   * The writer is the column count in the stats strip; this is the state it writes.
+   *
+   * Held as the feature's map rather than as a set of hidden names so the table is handed
+   * the shape it already understands, and derived back to a set for the strip, which
+   * should not have to know TanStack's convention that absent means visible.
+   */
+  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
+  /*
+    The filter panel closes on a press outside it. The ref lands on the header cell that is
+    currently showing one, which holds the funnel that opened it as well as the panel, so
+    pressing the funnel again still reaches its own toggle rather than being dismissed here
+    and reopened by the click that follows.
+  */
+  const filterPanelRef = useDismissOnOutsideClick<HTMLDivElement>(activeFilterCol !== null, () =>
+    setActiveFilterCol(null),
+  );
   const [revealedCells, setRevealedCells] = useState<Set<string>>(new Set());
 
   // Resolve config
@@ -341,7 +363,10 @@ export function ResultsGrid({
         // computed column, which has no catalog entry the schema tree could answer with.
         const declaredType = declaredTypeOf(result.columnTypes, field);
         return (
-          <div className="flex items-center gap-1 select-none group/header w-full">
+          <div
+            className="flex items-center gap-1 select-none group/header w-full"
+            ref={activeFilterCol === field ? filterPanelRef : undefined}
+          >
             <button
               type="button"
               aria-label={`${field}${declaredType ? `, ${declaredType}` : ""}${
@@ -569,14 +594,45 @@ export function ResultsGrid({
     revealCell,
   ]);
 
+  /**
+   * The hidden fields, for the strip. `false` is hidden and anything else is visible,
+   * which is TanStack's convention and the reason this is derived here rather than in
+   * the strip: the strip asks "which are hidden", not "what does the table store".
+   */
+  const hiddenColumns = useMemo(
+    () => new Set(Object.keys(columnVisibility).filter((field) => columnVisibility[field] === false)),
+    [columnVisibility],
+  );
+
+  /**
+   * The fields every view that does NOT go through the table instance renders (#870).
+   *
+   * Three readers: the mobile table's header and body loops, which map fields directly,
+   * and the card view, which picks its preview fields from the list it is handed. All
+   * three used `result.fields`, so column visibility reached the desktop grid alone and
+   * one hidden column meant two different answers on one result depending on the
+   * breakpoint or the view toggle. They read this instead, which also makes the
+   * sticky-first-column rule at `idx === 0` follow the first column that is there.
+   */
+  const visibleFields = useMemo(
+    () => result.fields.filter((field) => !hiddenColumns.has(field)),
+    [result.fields, hiddenColumns],
+  );
+
+  const toggleColumn = useCallback((field: string) => {
+    setColumnVisibility((current) => ({ ...current, [field]: current[field] === false }));
+  }, []);
+
   const table = useTable({
     features: tableFeatureSet,
     data: filteredRows,
     columns,
     state: {
       sorting,
+      columnVisibility,
     },
     onSortingChange: setSorting,
+    onColumnVisibilityChange: setColumnVisibility,
     columnResizeMode: "onChange",
   });
 
@@ -696,6 +752,8 @@ export function ResultsGrid({
         orderAcrossPagesUnspecified={orderAcrossPagesUnspecified}
         pageOffer={pageOffer}
         isLoadingMore={isLoadingMore}
+        hiddenColumns={hiddenColumns}
+        onToggleColumn={toggleColumn}
       />
 
       <div ref={cardContainerRef} className={cn("flex-1 overflow-auto p-4 md:hidden", viewMode !== "card" && "hidden")}>
@@ -715,7 +773,7 @@ export function ResultsGrid({
             >
               <ResultCard
                 row={result.rows[virtualRow.index]}
-                fields={result.fields}
+                fields={visibleFields}
                 primaryColumn={primaryColumn}
                 idColumn={idColumn}
                 index={virtualRow.index}
@@ -734,7 +792,7 @@ export function ResultsGrid({
       >
         <div className="min-w-max">
           <div className="sticky top-0 z-20 bg-raised flex">
-            {result.fields.map((field, idx) => {
+            {visibleFields.map((field, idx) => {
               const isSensitive = effectiveMaskingEnabled && sensitiveColumns.has(field);
               const declaredType = declaredTypeOf(result.columnTypes, field);
               return (
@@ -787,7 +845,7 @@ export function ResultsGrid({
                   className="flex hover:bg-brand-tint/[0.03] transition-colors border-b border-hairline cursor-pointer text-left"
                   onClick={() => setSelectedRow({ row, index: virtualRow.index })}
                 >
-                  {result.fields.map((field, idx) => {
+                  {visibleFields.map((field, idx) => {
                     const pattern = sensitiveColumns.get(field);
                     const isMasked =
                       effectiveMaskingEnabled && pattern && row[field] != null && row[field] !== undefined;
