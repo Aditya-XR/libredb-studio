@@ -47,7 +47,7 @@ The verifier prints one line per figure and exits non-zero if any disagrees. Get
 
     hf download libredb/database-agent-runs runs.jsonl --type=dataset --local-dir .
 
-## Two things worth knowing before editing
+## Three things worth knowing before editing
 
 **The sweep logs record process exit, not whether a run answered.** A log line reading
 `status=succeeded` belongs to runs that reported nothing. Scores must come from joining the log's
@@ -58,3 +58,8 @@ happen again.
 **The taxonomy is order-dependent.** 231 losses both ran out of clock and invoked no tool, so they
 satisfy two class definitions at once. The paper adopts clock-first, states the alternative, and
 reports both. Changing that order changes which class is smallest, so do not change it silently.
+
+**An uncapped context window looks like a hang.** With no context cap, one 7.1 GB model was
+admitted at its full 262,144-token window and held 51 GB on a 64 GB machine. In any ordinary log
+that run is indistinguishable from a model that timed out; we believe this confound affects
+published local-model benchmarks generally, ours included.
