@@ -5,6 +5,16 @@ LibreDB Studio, and of how much of that failure was ours rather than theirs.
 
 Authors: Cevheri Bozoglan, Yusuf Gundogdu, Abdullah Kaya, Koray Sirin.
 
+## Contents
+
+- [Status](#status)
+- [Corpus at a glance](#corpus-at-a-glance)
+- [Layout](#layout)
+- [Building and checking](#building-and-checking)
+- [Three things worth knowing before editing](#three-things-worth-knowing-before-editing)
+- [Citation](#citation)
+- [Questions or corrections](#questions-or-corrections)
+
 ## Status
 
 | | |
