@@ -43,6 +43,10 @@ under `anc/sweep-logs/` are named `<model>-<surface>.log`.
     ./build.sh                    # package only
     ./build.sh path/to/runs.jsonl # verify first, then package
 
+`build.sh` writes `libredb-arxiv-submission.tar.gz` into `dist/`: `paper.tex` plus `anc/` (verifier,
+scorer, exporter, argument captures, 160 sweep logs). That is the file to upload, not `paper.pdf`;
+arXiv rejects a PDF built from LaTeX.
+
 The verifier prints one line per figure and exits non-zero if any disagrees. Get the corpus with:
 
     hf download libredb/database-agent-runs runs.jsonl --type=dataset --local-dir .
