@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { QueryResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -51,6 +51,25 @@ const loadMoreLabel = (pageSize: number) => `load ${pageSize} more`;
 const ORDER_BADGE = "ORDER NOT GUARANTEED";
 const ORDER_NOTICE = "Without an ORDER BY the engine may return rows that repeat or are skipped between pages.";
 
+/**
+ * What a filtered count counted, said only where it is not the whole story (#870).
+ *
+ * The filter runs over `result.rows` (`ResultsGrid.tsx`), the rows loaded so far. While
+ * another page can still be fetched that is a strict subset of the object, so "1 shown"
+ * is read as a count over the table and nothing on screen contradicts it.
+ *
+ * Gated on `pageOffer`, the decision this strip already receives, rather than on
+ * `result.pagination?.hasMore`: the offer is the same condition the load-more control
+ * renders from, so the qualification cannot appear beside a control that is absent, and
+ * a result with no next page keeps its unqualified count.
+ *
+ * It rides the existing button's `title` after the action rather than adding a badge of
+ * its own. A second element here wraps the strip onto a second line on a narrow panel,
+ * which is what the footer was deleted to stop, and the visible text carries the scope
+ * itself ("of 2 loaded") so a sighted reader is not left depending on a tooltip.
+ */
+const FILTER_SCOPE_NOTICE = "Filtering runs over the rows loaded so far. Rows not yet loaded are not searched.";
+
 export interface StatsBarProps {
   result: QueryResult;
   filteredRowCount: number;
@@ -98,6 +117,21 @@ export interface StatsBarProps {
   pageOffer?: { onLoadMore: () => void; pageSize: number };
   /** Whether a page asked for through `pageOffer` is in flight; the control is disabled and says so. */
   isLoadingMore?: boolean;
+  /**
+   * The fields currently hidden from the grid, and the writer that flips one (#870).
+   *
+   * `columnVisibilityFeature` was registered in `ResultsGrid` with nothing calling
+   * `toggleVisibility`, so the capability was live and unreachable. The entry point is
+   * the column count already printed here, made clickable the way #816 made
+   * "(more available)" the load-more control, so the grid gains no chrome for it.
+   *
+   * `onToggleColumn` is what gates the control, not `hiddenColumns`: an empty set is the
+   * ordinary state of a grid whose columns can all be toggled, while a surface that owns
+   * no table supplies no writer at all and must keep inert text. Gated on the callback
+   * for the same reason `pageOffer` gates the load-more control.
+   */
+  hiddenColumns?: ReadonlySet<string>;
+  onToggleColumn?: (field: string) => void;
 }
 
 export function StatsBar({
@@ -120,8 +154,16 @@ export function StatsBar({
   orderAcrossPagesUnspecified,
   pageOffer,
   isLoadingMore,
+  hiddenColumns,
+  onToggleColumn,
 }: StatsBarProps) {
+  const [columnMenuOpen, setColumnMenuOpen] = useState(false);
   const warnings = result.warnings ?? [];
+  const hiddenCount = hiddenColumns?.size ?? 0;
+  const columnLabel =
+    hiddenCount > 0
+      ? `${result.fields.length - hiddenCount} of ${result.fields.length} columns`
+      : `${result.fields.length} columns`;
   const warningDetail = warnings.map(describeWarning).join("\n");
 
   return (
@@ -164,15 +206,62 @@ export function StatsBar({
             </>
           )}
         </span>
-        <span className="hidden sm:inline">{result.fields.length} columns</span>
+        {/*
+          THE COLUMN VISIBILITY ENTRY POINT (#870). The count that was here stays the
+          only thing on screen; it becomes the control rather than gaining one beside it.
+          Inert where no writer was supplied, because a hydrated result owns no table.
+        */}
+        {onToggleColumn === undefined ? (
+          <span className="hidden sm:inline">{columnLabel}</span>
+        ) : (
+          <span className="hidden sm:inline relative">
+            <button
+              type="button"
+              className="hover:text-fg-secondary transition-colors"
+              onClick={() => setColumnMenuOpen((open) => !open)}
+              title="Show or hide columns"
+              aria-expanded={columnMenuOpen}
+            >
+              {columnLabel}
+            </button>
+            {columnMenuOpen && (
+              <div
+                data-testid="column-visibility-menu"
+                className="absolute bottom-full left-0 mb-1 z-30 bg-overlay border border-hairline-strong rounded-lg shadow-xl p-1 w-48 max-h-64 overflow-auto"
+              >
+                {result.fields.map((field) => {
+                  const isHidden = hiddenColumns?.has(field) === true;
+                  return (
+                    <button
+                      key={field}
+                      type="button"
+                      data-column={field}
+                      aria-pressed={!isHidden}
+                      className="flex items-center gap-2 w-full px-2 py-1 rounded text-left hover:bg-fill transition-colors"
+                      onClick={() => onToggleColumn(field)}
+                    >
+                      {isHidden ? (
+                        <EyeOff strokeWidth={1.5} className="w-3 h-3 shrink-0 text-fg-muted" />
+                      ) : (
+                        <Eye strokeWidth={1.5} className="w-3 h-3 shrink-0 text-brand" />
+                      )}
+                      <span className={cn("truncate", isHidden && "text-fg-muted")}>{field}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </span>
+        )}
         {activeFilterCount > 0 && (
           <button
             className="flex items-center gap-1 text-brand text-xs bg-brand-tint/10 px-2 py-0.5 rounded hover:bg-brand-tint/20 transition-colors"
             onClick={onClearFilters}
-            title="Clear all filters"
+            title={pageOffer ? `Clear all filters. ${FILTER_SCOPE_NOTICE}` : "Clear all filters"}
           >
             <Funnel strokeWidth={1.5} className="w-3 h-3" />
-            {activeFilterCount} filter{activeFilterCount > 1 ? "s" : ""} &bull; {filteredRowCount} shown
+            {activeFilterCount} filter{activeFilterCount > 1 ? "s" : ""} &bull;{" "}
+            {pageOffer ? `${filteredRowCount} of ${result.rows.length} loaded` : `${filteredRowCount} shown`}
             <X strokeWidth={1.5} className="w-3 h-3" />
           </button>
         )}

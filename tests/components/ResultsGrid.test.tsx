@@ -115,6 +115,20 @@ mock.module("@/components/results-grid/StatsBar", () => ({
       // the stats strip, so the only thing left for ResultsGrid to get right is whether it
       // hands down an offer at all, and with what page size. Rendering it inside the
       // stats-bar stub is also what lets a test assert the grid grew no chrome below.
+      // The menu is rendered and worded in StatsBar; what this file is about is whether
+      // ResultsGrid hands down a writer and what that writer does to the table, so the
+      // stub only reports the prop and flips one known field through it.
+      props.onToggleColumn
+        ? React.createElement(
+            "button",
+            {
+              "data-testid": "toggle-column",
+              "data-hidden": [...((props.hiddenColumns as Set<string>) ?? [])].join(","),
+              onClick: () => (props.onToggleColumn as (f: string) => void)("name"),
+            },
+            "toggle name",
+          )
+        : null,
       props.pageOffer
         ? React.createElement(
             "button",
@@ -248,6 +262,29 @@ describe("ResultsGrid", () => {
     expect(queryAllByText("Alice").length).toBeGreaterThan(0);
     expect(queryAllByText("Bob").length).toBeGreaterThan(0);
     expect(queryAllByText("Charlie").length).toBeGreaterThan(0);
+  });
+
+  /**
+   * Hiding a column stops the grid emitting it (#870).
+   *
+   * `columnVisibilityFeature` was registered here with no writer, so the assertion that
+   * matters is not that a menu exists but that the table state it writes reaches
+   * `row.getVisibleCells()`. The header AND a cell value are both asserted: a column
+   * dropped from the header while its cells still render would misalign every row.
+   */
+  test("stops rendering a column the stats strip hid", () => {
+    const { getByTestId, queryAllByText } = render(React.createElement(ResultsGrid, { result: mockResult }));
+
+    expect(queryAllByText("name").length).toBeGreaterThan(0);
+    expect(queryAllByText("Alice").length).toBeGreaterThan(0);
+
+    fireEvent.click(getByTestId("toggle-column"));
+
+    expect(queryAllByText("name").length).toBe(0);
+    expect(queryAllByText("Alice").length).toBe(0);
+    expect(getByTestId("toggle-column").getAttribute("data-hidden")).toBe("name");
+    // The control: a column nobody hid is untouched.
+    expect(queryAllByText("email").length).toBeGreaterThan(0);
   });
 
   // ── 4. Shows row count via StatsBar ───────────────────────────────────────

@@ -60,6 +60,157 @@ describe("results-grid/StatsBar", () => {
     expect(onClearFilters).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * The filtered count names what it counted whenever rows are still unfetched (#870).
+   *
+   * `filteredRowCount` is a count over `result.rows`, the rows loaded so far, and on a
+   * pageable result that is a strict subset of the object. "1 shown" then reads as a
+   * count over the table and nothing on screen contradicts it.
+   *
+   * Paired with the control below it, which must NOT carry the qualification: without
+   * that pair the assertion passes on a component that qualifies unconditionally, which
+   * would be a new lie on every result that has no next page.
+   */
+  test("names the scope of a filtered count while another page can be fetched", () => {
+    const { queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={1}
+        activeFilterCount={2}
+        onClearFilters={mock(() => {})}
+        viewMode="card"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        pageOffer={{ onLoadMore: mock(() => {}), pageSize: 2 }}
+      />,
+    );
+
+    expect(queryByText("2 filters • 1 shown")).toBeNull();
+    const summary = queryByText("2 filters • 1 of 2 loaded");
+    expect(summary).not.toBeNull();
+    expect(summary!.closest("button")!.getAttribute("title")).toContain("not yet loaded");
+  });
+
+  test("leaves a filtered count unqualified when there is no next page", () => {
+    const { queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={1}
+        activeFilterCount={2}
+        onClearFilters={mock(() => {})}
+        viewMode="card"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+      />,
+    );
+
+    const summary = queryByText("2 filters • 1 shown");
+    expect(summary).not.toBeNull();
+    expect(summary!.closest("button")!.getAttribute("title")).not.toContain("not yet loaded");
+  });
+
+  /**
+   * The column count is the entry point to column visibility (#870).
+   *
+   * `columnVisibilityFeature` has been registered in `ResultsGrid` with no writer, so the
+   * capability was live and unreachable. It gains its writer here rather than a control of
+   * its own: the strip already prints "2 columns", and #816 turned "(more available)" into
+   * the load-more button on the same reasoning, so the grid gains no chrome.
+   *
+   * Hiding is asserted through the callback and the label, never through the menu's own
+   * markup: a menu that renders and calls nothing is the failure this pair is for.
+   */
+  test("opens the column list from the column count and reports a toggle", () => {
+    const onToggleColumn = mock((field: string) => {
+      void field;
+    });
+    const { getByTestId, queryByTestId, queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set<string>()}
+        onToggleColumn={onToggleColumn}
+      />,
+    );
+
+    expect(queryByTestId("column-visibility-menu")).toBeNull();
+    fireEvent.click(queryByText("2 columns")!);
+
+    const menu = getByTestId("column-visibility-menu");
+    fireEvent.click(menu.querySelector('[data-column="name"]')!);
+    expect(onToggleColumn).toHaveBeenCalledTimes(1);
+    expect(onToggleColumn.mock.calls[0]?.[0]).toBe("name");
+  });
+
+  test("names how many columns are visible while any are hidden", () => {
+    const { queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set(["name"])}
+        onToggleColumn={mock(() => {})}
+      />,
+    );
+
+    expect(queryByText("2 columns")).toBeNull();
+    expect(queryByText("1 of 2 columns")).not.toBeNull();
+  });
+
+  /**
+   * The control. A surface that supplies no writer keeps inert text, so the assertion
+   * above cannot pass on a strip that made the count clickable unconditionally: a
+   * hydrated agent result has no table to toggle.
+   */
+  test("leaves the column count inert where nothing can toggle a column", () => {
+    const { queryByText, queryByTestId } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+      />,
+    );
+
+    const count = queryByText("2 columns");
+    expect(count).not.toBeNull();
+    expect(count!.closest("button")).toBeNull();
+    fireEvent.click(count!);
+    expect(queryByTestId("column-visibility-menu")).toBeNull();
+  });
+
   test("supports masking toggle and view switch", () => {
     const onToggleMasking = mock(() => {});
     const onSetViewMode = mock((mode: "card" | "table") => {
