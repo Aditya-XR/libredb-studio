@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { useDismissOnOutsideClick } from "@/hooks/use-dismiss-on-outside-click";
 import { QueryResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -184,6 +185,11 @@ export function StatsBar({
   onToggleColumn,
 }: StatsBarProps) {
   const [columnMenuOpen, setColumnMenuOpen] = useState(false);
+  /*
+    The ref goes on the span that holds the trigger AND the menu, so pressing the trigger
+    is not "outside" and keeps reaching its own toggle.
+  */
+  const columnMenuRef = useDismissOnOutsideClick<HTMLSpanElement>(columnMenuOpen, () => setColumnMenuOpen(false));
   const warnings = result.warnings ?? [];
   const hiddenCount = hiddenColumns?.size ?? 0;
   const columnLabel =
@@ -240,7 +246,7 @@ export function StatsBar({
         {onToggleColumn === undefined ? (
           <span className="hidden sm:inline">{columnLabel}</span>
         ) : (
-          <span className="hidden sm:inline relative">
+          <span className="hidden sm:inline relative" ref={columnMenuRef}>
             <button
               type="button"
               className="hover:text-fg-secondary transition-colors"

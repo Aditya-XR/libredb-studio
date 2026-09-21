@@ -197,6 +197,57 @@ describe("results-grid/StatsBar", () => {
     expect(queryByTestId("column-visibility-menu")).toBeNull();
   });
 
+  test("closes the column list on a press outside it", () => {
+    const { queryByTestId, queryByText, container } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set<string>()}
+        onToggleColumn={mock(() => {})}
+      />,
+    );
+
+    fireEvent.click(queryByText("2 columns")!);
+    expect(queryByTestId("column-visibility-menu")).not.toBeNull();
+
+    fireEvent.mouseDown(container);
+    expect(queryByTestId("column-visibility-menu")).toBeNull();
+  });
+
+  /** The control: a press on a field inside the menu keeps it open, so several can be flipped. */
+  test("keeps the column list open while pressing inside it", () => {
+    const { getByTestId, queryByTestId, queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set<string>()}
+        onToggleColumn={mock(() => {})}
+      />,
+    );
+
+    fireEvent.click(queryByText("2 columns")!);
+    fireEvent.mouseDown(getByTestId("column-visibility-menu").querySelector('[data-column="name"]')!);
+    expect(queryByTestId("column-visibility-menu")).not.toBeNull();
+  });
+
   test("names how many columns are visible while any are hidden", () => {
     const { queryByText } = render(
       <StatsBar

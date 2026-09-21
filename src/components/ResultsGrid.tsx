@@ -32,6 +32,7 @@ import { StatsBar } from "@/components/results-grid/StatsBar";
 import { describeWarning, formatCellValue } from "@/components/results-grid/utils";
 import { hasResultOrder } from "@/lib/sql/result-order";
 import { pageOfferFor } from "@/components/results-grid/page-offer";
+import { useDismissOnOutsideClick } from "@/hooks/use-dismiss-on-outside-click";
 
 export interface CellChange {
   rowIndex: number;
@@ -193,6 +194,15 @@ export function ResultsGrid({
    * should not have to know TanStack's convention that absent means visible.
    */
   const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
+  /*
+    The filter panel closes on a press outside it. The ref lands on the header cell that is
+    currently showing one, which holds the funnel that opened it as well as the panel, so
+    pressing the funnel again still reaches its own toggle rather than being dismissed here
+    and reopened by the click that follows.
+  */
+  const filterPanelRef = useDismissOnOutsideClick<HTMLDivElement>(activeFilterCol !== null, () =>
+    setActiveFilterCol(null),
+  );
   const [revealedCells, setRevealedCells] = useState<Set<string>>(new Set());
 
   // Resolve config
@@ -353,7 +363,10 @@ export function ResultsGrid({
         // computed column, which has no catalog entry the schema tree could answer with.
         const declaredType = declaredTypeOf(result.columnTypes, field);
         return (
-          <div className="flex items-center gap-1 select-none group/header w-full">
+          <div
+            className="flex items-center gap-1 select-none group/header w-full"
+            ref={activeFilterCol === field ? filterPanelRef : undefined}
+          >
             <button
               type="button"
               aria-label={`${field}${declaredType ? `, ${declaredType}` : ""}${
@@ -592,13 +605,14 @@ export function ResultsGrid({
   );
 
   /**
-   * The fields the MOBILE table renders (#870).
+   * The fields every view that does NOT go through the table instance renders (#870).
    *
-   * That table maps `result.fields` directly rather than going through the table
-   * instance, so column visibility reached the desktop grid and not it: one hidden
-   * column, two different sets of columns on one result depending on the breakpoint.
-   * Both mobile loops read this instead, so the sticky-first-column rule at `idx === 0`
-   * also follows the first column that is actually there.
+   * Three readers: the mobile table's header and body loops, which map fields directly,
+   * and the card view, which picks its preview fields from the list it is handed. All
+   * three used `result.fields`, so column visibility reached the desktop grid alone and
+   * one hidden column meant two different answers on one result depending on the
+   * breakpoint or the view toggle. They read this instead, which also makes the
+   * sticky-first-column rule at `idx === 0` follow the first column that is there.
    */
   const visibleFields = useMemo(
     () => result.fields.filter((field) => !hiddenColumns.has(field)),
@@ -759,7 +773,7 @@ export function ResultsGrid({
             >
               <ResultCard
                 row={result.rows[virtualRow.index]}
-                fields={result.fields}
+                fields={visibleFields}
                 primaryColumn={primaryColumn}
                 idColumn={idColumn}
                 index={virtualRow.index}
