@@ -81,3 +81,8 @@ published local-model benchmarks generally, ours included.
       primaryClass  = {cs.SE},
       url    = {https://arxiv.org/abs/2609.21341}
     }
+
+## Questions or corrections
+
+Open an issue on [libredb/libredb-studio](https://github.com/libredb/libredb-studio/issues) and
+mention this directory.
