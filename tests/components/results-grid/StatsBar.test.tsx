@@ -35,7 +35,7 @@ describe("results-grid/StatsBar", () => {
 
   test("renders stats and filter summary, clears filters", () => {
     const onClearFilters = mock(() => {});
-    const { queryByText } = render(
+    const { queryByText, queryByTestId } = render(
       <StatsBar
         result={makeResult()}
         filteredRowCount={1}
@@ -54,9 +54,13 @@ describe("results-grid/StatsBar", () => {
     expect(queryByText("2 rows")).not.toBeNull();
     expect(queryByText("2 columns")).not.toBeNull();
     expect(queryByText("AUTO-LIMITED")).not.toBeNull();
-    expect(queryByText("2 filters • 1 shown")).not.toBeNull();
+    const summary = queryByTestId("filter-summary")!;
+    expect(summary.textContent).toBe("1 shown");
+    // The filter COUNT is not on screen: the filtered headers carry their own marker.
+    // It stays reachable for a screen reader, which can see neither funnel.
+    expect(summary.closest("button")!.textContent).toContain("2 column filters active");
 
-    fireEvent.click(queryByText("2 filters • 1 shown")!);
+    fireEvent.click(summary);
     expect(onClearFilters).toHaveBeenCalledTimes(1);
   });
 
@@ -72,7 +76,7 @@ describe("results-grid/StatsBar", () => {
    * would be a new lie on every result that has no next page.
    */
   test("names the scope of a filtered count while another page can be fetched", () => {
-    const { queryByText } = render(
+    const { queryByTestId } = render(
       <StatsBar
         result={makeResult()}
         filteredRowCount={1}
@@ -89,14 +93,13 @@ describe("results-grid/StatsBar", () => {
       />,
     );
 
-    expect(queryByText("2 filters • 1 shown")).toBeNull();
-    const summary = queryByText("2 filters • 1 of 2 loaded");
-    expect(summary).not.toBeNull();
+    const summary = queryByTestId("filter-summary");
+    expect(summary!.textContent).toBe("1 of 2");
     expect(summary!.closest("button")!.getAttribute("title")).toContain("not yet loaded");
   });
 
   test("leaves a filtered count unqualified when there is no next page", () => {
-    const { queryByText } = render(
+    const { queryByTestId } = render(
       <StatsBar
         result={makeResult()}
         filteredRowCount={1}
@@ -112,8 +115,8 @@ describe("results-grid/StatsBar", () => {
       />,
     );
 
-    const summary = queryByText("2 filters • 1 shown");
-    expect(summary).not.toBeNull();
+    const summary = queryByTestId("filter-summary");
+    expect(summary!.textContent).toBe("1 shown");
     expect(summary!.closest("button")!.getAttribute("title")).not.toContain("not yet loaded");
   });
 
@@ -157,6 +160,41 @@ describe("results-grid/StatsBar", () => {
     fireEvent.click(menu.querySelector('[data-column="name"]')!);
     expect(onToggleColumn).toHaveBeenCalledTimes(1);
     expect(onToggleColumn.mock.calls[0]?.[0]).toBe("name");
+  });
+
+  /**
+   * Escape closes it, the way the column filter popover in `ResultsGrid` does.
+   *
+   * The menu covers the rows below it while open and is dismissed by clicking the count
+   * again, which is the only way out until this listener exists. Measured in the running
+   * app: it sits over the grid's own header row, so "click the trigger again" is the one
+   * gesture that is not also a click on something the menu hides.
+   */
+  test("closes the column list on Escape", () => {
+    const { queryByTestId, queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set<string>()}
+        onToggleColumn={mock(() => {})}
+      />,
+    );
+
+    const trigger = queryByText("2 columns")!;
+    fireEvent.click(trigger);
+    expect(queryByTestId("column-visibility-menu")).not.toBeNull();
+
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(queryByTestId("column-visibility-menu")).toBeNull();
   });
 
   test("names how many columns are visible while any are hidden", () => {

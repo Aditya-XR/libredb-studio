@@ -64,9 +64,15 @@ const ORDER_NOTICE = "Without an ORDER BY the engine may return rows that repeat
  * a result with no next page keeps its unqualified count.
  *
  * It rides the existing button's `title` after the action rather than adding a badge of
- * its own. A second element here wraps the strip onto a second line on a narrow panel,
- * which is what the footer was deleted to stop, and the visible text carries the scope
- * itself ("of 2 loaded") so a sighted reader is not left depending on a tooltip.
+ * its own, and the visible text carries the scope itself so a sighted reader is not left
+ * depending on a tooltip.
+ *
+ * "10 of 50" and not "10 of 50 loaded", MEASURED in the running app rather than chosen:
+ * with the agent rail open, the longer wording wrapped this strip from 55px to 71px while
+ * every shorter candidate held 55px, and a strip whose height changes with the query is
+ * what the footer was deleted to stop. The count it is "of" is the loaded row count, which
+ * the strip already names as "50 rows" at its left edge, and the sentence below says which
+ * rows those are.
  */
 const FILTER_SCOPE_NOTICE = "Filtering runs over the rows loaded so far. Rows not yet loaded are not searched.";
 
@@ -219,6 +225,16 @@ export function StatsBar({
               type="button"
               className="hover:text-fg-secondary transition-colors"
               onClick={() => setColumnMenuOpen((open) => !open)}
+              /*
+                Escape closes it, which is what the column filter popover in `ResultsGrid`
+                binds too. Bound on the TRIGGER and not on the wrapping span: the trigger
+                keeps focus while the menu is open so the key lands here anyway, and a
+                span carrying a handler is a `jsx-a11y(no-static-element-interactions)`
+                error, which is a hard lint gate in this repository.
+              */
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setColumnMenuOpen(false);
+              }}
               title="Show or hide columns"
               aria-expanded={columnMenuOpen}
             >
@@ -227,7 +243,16 @@ export function StatsBar({
             {columnMenuOpen && (
               <div
                 data-testid="column-visibility-menu"
-                className="absolute bottom-full left-0 mb-1 z-30 bg-overlay border border-hairline-strong rounded-lg shadow-xl p-1 w-48 max-h-64 overflow-auto"
+                /*
+                  DOWNWARD, into the results panel, and not `bottom-full` above the strip.
+                  This strip is the TOP edge of the results panel and the Monaco editor
+                  sits directly above it, so a menu opened upward renders inside the
+                  editor's stacking context: visible, and with every click swallowed by
+                  `.view-lines`. Measured in the running app, not reachable from jsdom,
+                  where nothing is mounted above this component. Same direction and the
+                  same `z-30` as the column filter popover in `ResultsGrid`.
+                */
+                className="absolute top-full left-0 mt-1 z-30 bg-overlay border border-hairline-strong rounded-lg shadow-xl p-1 w-48 max-h-64 overflow-auto"
               >
                 {result.fields.map((field) => {
                   const isHidden = hiddenColumns?.has(field) === true;
@@ -260,8 +285,22 @@ export function StatsBar({
             title={pageOffer ? `Clear all filters. ${FILTER_SCOPE_NOTICE}` : "Clear all filters"}
           >
             <Funnel strokeWidth={1.5} className="w-3 h-3" />
-            {activeFilterCount} filter{activeFilterCount > 1 ? "s" : ""} &bull;{" "}
-            {pageOffer ? `${filteredRowCount} of ${result.rows.length} loaded` : `${filteredRowCount} shown`}
+            {/*
+              THE COUNT, AND NOT "2 filters" BESIDE IT. Which columns carry a filter is
+              already on screen: the funnel in each filtered header renders in `text-brand`
+              while an unfiltered one is invisible until hover (`ResultsGrid`), so the
+              number here only restated what the headers show, in the one strip whose
+              width is scarce. The icon on this chip says a filter is active; the text says
+              the one thing nothing else does, which is how many rows came through it.
+
+              The filter count survives for a screen reader, which cannot see either funnel.
+            */}
+            <span data-testid="filter-summary">
+              {pageOffer ? `${filteredRowCount} of ${result.rows.length}` : `${filteredRowCount} shown`}
+            </span>
+            <span className="sr-only">
+              , {activeFilterCount} column filter{activeFilterCount > 1 ? "s" : ""} active
+            </span>
             <X strokeWidth={1.5} className="w-3 h-3" />
           </button>
         )}
