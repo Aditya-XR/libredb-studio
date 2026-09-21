@@ -93,12 +93,26 @@ Two companion pages carry what this one deliberately does not:
 
 - [Turning it on](#turning-it-on)
 - [What a run is](#what-a-run-is)
+  - [The conversation a run belongs to](#the-conversation-a-run-belongs-to)
+  - [What a plan run knows](#what-a-plan-run-knows)
+  - [What the inventory is an inventory OF](#what-the-inventory-is-an-inventory-of)
+  - [The statement a plan run drafts](#the-statement-a-plan-run-drafts)
 - [Durability and resume](#durability-and-resume)
+  - [A drive that dies before the loop](#a-drive-that-dies-before-the-loop)
 - [The tool set](#the-tool-set)
+  - [The query-optimization template](#the-query-optimization-template)
+  - [The database-assessment template](#the-database-assessment-template)
+  - [The operations template](#the-operations-template)
+  - [The data-analysis template](#the-data-analysis-template)
+  - [Presenting an answer](#presenting-an-answer)
+  - [Handing the answer to the editor (auto-execute)](#handing-the-answer-to-the-editor-auto-execute)
+  - [What the fence is proved to hold against](#what-the-fence-is-proved-to-hold-against)
 - [What bounds a run](#what-bounds-a-run)
 - [Supported models](#supported-models)
 - [The model side](#the-model-side)
+  - [What a refused model looks like in the app](#what-a-refused-model-looks-like-in-the-app)
 - [Whether the run answered](#whether-the-run-answered)
+  - [The eval harness](#the-eval-harness)
 - [What the removed AI panels did that a run does not](#what-the-removed-ai-panels-did-that-a-run-does-not)
 - [HTTP surface](#http-surface)
 - [The surface in the app](#the-surface-in-the-app)
@@ -106,6 +120,7 @@ Two companion pages carry what this one deliberately does not:
 - [Package boundary](#package-boundary)
 - [Module map](#module-map)
 - [Known limitations](#known-limitations)
+- [Related documentation](#related-documentation)
 
 ## Turning it on
 
@@ -2360,14 +2375,11 @@ oldest artifact rather than the store's, so a run that executes a lot cannot mak
 on a quieter run that is still live. The store is per process, which is consistent with the
 zero-config backend below being single-instance.
 
-**What that product bounds is four *drives*, not four runs.** Every ceiling in the decision table is
-per drive (B6), while a resumed run keeps its `runId` and its artifacts are keyed by it — so a run
-driven three times may hold up to three times its statement ceiling here, and a long-lived run can
-pass 180 on its own. Run-fair eviction then takes that run's *own* earliest results, which its report
-may still cite: a third way to reach the "the rows are not here" answer a released result gives, this time while
-the run is still live. The ledger is unaffected — the claim and its citation are durable — and the
-gap is recorded as **B35** rather than closed with an artifact-only bound, because a ceiling that
-holds across drives is the mechanism B6 already names.
+**What that product bounds is four *drives*, not four runs.** A resumed drive's statement,
+elapsed-time and artifact ceilings are derived from the run's own ledger rather than handed to it
+fresh (#999), so a run driven three times no longer triples its statement budget or evicts the
+evidence an earlier drive cited. One ceiling is still per drive — the repair ledger is rebuilt by
+each drive (B6) — so repair attempts start over on resume.
 
 ## Deployment
 
@@ -2596,7 +2608,7 @@ the role's own grants are the whole boundary (A3).
 - **B4** — a mapped database error discards the text distinguishing a timeout cancel from an operator
   cancel.
 - **B5** — the ledger assumes one writer per run and cannot enforce it.
-- **B6** — every cost ceiling is per-drive, so N resumes can cost up to N times one drive's budget.
+- **B6** — the repair ledger is rebuilt per drive, so a resumed run's repair attempts start over.
 - **B9** — nothing enqueues a drive, so an interrupted run is resumable but never resumed.
 - **B11** — the rail can stop a run but cannot pause or resume one.
 - **B16** — the opt-in `@workflow/world-postgres` backend is not present in the standalone payload,

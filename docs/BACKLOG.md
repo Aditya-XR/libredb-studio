@@ -40,7 +40,7 @@ None of it is a GitHub issue.
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 24
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 23
 
 ---
 
@@ -2587,27 +2587,22 @@ Two consequences follow, and only the process-local half of the second is closed
 guarantee is asserted for every backend a deployment can reach. The process-local durable claim is
 asserted in `tests/unit/lib/agent/run-store.test.ts`.
 
-### B6. Every agent cost ceiling is per-drive, so N resumes cost up to N times one drive's budget
+### B6. The repair ledger is per-drive, so a resumed run's repair attempts start over
 
-The three things that bound what a run may spend — `ExecutionBudgetTracker` (`maxStatementsPerRun`,
-`maxTotalRunMs`), `AgentRepairLedger` and `AgentRunDeadline` — are all constructed by the process that
-drives a run and live only in its memory. `runInvestigation` takes them as injected resources, so a run
-resumed after a process death is handed a fresh set and starts each ceiling again.
+`ExecutionBudgetTracker` (`maxStatementsPerRun`, `maxTotalRunMs`), `AgentRunDeadline` and the artifact
+allowance were all constructed by the process that drives a run and lived only in its memory, so a run
+resumed after a process death was handed a fresh set. Those are now derived from the run's own ledger
+(#999): the deadline from `createdAtMs`, the statement and elapsed-time spend folded from
+`tool-completed` entries, and the artifact allowance from the workflow ceiling. A run that dies and
+resumes ten times no longer multiplies those tenfold.
 
-A run that dies and resumes ten times may perform ten times `maxStatementsPerRun` statements and spend
-ten times its workflow's `runDeadlineMs`, even though each drive stayed honestly inside its bounds.
+`AgentRepairLedger` is the remaining per-drive piece: `runtime.ts` rebuilds it fresh for every drive,
+so a resumed run starts its repair attempts over. Ten resumes can therefore still spend ten repair
+budgets, even though each drive stayed honestly inside its bounds.
 
-Nothing claims otherwise: `AGENT_WORKFLOW_BUDGETS`'s docblock states the per-drive scope explicitly. It
-matters for two later tasks — a budget meter must not present a per-drive figure as a run total, and any
-retry policy that resumes automatically would multiply the ceiling without a user asking.
-
-The data needed is already persisted. `AgentRunRecord` carries `createdAtMs`, and the ledger holds
-every settled step, so a drive could fold the run's own history into the ceilings it starts with: a
-deadline measured from `createdAtMs`, a statement count folded from `tool-completed` entries.
-
-**Done when:** the ceilings a drive enforces are derived from the run's ledger rather than from the
-drive's own construction, with a test that resumes a run twice and shows the second drive inheriting
-the first's spend.
+**Done when:** a drive's repair attempts are derived from the run's own history — or the per-drive
+rebuild is asserted by a test rather than assumed — with a test that resumes a run twice and shows the
+second drive inheriting the first's repair spend.
 
 ### B9. Nothing enqueues an agent drive, so an interrupted run is resumable but never resumed
 
@@ -2813,34 +2808,6 @@ depends on it and no user is waiting on it.
 
 **Done when:** the event model has settled and somebody is running Studio beside a stack that wants
 agent runs in it. #332 holds the full scope.
-
-### B35. A resumed run can evict its own still-cited results: the artifact cap is per drive
-
-`AGENT_MAX_ARTIFACTS` (`src/lib/agent/runtime.ts`) is `45 × 4 = 180`: the largest per-workflow statement
-ceiling times the four concurrent runs one agent process is sized for. Its justification used to be that
-"a run cannot produce more artifacts than it is allowed statements", which is true of a DRIVE and not of
-a run — every ceiling is per drive (B6), while a resumed run keeps its `runId` and its artifacts are
-keyed by it. A run driven three times may hold up to three times its statement ceiling, and one
-long-lived run can pass 180 with no concurrency at all.
-
-`ExecutionArtifactStore.put` spends the cap run-fairly: a store at the cap evicts the oldest artifact of
-the run that is STORING, which stops a busy run making "Show result" fail on a quieter one. Applied to a
-run past the cap, the same rule means the run evicts its own earliest evidence — the results its first
-drive read, which its report may still cite.
-
-Nothing about the ledger is wrong afterwards: a claim and its citation are durable, and the artifact
-route already answers "the rows are not here" for the run-ended and TTL-expired cases (B15). This is a
-third way to reach that answer, and the only one that can happen while the run is still live and the
-rail is still offering the control.
-
-Not closed with an artifact-only bound, deliberately. A ceiling that holds ACROSS drives is exactly what
-B6 describes as missing, and the run record already carries what it needs, so a second answer invented
-for artifacts alone would have to be unpicked when B6 lands. Raising the number cannot close it either:
-a run resumed often enough passes any constant.
-
-**Done when:** a drive's artifact allowance is derived from the run's own history rather than from a
-per-drive constant — most likely as part of B6 — with a test that drives one run twice past the cap and
-shows the first drive's cited results still readable, or the surface stating that they are not.
 
 ### B59. Per-model instructions have nowhere to go, and the mechanism that held them is gone
 
