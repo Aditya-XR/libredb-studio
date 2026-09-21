@@ -14,6 +14,11 @@ Authors: Cevheri Bozoglan, Yusuf Gundogdu, Abdullah Kaya, Koray Sirin.
 | arXiv id | [2609.21341](https://arxiv.org/abs/2609.21341) |
 | License | CC BY 4.0 |
 
+## Corpus at a glance
+
+Eleven days, 39 open-weight models served locally plus one hosted control, 8,199 runs, 110,711
+ledger events, 14,008 refused tool calls. All of it is in the released dataset above.
+
 ## Layout
 
 | Path | What it is |
