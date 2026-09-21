@@ -40,7 +40,7 @@ None of it is a GitHub issue.
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 23
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B82 · 24
 
 ---
 
@@ -2604,42 +2604,20 @@ budgets, even though each drive stayed honestly inside its bounds.
 rebuild is asserted by a test rather than assumed — with a test that resumes a run twice and shows the
 second drive inheriting the first's repair spend.
 
-### B9. Nothing enqueues an agent drive, so an interrupted run is resumable but never resumed
+### B9. The resume sweep is local-only, and a resumed run is not driven back into the rail
 
-Opened by #329 T9. `POST /api/agent/drive` exists, authenticates a server-minted single-purpose
-credential and resumes the run it names, and `src/lib/agent/runtime.ts` re-derives everything that run
-needs from its own ledger. So a resume WORKS. What does not exist is anything that asks for one.
+The local sweep (#1000) now finds runs a dead process left `running` and drives each one again, with
+the drive's own claim as the single-flight and B6's cross-drive ceilings accounted for. What remains:
 
-A run is driven exactly once, in the process that opened it. If that process dies mid-run the run stays
-`running` in the ledger with nobody to pick it up: `mintAgentDriveToken` has no production caller, and
-the workflow runtime is used only as the ledger's durable substrate — no `"use workflow"` function, no
-queue producer, so the backend's own re-enqueue-on-start never sees an agent run.
+- **The sweep is local-only.** It lists the `local` world's ledger streams; the multi-replica Postgres
+  world is absent from the shipped artifacts (B16), so no cross-replica sweep exists.
+- **A user-visible resume does not re-attach the rail.** `resumeRun` sets the run back to `running`, but
+  `driveAgentRun`'s only callers are the start route and the drive route — neither on the resume path —
+  so a run resumed from the rail is picked up by the sweep, eventually, rather than by the rail's own
+  stream.
 
-Distinct from a drive that *fails*, which is recorded: a throw anywhere in `driveAgentRun` ends the run
-as `failed` with a classified reason, so an unconfigured model no longer leaves a run at `queued`
-forever. This entry is the case where the process is GONE — nothing threw, nothing can record.
-
-**Adopting the SDK's Next.js integration was refused deliberately.** Its documented setup asks for
-`/.well-known/workflow/*` to be excluded from the proxy matcher, and warns that a proxy on that path
-detaches the request body, so the callback could not authenticate its way through the middleware
-either. Worse than the requested edit: **this matcher already excludes it**, because the dot rule
-(`.*\..*`) skips every path containing a dot and `.well-known` contains one (AU2 records the same
-consequence). That route would sit outside `src/proxy.ts` entirely, unauthenticated, the moment it
-existed — with no matcher edit to review. The pinned decision for this case says driving in-process
-without a loopback hop is strictly better, which is what the start route does. The drive path is one
-the matcher DOES route, guarded by a credential rather than a path rule, and `tests/api/proxy.test.ts`
-pins both halves.
-
-Two things have to land together whenever a producer arrives, and neither is safe alone:
-
-- **A sweep that finds runs left `running`** and drives each one, at boot or on a timer, with the same
-  credential the callback already verifies.
-- **Single-flight per run.** Today no two drives of one run can overlap, because there is only ever one.
-  A producer removes that accident, and the ledger is read-then-append with no fencing (B5), so two
-  drives would both read "not invoked" for the same step and both perform it.
-
-**Done when:** a run whose process died is picked up without a person asking, no step is performed
-twice while that happens, and B6's per-drive ceilings are accounted for across the resumes it causes.
+**Done when:** a resumed run is driven on every backend a deployment can reach, and the rail re-attaches
+to the resumed run's stream instead of waiting for the sweep.
 
 ### B11. The rail can stop a run but cannot pause or resume one
 
@@ -3045,3 +3023,18 @@ value are the same object shape, which is the same defect one level up.
 **Done when:** an unasked seed list is distinguishable from a measured empty one, a non-OK the
 server did not attribute leaves the browser in the unasked state rather than the empty one, and the
 two tests above wait on a fact that a hook which never fetched cannot satisfy.
+
+### B82. The resume sweep keeps re-driving a run that dies again at the same point
+
+The sweep that #1000 added finds a run a dead process left `running` and drives it again, once per
+interval. A run whose process dies WITHOUT recording a failure — a hard crash, `kill -9`, a host
+reboot — stays `running`, so after its claim expires the sweep picks it up again. If it dies again at
+the same point, the sweep repeats this at every interval, forever.
+
+`driveAgentRun` turns a THROW into a terminal `failed` run, so an ordinary failure does not loop; this
+entry is only the case where the process is gone before it can write anything. There is no attempt
+counter, no max-retry and no dead-letter, because the sweep cannot tell "crashed again" from "never
+attempted": neither writes a record.
+
+**Done when:** the sweep stops re-driving a run after a bounded number of consecutive unrecorded
+deaths and says so — in the run's ledger or in the operator log.
