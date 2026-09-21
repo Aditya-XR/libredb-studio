@@ -47,7 +47,9 @@ under `anc/sweep-logs/` are named `<model>-<surface>.log`.
 scorer, exporter, argument captures, 160 sweep logs). That is the file to upload, not `paper.pdf`;
 arXiv rejects a PDF built from LaTeX.
 
-The verifier prints one line per figure and exits non-zero if any disagrees. Get the corpus with:
+The verifier prints one line per figure and exits non-zero if any disagrees. Get the corpus with the
+[`huggingface_hub` CLI](https://pypi.org/project/huggingface-hub/) (`pip install -U
+"huggingface_hub[cli]"` if `hf` is not already on your PATH):
 
     hf download libredb/database-agent-runs runs.jsonl --type=dataset --local-dir .
 
