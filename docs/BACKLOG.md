@@ -2567,50 +2567,25 @@ the new signal — and when classification no longer depends on a substring a ta
 satisfy. Driver error codes (PostgreSQL `SQLSTATE`, SQLite `errcode`) are the signal that does not
 collide, and each provider already has access to its own.
 
-### B5. The agent run ledger assumes one writer per run, and cannot enforce it
+### B5. The agent run ledger cannot fence two writers, so single ownership has to be asserted above it
 
 `run-store.ts` and `run-service.ts` are append-only over the durable world's stream primitives, which
 offer no compare-and-append: a writer cannot say "append this only if the stream is still at index N".
-Every operation is read-then-append. Two consequences follow that a single-writer run never meets:
+Two consequences follow, and only the process-local half of the second is closed:
 
 - **Two concurrent opens on one caller-supplied run id write two headers.** The fold refuses a ledger
   with a second header (`MALFORMED_LEDGER`), permanently, for every later read. The race does not
-  resolve in one side's favour — it bricks the run. Nothing minted internally can collide (UUIDv4, 122
-  random bits), so reaching this needs a caller that supplies its own id, which is what the
-  workflow-run-id path does.
-- **Two loops driving one running run would both perform the same step.** `runStep` reads the ledger,
-  sees the step neither settled nor invoked, and appends its invocation. Two readers of the same state
-  both pass that check. The write-ahead ordering makes a step at-most-once *per loop*, not *per run*.
-  The milestone's "no tool execution performed twice" criterion is about a restart, where the dead
-  process is gone by construction, and that case is genuinely covered.
-
-Not defended at the storage layer because every cross-process defence available is worse than the
-constraint: a lock file is single-instance only (which the Postgres backend exists to escape), and a
-lease in the ledger is a distributed-lock design with its own expiry semantics. Single ownership of a
-running workflow belongs to the layer above.
-
-How strong the guarantee is depends on the backend. On the zero-config local world it holds by
-construction: the queue awaits each delivery before attempting the next, so retries are sequential. On
-the opt-in Postgres backend a visibility-timeout redelivery can overlap a handler that is still alive,
-which is where the second bullet would bite.
-
-**Severity is a function of B9.** Nothing delivers an agent drive today: `mintAgentDriveToken` has no
-production caller, there is no `"use workflow"` function and no queue producer, so a run is driven
-exactly once, in the process that opened it. A second drive is not reachable through the product on
-either backend. Producing one takes a caller that mints its own drive credential from `JWT_SECRET`,
-which is how the fence below was exercised against a live run rather than only in a test. Closing B9 is
-what makes this live — and in that order, because a producer without the fence is a redelivery that runs
-the user's statement a second time.
-
-The process-local half of the fence exists (2026-08). `claimDrive`/`releaseDrive` refuse a second
-concurrent drive of one run inside a single process, and `AgentRunStore.append` refuses an append once
-the run's stream has been closed (`RUN_ALREADY_CLOSED`), turning the silent-loss mode into a loud
-refusal. The cross-process half is open: two replicas would still both pass the read-then-append check.
+  resolve in one side's favour — it bricks the run. Run creation still has to be serialized by its
+  caller.
+- **Two loops driving one running run would both perform the same step.** The drive claim is now a
+  DURABLE ledger record — `drive-claimed`/`drive-released` — rather than a memory-only set, and
+  `tryClaimDrive` serializes check-then-append per store instance (#998, pinned by a fifty-claim
+  concurrency test). The cross-process half is open: two replicas would still both pass the
+  read-then-append check, because the durable world offers no tail-index conditional append (B16).
 
 **Done when:** the ledger can append conditionally on the stream's tail index, or the single-ownership
-guarantee the runtime provides is asserted by a test rather than assumed by prose. The process-local
-claim is asserted in `tests/unit/lib/agent/run-service.test.ts`, the append-after-close guard in
-`tests/unit/lib/agent/run-store.test.ts`.
+guarantee is asserted for every backend a deployment can reach. The process-local durable claim is
+asserted in `tests/unit/lib/agent/run-store.test.ts`.
 
 ### B6. Every agent cost ceiling is per-drive, so N resumes cost up to N times one drive's budget
 
