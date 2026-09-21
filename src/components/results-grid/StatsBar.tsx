@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/button";
 import type { CellChange } from "@/components/ResultsGrid";
 import { describeWarning } from "@/components/results-grid/utils";
 
-const MASKED_LABEL = "MASKED";
+const MASKED_LABEL = "masked";
 const LOADING_LABEL = "Loading...";
 /**
  * The control's label, which names the size of the page the click will fetch.
@@ -42,13 +42,20 @@ const loadMoreLabel = (pageSize: number) => `load ${pageSize} more`;
  * about it. `ResultsGrid` decides when it is shown and will not show it where no next
  * page can be asked for.
  *
- * A badge in the AUTO-LIMITED idiom rather than a sentence, with the sentence itself on
- * the `title` and in an `sr-only` span the way the warning badge below carries its
- * detail. A sentence of this length wraps the strip onto a second line on a narrow
- * results panel, and a strip whose height changes with the query is the thing the footer
- * was deleted to stop.
+ * A badge rather than a sentence, with the sentence itself on the `title` and in an
+ * `sr-only` span the way the warning badge below carries its detail. A sentence of this
+ * length wraps the strip onto a second line on a narrow results panel, and a strip whose
+ * height changes with the query is the thing the footer was deleted to stop.
+ *
+ * ONE GLYPH, and it used to be the words "ORDER NOT GUARANTEED". MEASURED in the running
+ * app: those words took 154px of a 960px strip, next to 99px for the limit badge and 95px
+ * for a duration, so a third of the strip went to three facts of one word each while the
+ * right-hand end clipped. The glyph holds 23px and loses nothing, because everything the
+ * words said is in the `title` and the `sr-only` span already and always was: a reader who
+ * hovers or listens gets the sentence, and the words only ever told a sighted reader that
+ * SOMETHING about ordering applied here.
  */
-const ORDER_BADGE = "ORDER NOT GUARANTEED";
+const ORDER_BADGE = "!";
 const ORDER_NOTICE = "Without an ORDER BY the engine may return rows that repeat or are skipped between pages.";
 
 /**
@@ -74,6 +81,19 @@ const ORDER_NOTICE = "Without an ORDER BY the engine may return rows that repeat
  * the strip already names as "50 rows" at its left edge, and the sentence below says which
  * rows those are.
  */
+/**
+ * The limit badge, lower case since #870.
+ *
+ * It said "AUTO-LIMITED" in the strip's shouting idiom, which cost 99px to say one word.
+ * The word that carries the fact is "limited"; what applied the limit is in the sentence
+ * on the `title`, where the other badges beside it already keep theirs.
+ */
+const AUTO_LIMIT_BADGE = "limited";
+const AUTO_LIMIT_NOTICE = "Studio bounded this result. Rows beyond the bound were not fetched.";
+
+/** What the duration beside it is, for anyone who hovers or listens. */
+const EXEC_TIME_NOTICE = "Execution time";
+
 const FILTER_SCOPE_NOTICE = "Filtering runs over the rows loaded so far. Rows not yet loaded are not searched.";
 
 export interface StatsBarProps {
@@ -305,7 +325,10 @@ export function StatsBar({
           </button>
         )}
         {result.pagination?.wasLimited && (
-          <span className="text-brand text-xs bg-brand-tint/10 px-2 py-0.5 rounded">AUTO-LIMITED</span>
+          <span className="text-brand text-xs bg-brand-tint/10 px-2 py-0.5 rounded" title={AUTO_LIMIT_NOTICE}>
+            {AUTO_LIMIT_BADGE}
+            <span className="sr-only">: {AUTO_LIMIT_NOTICE}</span>
+          </span>
         )}
         {orderAcrossPagesUnspecified && (
           <span className="text-fg-muted text-xs bg-fill px-2 py-0.5 rounded" title={ORDER_NOTICE}>
@@ -315,7 +338,7 @@ export function StatsBar({
         )}
         {warnings.length > 0 && (
           <span className="text-warning text-xs bg-warning-tint/10 px-2 py-0.5 rounded" title={warningDetail}>
-            {warnings.length} WARNING{warnings.length > 1 ? "S" : ""}
+            {warnings.length} warning{warnings.length > 1 ? "s" : ""}
             <span className="sr-only">: {warningDetail}</span>
           </span>
         )}
@@ -383,8 +406,14 @@ export function StatsBar({
           </div>
         )}
 
-        <span className="hidden sm:flex px-2 py-0.5 rounded bg-fill border border-hairline">
-          EXEC TIME: {result.executionTime || "0ms"}
+        {/*
+          THE DURATION, WITHOUT ITS LABEL. "EXEC TIME: " took 95px of a 960px strip to say
+          what a duration beside a row count already reads as. It also lost its unit: the
+          value is a number and `ms` sat only in the zero fallback, so a two millisecond
+          query rendered "EXEC TIME: 2". The full words stay on the `title`.
+        */}
+        <span className="hidden sm:flex px-2 py-0.5 rounded bg-fill border border-hairline" title={EXEC_TIME_NOTICE}>
+          {result.executionTime ?? 0}ms<span className="sr-only"> {EXEC_TIME_NOTICE}</span>
         </span>
 
         <div className="flex md:hidden items-center bg-fill rounded-lg p-0.5">

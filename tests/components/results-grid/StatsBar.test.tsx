@@ -53,7 +53,7 @@ describe("results-grid/StatsBar", () => {
 
     expect(queryByText("2 rows")).not.toBeNull();
     expect(queryByText("2 columns")).not.toBeNull();
-    expect(queryByText("AUTO-LIMITED")).not.toBeNull();
+    expect(queryByText("limited")).not.toBeNull();
     const summary = queryByTestId("filter-summary")!;
     expect(summary.textContent).toBe("1 shown");
     // The filter COUNT is not on screen: the filtered headers carry their own marker.
@@ -353,7 +353,7 @@ describe("results-grid/StatsBar", () => {
         userCanToggle={false}
       />,
     );
-    expect(queryByText("MASKED")).not.toBeNull();
+    expect(queryByText("masked")).not.toBeNull();
   });
 
   test("renders no warnings badge when the engine reported none", () => {
@@ -372,7 +372,7 @@ describe("results-grid/StatsBar", () => {
         userCanToggle={false}
       />,
     );
-    expect(container.textContent).not.toContain("WARNING");
+    expect(container.textContent).not.toContain("warning");
 
     // An empty array must not render an empty affordance either.
     rerender(
@@ -390,7 +390,7 @@ describe("results-grid/StatsBar", () => {
         userCanToggle={false}
       />,
     );
-    expect(container.textContent).not.toContain("WARNING");
+    expect(container.textContent).not.toContain("warning");
   });
 
   test("renders a warnings badge whose message is reachable by tooltip and by screen reader", () => {
@@ -414,7 +414,7 @@ describe("results-grid/StatsBar", () => {
     );
 
     const badge = getByTitle("2 segments of the queried data were unavailable.");
-    expect(badge.textContent).toContain("1 WARNING");
+    expect(badge.textContent).toContain("1 warning");
     expect(badge.querySelector(".sr-only")?.textContent).toContain("2 segments of the queried data were unavailable.");
   });
 
@@ -442,7 +442,7 @@ describe("results-grid/StatsBar", () => {
     // on the raw attribute.
     const badge = getByTitle(/index advice available/);
     expect(badge.getAttribute("title")).toBe("index advice available\nrows were sampled");
-    expect(badge.textContent).toContain("2 WARNINGS");
+    expect(badge.textContent).toContain("2 warnings");
   });
 
   test("falls back to the engine's code when a warning carries no message", () => {
@@ -465,7 +465,7 @@ describe("results-grid/StatsBar", () => {
 
     const badge = getByTitle(/Warning 0/);
     expect(badge.getAttribute("title")).toBe("Warning 0\nWarning");
-    expect(badge.textContent).toContain("2 WARNINGS");
+    expect(badge.textContent).toContain("2 warnings");
   });
 
   test("shows pending changes actions and executes callbacks", () => {
@@ -603,6 +603,41 @@ describe("results-grid/StatsBar - the load-more control (#816)", () => {
  * is not guaranteed. Whether it is said is `ResultsGrid`'s decision and is asserted there;
  * this is about the sentence itself.
  */
+/**
+ * The strip stopped shouting (#870 follow-up).
+ *
+ * MEASURED in the running app before the change: in a 960px strip these three badges took
+ * 154px, 99px and 95px, over a third of the width, for facts that are each one word. The
+ * duration also rendered as "EXEC TIME: 2" with no unit, because `ms` sat only in the
+ * zero fallback beside it.
+ */
+describe("results-grid/StatsBar — badge weight", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  test("gives the duration its unit and drops the label", () => {
+    const { container } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+      />,
+    );
+
+    expect(container.textContent).toContain("14ms");
+    expect(container.textContent).not.toContain("EXEC TIME");
+  });
+});
+
 describe("results-grid/StatsBar — the ordering notice (#816)", () => {
   afterEach(() => {
     cleanup();
@@ -625,7 +660,7 @@ describe("results-grid/StatsBar — the ordering notice (#816)", () => {
     />
   );
 
-  const BADGE = "ORDER NOT GUARANTEED";
+  const BADGE = "!";
   const NOTICE = "Without an ORDER BY the engine may return rows that repeat or are skipped between pages.";
 
   test("states the condition once, beside the auto-limited badge", () => {
@@ -634,7 +669,7 @@ describe("results-grid/StatsBar — the ordering notice (#816)", () => {
     expect(queryAllByText(BADGE)).toHaveLength(1);
     // Beside the badge, in the same left-hand group, so the two read as one sentence
     // about the same bound rather than as a warning of their own.
-    expect(getByText(BADGE).parentElement).toBe(getByText("AUTO-LIMITED").parentElement);
+    expect(getByText(BADGE).parentElement).toBe(getByText("limited").parentElement);
     // Terse in the strip, whole to anyone who hovers or listens: the sentence is on the
     // title and in an sr-only span, the idiom the warning badge beside it already uses.
     // A sentence of this length inline wraps the strip on a narrow panel, and a strip
