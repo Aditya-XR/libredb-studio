@@ -6,13 +6,29 @@ export const dynamic = "force-dynamic";
 /**
  * Columns, indexes and foreign keys for one object (#789).
  *
- * NO PRODUCT CALLER TODAY, stated rather than left for the next reader to discover. The details
- * pane a reader opens on a single row is Phase 2; Phase 1's consumers all read a WHOLE folder,
- * through `describeObjects` and the inventory route's `includeColumns`, because one call per
- * object was measured as an N+1 of up to 5000 round trips and removed. This route is the
- * single-object read that pane will want, landed with the rest of the surface in Task 4 so the
- * four routes share one request shape, one error vocabulary and one test file. It is exercised by
- * `tests/api/db-objects.test.ts` and by nothing else.
+ * THE OBJECT TREE IS THE CALLER, one read per EXPANDED object row. A reader opens the twisty on an
+ * object whose kind declares `hasColumns`, the tree issues the `describe` arm of
+ * `ObjectReadRequest` (`src/components/object-tree/use-tree-nodes.ts`), and the columns of this
+ * answer are the rows drawn under it. This paragraph used to say the route had no product caller
+ * and was exercised by `tests/api/db-objects.test.ts` and by nothing else, which was true until
+ * the tree started reading it.
+ *
+ * ONE READ PER GESTURE IS NOT THE N+1 THAT WAS REMOVED, and the gesture is the whole difference.
+ * The removed one was the inventory route's `includeColumns` over a WHOLE DATABASE, eagerly, up to
+ * 5,000 sequential round trips with no user gesture behind any of them. This one is issued only
+ * for a row somebody opened, is cached for the life of the connection's tree cache, and is NOT
+ * re-issued when that row is collapsed and expanded again. The bound is the tree's expansion
+ * state and never the size of the database.
+ *
+ * A REFRESH COSTS ONE DESCRIBE PER OPEN OBJECT ROW. A `refreshToken` bump re-issues over every row
+ * that is open, so the columns a DDL statement added appear, and DROPS the cached detail of every
+ * collapsed one, so re-expanding reads again rather than drawing a column list that statement
+ * invalidated.
+ *
+ * The budget is SHARED and this route carries no bucket of its own: `handleObjectRequest` meters
+ * every object route into the `query` bucket (`src/lib/api/object-route.ts:73`), 120 requests per
+ * 60 seconds by default, shared with `POST /api/db/query` and the storage sync routes. A reader
+ * with many rows open therefore spends the same allowance their statements do.
  *
  * `kind` is required in the body, not optional and not inferred. The provider method takes it as
  * its second argument for the reason recorded on the epic: without it a provider has to guess what

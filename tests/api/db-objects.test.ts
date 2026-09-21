@@ -622,6 +622,110 @@ describe("POST /api/db/objects/describe", () => {
     expect(response.status).toBe(400);
     expect((await parseResponseJSON<{ error: string }>(response)).error).toContain("kind");
   });
+
+  test("answers the provider's ObjectDetail verbatim, indexes and foreign keys included", async () => {
+    // The object tree reads only the COLUMNS out of this answer, and the route still hands the
+    // whole detail over unreshaped, which is what lets a later phase draw the indexes and the
+    // foreign keys with no second round trip. Asserted with all three arrays non-empty rather
+    // than with the columns alone: a route that dropped either of the other two would still pass
+    // the column-only comparison above.
+    const detail: ObjectDetail = {
+      path: ["app", "orders"],
+      columns: [
+        { name: "id", type: "integer", nullable: false, isPrimary: true },
+        { name: "total", type: "numeric(12,2)", nullable: true, isPrimary: false, defaultValue: "0" },
+      ],
+      indexes: [{ name: "orders_pkey", columns: ["id"], unique: true }],
+      foreignKeys: [{ columnName: "customer_id", referencedTable: "customers", referencedColumn: "id" }],
+    };
+    activeProvider = objectProvider({ describeObject: mock(async () => detail) });
+
+    const response = await describeRoute.POST(
+      createMockRequest("/api/db/objects/describe", {
+        method: "POST",
+        body: { connection, path: ["app", "orders"], kind: "table" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await parseResponseJSON<ObjectDetail>(response)).toEqual(detail);
+  });
+
+  test("answers three empty arrays for a kind that has no columns, rather than refusing", async () => {
+    // A kind with nothing to describe is a 200 carrying three empty arrays, and that is a
+    // contract the tree depends on rather than an accident: the twisty is gated on the kind's own
+    // `hasColumns` declaration and never on the answer, so a caller that asks anyway must get an
+    // answer it can render as "none" instead of the engine's-fault path. Two providers reach this
+    // shape without touching the wire at all - oracle returns it for any kind whose role is not
+    // `relation` (`src/lib/db/providers/sql/oracle.ts:2015-2017`) and mysql for any kind its own
+    // `hasColumns` predicate rejects (`src/lib/db/providers/sql/mysql.ts:2518-2520`).
+    const describeObject = mock(async () => emptyDetail(["app", "order_total(integer)"]));
+    activeProvider = objectProvider({ describeObject });
+
+    const response = await describeRoute.POST(
+      createMockRequest("/api/db/objects/describe", {
+        method: "POST",
+        body: { connection, path: ["app", "order_total(integer)"], kind: "function" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await parseResponseJSON<ObjectDetail>(response)).toEqual({
+      path: ["app", "order_total(integer)"],
+      columns: [],
+      indexes: [],
+      foreignKeys: [],
+    });
+    expect(describeObject).toHaveBeenCalledWith(["app", "order_total(integer)"], "function");
+  });
+
+  // An object dropped between the listing and the expand has TWO answers in the shipped fleet, and
+  // the pair below is pinned so a later reader cannot assume either one is THE behaviour.
+  // PostgreSQL checks for a zero-row catalog answer and raises `No detail row for ...`
+  // (`src/lib/db/providers/sql/postgres.ts:3021`); oracle, mysql and couchbase have no such check
+  // and answer three empty arrays, couchbase because a rejected INFER is deliberately not an error
+  // (`src/lib/db/providers/document/couchbase/introspect.ts:206-215`). Both cases are driven
+  // through DOUBLES over one missing path and are never asserted as a count of engines.
+  const DROPPED_PATH = ["app", "orders_dropped"];
+
+  test("maps a provider that raises for a path it cannot find to 400 QUERY_ERROR", async () => {
+    activeProvider = objectProvider({
+      describeObject: mock(async () => {
+        throw new QueryError(`No detail row for ${DROPPED_PATH.join(".")}`, "postgres");
+      }),
+    });
+
+    const response = await describeRoute.POST(
+      createMockRequest("/api/db/objects/describe", {
+        method: "POST",
+        body: { connection, path: DROPPED_PATH, kind: "table" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    const body = await parseResponseJSON<{ error: string; code: string }>(response);
+    expect(body.error).toBe("No detail row for app.orders_dropped");
+    expect(body.code).toBe(ApiErrorCode.QUERY_ERROR);
+  });
+
+  test("answers 200 and three empty arrays for the SAME missing path when the provider does not check", async () => {
+    activeProvider = objectProvider({ describeObject: mock(async () => emptyDetail(DROPPED_PATH)) });
+
+    const response = await describeRoute.POST(
+      createMockRequest("/api/db/objects/describe", {
+        method: "POST",
+        body: { connection, path: DROPPED_PATH, kind: "table" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await parseResponseJSON<ObjectDetail>(response)).toEqual({
+      path: DROPPED_PATH,
+      columns: [],
+      indexes: [],
+      foreignKeys: [],
+    });
+  });
 });
 
 // ============================================================================

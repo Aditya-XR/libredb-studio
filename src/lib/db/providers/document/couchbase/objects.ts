@@ -156,6 +156,14 @@ export const COUCHBASE_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     // address a Couchbase document through the `__id` projection; an import into a
     // collection is an ordinary `UPSERT`. See `kindAcceptsRowWrites()` in object-kinds.ts.
     acceptsRowWrites: true,
+    // The ONE kind here with columns, and it is the same fact `describeObject` gates on:
+    // it answers three empty arrays for anything whose role is not `relation`
+    // (couchbase/index.ts:803-804). A collection's columns are INFERRED from a document
+    // sample rather than read from a schema, so an empty collection (error 7014) and an
+    // INFER the caller has no SELECT grant for both answer no column and no error
+    // (couchbase/introspect.ts:200-215); the tree reports that open row as having none
+    // rather than treating it as a failure.
+    hasColumns: true,
   },
   {
     id: COUCHBASE_KIND_FUNCTION,

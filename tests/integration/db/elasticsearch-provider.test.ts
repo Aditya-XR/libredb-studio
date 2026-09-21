@@ -1019,9 +1019,16 @@ describe("ElasticsearchProvider metadata", () => {
       // itself. The roles are asserted where they were measured.
       containerLevels: [],
       objectKinds: [
-        { id: "index", role: "relation", label: "Index", labelPlural: "Indices", acceptsRowWrites: true },
-        { id: "alias", role: "relation", label: "Alias", labelPlural: "Aliases" },
-        { id: "stream", role: "relation", label: "Data Stream", labelPlural: "Data Streams" },
+        {
+          id: "index",
+          role: "relation",
+          label: "Index",
+          labelPlural: "Indices",
+          acceptsRowWrites: true,
+          hasColumns: true,
+        },
+        { id: "alias", role: "relation", label: "Alias", labelPlural: "Aliases", hasColumns: true },
+        { id: "stream", role: "relation", label: "Data Stream", labelPlural: "Data Streams", hasColumns: true },
         {
           id: "pipeline",
           role: "config",
@@ -2507,6 +2514,43 @@ describe("object surface", () => {
         .map((kind) => kind.id)
         .sort(),
     ).toEqual(["alias", "index", "stream"]);
+  });
+
+  test("declares columns on exactly the kinds that resolve to a mapping", async () => {
+    const provider = await connectProvider();
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    // The three kinds `describeObject` reads `_mapping` for (`search/index.ts:1251`,
+    // gated on `SEARCH_MAPPED_KINDS` at `:478`). The declaration is written as a literal
+    // beside each kind because that constant is declared AFTER the kind array, so
+    // referencing it there would be a temporal dead zone throw at module init.
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["alias", "index", "stream"]);
+    // The other direction, so a kind added later cannot quietly gain a twisty. A pipeline
+    // and a template are JSON documents with no field list at all.
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["pipeline", "template"]);
+
+    // The declaration against the engine's own answer, one kind each way. An alias row's
+    // columns are the mapping of ONE backing index, which is what the transport takes
+    // (`search/http-transport.ts:1266`).
+    const alias = await provider.describeObject(["probe_orders_alias"], "alias");
+    expect(alias.columns.length).toBeGreaterThan(0);
+    for (const column of alias.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+    expect((await provider.describeObject(["probe_pipeline"], "pipeline")).columns).toEqual([]);
   });
 });
 

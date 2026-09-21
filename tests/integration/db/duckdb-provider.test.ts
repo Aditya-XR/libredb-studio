@@ -1420,6 +1420,45 @@ describe("object surface", () => {
     ).toEqual([]);
   });
 
+  /**
+   * `hasColumns` against the engine's own answer, on the two kinds that decide it (#789).
+   *
+   * The declaration is what draws the twisty in the object tree, so a kind declaring it and
+   * answering nothing is a twisty that opens on nothing, and a kind answering columns while
+   * declaring nothing hides them behind a leaf with nothing on screen to say so. On this engine
+   * the fact is not a transcription: `describeObject` returns three empty arrays for anything
+   * whose role is not `relation` (`sql/duckdb/index.ts:959-961`), so `table` and `view` are the
+   * two kinds that can answer at all, and `macro` and `sequence` cannot.
+   */
+  test("declares columns on exactly the kinds describeObject answers columns for", async () => {
+    const kinds = new DuckDBProvider(makeConfig()).getCapabilities().objectKinds ?? [];
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["table", "view"]);
+    // The other direction: a kind that abstains declares nothing at all, not `false`.
+    expect(kinds.filter((kind) => kind.hasColumns !== true).map((kind) => kind.hasColumns)).toEqual([
+      undefined,
+      undefined,
+    ]);
+
+    const provider = await seededObjectProvider();
+    try {
+      const view = await provider.describeObject(["memory", "main", "customer_names"], "view");
+      expect(view.columns.length).toBeGreaterThan(0);
+      for (const column of view.columns) {
+        expect(typeof column.name === "string" && column.name.trim() !== "").toBe(true);
+        expect(typeof column.type === "string" && column.type.trim() !== "").toBe(true);
+      }
+
+      expect((await provider.describeObject(["memory", "analytics", "recent_events"], "macro")).columns).toEqual([]);
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
   test("satisfies the shared object surface contract", async () => {
     const provider = await seededObjectProvider();
     try {

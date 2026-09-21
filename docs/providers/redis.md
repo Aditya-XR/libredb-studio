@@ -835,6 +835,23 @@ this engine a prefix disappears the moment its last key is deleted.
 A function library answers three empty arrays with **no round trip**. That is a true fact about the
 kind rather than a failed read — a library has no columns, no indexes and no foreign keys.
 
+**`keyspace` is the only kind here that declares `hasColumns`**, so it is the only object row the
+desktop object tree gives a twisty to; `function` declares nothing, `describeObject()` answers it
+`columns: []`, and it stays a leaf. A `keyspace` row's three columns are SYNTHETIC, derived from the
+types sampled by the scan walk rather than read from a catalog, and they are declared because that
+grouping is what this provider models a key pattern as.
+
+**Expanding a key pattern re-walks the keyspace, and above the scan bound it can fail.**
+`describeObject()` does not reuse the walk the listing ran: it calls `scanKeyGroups()` itself, which
+is its own bounded `SCAN` capped at `KEY_SCAN_LIMIT` (1,000 keys), and raises when the grouping the
+listing produced is absent from that second walk. `SCAN` guarantees no order, so on a database
+holding more than 1,000 keys the two walks are different samples, a listed key pattern can fail to
+expand with `No key under "session:*" was found in the 1000-key SCAN of database 0`, and collapsing
+and re-expanding the row may or may not repair it: it is a fresh sample each time. This is a measured
+limit of a bounded walk over an unordered keyspace, not a bug with a fix pending here. The refusal
+itself is deliberate and is argued two paragraphs down: a grouping ceases to exist when its last key
+is deleted, so an empty shape would claim a grouping that is gone.
+
 **The two kinds are therefore asymmetric about EXISTENCE, on purpose.** `describeObject()` answers a
 valid detail for ANY `function` name, a library that was never loaded included, because nothing there
 reads the catalog; a `keyspace` whose grouping the current scan no longer holds raises. Existence is

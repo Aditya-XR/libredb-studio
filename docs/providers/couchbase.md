@@ -765,6 +765,12 @@ A rejected `INFER` yields **no columns rather than an error**: the collection be
 `bookings` empty so that stays measured. `foreignKeys` is always `[]` for the same reason
 `declaresForeignKeys: false` is declared: SQL++ has no referential constraint.
 
+`collection` is the only kind declaring `hasColumns`, so it is the only object row the desktop
+object tree gives a twisty to; `function` and `index` declare nothing, are leaves there, and the
+tree derives no read for them, which is the same fact the table above states by answering `[]`.
+An empty collection and an `INFER` the caller has no SELECT grant for both reach the tree as an
+open row reporting `No columns reported`, because neither is an error on this engine.
+
 A function's BODY is read by `readObjectSource` instead ([§6b](#6b-object-source-789)), not by
 `describeObject`. A function's parameter list and an index's keys as a first-class detail remain
 unmodelled.

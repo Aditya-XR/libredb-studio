@@ -930,6 +930,14 @@ in both methods, so one bad call reports the same thing either way.
 An empty column answer raises for a dictionary too, for the same reason as for a table: a dictionary
 always declares at least a key, so nothing there under that name is the only way to read it.
 
+`hasColumns` is declared on exactly the four kinds that read a catalog, `table`, `view`,
+`materialized_view` and `dictionary`, so those rows expand to their columns in the object tree, while
+`function` declares nothing and stays a leaf because `describeObject()` answers it `columns: []`
+without a round trip.
+The dictionary is one of the fleet's five refutations of `role === 'relation'` as that gate: it is
+declared `config` and still answers its structure, out of `system.dictionaries`, which is why the
+declaration is per kind and measured rather than derived from the role.
+
 `foreignKeys` is always `[]`, the same fact as in section 6: ClickHouse parses `REFERENCES` and
 enforces nothing by it, and `system.*` holds no constraint catalog to read one back from.
 

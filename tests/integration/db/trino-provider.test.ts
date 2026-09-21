@@ -86,7 +86,7 @@ import type {
 } from "@/lib/db/types";
 import type { DatabaseConnection } from "@/lib/types";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
-import { isSourcePartUnavailable } from "@/lib/db/object-kinds";
+import { isSourcePartUnavailable, kindHasColumns } from "@/lib/db/object-kinds";
 import { comparePaths } from "@/lib/db/object-path";
 
 const CATALOG = "tpch";
@@ -1568,6 +1568,19 @@ function serveObjectSurface(): void {
     trinoObjectColumnsSql("memory", "app", "customer_names"),
     rows(OBJECT_COLUMN_COLUMNS, [["name", "varchar", "YES"]]),
   );
+  // The SINGLE column read for the conformance sample, which the bulk reading above already
+  // publishes for the same object: `memory.app.orders` is `sampleObject`, and invariant 8
+  // holds the `hasColumns` declaration against what this statement answers. Without it the
+  // double falls through to the generic page, whose column names this reader cannot use, and
+  // the sample answers zero columns while nothing in the suite says so.
+  serveInstead(
+    trinoObjectColumnsSql("memory", "app", "orders"),
+    rows(OBJECT_COLUMN_COLUMNS, [
+      ["id", "bigint", "YES"],
+      ["customer_id", "bigint", "YES"],
+      ["total", "double", "YES"],
+    ]),
+  );
   serveInstead(trinoObjectColumnsSql("memory", "app", "gone"), rows(OBJECT_COLUMN_COLUMNS, []));
 
   // The FLAT reading, over the SAME objects the object reading publishes (#789).
@@ -1829,6 +1842,39 @@ describe("object surface", () => {
       { id: "catalog", label: "Catalog", labelPlural: "Catalogs" },
       { id: "schema", label: "Schema", labelPlural: "Schemas" },
     ]);
+  });
+
+  /**
+   * `hasColumns` on the three relation kinds, and `describeObject` agreeing with it (#789).
+   *
+   * The declaration is a CLIENT GATE: the object tree draws a twisty on a kind that carries
+   * it and asks `describeObject` when the row is opened, so a kind declaring it and
+   * answering nothing opens on an empty list with nothing on screen to say why. It is
+   * written literally here and the second half of this test is what makes the literal safe.
+   * `describeObject` gates on `spec.role !== "relation"` (`trino/index.ts:1032`), so
+   * `function` answers three empty arrays without a round trip and `table`, `view` and
+   * `materialized_view` read `information_schema.columns`.
+   */
+  test("declares hasColumns on the relation kinds only, and describeObject agrees", async () => {
+    const kinds = new TrinoProvider(makeConnection()).getCapabilities().objectKinds ?? [];
+
+    expect(
+      kinds
+        .filter(kindHasColumns)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["materialized_view", "table", "view"]);
+
+    const provider = await objectProvider({ database: "memory", schema: "app" });
+    const [column] = (await provider.describeObject!(["memory", "app", "customer_names"], "view")).columns;
+    expect(typeof column?.name).toBe("string");
+    expect(column?.name).not.toBe("");
+    expect(typeof column?.type).toBe("string");
+    expect(column?.type).not.toBe("");
+
+    // `function` declares nothing, so it has to answer nothing: a kind the tree never draws
+    // a twisty for must not be hiding columns behind the twisty that is missing.
+    expect((await provider.describeObject!(["memory", "app", "plus_one(bigint)"], "function")).columns).toEqual([]);
   });
 
   /**

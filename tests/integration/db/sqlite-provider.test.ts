@@ -38,6 +38,7 @@ import {
   declaredKinds,
   isCountUnavailable,
   isSourcePartUnavailable,
+  kindHasColumns,
   sourceBoundTruncationReason,
 } from "@/lib/db/object-kinds";
 import { flattenTree } from "@/components/object-tree/flatten";
@@ -1751,6 +1752,45 @@ describe("SQLiteProvider object surface (#789)", () => {
       indexes: [],
       foreignKeys: [],
     });
+  });
+
+  test("declares hasColumns on the two relation kinds, and the engine answers both ways", async () => {
+    // The declaration the object tree draws a twisty from (#789), pinned against this
+    // engine's own answer rather than against the design's table. The two coincide with
+    // `role === "relation"` HERE and that is a coincidence, not the rule: `describeObject`
+    // gates on the role only because `pragma_table_xinfo` answers zero rows for an index
+    // and for a trigger name, measured in the test above.
+    objects = await connectedWithObjects();
+    const kinds = declaredKinds(objects.getCapabilities());
+
+    expect(kinds.filter((kind) => kindHasColumns(kind)).map((kind) => kind.id)).toEqual(["table", "view"]);
+    // Absent rather than `false`: an abstaining kind declares nothing at all, so a kind
+    // that later grows columns cannot be missed by a reader looking only for the field.
+    for (const abstainer of ["index", "trigger"]) {
+      expect(kinds.find((kind) => kind.id === abstainer)?.hasColumns).toBeUndefined();
+    }
+
+    for (const [path, kind] of [
+      [["orders"], "table"],
+      [["order_summary"], "view"],
+    ] as const) {
+      const detail = await objects.describeObject(path, kind);
+      expect(detail.columns.length).toBeGreaterThan(0);
+      // Both fields, and the name check is not cosmetic: the tree feeds `column.name` to
+      // `pathKey`, which calls `segment.replaceAll(...)`, so a non-string name throws
+      // inside the walk and unmounts the whole tree instead of failing one row.
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name.trim()).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(column.type.trim()).not.toBe("");
+      }
+    }
+
+    // The other direction, which is what keeps the declaration from being a one-way claim:
+    // a kind that declares nothing is a leaf in the tree, so it must answer no column.
+    expect((await objects.describeObject(["idx_orders_customer"], "index")).columns).toEqual([]);
+    expect((await objects.describeObject(["orders", "orders_stamp"], "trigger")).columns).toEqual([]);
   });
 
   test("an object that is not there is a failed read and says so", async () => {

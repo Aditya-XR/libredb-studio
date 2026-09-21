@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:
 import {
   callerBoundTruncationReason,
   isSourcePartUnavailable,
+  kindHasColumns,
   sourceBoundTruncationReason,
 } from "@/lib/db/object-kinds";
 import type oracledb from "oracledb";
@@ -2661,6 +2662,27 @@ describe("object surface", () => {
     ).toEqual([]);
   });
 
+  test("declares columns on exactly the kinds describeObject resolves as relations", () => {
+    const kinds = makeProvider().getCapabilities().objectKinds ?? [];
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["materialized_view", "table", "view"]);
+    // The other direction, and `sequence` is the entry that matters. This provider gates
+    // describeObject on the ROLE (`oracle.ts:2000`), so an Oracle sequence answers no
+    // columns at all - the opposite of PostgreSQL's sequence, which answers last_value,
+    // log_cnt and is_called. Same kind id, opposite answer, which is why the fact is
+    // declared per provider and never derived from the role or from the id (#789).
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["function", "package", "procedure", "sequence", "synonym", "trigger"]);
+  });
+
   test("the container is the connecting user, and other owners are reachable", async () => {
     const statements: string[] = [];
     mockExecuteFn = async (sql: string) => {
@@ -2989,7 +3011,7 @@ describe("object surface", () => {
 /**
  * The rest of the object surface: the dictionary reads behind each kind, the detail row,
  * and the refusals. Kept out of the block above so `-t "object surface"` still runs
- * exactly the five conformance tests.
+ * exactly the six conformance tests.
  */
 describe("Oracle object listing and detail", () => {
   beforeEach(() => {
@@ -3492,6 +3514,43 @@ describe("Oracle object listing and detail", () => {
         { name: "ID", type: "NUMBER", nullable: true, isPrimary: false, defaultValue: undefined },
       ]);
     }
+    await provider.disconnect();
+  });
+
+  test("hasColumns is declared on exactly the kinds whose describeObject answers a column", async () => {
+    // The declaration is a CLIENT GATE: the tree draws a twisty on a kind that declares it
+    // and draws none on a kind that does not, so a declaration that disagrees with this
+    // provider's own answer either opens on nothing or hides columns that exist, and the
+    // second says nothing on screen. Checked against the answer rather than transcribed.
+    mockExecuteFn = async (sql: string) => {
+      if (!sql.includes("ALL_TAB_COLUMNS")) return { rows: [] };
+      return { rows: [{ COLUMN_NAME: "ID", DATA_TYPE: "NUMBER", NULLABLE: "Y", DATA_DEFAULT: null }] };
+    };
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    const answered: string[] = [];
+    for (const kind of kinds) {
+      const detail = await provider.describeObject(["APP", "APP_ORDERS"], kind.id);
+      for (const column of detail.columns) {
+        // Both fields, because the tree feeds the name to `pathKey`, which calls
+        // `replaceAll` on it, and renders the type as the row's trailing text.
+        expect(typeof column.name === "string" && column.name.trim() !== "").toBe(true);
+        expect(typeof column.type === "string" && column.type.trim() !== "").toBe(true);
+      }
+      if (detail.columns.length > 0) answered.push(kind.id);
+    }
+    expect(answered.sort()).toEqual(["materialized_view", "table", "view"]);
+    expect(
+      kinds
+        .filter(kindHasColumns)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(answered.sort());
+    // The abstainer spelled out at its own object: a sequence is listed, is describable and
+    // carries nothing to expand.
+    expect((await provider.describeObject(["APP", "APP_INVOICE_SEQ"], "sequence")).columns).toEqual([]);
     await provider.disconnect();
   });
 

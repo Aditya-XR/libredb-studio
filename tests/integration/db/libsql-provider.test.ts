@@ -30,6 +30,7 @@ import {
   containerDepth,
   isCountUnavailable,
   isSourcePartUnavailable,
+  kindHasColumns,
   sourceBoundTruncationReason,
 } from "@/lib/db/object-kinds";
 import { LibSQLProvider } from "@/lib/db/providers/sql/libsql";
@@ -1781,6 +1782,44 @@ describe("LibSQLProvider object surface (#789)", () => {
       "index_list",
       "foreign_key_list",
     ]);
+  });
+
+  test("hasColumns is declared on the two relation kinds, and describeObject backs the declaration", async () => {
+    // The declaration is a CLIENT GATE (#789): the tree draws a twisty only where a kind
+    // declares `hasColumns`, so a kind declaring it whose describe answers nothing opens
+    // on nothing, and a kind answering columns without declaring it hides them behind a
+    // leaf row. Both directions are asserted against this engine's own answer rather
+    // than against the role, which happens to coincide here and does not elsewhere:
+    // `describeLibSQLObject` gates on `spec.role !== "relation"`
+    // (src/lib/db/providers/sql/libsql/objects.ts:785), while a MariaDB sequence is
+    // declared `config` and still has columns.
+    objects = await connectedWithObjects();
+    const kinds = objects.getCapabilities().objectKinds ?? [];
+
+    expect(kinds.filter((kind) => kindHasColumns(kind)).map((kind) => kind.id)).toEqual(["table", "view"]);
+    // ABSENT rather than `false`, which is what the field's docblock asks of a provider
+    // that has no columns for a kind: absent and false read the same and one writer is
+    // enough.
+    expect(kinds.find((kind) => kind.id === "index")?.hasColumns).toBeUndefined();
+    expect(kinds.find((kind) => kind.id === "trigger")?.hasColumns).toBeUndefined();
+
+    const view = await objects.describeObject(["order_summary"], "view");
+
+    expect(view.columns.length).toBeGreaterThan(0);
+    for (const column of view.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+  });
+
+  test("a kind that declares no hasColumns answers no columns at all", async () => {
+    objects = await connectedWithObjects();
+    const index = (objects.getCapabilities().objectKinds ?? []).find((kind) => kind.id === "index");
+
+    expect(kindHasColumns(index)).toBe(false);
+    expect((await objects.describeObject(["idx_orders_customer"], "index")).columns).toEqual([]);
   });
 
   test("an index and a trigger describe as three empty arrays, without a round trip", async () => {

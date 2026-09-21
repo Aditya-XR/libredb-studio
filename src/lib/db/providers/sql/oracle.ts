@@ -1427,24 +1427,39 @@ export class OracleProvider extends SQLBaseProvider {
       // TABLE_NAME and an index cannot exist without them - so it belongs in
       // `describeObject`'s output, where it is, rather than in a folder of its own.
       objectKinds: [
+        // `hasColumns` on the three kinds and no more, and it is written out rather than
+        // derived from `role === "relation"` even though the two agree here (#789).
+        // `describeObject` gates on the role at `oracle.ts:2015`, so a sequence answers no
+        // columns at all - the opposite of PostgreSQL's sequence, which answers last_value,
+        // log_cnt and is_called. Same kind id, opposite answer, so the fact is the
+        // provider's to state and the tree draws a twisty on nothing else.
         {
           id: "table",
           role: "relation",
           label: "Table",
           labelPlural: "Tables",
           acceptsRowWrites: true,
+          hasColumns: true,
           ...ORACLE_SOURCE_DECLARATION,
         },
         // No `acceptsRowWrites` on either view kind. Oracle takes an UPDATE against a
         // key-preserved view and refuses it against the rest, which is a per-OBJECT fact
         // this per-kind declaration cannot state; a materialized view takes no row write
         // at all, since its rows come from its query.
-        { id: "view", role: "relation", label: "View", labelPlural: "Views", ...ORACLE_SOURCE_DECLARATION },
+        {
+          id: "view",
+          role: "relation",
+          label: "View",
+          labelPlural: "Views",
+          hasColumns: true,
+          ...ORACLE_SOURCE_DECLARATION,
+        },
         {
           id: "materialized_view",
           role: "relation",
           label: "Materialized View",
           labelPlural: "Materialized Views",
+          hasColumns: true,
           ...ORACLE_SOURCE_DECLARATION,
         },
         { id: "synonym", role: "config", label: "Synonym", labelPlural: "Synonyms", ...ORACLE_SOURCE_DECLARATION },

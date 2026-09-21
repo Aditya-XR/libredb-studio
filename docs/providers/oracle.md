@@ -1162,6 +1162,17 @@ breaks: these statements key the last path segment against `TABLE_NAME`, and a t
 `APP_ORDERS` on table `APP_CUSTOMERS` is legal, so it would have been handed `APP_ORDERS`'s columns
 as if they were its own.
 
+Those same three kinds, `table`, `view` and `materialized_view`, are the ones that declare
+`hasColumns`, which is what gives an object row a twisty in the object tree; a synonym, a sequence, a
+package, a procedure, a function and a trigger declare nothing and are leaves, because
+`describeObject()` answers them three empty arrays.
+`sequence` is why the declaration is per provider rather than derived from the role or the kind id:
+this provider gates on the role, so an Oracle sequence has no columns at all, while PostgreSQL's
+`sequence` answers `last_value`, `log_cnt` and `is_called` under the same kind id.
+An object dropped between the listing and the expand is not an error here: the four reads answer no
+row and `describeObject()` returns three empty arrays, which the tree reports on the open row as
+`No columns reported` rather than as a refusal.
+
 Two of the four statements differ from the deleted flat reading's counterparts on purpose:
 
 - The foreign-key read pairs columns with `rcc.POSITION = acc.POSITION`. Without it a two-column

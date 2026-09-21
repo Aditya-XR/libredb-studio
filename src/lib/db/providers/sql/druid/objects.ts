@@ -137,11 +137,19 @@ export const DRUID_CONTAINER_LEVELS: ContainerLevels = Object.freeze([
  * posted to the Coordinator, not by DDL, and `ObjectRole` names a Druid lookup as the
  * example of that role. It is nonetheless queryable, which is why it is in this list at
  * all rather than only in a settings panel somewhere.
+ *
+ * All three declare `hasColumns`, which is the whole declaration on this engine and the
+ * reason `lookup` is the case that shows `role === "relation"` could never have been the
+ * gate (#789): it is `config` and it answers `k` and `v`. The fact is the one
+ * `describeObject` below states and `INFORMATION_SCHEMA.COLUMNS` answers for all three
+ * alike, so nothing here abstains and no object row in this engine is a leaf. The
+ * druid integration suite states that with `noAbstainingKinds`, because invariant 8's
+ * negative direction iterates zero times here and certifies nothing on its own.
  */
 export const DRUID_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
-  { id: "datasource", role: "relation", label: "Datasource", labelPlural: "Datasources" },
-  { id: "lookup", role: "config", label: "Lookup", labelPlural: "Lookups" },
-  { id: "system_table", role: "relation", label: "System Table", labelPlural: "System Tables" },
+  { id: "datasource", role: "relation", label: "Datasource", labelPlural: "Datasources", hasColumns: true },
+  { id: "lookup", role: "config", label: "Lookup", labelPlural: "Lookups", hasColumns: true },
+  { id: "system_table", role: "relation", label: "System Table", labelPlural: "System Tables", hasColumns: true },
 ] as const);
 
 // ============================================================================

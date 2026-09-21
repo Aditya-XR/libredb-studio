@@ -686,6 +686,13 @@ is among them, and there is no index catalog at all
 folder, and a folder for something the engine cannot have is a lie its zero badge makes look like a
 fact.
 
+`hasColumns: true` is declared on the three relation kinds, `table`, `view` and
+`materialized_view`, and on nothing else: `describeObject` gates on the role, so `function` answers
+`columns: []` without reaching the cluster, and the object tree therefore draws no expander on a
+function row. One `describeObject` here is the most expensive single object read in the fleet at
+25.8 ms, measured in the A/B below against `describeObjects()`, which the tree pays once for each
+row a reader expands and never for a row they do not.
+
 `describeObject` therefore answers `indexes: []` and `foreignKeys: []` for every kind, and every
 column carries `isPrimary: false`. Those are the engine's answers and not defaults this provider
 chose. `is_nullable` is the ANSI varchar `'YES'`/`'NO'` here rather than a boolean.

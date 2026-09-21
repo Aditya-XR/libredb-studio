@@ -980,6 +980,13 @@ answer rather than a gap: they are JSON documents with no field list, exactly as
 and a sequence have no columns on the SQL engines. `indexes` and `foreignKeys` are always empty, for
 the reasons in the table above.
 
+Those same three kinds declare `hasColumns: true` (#789), which is what gives an object row a twisty
+in the object tree; a `pipeline` and a `template` declare nothing and stay leaves, so no column read
+is ever issued for them. An `alias` row and a `data stream` row show the mapping of **one** backing
+index: the transport takes the first entry of a `_mapping` payload keyed by concrete index name
+(`src/lib/db/providers/sql/search/http-transport.ts:1266`), so an alias spanning two indices shows
+whichever the cluster answered first, with nothing on screen to say the other is missing.
+
 #### `describeObjects`, the bulk column read (#789)
 
 `describeObjects(container, kind, limit?)` answers columns for every object of one kind, and **which

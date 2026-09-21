@@ -471,6 +471,17 @@ written as a literal: `2` and `3` are right for a one-level engine and wrong for
 ones in this epic, and the segment names in the refusal message come from the same array as the
 depth, so the message and the check cannot disagree.
 
+**`hasColumns` is declared on `table`, `view`, `materialized_view` and `sequence`, and on nothing
+else (#789).** The declaration is not transcribed: it reads `RELKIND_BY_KIND`, the same map
+`describeObject()` gates on, so the twisty the object tree draws and the read that fills it are one
+fact. `function`, `procedure` and `trigger` declare nothing and answer `columns: []` with no round
+trip, which is why they are leaves in the tree. `sequence` is the kind that shows this cannot be read
+off `role`: it is `role: "config"` and it answers `last_value`, `log_cnt` and `is_called` out of
+`pg_attribute`, where Oracle's kind of the same id answers none. An object dropped between the
+listing and the expand does NOT reach the reader as an empty answer here: the detail statement's
+aggregate has no `GROUP BY`, so zero rows means the statement that ran was not the one we wrote, and
+the provider raises `No detail row for <schema>.<name>`.
+
 **Listing order is applied in TypeScript, not with an `ORDER BY`, and sorts by PATH.** Three
 different catalogs answer the three listings, so three `ORDER BY` clauses would be three chances to
 disagree; and a SQL sort runs under the database's own collation, which is `C` on the seeded fixture

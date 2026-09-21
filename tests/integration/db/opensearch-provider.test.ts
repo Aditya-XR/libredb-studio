@@ -1400,6 +1400,43 @@ describe("object surface", () => {
     ).toEqual(["alias", "index", "stream"]);
   });
 
+  test("declares columns on exactly the kinds that resolve to a mapping", async () => {
+    const provider = await connectProvider();
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    // ONE declaration constant serves both type-ids, so this expectation is written out
+    // here rather than compared against the other product's, for the same reason the
+    // source test above is. The three kinds are the ones `describeObject` reads
+    // `_mapping` for (`search/index.ts:1251`, gated on `SEARCH_MAPPED_KINDS` at `:478`).
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["alias", "index", "stream"]);
+    // The other direction, so a kind added later cannot quietly gain a twisty. A pipeline
+    // and a template are JSON documents with no field list at all.
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["pipeline", "template"]);
+
+    // The declaration against the engine's own answer, one kind each way. A data stream
+    // row's columns are the mapping of its CURRENT backing index, which is what the
+    // transport takes (`search/http-transport.ts:1266`).
+    const stream = await provider.describeObject(["probe_stream"], "stream");
+    expect(stream.columns.length).toBeGreaterThan(0);
+    for (const column of stream.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+    expect((await provider.describeObject(["probe_pipeline"], "pipeline")).columns).toEqual([]);
+  });
+
   // --------------------------------------------------------------------------
   // describeObjects, the bulk column read (#789)
   // --------------------------------------------------------------------------

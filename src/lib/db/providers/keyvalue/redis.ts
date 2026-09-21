@@ -190,7 +190,19 @@ const REDIS_CONTAINER_LEVELS: ContainerLevels = Object.freeze([
  * showing a zero nobody measured.
  */
 const REDIS_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
-  { id: "keyspace", role: "relation", label: "Key Pattern", labelPlural: "Key Patterns" },
+  {
+    id: "keyspace",
+    role: "relation",
+    label: "Key Pattern",
+    labelPlural: "Key Patterns",
+    // THE ONE KIND WITH COLUMNS ON THIS ENGINE (#789). Written as a literal because the gate in
+    // `describeObject` is the kind itself (`kind !== "keyspace"` returns the empty shape), so
+    // there is no predicate to derive it from. The three columns are SYNTHETIC, derived from the
+    // types sampled by the SCAN walk rather than from any catalog (`keyGroupColumns` above), and
+    // they are declared because that grouping IS what this provider models a key pattern as.
+    // `function` abstains: a library has no columns, so a twisty on it would open on nothing.
+    hasColumns: true,
+  },
   {
     id: "function",
     role: "routine",
