@@ -1827,7 +1827,7 @@ not cover, are all under [`docs/llms/`](llms/README.md).
 
 
 Nothing prevents another model from being configured — the capability probe below decides what any
-given endpoint can do, and there is no allow-list in the code. What the thirty have is a measurement.
+given endpoint can do, and there is no allow-list in the code. What the thirty-five have is a measurement.
 
 ## The model side
 
