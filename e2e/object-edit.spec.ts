@@ -657,9 +657,20 @@ test.describe("Functional smoke: object edit end to end", () => {
   });
 
   test("expanding an object row draws its columns, and the DECLARED TYPE reaches the row's name", async ({ page }) => {
-    // The assertion no unit test can make: happy-dom's name computation is testing-library's own,
-    // and this is the one place a column row's name is read out of a REAL browser's accessibility
-    // tree.
+    // The assertion no unit test can make, though NOT for the reason this comment used to give.
+    // Playwright does not read Chromium's accessibility tree here: `getByRole({ name })` runs
+    // Playwright's OWN accessible-name computation inside the page (`getElementAccessibleName` in
+    // `playwright-core`; nothing in that package calls CDP `Accessibility.getFullAXTree`). What is
+    // real here, and is what happy-dom cannot give, is everything around the name: Chromium's DOM,
+    // CSS and layout, the app as it is actually built, and a live PostgreSQL behind the route.
+    //
+    // THE TWO COMPUTATIONS ARE NOT INTERCHANGEABLE, which is why the distinction is worth saying.
+    // Chromium applies CSS `text-transform` when it publishes a name and Playwright's
+    // implementation does not (`text-transform` appears nowhere in its accname path). MEASURED on
+    // 2026-09-22, with the `uppercase` class on the type span and so inherited by the `sr-only`
+    // twin inside it: Chromium published `id Primary key INTEGER`, Playwright computed
+    // `id Primary key integer`. The regex below is the lowercase one because it pins what
+    // Playwright computes; move that class onto the inner `aria-hidden` span and the two agree.
     //
     // WHAT IT PINS IS THE OUTCOME AND NOT THE MECHANISM, because the mechanism turned out to be two
     // things rather than one. MEASURED in Chromium on 2026-09-22, against four hand-built copies of

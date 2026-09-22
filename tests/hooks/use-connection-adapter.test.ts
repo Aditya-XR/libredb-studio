@@ -921,14 +921,19 @@ describe("useConnectionAdapter and the describe seam", () => {
     const host = new HostWithDetail({ "host-conn-1": detail });
     const { result } = adapterFor(host);
 
+    // NOT `table`, and the value is the assertion. An arm that dropped `request.kind` and passed
+    // the literal `"table"` was indistinguishable from one that threads it while this seam only
+    // ever asked about a table, and that mutant survived the suite. A host is asked about the
+    // kind the row declares: Cassandra answers a `materialized_view`, a `type` and a `table`
+    // through three different catalogs, so the wrong word here reads the wrong object or refuses.
     const answer = await result.current.objectSource(result.current.connections[0], {
       route: "describe",
       path: ["app", "orders"],
-      kind: "table",
+      kind: "materialized_view",
     });
 
     expect(answer).toBe(detail);
-    expect(host.asked).toEqual([["host-conn-1", ["app", "orders"], "table"]]);
+    expect(host.asked).toEqual([["host-conn-1", ["app", "orders"], "materialized_view"]]);
   });
 
   test("a host that declares no describe read rejects, rather than answering nothing", async () => {

@@ -1568,9 +1568,14 @@ export class MSSQLProvider extends SQLBaseProvider {
       // this comment: `describeObject` below returns three empty arrays for every
       // non-relation kind, and invariant 8 of `tests/helpers/object-surface-conformance.ts`
       // asks this provider's `describeObject` about an object its own `listObjects`
-      // produced, in both directions. Measured on the fixture server: of the types a person
-      // writes, only `U` and `V` have `sys.columns` rows - a procedure, a function, a
-      // synonym, a SEQUENCE and a trigger all have none.
+      // produced, in both directions. Measured on the fixture server, `sys.objects` left
+      // joined to `sys.columns` over `is_ms_shipped = 0`: of the types a person writes, a
+      // procedure, a scalar function, a synonym, a SEQUENCE and a trigger have no
+      // `sys.columns` rows, while `U` and `V` have them and so does a TABLE-VALUED function
+      // (`IF` and `TF`, 2 rows each on the fixture, both inside
+      // `MSSQL_OBJECT_TYPES.function`). So `function` abstains here as a SCOPE call and not
+      // because the engine is silent: reporting a routine's result shape belongs to the phase
+      // that renders a routine, which is where `describeObjects` below leaves it too.
       objectKinds: [
         {
           id: "table",

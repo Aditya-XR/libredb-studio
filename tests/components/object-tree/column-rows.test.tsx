@@ -90,19 +90,75 @@ function installFetch(handlers: Handlers): FetchCall[] {
   return calls;
 }
 
-/** The whole fixture: one schema, two tables, one of which the describe handler answers for. */
+/**
+ * The whole fixture: one schema, two tables, one of which the describe handler answers for, and
+ * one function.
+ *
+ * The function is an OBJECT ROW of a kind that declares no columns, and it is here because the
+ * control below needs one: a Functions folder that lists nothing leaves that control asserting
+ * the FOLDER's own twisty, which every folder has whatever a kind declares.
+ */
 function routesFor(describeHandler: Handler): FetchCall[] {
   return installFetch({
     containers: () => [{ path: ["app"], name: "app", level: 0, isSessionDefault: true }],
-    counts: () => ({ table: { count: 2 }, function: { count: 0 } }),
+    counts: () => ({ table: { count: 2 }, function: { count: 1 } }),
     list: (body) =>
       String(body.kind) === "table"
         ? [
             { path: ["app", "orders"], name: "orders", kind: "table", rowCount: 1234 },
             { path: ["app", "customers"], name: "customers", kind: "table" },
           ]
-        : [],
+        : [{ path: ["app", "order_total"], name: "order_total", kind: "function" }],
     describe: describeHandler,
+  });
+}
+
+/**
+ * The SECOND expandable kind, which is what makes the request's own fields observable at all.
+ *
+ * Every other case in this file expands `app.orders`, a `table`. With one expandable kind and one
+ * object in the fixture, every field the tree threads into the describe request can be replaced
+ * by a literal and stay green, and four of them were: the request's `kind`, the request's `path`,
+ * the embedded adapter's `kind` and the kind segment of a column row's id each survived all
+ * twelve test files that render a row, 604 tests.
+ *
+ * Cassandra-shaped, because that is the measured failure rather than an invented one. A UDT row
+ * expands through the same describe route, and `describeObject` sends the kind `type` to
+ * `system_schema.types`; a request that says `table` for it falls through to the table-columns
+ * CQL, reads zero rows and raises "No Cassandra table named address in shipping", which the row
+ * then draws as the engine's own refusal. Three of that provider's kinds declare columns and only
+ * one of them is `table`, which is the whole reason the declaration is per kind.
+ */
+const cassandra = capabilitiesOf({
+  containerLevels: [{ id: "schema", label: "Keyspace", labelPlural: "Keyspaces" }],
+  objectKinds: [
+    { id: "table", role: "relation", label: "Table", labelPlural: "Tables", hasColumns: true },
+    { id: "type", role: "config", label: "Type", labelPlural: "Types", hasColumns: true },
+  ],
+});
+
+function cassandraConnection(): DatabaseConnection {
+  return { id: "cass", name: "conn cassandra", type: "cassandra", createdAt: new Date("2026-01-01") };
+}
+
+/** One keyspace, one table, and the user-defined type the case below opens. */
+function keyspaceRoutes(): FetchCall[] {
+  return installFetch({
+    containers: () => [{ path: ["shipping"], name: "shipping", level: 0, isSessionDefault: true }],
+    counts: () => ({ table: { count: 1 }, type: { count: 1 } }),
+    list: (body) =>
+      String(body.kind) === "type"
+        ? [{ path: ["shipping", "address"], name: "address", kind: "type" }]
+        : [{ path: ["shipping", "events"], name: "events", kind: "table" }],
+    describe: () => ({
+      path: ["shipping", "address"],
+      columns: [
+        { name: "street", type: "text", nullable: true, isPrimary: false },
+        { name: "zip", type: "int", nullable: true, isPrimary: false },
+      ],
+      indexes: [],
+      foreignKeys: [],
+    }),
   });
 }
 
@@ -167,6 +223,28 @@ describe("expanding an object row reads its columns", () => {
     expect(screen.getByRole("treeitem", { name: "orders 1,234" })).toBe(row(/orders/));
   });
 
+  test("the request carries the row's OWN kind and path, and so does every column id", async () => {
+    // A `type` in the keyspace `shipping`: not one segment of it is what the `table` fixture
+    // above would answer, so a literal in any of the places this pair is threaded through shows
+    // up in one of the two assertions below. The body is what the route parses, and `data-row-id`
+    // is the id the focus effect, React's list key and `rowOf` all match a column row on.
+    const calls = keyspaceRoutes();
+    render(<ObjectTree connection={cassandraConnection()} capabilities={cassandra} />);
+    await screen.findByRole("treeitem", { name: /Types/ });
+    await within(row(/Types/)).findByTestId("tree-row-badge");
+    await userEvent.click(row(/Types/));
+    await screen.findByText("address");
+    await pressTwisty(/address/);
+    await screen.findByText("street");
+
+    expect(describeCalls(calls)).toHaveLength(1);
+    expect(describeCalls(calls)[0].body).toMatchObject({ path: ["shipping", "address"], kind: "type" });
+    expect(columnRows().map((item) => item.getAttribute("data-row-id"))).toEqual([
+      "column%3Ashipping/address/type/street",
+      "column%3Ashipping/address/type/zip",
+    ]);
+  });
+
   test("a second expansion of the same row posts nothing", async () => {
     const calls = routesFor(() => ordersDetail);
     await openTables();
@@ -182,15 +260,23 @@ describe("expanding an object row reads its columns", () => {
   });
 
   test("a kind that declares no columns is offered no twisty at all", async () => {
-    // The control for every case above: the same tree, the same pointer, a kind that declared
-    // nothing. Without it "the twisty expands" says nothing about what decides it exists.
+    // The control for every case above: the same tree, the same pointer, an OBJECT of a kind that
+    // declared nothing. It has to be an object row and not the folder over it, which is what this
+    // case asserted while the Functions folder listed nothing: a folder carries a twisty whatever
+    // the kind declares, so a change that gave every object row one left it green.
     const calls = routesFor(() => ordersDetail);
     await openTables();
     await userEvent.click(row(/Functions/));
 
+    const routine = await screen.findByRole("treeitem", { name: /order_total/ });
     expect(row(/Functions/).getAttribute("aria-expanded")).toBe("true");
+    expect(within(routine).queryAllByTestId("tree-row-twisty")).toHaveLength(0);
+    expect(routine.hasAttribute("aria-expanded")).toBe(false);
+    // The control's own control, on the same screen: the kind that DID declare columns has one.
     expect(within(row(/customers/)).queryByTestId("tree-row-twisty")).not.toBeNull();
-    expect(row(/Functions/).hasAttribute("aria-expanded")).toBe(true);
+    // And the gesture, not only the render: activating the row reads nothing either, so the
+    // affordance is absent rather than merely undrawn.
+    await userEvent.click(routine);
     expect(describeCalls(calls)).toHaveLength(0);
   });
 
@@ -406,6 +492,47 @@ describe("the three states of a describe", () => {
     expect(describeCalls(calls)).toHaveLength(2);
   });
 
+  test("the twisty names the gesture it performs, and the name flips with the row", async () => {
+    // The label is the only thing that tells a keyboard or screen-reader user which way this press
+    // goes: the button carries no `aria-expanded` on purpose, because the treeitem already does and
+    // announcing the state twice is noise. Nothing asserted the label until now, so
+    // `aria-label={`Toggle ${row.label}`}` survived every test in this file.
+    routesFor(() => ordersDetail);
+    await openTables();
+
+    const twistyName = (): string =>
+      within(row(/orders/))
+        .getByTestId("tree-row-twisty")
+        .getAttribute("aria-label") ?? "";
+    expect(twistyName()).toBe("Expand orders");
+
+    await pressTwisty(/orders/);
+    await screen.findByText("total");
+    expect(twistyName()).toBe("Collapse orders");
+  });
+
+  test("a FOLDER keeps its failure while closed, which is the half the object gate must not take", async () => {
+    // The control for the gate one test below. `failureFor` returns nothing for a CLOSED OBJECT,
+    // and the narrowness of that is load-bearing: a folder's read is about the folder itself and
+    // has always been offered whether or not the row is open, so widening the gate to every row
+    // kind would silently drop a listing failure the reader can still act on. Dropping
+    // `row.kind === "object" &&` from the gate leaves this file green without this case.
+    installFetch({
+      containers: () => [{ path: ["app"], name: "app", level: 0, isSessionDefault: true }],
+      counts: () => ({ table: { count: 2 }, function: { count: 1 } }),
+      list: () => Response.json({ error: "relation listing refused" }, { status: 403 }),
+      describe: () => ordersDetail,
+    });
+    render(<ObjectTree connection={connectionOf()} capabilities={oneLevel} />);
+    await userEvent.click(await screen.findByRole("treeitem", { name: /Tables/ }));
+    const openFolder = await screen.findByRole("treeitem", { name: /Tables .*relation listing refused/ });
+    expect(within(openFolder).getByTestId("tree-row-failure").textContent).toBe("relation listing refused");
+
+    await userEvent.click(row(/Tables/));
+    await waitFor(() => expect(row(/Tables/).getAttribute("aria-expanded")).toBe("false"));
+    expect(within(row(/Tables/)).getByTestId("tree-row-failure").textContent).toBe("relation listing refused");
+  });
+
   test("a CLOSED object says nothing about a read that failed while it was open", async () => {
     // The walk already holds this rule for the sibling slot: `unavailable` is derived from the
     // detail and the detail is only read while the row is open, so a closed object never says
@@ -431,6 +558,24 @@ describe("the three states of a describe", () => {
     // `column.name` reaches `pathKey`, which calls `replaceAll` on it, so a non-string throws
     // INSIDE the walk and unmounts the tree with every panel that could have reported it.
     routesFor(() => ({ path: ["app", "orders"], columns: [{ name: "id", type: 7 }] }));
+    await openTables();
+    await pressTwisty(/orders/);
+
+    const orders = await screen.findByRole("treeitem", {
+      name: "orders The describe reading answered with a body this tree cannot render",
+    });
+    expect(within(orders).getByTestId("tree-row-failure")).toBeTruthy();
+    expect(screen.getByTestId("object-tree")).toBeTruthy();
+    expect(screen.getByText("customers")).toBeTruthy();
+  });
+
+  test("a body whose column NAME is not a string is reported, and the tree stays mounted", async () => {
+    // The sibling of the case above, on the OTHER conjunct of the same guard, and the dangerous
+    // half: `column.type` is only `.split("(")` inside a row, while `column.name` reaches
+    // `pathKey`'s `replaceAll` INSIDE the walk, so a number there throws where nothing can catch
+    // it for a row. Measured with the name conjunct removed: this case reports "An error occurred
+    // in the <ObjectTree> component" and the failure cascades into the next test in the file.
+    routesFor(() => ({ path: ["app", "orders"], columns: [{ name: 7, type: "integer" }] }));
     await openTables();
     await pressTwisty(/orders/);
 

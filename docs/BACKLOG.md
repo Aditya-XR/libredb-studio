@@ -28,10 +28,10 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1–D102, U17 · 47
+- [Drivers and connections](#drivers-and-connections) — D1–D103, U17 · 48
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U31 · 20
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U35 · 23
 - [Dependencies](#dependencies) — P1–P5 · 5
 - [Documentation](#documentation) — DOC3–DOC4 · 2
 - [Release pipeline](#release-pipeline) — REL1–REL4 · 4
@@ -721,8 +721,17 @@ carry it. The object was reachable only by hand-writing a restored tab.
 This is load-bearing for the editing phase rather than cosmetic: any client-side predicate built on
 `provider-meta`'s answer is, on MariaDB, built on the wrong server's declaration.
 
+One sentence in the tree contradicts this entry, and it is the reason the entry is easy to lose.
+`flavourFor`'s docblock (`src/lib/db/providers/sql/mysql.ts:1189`) says that defaulting to MySQL
+"costs two folders a MariaDB user regains the moment the connection is live". Nothing re-reads
+capabilities once a connection opens, which is this entry's whole subject, so a reader who meets that
+sentence first concludes the gap closes itself and stops looking. It is on `origin/main` and
+untouched by the object-tree work, and it is corrected here rather than in an entry of its own
+because the sentence and the defect have one repair.
+
 **Done when:** a MariaDB connection draws its Packages and Sequences folders in both shells, or the
-provider doc says which surface cannot have them and why.
+provider doc says which surface cannot have them and why, and `flavourFor`'s docblock no longer says
+the two folders come back when the connection is live.
 
 ### D58. A ClickHouse function with a non-SQL origin has never been read live
 
@@ -1495,6 +1504,42 @@ does.
 wire-compatible engine whose fallback behaviour was measured for the change, with a test that drives
 the provider as a non-owner role rather than asserting the statement text.
 
+### D103. `noAbstainingKinds` is enforced over the expectation's kinds, not the provider's declarations
+
+`assertColumnDeclarations` builds `abstained` by walking `listings`
+(`tests/helpers/object-surface-conformance.ts:595-603`), and `listings` holds only the kinds the
+expectation gave a non-zero `want` (`:307-335`). The field's own docblock (`:195-200`) defines it
+over something else: "This provider declares `hasColumns` on EVERY kind it has". A provider that
+declares one kind without `hasColumns` and whose fixture happens to hold none of that kind is
+therefore indistinguishable, to the guard, from a provider that has no abstaining kind at all, and
+the refusal at `:643` tells the author to set a flag whose stated meaning that provider's own
+declarations contradict.
+
+It is worse than one wrong direction, and the control that shows it is the one worth keeping.
+Omitting the declared abstainer from the expectation is refused too. A fake provider declaring
+`table` (with columns, answering columns) and `trigger` (abstaining) throws the same
+"listed no kind that abstains from hasColumns" whether `trigger` is listed with a `want` of 0 or left
+out of `expected.kinds` entirely, and the only way to green it is to set `noAbstainingKinds`. So the
+expectation has no form in which it can state the truth about that provider, and the guard's advice
+is to record a falsehood.
+
+No shipped engine trips it today, re-checked across all seventeen expectations: druid, mongodb and
+libredb set the flag correctly, and Trino's only zero-counted kind, `materialized_view`, declares
+`hasColumns` and so is not an abstainer. This is a guard that refuses a legal provider, not a live
+red.
+
+Repro: take any expectation, add a kind the provider declares without `hasColumns` with a `want` of
+0, run it, then delete that kind from `expected.kinds` and run it again. Both throw the same message.
+
+Splitting the flag into two variables, the declaration fact and the fixture fact, is necessary and
+not sufficient. After the split a declared-but-unlisted abstainer still runs the negative probe zero
+times, which is the vacuity the flag was added against, so the complete repair needs a third state:
+the probe ran, or the expectation says why it could not.
+
+**Done when:** `abstained` is derived from the provider's own `objectKinds()` rather than from
+`listings`, an expectation that omits a declared abstaining kind is refused by name instead of by the
+flag's message, a flag set against declarations that contradict it is refused, and the negative
+direction of invariant 8 reports whether it ran rather than only whether it could have.
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound
@@ -2007,30 +2052,6 @@ detail of the same object.
 batch one, on the route and on the seam, the bound is the same decision as `list`'s, and the tree
 says so on a row where it was hit.
 
-### U29. The twisty's pointer target is about 20 by 26, which is short of WCAG 2.5.8
-
-`TreeRow` grows the expand control with `-m-1.5 p-1.5 box-content` around a 14px chevron, so the
-pressable box is 26px on a side and the row's layout is unchanged, because flex measures the margin
-box and the negative margin cancels the padding.
-The kind icon paints after it and takes its own 14px back, so the effective target is about 20 by 26
-against WCAG 2.5.8's 24 by 24 (AA).
-The spacing exception does not rescue it: the row's own activation is a different action, it opens
-the object's data, and it is immediately adjacent.
-
-Repro: open the desktop sidebar, inspect the `tree-row-twisty` button and measure its box against the
-row's own hit area.
-
-The shape that reaches 24 by 24 is an absolutely positioned control over the indent gutter, and that
-is why this is an entry rather than a class change.
-The indent is `8 + row.depth * 12`, computed in one place in `TreeRow` and consumed by one.
-An absolutely positioned control has to place itself against the same arithmetic, which gives it a
-second reader, and a second reader that drifts puts the control over the wrong row's indent at depth
-4 and nowhere near it at depth 1.
-
-**Done when:** the toggle's pointer target is at least 24 by 24 CSS pixels, the row's own activation
-target is not made smaller to get there, and the indent arithmetic has one writer with both readers
-asserted at more than one depth.
-
 ### U30. A search alias or stream over more than one index is described by the first index's mapping
 
 `src/lib/db/providers/sql/search/` declares `index`, `alias` and `stream` as kinds that have columns,
@@ -2088,6 +2109,141 @@ still need the single read.
 time, the prefetch triggers on a per-engine threshold derived from those numbers rather than a
 constant, and a bounded batch and a single read land in one cache shape rather than two.
 
+### U32. A catalog change that lands during an in-flight read is dropped, and the pre-DDL answer stays
+
+`run` refuses a read whose key is already in flight
+(`src/components/object-tree/use-tree-nodes.ts:517`) and `refresh` issues its reads without waiting
+for anything (`:696`), so a `refreshToken` bump that arrives while a read is still open issues
+nothing for that slot.
+The answer that lands is the one asked for before the DDL statement ran, `store` writes it as the
+row's current state, and nothing re-issues until the next bump.
+A column added by that statement is therefore missing behind the twisty, and the row asserts a
+column list the engine no longer has, for as long as the reader runs no further DDL.
+
+Pre-existing, and measured as such rather than assumed. The guard and `refresh` both predate the
+column rows, and the same gesture on a folder's `list` read, with a capability set that declares no
+`hasColumns` so nothing in the column path is exercised, loses the same way: the bump issues
+`containers` and `counts` and no second `list`, and a table the statement created is absent until
+the next bump. So this is a standing property of `refresh` and not something the column rows created.
+The column rows do make it easier to reach, because a describe is slower than a listing and there is
+one per open object.
+
+Repro: PostgreSQL, standalone shell. Hold `POST /api/db/objects/describe` for `orders` open, expand
+`orders`, and while the describe is still open run `ALTER TABLE orders ADD COLUMN note text` in the
+editor. Release the held describe with the pre-DDL answer. The row draws the pre-DDL columns, no
+second describe is issued for it, and `note` appears only after the next DDL statement.
+
+A plain second `run` call is NOT the fix, and that is the trap this entry exists to record. Two
+describes for one row would then be in flight with no ordering between them, and the older can land
+last and overwrite the newer, which is a worse failure than a stale answer the next bump corrects.
+The fix records that a key was refused while in flight and re-issues it once the first settles, and
+it has to do that for all four slot kinds rather than for `details` alone: teaching one read kind to
+survive this race and leaving the other three behind is a harder inconsistency to reason about than
+the race itself.
+
+**Done when:** a bump that arrives while a read is in flight causes exactly one re-read of that slot
+after the first settles, for every slot kind, with never two reads of one slot in flight at once, and
+a test holds a read open across a bump and asserts the second answer is the one on screen.
+
+### U33. Three tree spans miss 4.5:1 on a selected row, and the docblock measured one background
+
+Three spans in `src/components/object-tree/TreeRow.tsx` are `text-muted-foreground` at 10px:
+`tree-row-column-type`, `tree-row-count` and `tree-row-badge`. Cited by test id rather than by line,
+because the line numbers in that file moved twice while this entry was being written. Measured
+against the repository's own compiled stylesheet, with the token values read off the live page rather
+than the file:
+
+| row background | light | dark |
+|---|---|---|
+| plain | 4.74 | 7.76 |
+| hover | 4.50 | 6.70 |
+| selected (`bg-muted`) | 4.35 | 5.81 |
+
+WCAG 1.4.3 asks 4.5:1 for text below 18.66px, so the light theme fails on the selected row and sits
+exactly on the line on hover. The failing background is not an edge case: clicking a row is the
+primary gesture on the tree, and a clicked row carries `aria-selected="true"` and `bg-muted`, so it
+is the reader's own row that fails.
+
+The correctness note above the type slot, the paragraph beginning "NO `/70`", reaches its conclusion
+from one background. It records `#737373` on `#ffffff` (4.7:1) and `#a1a1aa` on `#09090b` (7.7:1) and
+names neither the hover nor the selected ground, so the `/70` opacity it correctly refuses is refused
+for a reason narrower than the slot's real range, and the note reads as a clearance it has not
+established.
+
+The count and the badge have carried the same ratio since before the column rows existed, so the
+type slot joins a defect rather than introducing one. Repairing the three together, rather than
+recolouring one span in the change that added it, is why this is an entry.
+
+Repro: open the object tree, click any row so it carries `bg-muted`, and measure
+`tree-row-column-type`, `tree-row-count` or the badge text against the row's own background in the
+light theme.
+
+**Done when:** all three spans clear 4.5:1 on the plain, hover and selected backgrounds in both
+themes, the docblock states the measurement per background instead of one, and the ratios are
+asserted in `tests/unit/theme-accent-contrast.test.ts` through `tests/helpers/contrast.ts` rather
+than written down as prose.
+
+### U34. A refresh that drops the focused row sends focus to the document body
+
+`ObjectTree` keeps exactly one tabbable row,
+`rows.find((row) => row.id === activeId)?.id ?? rows[0]?.id`
+(`src/components/object-tree/ObjectTree.tsx:174`), and the focus effect below it moves focus only on
+an explicit `focusRequest`. When a catalog refresh removes the focused row from the model, the
+focused element unmounts, the browser hands focus to `document.body`, and the tab stop falls back to
+the first row. Arrow keys then do nothing, because the key handler is on the row, and the reader has
+to press Tab to re-enter the tree at the top, several screens from where they were.
+
+Pre-existing, and the tempting reading that `DROP COLUMN` makes it newly reachable is refuted by its
+own control: the same gesture against an OBJECT row, which `DROP TABLE` reaches and which predates
+any column work, loses focus identically, focus on `BODY` and the tab stop back on the first row.
+`git diff origin/main...HEAD -- src/components/object-tree/ObjectTree.tsx` reaches neither the
+fallback nor the focus effect. Column rows add one more way in, not the fault.
+
+Repro: PostgreSQL, standalone shell. Focus a column row of `orders` with the keyboard, then run
+`ALTER TABLE orders DROP COLUMN note` for that column in the editor. After the refresh,
+`document.activeElement` is `BODY`, the tab stop is the first row, and ArrowDown does nothing. Repeat
+with a table row and `DROP TABLE` to see the pre-existing half.
+
+**Done when:** a refresh that removes the focused row moves focus to the nearest surviving row, the
+parent for a dropped child and the next sibling otherwise, keyboard navigation continues from there
+with no Tab, and both the object-row case and the column-row case are tested.
+
+### U35. The type slot shows the wrapper and not the type on engines whose types nest
+
+The `aria-hidden` half of the `tree-row-column-type` span in `src/components/object-tree/TreeRow.tsx`
+renders `row.column.type.split("(")[0]`. That rule is right where the parenthesis opens a parameter
+list, which is why `VARCHAR(255)` reads `VARCHAR`, and wrong where it opens the type itself. Driven
+through the component with the spellings
+`docs/providers/clickhouse.md` records as what that provider returns:
+
+| the provider's answer | on screen |
+|---|---|
+| `Int32` | `INT32` |
+| `Nullable(String)` | `NULLABLE` |
+| `Array(UInt8)` | `ARRAY` |
+| `Map(String,String)` | `MAP` |
+| `Enum8('x'=1,'y'=2)` | `ENUM8` |
+| `LowCardinality(String)` | `LOWCARDINALITY` |
+| `Decimal(10,3)` | `DECIMAL` |
+
+So for every nullable or low-cardinality ClickHouse column the visible slot says only that the column
+is wrapped and never what it holds, and a reader scanning a table's types learns nothing from the
+column that needed the annotation most. Degraded rather than lost: the full spelling stays in the
+`title` and in the `sr-only` twin, so the tooltip and the accessible name are correct.
+
+Not the tree's invention. `src/components/schema-explorer/ColumnList.tsx:36` does the identical
+split, so the tree restores behaviour the flat explorer already had on the same engines, which is
+why this is an entry covering both readers rather than a line in the change that added the second.
+There is no second field to fall back to either: the ClickHouse provider publishes the wrapped
+spelling and no base type beside it.
+
+Repro: connect ClickHouse, create a table with a `Nullable(String)` column, and expand it in the
+object tree. The right-hand slot reads `NULLABLE`.
+
+**Done when:** a nested type shows the reader the inner type rather than the wrapper, the choice is
+driven off what the provider publishes rather than off the shape of the string and without branching
+on a database type id in a component, and the tree slot and the flat explorer's column list take the
+same answer from one place.
 
 ## Dependencies
 

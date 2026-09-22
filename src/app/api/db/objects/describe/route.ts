@@ -20,10 +20,21 @@ export const dynamic = "force-dynamic";
  * re-issued when that row is collapsed and expanded again. The bound is the tree's expansion
  * state and never the size of the database.
  *
- * A REFRESH COSTS ONE DESCRIBE PER OPEN OBJECT ROW. A `refreshToken` bump re-issues over every row
- * that is open, so the columns a DDL statement added appear, and DROPS the cached detail of every
- * collapsed one, so re-expanding reads again rather than drawing a column list that statement
- * invalidated.
+ * A REFRESH COSTS ONE DESCRIBE PER OPEN OBJECT ROW WHOSE LAST ONE HAS SETTLED. A `refreshToken`
+ * bump re-issues over those rows, so the columns a DDL statement added appear, and DROPS the cached
+ * detail of every collapsed one, so re-expanding reads again rather than drawing a column list that
+ * statement invalidated.
+ *
+ * THE EXCEPTION IS A BUMP THAT ARRIVES WHILE THAT ROW'S DESCRIBE IS STILL IN FLIGHT, and this
+ * paragraph used to claim otherwise. `run` keys each read by its slot and returns early when that
+ * key is already in flight (`src/components/object-tree/use-tree-nodes.ts`, the `inFlight` guard),
+ * so the bump issues nothing for that row: the pre-DDL answer lands afterwards, is stored, and is
+ * drawn as current until the next bump. Nothing here is specific to a describe. `refresh` and that
+ * guard both predate the tree reading this route, and the same race drops a container, count or
+ * listing re-read; measured on the `list` slot with no kind declaring `hasColumns`, the stale
+ * listing survives the bump exactly as the stale column list does. Filed rather than fixed here,
+ * because teaching one slot kind to queue would make the describe the only read that survives the
+ * race, which is a worse inconsistency than the race.
  *
  * The budget is SHARED and this route carries no bucket of its own: `handleObjectRequest` meters
  * every object route into the `query` bucket (`src/lib/api/object-route.ts:73`), 120 requests per

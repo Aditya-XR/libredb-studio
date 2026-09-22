@@ -225,11 +225,17 @@ export function TreeRow({
 
         `-m-1.5 p-1.5` GROWS THE TARGET WITHOUT MOVING ANYTHING. Flex measures the margin box, so
         the negative margin cancels the padding and the row's layout is identical to the 14px
-        span this replaces, while the pressable box is 26px tall and reaches 6px past the glyph
-        on every side. The kind icon paints after it and takes its own 14px back, so the gain is
-        on the left and vertically: about 20 by 26 against 14 by 14. That is short of WCAG 2.5.8
-        (24 by 24) and is filed rather than claimed; the honest maximum inside this row without
-        an absolutely positioned control and a second copy of the indent arithmetic.
+        span this replaces, while the pressable box reaches 6px past the glyph on every side:
+        26 by 26 around a 14 by 14 chevron, which clears the 24 by 24 of WCAG 2.5.8 on both axes.
+
+        MEASURED rather than reasoned, because the arithmetic that stood here was wrong. In
+        Chromium, against the compiled stylesheet, by `getBoundingClientRect` and by a half-pixel
+        `elementFromPoint` scan asking which pixels actually land on the button, at row indents
+        of 8, 20, 32, 44 and 56px: 26 by 26 at every depth, hittable across the whole of it. The
+        kind icon does NOT take its own 14px back, which is what the earlier note here claimed
+        and what made this look 20 wide: it is the next flex item and its left edge sits exactly
+        on the button's border-box right edge at every depth, so nothing paints over the 6px
+        right pad.
 
         THE SPINNER LIVES HERE while the describe is in flight, rather than mid-row after the
         label. The gesture and the reader's eye are both on this glyph, the wait is up to five
@@ -348,8 +354,34 @@ export function TreeRow({
       {busy && !showsTwisty && (
         <LoaderCircle aria-hidden="true" className="w-3 h-3 shrink-0 animate-spin text-muted-foreground" />
       )}
-      {/* The engine's own sentence for a read it refused, in place of the number it could not give. */}
-      {row.unavailable !== undefined && (
+      {/*
+        ONE SENTENCE IN THIS SLOT, and where two are true the FAILURE takes it.
+
+        `unavailable` is a read that ANSWERED, off a stored answer: the engine's own refusal to
+        count on a folder, and on an open object the walk's sentence for a describe that landed
+        carrying nothing. `failure` is a read that did not answer at all. A row can hold both, and
+        before this gate it drew both, in this one slot, with `ROW_NAME_PARTS` above naming each
+        span so the pair also ran together into the accessible name. Measured on an object row
+        with a stored `columns: []` and a refused re-read:
+        `ordersNo columns reportedconnection reset`, two reports of one read with nothing between
+        them, competing for the same `ml-auto truncate` space.
+
+        The FAILURE takes it because a read that failed outranks a read that answered: the
+        answer's sentence describes a picture the tree no longer knows to be current, and the
+        failure is the reason it does not. On an object row that is also the NEWER fact, and
+        provably so: `run` clears a row's failure whenever an answer lands, so a stored detail
+        beside a stored failure means the failure came second, and `refresh` keeps an open row's
+        detail on purpose so the row does not blink empty while the re-read is in flight. On a
+        folder the two are about DIFFERENT reads, a refused count and a failed listing, so only
+        the ranking decides it, and the count refusal is the smaller loss: a folder whose listing
+        failed is showing nothing at all, which is a bigger fact than a missing badge.
+
+        Nothing is hidden by standing the answer's sentence down on an object row: that clash is
+        reachable only when the stored answer was EMPTY, so there are no column rows under this
+        one either way. And this is the rule the count one block below already follows, one step
+        further on: the slot carries one report, and the rest stand down.
+      */}
+      {row.unavailable !== undefined && failure === undefined && (
         <span
           id={rowNameId("unavailable", row.id)}
           data-testid="tree-row-unavailable"

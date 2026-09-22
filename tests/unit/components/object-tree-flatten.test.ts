@@ -1,7 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { flattenTree, type FlattenTreeState } from "@/components/object-tree/flatten";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { flattenTree, type FlattenTreeState, type TreeRowModel } from "@/components/object-tree/flatten";
+import { TreeRow, type TreeRowProps } from "@/components/object-tree/TreeRow";
 import { containerDepth } from "@/lib/db/object-kinds";
-import type { ProviderCapabilities } from "@/lib/db/types";
+import type { DatabaseObject, ProviderCapabilities } from "@/lib/db/types";
 
 const kinds = [
   { id: "table", role: "relation", label: "Table", labelPlural: "Tables" },
@@ -867,5 +870,113 @@ describe("flattenTree column rows", () => {
     expect(orders?.expanded).toBeUndefined();
     expect(orders?.unavailable).toBeUndefined();
     expect(rows.filter((r) => r.kind === "column")).toHaveLength(0);
+  });
+});
+
+/**
+ * The row the walk built, DRAWN (#789).
+ *
+ * In this file rather than in a component suite because the trailing-slot cases below live in the
+ * SEAM between the walk and the row, and neither module can see them on its own. `flattenTree`
+ * writes the "no columns" sentence onto the MODEL out of a stored answer; the failure of a later
+ * read never passes through the walk at all and reaches the row as a PROP. Only a drawn row holds
+ * both. The twisty's tab stop is here for the same instrument rather than the same reason: it is
+ * a property of the drawn row with no gesture in it, so a driven tree would only be a slower way
+ * to read one attribute.
+ *
+ * Static markup rather than a mounted tree because nothing here is a gesture: every fact is
+ * settled before the row renders, and `TreeRowProps.onToggle` is optional for exactly this, a row
+ * drawn on its own. Parsed into an element rather than matched as a string, so an absence is an
+ * absent NODE and not a substring some other attribute could have supplied.
+ */
+function drawRow(props: Partial<TreeRowProps> & Pick<TreeRowProps, "row">): HTMLElement {
+  const host = document.createElement("div");
+  host.innerHTML = renderToStaticMarkup(
+    createElement(TreeRow, {
+      active: false,
+      selected: false,
+      busy: false,
+      onOpenMenu: () => undefined,
+      top: 0,
+      ...props,
+    }),
+  );
+  return host;
+}
+
+/** The one open object row of an `ordersOpen` walk, which is what every case below draws. */
+function openOrdersRow(details: FlattenTreeState["details"]): TreeRowModel {
+  const orders = flattenTree(stateOf({ ...ordersOpen, details })).find((row) => row.kind === "object");
+  if (orders === undefined) throw new Error("the walk emitted no object row to draw");
+  return orders;
+}
+
+/** The listing entry the row was built from, carrying the estimate the trailing slot competes with. */
+const ordersObject: DatabaseObject = { path: ["app", "orders"], name: "orders", kind: "table", rowCount: 1234 };
+
+describe("TreeRow trailing slot", () => {
+  test("the walk's sentence holds the slot alone while no read has failed", () => {
+    // The control for the case below, and it has to be here: it shows the instrument can see the
+    // walk's sentence at all, and that the slot already holds exactly one thing, the count having
+    // stood down for it.
+    const host = drawRow({ row: openOrdersRow({ "app/orders/table": detailOf([]) }), object: ordersObject });
+    expect(host.querySelector('[data-testid="tree-row-unavailable"]')?.textContent).toBe("No columns reported");
+    expect(host.querySelector('[data-testid="tree-row-failure"]')).toBeNull();
+    expect(host.querySelector('[data-testid="tree-row-count"]')).toBeNull();
+  });
+
+  test("a failed re-read takes the slot from the sentence its own stale answer left there", () => {
+    // The state a refresh produces: a describe answered "none", so the walk put its sentence on
+    // the model, and the re-read a DDL statement triggered then failed without clearing the
+    // detail. Both facts are true of the row at once and they are about DIFFERENT reads, so
+    // drawing both puts two reports of one read side by side in one slot, and `aria-labelledby`
+    // names both, which is how "ordersNo columns reportedconnection reset" was measured.
+    const host = drawRow({
+      row: openOrdersRow({ "app/orders/table": detailOf([]) }),
+      object: ordersObject,
+      failure: { message: "connection reset" },
+    });
+    expect(host.querySelector('[data-testid="tree-row-failure"]')?.textContent).toBe("connection reset");
+    expect(host.querySelector('[data-testid="tree-row-unavailable"]')).toBeNull();
+    expect(host.querySelector('[data-testid="tree-row-count"]')).toBeNull();
+    // Read out, not merely rendered: every slot joins the name, so the row must not say two
+    // things about one read.
+    expect(host.textContent).toBe("ordersconnection reset");
+  });
+
+  test("a folder's count refusal stands down for a failed listing, which is the same rule", () => {
+    // The rule is about the SLOT and not about object rows. On a folder the two sentences are
+    // about two different reads, a refused count and a failed listing, so the freshness argument
+    // does not reach here and the ranking does. Reachable and never measured in the wild: the
+    // listing fails first, a later counts refresh comes back refused, and `readFor`'s folder arm
+    // resolves the listing slot whether or not the folder is still expandable.
+    const refusedCount = { app: { table: { unavailable: "Counting is not permitted here" } } };
+    const folder = flattenTree(stateOf({ ...ordersOpen, counts: refusedCount })).find((row) => row.kind === "folder");
+    if (folder === undefined) throw new Error("the walk emitted no folder row to draw");
+    const alone = drawRow({ row: folder });
+    expect(alone.querySelector('[data-testid="tree-row-unavailable"]')?.textContent).toBe(
+      "Counting is not permitted here",
+    );
+    const withFailure = drawRow({ row: folder, failure: { message: "listing refused" } });
+    expect(withFailure.querySelector('[data-testid="tree-row-failure"]')?.textContent).toBe("listing refused");
+    expect(withFailure.querySelector('[data-testid="tree-row-unavailable"]')).toBeNull();
+  });
+
+  test("the twisty is not a tab stop, on the very row that holds the tree's one", () => {
+    // The roving tabindex is the whole keyboard design: ArrowRight and ArrowLeft open and close a
+    // row, so a focusable twisty would add a second tab stop to every mounted object row and a
+    // third to the active one. Both controls are in this same markup: the treeitem and the menu
+    // trigger report 0 on the active row, so a "-1" here is a deliberate difference and not an
+    // instrument that cannot read the attribute.
+    const host = drawRow({
+      row: openOrdersRow({}),
+      object: ordersObject,
+      active: true,
+      hasActions: true,
+      onToggle: () => undefined,
+    });
+    expect(host.querySelector('[role="treeitem"]')?.getAttribute("tabindex")).toBe("0");
+    expect(host.querySelector('[data-testid="tree-row-menu-trigger"]')?.getAttribute("tabindex")).toBe("0");
+    expect(host.querySelector('[data-testid="tree-row-twisty"]')?.getAttribute("tabindex")).toBe("-1");
   });
 });

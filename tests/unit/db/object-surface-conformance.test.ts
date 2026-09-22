@@ -1945,20 +1945,35 @@ describe("assertObjectSurface and the hasColumns declaration", () => {
     );
   });
 
-  // Four spellings in one test, in the shape the `emptyKinds` verdict guard already uses.
+  // Three spellings in one test, in the shape the `emptyKinds` verdict guard already uses.
   // A non-string `name` is not a cosmetic defect: the tree feeds it to `pathKey`, which
   // calls `segment.replaceAll(...)`, so it throws inside the walk and unmounts the tree.
-  test("a column with an unreadable name or type is refused, in all four spellings", async () => {
+  // The two fields are NOT held to the same bar and the fourth row here used to say they
+  // were: `name` is refused when it is empty, `type` is not, because an empty declared type
+  // is what SQLite answers for a virtual table. That row is now the passing case below.
+  test("a column with an unreadable name or type is refused, in all three spellings", async () => {
     const unreadable: [{ name: unknown; type: unknown }, RegExp][] = [
       [{ name: 7, type: "integer" }, /answered a column with no name a reader can be shown/],
       [{ name: "   ", type: "integer" }, /answered a column with no name a reader can be shown/],
+      // Keeps the surviving `typeof column.type !== "string"` arm non-vacuous.
       [{ name: "id", type: 7 }, /answered a column with no type a reader can be shown/],
-      [{ name: "id", type: "" }, /answered a column with no type a reader can be shown/],
     ];
     for (const [column, pattern] of unreadable) {
       const provider = columnProvider(["view"], (kind) => (kind === "view" ? [column] : []));
       await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(pattern);
     }
+  });
+
+  // An EMPTY declared type is a real answer and not a defect, which is the one shape the
+  // refusal above used to get wrong. Measured with `bun:sqlite` against the statements
+  // the shipped fixture holds: `pragma_table_xinfo` answers `type: ""` for every column of
+  // `CREATE VIRTUAL TABLE notes USING fts5(body)` (`docker/sqlite-init/01-object-fixture.sql`)
+  // and for the expression column of `CREATE VIEW ... AS SELECT id, total * 2 AS doubled`.
+  // The renderer already draws that as an honest blank rather than a bug: `TreeRow` gates the
+  // type slot on `row.column.type !== ""`.
+  test("a column whose declared type is EMPTY is accepted, because SQLite answers exactly that", async () => {
+    const provider = columnProvider(["view"], (kind) => (kind === "view" ? [{ name: "body", type: "" }] : []));
+    await expect(assertObjectSurface(provider as never, expectation)).resolves.toBeUndefined();
   });
 
   // The fifth vacuity guard. A provider declaring `hasColumns` on every kind it lists runs

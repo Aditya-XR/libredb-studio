@@ -561,9 +561,22 @@ async function assertBulkColumnRead(
  * that opens on nothing, and one empty object among many is a fixture fact that `columnlessSamples`
  * is where to write down.
  *
- * Both fields of a column are checked, and the `name` check is not cosmetic: the tree feeds
- * `column.name` to `pathKey`, which calls `segment.replaceAll(...)`, so a non-string name throws
- * inside the WALK and unmounts the whole tree rather than failing one row.
+ * Both fields of a column are checked, and NOT to the same bar, which is measured rather than
+ * tidy. `name` is checked for being a string AND for being non-empty, because the tree feeds
+ * `column.name` to `pathKey`, which calls `segment.replaceAll(...)`: a non-string name throws
+ * inside the WALK and unmounts the whole tree rather than failing one row. `type` is checked for
+ * being a string and NOTHING MORE, because an EMPTY declared type is a real answer and refusing
+ * it would fail a correct provider. Measured with `bun:sqlite` on the statements the shipped
+ * fixture holds: `pragma_table_xinfo` answers `type: ""` for every column of
+ * `CREATE VIRTUAL TABLE notes USING fts5(body)` (`docker/sqlite-init/01-object-fixture.sql`,
+ * mirrored in the libSQL fixture) and for the expression column of
+ * `CREATE VIEW ... AS SELECT id, total * 2 AS doubled`; Cassandra answers it too, mapping a UDT
+ * field whose position has no entry in `field_types` to `type: types[index] ?? ""`
+ * (`sql/cassandra/objects.ts`). The renderer agrees: `TreeRow` gates the type slot on
+ * `row.column.type !== ""` and draws an empty type as an honest blank. This arm refused all of
+ * it until the #789 review, and reached no fixture only because each kind is probed at ONE
+ * object: point `sampleObject` at `notes` and a CORRECT provider goes red, told to stop
+ * declaring the kind, which is the wrong repair.
  *
  * The fifth vacuity guard is here, and it is symmetric. A provider that declares `hasColumns` on
  * every kind it listed runs the negative direction zero times, which certifies nothing, so its
@@ -619,7 +632,7 @@ async function assertColumnDeclarations(
             `${JSON.stringify(object.path)}: ${JSON.stringify(column.name)}`,
         );
       }
-      if (typeof column.type !== "string" || column.type.trim() === "") {
+      if (typeof column.type !== "string") {
         throw new Error(
           `kind "${kindId}" answered a column with no type a reader can be shown for ` +
             `${JSON.stringify(object.path)}, column "${column.name}": ${JSON.stringify(column.type)}`,
