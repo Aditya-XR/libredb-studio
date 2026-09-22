@@ -112,6 +112,30 @@ function rowNameId(part: (typeof ROW_NAME_PARTS)[number], rowId: string): string
   return `tree-name-${part}-${escaped}`;
 }
 
+/**
+ * The twisty's glyph: a spinner while its own read is in flight, a chevron either way, and
+ * nothing at all on a leaf.
+ *
+ * Extracted rather than written inline twice, and the reason is measurable rather than a taste:
+ * inline it was two nested ternaries and it carried `TreeRow`'s cognitive complexity to 26
+ * against a threshold of 15 (SonarCloud S3358 and S3776 on PR #1069). One function with three
+ * guarded returns says the same thing in the order a reader asks it.
+ *
+ * `busy` is only ever passed by the BUTTON, which is the only place a describe can be in flight,
+ * and the button renders only where `expanded` is defined, so the `undefined` arm below is
+ * reached from the SPAN alone. That is a leaf: a column row, or a folder whose count the engine
+ * refused. Both arms are driven by the suite rather than argued here.
+ */
+function TwistyGlyph({ busy, expanded }: { readonly busy?: boolean; readonly expanded?: boolean }) {
+  if (busy === true) return <LoaderCircle aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />;
+  if (expanded === undefined) return null;
+  return expanded ? (
+    <ChevronDown strokeWidth={1.5} className="w-3.5 h-3.5" />
+  ) : (
+    <ChevronRight strokeWidth={1.5} className="w-3.5 h-3.5" />
+  );
+}
+
 export interface TreeRowProps {
   readonly row: TreeRowModel;
   /** The object an object row was built from, for `status` and `rowCount`, which the model omits. */
@@ -236,21 +260,11 @@ export function TreeRow({
           onKeyDown={(event) => event.stopPropagation()}
           className="-m-1.5 flex w-3.5 h-3.5 box-content shrink-0 items-center justify-center rounded-sm p-1.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-brand"
         >
-          {busy ? (
-            <LoaderCircle aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
-          ) : row.expanded ? (
-            <ChevronDown strokeWidth={1.5} className="w-3.5 h-3.5" />
-          ) : (
-            <ChevronRight strokeWidth={1.5} className="w-3.5 h-3.5" />
-          )}
+          <TwistyGlyph busy={busy} expanded={row.expanded} />
         </button>
       ) : (
         <span aria-hidden="true" className="w-3.5 shrink-0 text-muted-foreground">
-          {row.expanded === undefined ? null : row.expanded ? (
-            <ChevronDown strokeWidth={1.5} className="w-3.5 h-3.5" />
-          ) : (
-            <ChevronRight strokeWidth={1.5} className="w-3.5 h-3.5" />
-          )}
+          <TwistyGlyph expanded={row.expanded} />
         </span>
       )}
       {Icon === null ? (

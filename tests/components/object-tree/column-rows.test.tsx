@@ -194,6 +194,38 @@ describe("expanding an object row reads its columns", () => {
     expect(describeCalls(calls)).toHaveLength(0);
   });
 
+  test("the chevron points down when the row is open and right when it is closed", async () => {
+    // The glyph is what a SIGHTED reader reads, and nothing else in this suite looks at it:
+    // `aria-expanded` and the button's own label carry the state for everyone else, so swapping
+    // the two chevrons survived every assertion here until this test existed. Measured by
+    // mutation: reversing them left 153 tests green.
+    routesFor(() => ordersDetail);
+    await openTables();
+
+    const glyphOf = (name: RegExp): string =>
+      within(row(name)).getByTestId("tree-row-twisty").querySelector("svg")?.getAttribute("class") ?? "";
+    expect(glyphOf(/orders/)).toContain("lucide-chevron-right");
+
+    await pressTwisty(/orders/);
+    await screen.findByText("total");
+    expect(glyphOf(/orders/)).toContain("lucide-chevron-down");
+  });
+
+  test("a LEAF draws no chevron at all, which is what says it cannot be opened", async () => {
+    // The other half of the same blind spot: a leaf that grew a chevron would promise a gesture
+    // that does nothing, and no assertion in this suite would have noticed. A column row is the
+    // leaf this change introduces, so it is the one driven here.
+    routesFor(() => ordersDetail);
+    await openTables();
+    await pressTwisty(/orders/);
+    await screen.findByText("total");
+
+    const column = row(/^total/);
+    expect(column.querySelectorAll("svg[class*='lucide-chevron']")).toHaveLength(0);
+    // The control, on the same screen: the row it hangs under does draw one.
+    expect(row(/orders 1,234/).querySelectorAll("svg[class*='lucide-chevron']").length).toBeGreaterThan(0);
+  });
+
   test("the press leaves focus on the row, so the arrow keys still work", async () => {
     // `tabIndex={-1}` keeps the button out of the tab order, and a pointer press still focuses it
     // in most browsers. `toggleRow` calls `focusRow`, whose effect focuses the row element by
