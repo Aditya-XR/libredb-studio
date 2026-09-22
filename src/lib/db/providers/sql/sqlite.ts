@@ -1828,28 +1828,50 @@ export class SQLiteProvider extends SQLBaseProvider {
   // Health & Monitoring
   // ============================================================================
 
+  /**
+   * The database's size in bytes, or absent when it genuinely cannot be read (#546).
+   *
+   * `getHealth()` and `getOverview()` both used to read this size themselves, and
+   * drifted: `getHealth()` caught a failed file stat to `"Unknown"` and a failed
+   * `:memory:` read to `"N/A"`, `getOverview()` initialized to `0` and left it
+   * there through an empty catch either way, and neither result was a measurement
+   * - a read that never answered is not the same fact as a database that is
+   * genuinely empty. One reader now decides both, so the two panels cannot
+   * disagree about the same database again, and the review that caught the
+   * :memory: half of this - `result?.size || 0` cannot tell a measured zero from
+   * `sizeStmt.get()` returning no row, or a row whose `size` is `undefined` - is
+   * fixed once here rather than twice.
+   */
+  private readDatabaseSizeBytes(): number | undefined {
+    const dbPath = this.getDatabasePath();
+    if (dbPath !== ":memory:") {
+      try {
+        return fs.statSync(dbPath).size;
+      } catch {
+        // Absent: the catch cannot tell "file does not exist yet" apart from any
+        // other statSync failure.
+        return undefined;
+      }
+    }
+    try {
+      const sizeStmt = this.db!.prepare(MEMORY_DB_SIZE_SQL);
+      const result = sizeStmt.get() as { size?: number };
+      // A type check, not `|| 0`: page_count * page_size answering a real zero is
+      // a measured reading, kept - but `|| 0` cannot tell that apart from
+      // `get()` returning no row, or a row whose `size` came back `undefined`,
+      // both of which `as { size: number }` casts past rather than rules out.
+      return typeof result?.size === "number" ? result.size : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   public async getHealth(): Promise<HealthInfo> {
     this.ensureConnected();
 
     const dbPath = this.getDatabasePath();
-
-    let databaseSize = "N/A";
-    if (dbPath !== ":memory:") {
-      try {
-        const stats = fs.statSync(dbPath);
-        databaseSize = formatBytes(stats.size);
-      } catch {
-        databaseSize = "Unknown";
-      }
-    } else {
-      try {
-        const sizeStmt = this.db!.prepare(MEMORY_DB_SIZE_SQL);
-        const result = sizeStmt.get() as { size: number };
-        databaseSize = formatBytes(result?.size || 0);
-      } catch {
-        databaseSize = "N/A";
-      }
-    }
+    const sizeBytes = this.readDatabaseSizeBytes();
+    const databaseSize = sizeBytes === undefined ? "N/A" : formatBytes(sizeBytes);
 
     let isHealthy = true;
     try {
@@ -1960,26 +1982,9 @@ export class SQLiteProvider extends SQLBaseProvider {
     const versionResult = versionStmt.get() as { version: string };
     const version = `SQLite ${versionResult?.version || "Unknown"}`;
 
-    // Get database size
-    const dbPath = this.getDatabasePath();
-    let databaseSizeBytes = 0;
-
-    if (dbPath !== ":memory:") {
-      try {
-        const stats = fs.statSync(dbPath);
-        databaseSizeBytes = stats.size;
-      } catch {
-        // File might not exist yet
-      }
-    } else {
-      try {
-        const sizeStmt = this.db!.prepare(MEMORY_DB_SIZE_SQL);
-        const result = sizeStmt.get() as { size: number };
-        databaseSizeBytes = result?.size || 0;
-      } catch {
-        // Ignore
-      }
-    }
+    // Get database size, absent rather than 0 when it cannot be read (#546) - see
+    // `readDatabaseSizeBytes()` above, shared with `getHealth()`.
+    const sizeBytes = this.readDatabaseSizeBytes();
 
     // Get table count
     const tableCountStmt = this.db!.prepare(TABLE_COUNT_SQL);
@@ -1996,8 +2001,11 @@ export class SQLiteProvider extends SQLBaseProvider {
       uptime: "N/A",
       activeConnections: 1,
       maxConnections: 1,
-      databaseSize: formatBytes(databaseSizeBytes),
-      databaseSizeBytes,
+      // "N/A", not formatBytes(0): moves with the figure, so an unanswered read
+      // does not print a confident "0 Bytes" beside the Storage tab's own absence
+      // message.
+      databaseSize: sizeBytes === undefined ? "N/A" : formatBytes(sizeBytes),
+      ...(sizeBytes === undefined ? {} : { databaseSizeBytes: sizeBytes }),
       tableCount,
       indexCount,
     };

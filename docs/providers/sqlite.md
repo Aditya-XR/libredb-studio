@@ -883,8 +883,8 @@ Minimal by nature — SQLite keeps almost no server-style runtime statistics.
 
 | Method | Source | Notes |
 |--------|--------|-------|
-| `getHealth()` | `fs.statSync` / page PRAGMAs, `PRAGMA integrity_check`, `PRAGMA journal_mode` | reports integrity + journal mode as info rows; `activeConnections: 1`, cache-hit `N/A` |
-| `getOverview()` | `sqlite_version()`, file size, `sqlite_master` counts | `uptime: N/A`, `maxConnections: 1` |
+| `getHealth()` | `fs.statSync` / page PRAGMAs, `PRAGMA integrity_check`, `PRAGMA journal_mode` | reports integrity + journal mode as info rows; `activeConnections: 1`, cache-hit `N/A`; `databaseSize` reads `"N/A"`, never a formatted `0`, when the size read fails — [§7.3](#73-when-the-database-size-is-not-measurable) |
+| `getOverview()` | `sqlite_version()`, file size, `sqlite_master` counts | `uptime: N/A`, `maxConnections: 1`; `databaseSizeBytes` is **omitted** and `databaseSize` stays `N/A`, never a `0`, when the size read fails — [§7.3](#73-when-the-database-size-is-not-measurable) |
 | `getPerformanceMetrics()` | — | **no cache-hit ratio, no QPS, no buffer-pool usage** — all three are omitted, so both monitoring tabs show "N/A / Not measured" for them ([§7.1](#71-there-is-no-cache-hit-ratio-and-there-cannot-be)); only `deadlocks: 0` is reported, which is a fact about the engine |
 | `getSlowQueries()` | — | always `[]` (SQLite has no query stats) |
 | `getActiveSessions()` | — | the single current process session |
@@ -994,6 +994,52 @@ for `small` (4 KB), a guess presented as a measurement. A `0` would have been th
 fabrication in a different digit, which is why the fields are absent rather than zero.
 `totalSize`/`totalSizeBytes` remain required by `TableStats`, so they carry the same `"N/A"` / `0`
 placeholder `indexSize` already used, and every consumer gates on the absent `tableSizeBytes`.
+
+### 7.3 When the database size is not measurable
+
+`getHealth()` and `getOverview()` share one private reader, `readDatabaseSizeBytes()`, which sizes the
+database two ways, by `dbPath`:
+
+```ts
+// File-backed
+return fs.statSync(dbPath).size;
+// :memory: — no file to stat
+const result = sizeStmt.get() as { size?: number }; // SELECT (page_count * page_size) as size ...
+return typeof result?.size === "number" ? result.size : undefined;
+```
+
+Through 0.16.2 there was no shared reader: each method read the size itself, and the two drifted.
+`getOverview()`'s local was initialized to `0` and each `catch` left it there, so a `statSync` throwing
+— the file not yet created on connect, a permission refusal, any other reason a stat can fail — or the
+`:memory:` PRAGMA read throwing published a measured-looking zero indistinguishable from a genuinely
+empty database (#546). `getHealth()` caught the same two failures to two different strings, `"Unknown"`
+for the file branch and `"N/A"` for the `:memory:` branch. And the `:memory:` success path in both
+was `result?.size || 0`, which reads as "kept a real zero" but cannot actually tell one apart from
+`sizeStmt.get()` returning no row, or a row whose `size` came back `undefined` — `as { size: number }`
+is a cast, not a check, so nothing upstream ruled either out (caught in review on #1050, before either
+shipped). `DatabaseOverview.databaseSizeBytes` is optional precisely so a read that never answered can
+say nothing instead — *"absence and zero are different facts"*, its docblock in
+[`src/lib/db/types.ts`](../../src/lib/db/types.ts) — and until now neither method could say it
+correctly.
+
+The monitoring **Storage** tab
+([`src/components/monitoring/tabs/StorageTab.tsx`](../../src/components/monitoring/tabs/StorageTab.tsx))
+is what the `getOverview()` half buys: it keys its whole breakdown off `databaseSizeBytes !== undefined`,
+so on the absence it renders "No storage size information available." On the fabricated `0` it drew the
+breakdown instead, against a total that contradicted the real per-table bytes `getTableStats()` reports
+separately. The `getHealth()` half buys agreement between panels: before this, one unmeasurable SQLite
+database could show `"N/A"` on the Overview card and `"Unknown"` on Health, two sentences about the
+same absence.
+
+**`databaseSize`, the formatted string, moves with the same figure in both methods.** Each initializes
+to `"N/A"` and only `formatBytes()` replaces it — one wording, from one reader, everywhere this size is
+shown.
+
+A database that really measures `0` is a **reading** and is kept: `typeof result?.size === "number"`
+lets a real zero-page `:memory:` result through exactly as before, and (in principle) a zero-length file
+still reaches `formatBytes(0)`. The absence is spelled `=== undefined` (a type check on the `:memory:`
+arm, not a falsy test) plus a conditional spread in `getOverview()`'s return — a falsy test would erase
+that very measurement, which is the mistake `|| 0` was making.
 
 ---
 

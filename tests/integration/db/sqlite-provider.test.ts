@@ -23,6 +23,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+/** A namespace import, not the named `statSync` above: `spyOn` needs an object it can
+ * reassign a property on, and this is the same module object the provider's own
+ * `import * as fs from "fs"` reads `statSync` off. */
+import * as fsNode from "node:fs";
 
 /** The repository root, anchored to this file so nothing here depends on the launcher's cwd. */
 const REPO_ROOT = resolve(import.meta.dir, "../../..");
@@ -573,6 +577,48 @@ describe("SQLiteProvider", () => {
       expect(overview.activeConnections).toBe(1);
       expect(overview.maxConnections).toBe(1);
     });
+
+    // Review on #1050: `result?.size || 0` cannot tell a measured zero apart from
+    // `sizeStmt.get()` answering no row, or a row whose `size` came back
+    // `undefined` - `as { size: number }` casts past both rather than ruling them
+    // out. `page_count * page_size` never actually produces either in real
+    // operation, so both are reproduced here by intercepting the statement.
+    describe("a :memory: size read that answers no measurement", () => {
+      test("no row at all leaves databaseSizeBytes absent, not 0", async () => {
+        provider = new SQLiteProvider(makeSQLiteConfig());
+        await provider.connect();
+        answerReadsMatching(provider, "page_count", []);
+
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+      });
+
+      test("a row whose size is undefined leaves databaseSizeBytes absent, not 0", async () => {
+        provider = new SQLiteProvider(makeSQLiteConfig());
+        await provider.connect();
+        answerReadsMatching(provider, "page_count", [{ size: undefined }]);
+
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+      });
+
+      // The control: a real zero (an edge case in principle, since page_count and
+      // page_size are never actually 0 on a real :memory: handle) is a
+      // measurement and must be kept, not folded into the same absence.
+      test("a row whose size really is 0 is kept as a measurement", async () => {
+        provider = new SQLiteProvider(makeSQLiteConfig());
+        await provider.connect();
+        answerReadsMatching(provider, "page_count", [{ size: 0 }]);
+
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBe(0);
+        expect(overview.databaseSize).not.toBe("N/A");
+      });
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -903,6 +949,26 @@ describe("SQLiteProvider", () => {
       expect(health.activeSessions[0].database).toBe("health.db");
     });
 
+    // Review on #1050: `getHealth()` used to report a failed file stat as
+    // "Unknown" while `getOverview()` reported the same failure as "N/A" - two
+    // different sentences for the same unmeasured database. Both now read the
+    // same helper and say the same thing.
+    test("getHealth reads N/A, not Unknown, when the file cannot be stat'd", async () => {
+      const dbPath = join(fileTmpDir, "unreadable-health.db");
+      provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
+      await provider.connect();
+      await provider.query("CREATE TABLE h (id INTEGER PRIMARY KEY)");
+
+      const spy = spyOn(fsNode, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        expect((await provider.getHealth()).databaseSize).toBe("N/A");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     test("getOverview reads the database size from the file", async () => {
       const dbPath = join(fileTmpDir, "overview.db");
       provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
@@ -912,6 +978,37 @@ describe("SQLiteProvider", () => {
       const overview = await provider.getOverview();
       expect(overview.databaseSizeBytes).toBeGreaterThan(0);
       expect(overview.tableCount).toBe(1);
+    });
+
+    // `databaseSizeBytes` used to be initialised to 0 and left there by an empty
+    // catch, so a read that never answered published a measured-looking zero
+    // indistinguishable from a genuinely empty database (#546). It is optional
+    // exactly so a failed read can say nothing instead (src/lib/db/types.ts).
+    //
+    // `statSync` is mocked rather than deleting the file out from under the
+    // connection: a bun:sqlite handle over a removed file answers "disk I/O
+    // error" on the VERY NEXT query too (measured), which would take the table
+    // and index counts down with it and test a different failure than this one.
+    test("getOverview omits databaseSizeBytes, and databaseSize reads N/A, when the file cannot be stat'd", async () => {
+      const dbPath = join(fileTmpDir, "unreadable.db");
+      provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
+      await provider.connect();
+      await provider.query("CREATE TABLE v (id INTEGER PRIMARY KEY)");
+
+      const spy = spyOn(fsNode, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+        // The table/index counts come from the open handle, not statSync, so the
+        // rest of the overview is unaffected by the mocked failure.
+        expect(overview.tableCount).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test("getStorageStats lists the main database plus WAL and SHM sidecar files", async () => {

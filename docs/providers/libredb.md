@@ -882,12 +882,12 @@ There is no embedded stats API.
 
 | Method | Source | Returns |
 |--------|--------|---------|
-| `getHealth()` | `fs.statSync` | `activeConnections: 1`, file size as `databaseSize`, `cacheHitRatio: "N/A"` |
-| `getOverview()` | `fs.statSync` + schema scan | `version`, file size, namespace count as `tableCount`, `indexCount: 0` |
+| `getHealth()` | `fs.statSync` | `activeConnections: 1`, file size as `databaseSize` (`"N/A"` when unmeasurable — [§7.3](#73-when-the-file-size-is-not-measurable)), `cacheHitRatio: "N/A"` |
+| `getOverview()` | `fs.statSync` + schema scan | `version`, file size, namespace count as `tableCount`, `indexCount: 0`; `databaseSizeBytes` is **omitted** and `databaseSize` stays `"N/A"`, never a `0`, when the stat fails — [§7.3](#73-when-the-file-size-is-not-measurable) |
 | `getPerformanceMetrics()` | — | `{}` — nothing is measurable here |
 | `getSlowQueries()` | — | `[]`; the Queries panel renders `slowQueriesEmptyState` |
 | `getActiveSessions()` | — | **throws** `LIBREDB_ACTIVE_SESSIONS_REFUSAL` — no session registry exists |
-| `getStorageStats()` | `fs.statSync` | one entry: file path + size |
+| `getStorageStats()` | `fs.statSync` | one entry: file path + size; `sizeBytes` is a **required** number, so it stays `0` (never absent) when the stat fails — [§7.3](#73-when-the-file-size-is-not-measurable) |
 | `getTableStats()` | the schema tree's scan | one row per namespace: lens as `schemaName`, key count as `rowCount`, no bytes |
 | `getIndexStats()` | — | **throws** `LIBREDB_INDEX_STATS_REFUSAL` — no index object exists |
 
@@ -953,6 +953,30 @@ deliberate: `POST /api/db/test-connection` calls it and the connection dialog's 
 that request, so a throwing health check would lock the embedded engine out of the product
 (the lesson of [#455](https://github.com/libredb/libredb-studio/issues/455)). A monitoring panel has
 the opposite obligation — it is the surface that must say what it could not read.
+
+### 7.3 When the file size is not measurable
+
+`fileSizeBytes()`, the one place every size figure in this file comes from, reads `fs.statSync(this.dbPath).size`.
+Through 0.16.2 it returned `0` both when there was no `dbPath` at all and when `statSync` threw for any
+reason, so `getOverview()` published a measured-looking zero indistinguishable from a genuinely empty
+database (#546). `DatabaseOverview.databaseSizeBytes` is optional precisely so this can be said instead
+— *"absence and zero are different facts"*, its docblock in
+[`src/lib/db/types.ts`](../../src/lib/db/types.ts) — and until now this provider could not say it.
+
+The monitoring **Storage** tab
+([`src/components/monitoring/tabs/StorageTab.tsx`](../../src/components/monitoring/tabs/StorageTab.tsx))
+is what the difference buys: it keys its whole breakdown off `databaseSizeBytes !== undefined`, so on
+the absence it renders "No storage size information available" instead of a breakdown drawn over a
+file this provider never measured. `getHealth()`'s `databaseSize` string moves with the same absence —
+`fileSizeHuman()` reads `"N/A"` rather than formatting a zero it was never given.
+
+**`StorageStats.sizeBytes` does not get the same treatment, because it cannot.** Unlike
+`DatabaseOverview.databaseSizeBytes` it is a *required* `number` with no optional counterpart
+(`src/lib/db/types.ts`), so `getStorageStats()` coerces `fileSizeBytes()`'s absence back to `0` at its
+own call site — the one place in this file that keeps the old fallback, because its type leaves it no
+other honest answer. `size`, the formatted string beside it, still reads `"N/A"` through the same
+`fileSizeHuman()` every other caller uses, so the row is not internally consistent between its two size
+fields on a failed read — a required-field limitation, not an oversight.
 
 ---
 
