@@ -589,6 +589,16 @@ export function useTreeNodes(
 
   const failureFor = useCallback(
     (row: TreeRowModel) => {
+      // A CLOSED object says nothing, which is the rule `flatten.ts` already holds for the slot
+      // beside this one: `unavailable` is derived from the detail and the detail is only read
+      // while the row is open, so a closed object never reports "No columns reported". This slot
+      // reached the render by another path. `readFor` answers for an object row whose `expanded`
+      // is merely DEFINED, and `false` is defined, so a table whose describe was refused kept the
+      // engine's sentence after the reader collapsed it, in the `ml-auto` space its row count
+      // wants, for the life of the connection. A folder and a container are NOT gated here and
+      // must not be: their read is about the row itself and is offered whether or not it is open,
+      // which is how they behaved before an object row had a read at all.
+      if (row.kind === "object" && row.expanded !== true) return undefined;
       const read = readFor(row, depth);
       return read === undefined ? undefined : cache.failures[slotKey(read.slot)];
     },

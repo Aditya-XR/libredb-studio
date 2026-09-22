@@ -374,6 +374,27 @@ describe("the three states of a describe", () => {
     expect(describeCalls(calls)).toHaveLength(2);
   });
 
+  test("a CLOSED object says nothing about a read that failed while it was open", async () => {
+    // The walk already holds this rule for the sibling slot: `unavailable` is derived from the
+    // detail and the detail is only read while the row is open, so a closed object never says
+    // "No columns reported". The failure slot reached the render by another path, `failureFor`,
+    // which answered for any object row whose `expanded` is merely DEFINED, and `false` is
+    // defined. A collapsed table then kept a sentence about contents nobody can see, in the
+    // `ml-auto` space its row count wants, for the life of the connection.
+    routesFor(() => Response.json({ error: "permission denied for table orders" }, { status: 403 }));
+    await openTables();
+    await pressTwisty(/orders/);
+    await screen.findByRole("treeitem", { name: "orders permission denied for table orders" });
+
+    await pressTwisty(/orders/);
+    await waitFor(() => expect(row(/orders/).getAttribute("aria-expanded")).toBe("false"));
+    // The name is the assertion, and it carries both halves: the sentence is gone, and the row
+    // count it had displaced is back. A row still holding the refusal matches neither.
+    const closed = screen.getByRole("treeitem", { name: "orders 1,234" });
+    expect(within(closed).queryByTestId("tree-row-failure")).toBeNull();
+    expect(within(closed).getByTestId("tree-row-count").textContent).toBe("1,234");
+  });
+
   test("a body of the wrong shape is reported, and the tree stays mounted", async () => {
     // `column.name` reaches `pathKey`, which calls `replaceAll` on it, so a non-string throws
     // INSIDE the walk and unmounts the tree with every panel that could have reported it.
