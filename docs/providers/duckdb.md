@@ -732,6 +732,11 @@ two other providers in #789 broke on their first pass.
   parser error too, so zero column rows raises rather than rendering a dropped table as a table with
   no columns.
 
+`hasColumns: true` is declared on `table` and `view` and on nothing else, because `describeObject`
+gates the four reads above on `role: "relation"`: a `macro` and a `sequence` answer three empty
+arrays without a round trip, so both declare nothing and their rows are leaves in the object tree
+rather than twisties that open on nothing.
+
 #### `describeObject` takes the KIND, and on this engine that is not theoretical
 
 Measured on v1.5.5, in ONE schema: `CREATE SEQUENCE overlap` and `CREATE MACRO overlap(x)` both

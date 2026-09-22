@@ -1970,6 +1970,57 @@ describe("object surface", () => {
     await provider.disconnect();
   });
 
+  test("declares columns on exactly the four kinds a catalog describes, and the engine agrees", async () => {
+    // The declaration is NOT `role === "relation"` here, and this engine is one of the five
+    // cases in the fleet that refute the role: a dictionary is `role: "config"` and still
+    // answers its structure, out of `system.dictionaries` (#789, and `describeDictionary()`
+    // in `clickhouse/objects.ts` carries the measurement). A function is the other side:
+    // `CLICKHOUSE_OBJECT_CATALOGS` has no entry a column could come from, so it answers
+    // three empty arrays without a round trip and must declare nothing.
+    installObjectReplies();
+    const provider = await connectProvider({ database: OBJECT_DATABASE });
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["dictionary", "materialized_view", "table", "view"]);
+    // The other direction, so a kind added later cannot quietly gain a twisty. Absent is
+    // the abstention, and `false` is not written anywhere: `kindHasColumns` reads both the
+    // same way and one spelling keeps the census readable.
+    expect(kinds.filter((kind) => kind.hasColumns !== true).map((kind) => kind.id)).toEqual(["function"]);
+    expect(kinds.every((kind) => kind.hasColumns !== false)).toBe(true);
+
+    // Each declaration against the engine's own answer, at one object per kind, because a
+    // declaration checked against a transcription is checked against nothing. Both fields
+    // are asserted: the tree feeds `column.name` to `pathKey`, which calls `replaceAll` on
+    // it, and splits `column.type` in the row.
+    const samples = [
+      { kind: "table", name: "events" },
+      { kind: "view", name: "events_view" },
+      { kind: "materialized_view", name: "mv_to" },
+      { kind: "dictionary", name: "dict_users" },
+    ] as const;
+    for (const sample of samples) {
+      const detail = await provider.describeObject([OBJECT_DATABASE, sample.name], sample.kind);
+      expect(detail.columns.length).toBeGreaterThan(0);
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name.trim()).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(column.type.trim()).not.toBe("");
+      }
+    }
+
+    // The abstaining kind, from the same provider, so the negative direction is a read and
+    // not an omission.
+    const fn = await provider.describeObject([OBJECT_DATABASE, "probe_double"], "function");
+    expect(fn.columns).toEqual([]);
+    await provider.disconnect();
+  });
+
   test("satisfies the shared object surface contract", async () => {
     // The source statements are routed too, because the helper reads a document for every
     // source-bearing kind it counts above zero and this provider declares all five.

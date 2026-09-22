@@ -450,6 +450,13 @@ export class DuckDBProvider extends SQLBaseProvider {
       // ENGINE, not in the fleet: the #789 design names PostgreSQL `view` and
       // `materialized_view` and Couchbase `function` as producers of the same arm, and
       // `postgres.ts` already answers it. `objects.ts` records why a macro is one.
+      //
+      // `hasColumns` is narrower than `hasSource` and is the declaration the object tree's
+      // twisty reads (#789): `describeObject` answers three empty arrays for every kind whose
+      // role is not `relation` (`describeObject` below), so only `table` and `view` can answer a
+      // column here. `macro` and `sequence` declare nothing, which makes their rows leaves, and
+      // that is the measured answer rather than a transcription: a macro's parameters are Phase
+      // 2's job and a DuckDB sequence publishes no column at all.
       objectKinds: [
         {
           id: "table",
@@ -458,12 +465,21 @@ export class DuckDBProvider extends SQLBaseProvider {
           labelPlural: "Tables",
           acceptsRowWrites: true,
           hasSource: true,
+          hasColumns: true,
           sourceLanguage: "sql",
         },
         // No `acceptsRowWrites` on a view. Measured on v1.5.5: `INSERT INTO <view>`
         // answers `Catalog Error: <view> is not an table`, so a view is never an import
         // or inline-edit target here - not even the single-table case PostgreSQL takes.
-        { id: "view", role: "relation", label: "View", labelPlural: "Views", hasSource: true, sourceLanguage: "sql" },
+        {
+          id: "view",
+          role: "relation",
+          label: "View",
+          labelPlural: "Views",
+          hasSource: true,
+          hasColumns: true,
+          sourceLanguage: "sql",
+        },
         // ONE kind for both macro forms. A scalar macro (`AS <expression>`) and a table
         // macro (`AS TABLE <select>`) are `function_type` 'macro' and 'table_macro', and
         // both are something a person wrote with CREATE MACRO. There is no

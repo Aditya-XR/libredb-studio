@@ -4,7 +4,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
-import { callerBoundTruncationReason, isSourcePartUnavailable } from "@/lib/db/object-kinds";
+import { callerBoundTruncationReason, isSourcePartUnavailable, kindHasColumns } from "@/lib/db/object-kinds";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ColumnSchema, DatabaseConnection } from "@/lib/types";
@@ -4517,6 +4517,51 @@ describe("MySQL object listing and detail", () => {
     expect(detail.columns).toEqual([
       { name: "next_not_cached_value", type: "bigint", nullable: false, isPrimary: false, defaultValue: undefined },
     ]);
+    await provider.disconnect();
+  });
+
+  test("hasColumns is declared exactly on the kinds the column dictionary answers for (#789)", async () => {
+    // The declaration is a CLIENT gate: the tree draws a twisty on a kind that declares it and
+    // asks `describeObject` when the row opens, so a kind declaring it and answering nothing is
+    // a twisty that opens on nothing. Derived at the declaration from the same `hasColumns()`
+    // predicate both read methods gate on (`mysql.ts:1860-1862`), and asserted here against the
+    // literal set, which is the only thing that can catch the derivation widening.
+    //
+    // MariaDB, because it is the flavour that has every kind: the MySQL six plus `package` and
+    // `sequence`. The sequence is the entry `role === "relation"` would have got wrong.
+    const provider = await connectedTo(true);
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    expect(
+      kinds
+        .filter((kind) => kindHasColumns(kind))
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["sequence", "table", "view"]);
+    for (const kind of kinds) {
+      // Absent, never `false`. Both read as false through `kindHasColumns`, and only the absence
+      // says the provider abstained rather than measured a negative.
+      if (!["sequence", "table", "view"].includes(kind.id)) expect(kind.hasColumns).toBeUndefined();
+    }
+    await provider.disconnect();
+  });
+
+  test("a declared kind answers a column a reader can be shown, and an abstaining kind answers none (#789)", async () => {
+    // Both fields are checked because the tree renders both, and `name` feeds `pathKey`, which
+    // calls `segment.replaceAll(...)`: a non-string name throws inside the walk and unmounts the
+    // whole tree rather than failing one row.
+    const provider = await connectedTo(false);
+
+    const table = await provider.describeObject(["app", "customers"], "table");
+    expect(table.columns.length).toBeGreaterThan(0);
+    for (const column of table.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+
+    expect((await provider.describeObject(["app", "touch_order"], "procedure")).columns).toEqual([]);
     await provider.disconnect();
   });
 

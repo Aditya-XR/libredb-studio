@@ -189,11 +189,18 @@ export const LIBREDB_TABLE_STATS_TRUNCATED = `LibreDB keeps no row counter, so t
  * `describeObject` answers as the table's columns, no statement in this grammar could
  * re-apply an edited one, and `recordRelational` throws on a schema mismatch rather than
  * migrating. `docs/providers/libredb.md` section 6.1 carries the measurement in full.
+ *
+ * EVERY kind declares `hasColumns`, which is unusual in the fleet and is measured rather
+ * than assumed: `columnsForGroup` below has exactly three arms, one per kind, and none of
+ * them can answer an empty list - a cataloged table answers its declared column map, a
+ * cataloged collection answers the id/document pair, and a derived grouping answers the
+ * key/value pair. So invariant 8's negative direction has nothing to iterate here and the
+ * suite states `noAbstainingKinds`.
  */
 const LIBREDB_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
-  { id: "table", role: "relation", label: "Table", labelPlural: "Tables" },
-  { id: "collection", role: "relation", label: "Collection", labelPlural: "Collections" },
-  { id: "keyspace", role: "relation", label: "Key Prefix", labelPlural: "Key Prefixes" },
+  { id: "table", role: "relation", label: "Table", labelPlural: "Tables", hasColumns: true },
+  { id: "collection", role: "relation", label: "Collection", labelPlural: "Collections", hasColumns: true },
+  { id: "keyspace", role: "relation", label: "Key Prefix", labelPlural: "Key Prefixes", hasColumns: true },
 ] as const);
 
 /**

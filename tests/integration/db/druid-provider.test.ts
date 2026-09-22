@@ -54,7 +54,7 @@ import {
   TimeoutError,
 } from "@/lib/db/errors";
 import { DRUID_CONTAINER_LEVELS, DRUID_OBJECT_KINDS } from "@/lib/db/providers/sql/druid/objects";
-import { callerBoundTruncationReason, kindHasSource } from "@/lib/db/object-kinds";
+import { callerBoundTruncationReason, findKind, kindHasColumns, kindHasSource } from "@/lib/db/object-kinds";
 import { getExplainStrategy } from "@/lib/explain";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 import type { ExplainTreeNode } from "@/lib/explain/types";
@@ -1966,6 +1966,55 @@ describe("object surface", () => {
     await provider.disconnect();
   });
 
+  /**
+   * The PRESENCE, and it is the whole declaration on this engine (#789).
+   *
+   * Druid is one of the three type-ids that declare `hasColumns` on every kind they have, so
+   * invariant 8's negative direction iterates zero times here and the positive direction is the
+   * only one carrying this provider: that is why the conformance expectation below must state
+   * `noAbstainingKinds` and why this test asserts the population by name first. A `filter` over a
+   * declaration that lost a kind would answer the same thing as a declaration that is right.
+   *
+   * `kindHasColumns` is driven rather than the raw field, because that derivation is what the
+   * object tree reads to decide whether a row gets a twisty at all.
+   *
+   * The answers are the measurement behind the declaration, not a restatement of it: a datasource
+   * answers its dimensions and metrics, a lookup answers `k` and `v` - which is why `lookup` is
+   * `role: "config"` and still declares columns - and a `sys` table answers its own projection.
+   */
+  test("declares hasColumns on every kind, and every kind answers a column a reader can be shown", async () => {
+    installObjectReplies();
+    const provider = await connectProvider();
+    const capabilities = provider.getCapabilities();
+    const kinds = capabilities.objectKinds ?? [];
+
+    expect(kinds.filter((kind) => kind.hasColumns === true).map((kind) => kind.id)).toEqual([
+      "datasource",
+      "lookup",
+      "system_table",
+    ]);
+    expect(kinds.map((kind) => kindHasColumns(findKind(capabilities, kind.id)))).toEqual([true, true, true]);
+    // No kind abstains, so there is nothing here that answers `columns: []`.
+    expect(kinds.filter((kind) => kind.hasColumns !== true).map((kind) => kind.id)).toEqual([]);
+
+    const details = [
+      await provider.describeObject([OBJECT_SCHEMA, "libredb_objects_orders"], "datasource"),
+      await provider.describeObject(["lookup", "libredb_country_names"], "lookup"),
+      await provider.describeObject(["sys", "servers"], "system_table"),
+    ];
+    for (const detail of details) {
+      expect(detail.columns.length).toBeGreaterThan(0);
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name.trim()).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(column.type.trim()).not.toBe("");
+      }
+    }
+
+    await provider.disconnect();
+  });
+
   test("satisfies the shared object surface contract", async () => {
     installObjectReplies();
     const provider = await connectProvider();
@@ -1986,6 +2035,9 @@ describe("object surface", () => {
       container: ["druid"],
       kinds: { datasource: 4, lookup: 0, system_table: 0 },
       sampleObject: { path: ["druid", "libredb_objects_orders"], kind: "datasource" },
+      // Every kind Druid has declares `hasColumns`, so invariant 8's negative direction runs
+      // zero times and the helper refuses to certify an absence it never measured (#789).
+      noAbstainingKinds: true,
     });
     await provider.disconnect();
   });

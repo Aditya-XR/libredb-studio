@@ -1236,6 +1236,14 @@ every column including `__time`, are all stated once (§6 above).
 two reasons the object surface gives. Zero columns **raises**: every object of every declared kind has at
 least one column, so an empty answer means the object is not there under that name in this schema.
 
+All three kinds declare `hasColumns`, so every object row in the tree expands and there is no kind
+here whose `describeObject` answers `columns: []` (#789). That makes Druid one of the three engines
+whose conformance expectation must set `noAbstainingKinds`: the invariant's negative direction, which
+asserts that a kind declaring nothing answers no column, iterates zero times on this provider, and the
+positive direction is the only one carrying it. `lookup` is the case worth naming: it is
+`role: "config"` and it answers `k` and `v`, which is why the twisty is decided by the declaration and
+never by the role.
+
 `DatabaseObject` carries no `rowCount` and no `sizeBytes` here. Both would have to come from
 `sys.segments`, and nothing in this surface reads `sys` on purpose: a cluster running
 `druid-basic-security` grants the `sys` schema separately from the catalogs, so a row count taken

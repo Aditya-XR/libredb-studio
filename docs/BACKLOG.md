@@ -28,10 +28,10 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1–D98, U17 · 43
+- [Drivers and connections](#drivers-and-connections) — D1–D103, U17 · 48
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U21 · 12
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U35 · 23
 - [Dependencies](#dependencies) — P1–P5 · 5
 - [Documentation](#documentation) — DOC3–DOC4 · 2
 - [Release pipeline](#release-pipeline) — REL1–REL4 · 4
@@ -721,8 +721,17 @@ carry it. The object was reachable only by hand-writing a restored tab.
 This is load-bearing for the editing phase rather than cosmetic: any client-side predicate built on
 `provider-meta`'s answer is, on MariaDB, built on the wrong server's declaration.
 
+One sentence in the tree contradicts this entry, and it is the reason the entry is easy to lose.
+`flavourFor`'s docblock (`src/lib/db/providers/sql/mysql.ts:1189`) says that defaulting to MySQL
+"costs two folders a MariaDB user regains the moment the connection is live". Nothing re-reads
+capabilities once a connection opens, which is this entry's whole subject, so a reader who meets that
+sentence first concludes the gap closes itself and stops looking. It is on `origin/main` and
+untouched by the object-tree work, and it is corrected here rather than in an entry of its own
+because the sentence and the defect have one repair.
+
 **Done when:** a MariaDB connection draws its Packages and Sequences folders in both shells, or the
-provider doc says which surface cannot have them and why.
+provider doc says which surface cannot have them and why, and `flavourFor`'s docblock no longer says
+the two folders come back when the connection is live.
 
 ### D58. A ClickHouse function with a non-SQL origin has never been read live
 
@@ -1381,6 +1390,156 @@ What can be done is to re-probe, and to stop the claim drifting back to "whole o
 
 **Done when:** the focused repro has been run against a bun newer than 1.4.2 under the same load, and either it is whole 10 times out of 10 and this entry closes, or the entry names the newest version it still reproduces on and is reported upstream.
 
+### D99. The MariaDB flavour write is hand-copied into four declaration suites
+
+`MySQLProvider` resolves its object kinds from a private `measuredFlavour` that `connect()` writes
+from a server-version probe, so a suite that wants the MariaDB branch without a server writes the
+private field through a cast.
+Four files in `tests/isolated/` now carry the same `MARIADB_FLAVOUR` constant and the same
+`(provider as unknown as { measuredFlavour: "mysql" | "mariadb" }).measuredFlavour = MARIADB_FLAVOUR`
+line: `monaco-language-ids.test.ts`, `object-source-declarations.test.ts`,
+`object-edit-declarations.test.ts` and `object-column-declarations.test.ts`.
+
+Each of the first three disclosed the copy in its docblock rather than hoisting it, citing the
+standing ruling that a second copy is disclosed and a helper is earned; the fourth followed suit
+during the #789 column census and said so.
+Four is past that point.
+The cast is the part that matters: it names a private field's type in four places, so a rename of
+`measuredFlavour` or a third flavour compiles everywhere and silently stops driving the MariaDB
+branch in all four suites at once, and the census guards there would then be measuring MySQL while
+their names say MariaDB.
+
+Repro: rename `measuredFlavour` in `src/lib/db/providers/sql/mysql.ts` and run `bun run typecheck`.
+The four casts still compile, because a cast through `unknown` asserts a shape rather than checking
+one.
+
+**Done when:** one helper beside `tests/helpers/census-connection.ts` owns the constant and the
+write, the four suites call it, and the helper's own test fails when the private field it writes no
+longer exists on the provider.
+
+### D100. Five dead fixture arms in the SQL Server suite model a method that was removed
+
+`tests/integration/db/mssql-provider.test.ts` dispatches its double on statement text, and five arms
+answer for a `getSchema()` shape that no longer exists: `flat-tables`, `flat-columns`, `flat-pk`,
+`flat-fks` and `flat-indexes`.
+`src/lib/db/base-provider.ts` records that removal.
+
+They were not merely dead, they were live and wrong.
+During the #789 column census the single-object index statement fell into the `flat-indexes` arm,
+which answers a canned `app_orders_total_ix` row for any object, and the suite fabricated an index on
+`app.order_summary` the moment that object gained column rows.
+The arm's guard was narrowed with `T.NAME AS TABLE_NAME`, the same fragment the neighbouring
+`flat-pk` arm already uses, so the defect is fixed and all five arms are now unreachable.
+
+Repro: delete the five `case` bodies and their five `if` guards and run
+`bun tests/run-tests.ts tests/integration/db/mssql-provider.test.ts`.
+If the suite is green, nothing reached them.
+
+**Done when:** the five arms are gone, or the one that is still reachable is named with the statement
+that reaches it, and the suite is green either way.
+
+### D101. A `columnlessSamples` reason is not held to the bar `emptyKinds` sets
+
+`tests/helpers/object-surface-conformance.ts` takes two exemption maps whose values are reasons a
+person reads.
+`emptyKinds` holds its reasons to a bar: a blank sentence is refused, and the verdicts in
+`NOT_A_REASON` ("not applicable", "n/a", "none", "todo") are refused with a sentence saying to write
+what is absent and why.
+`columnlessSamples`, added by the #789 census so a provider may declare a kind has columns while a
+fixture's sampled object has none, is checked only for having excused something.
+So `columnlessSamples: { collection: "" }` and `columnlessSamples: { collection: "n/a" }` both buy the
+exemption, and the invariant that a declared twisty never opens on nothing is then waived by a string
+that states no fact.
+
+Repro: in any provider suite whose expectation carries a `columnlessSamples` entry, replace the reason
+with `"n/a"` and run that suite. It stays green.
+
+**Done when:** a `columnlessSamples` reason passes the same blank and `NOT_A_REASON` checks
+`emptyKinds` reasons pass, with the two negative cases asserted, and the two maps share one reason
+checker rather than two copies of it.
+
+### D102. PostgreSQL reports no primary key and no foreign key to a least-privilege role
+
+`CTE_PK_INFO` and `CTE_FK_INFO` in `src/lib/db/providers/sql/postgres.ts` read
+`information_schema.table_constraints`, which PostgreSQL defines as showing only constraints on
+tables a currently enabled role owns.
+A connection made as an ordinary `SELECT`-only role therefore sees every column and every index and
+NO key at all, and the answer is a claim rather than an absence: `describeObject` returns
+`isPrimary: false` on every column and `foreignKeys: []`.
+
+That role is not a corner case, it is what this product recommends and what its own seed fixture
+uses.
+The blind spot predates the object tree and is not confined to it: both CTEs feed `OBJECT_DETAIL_SQL`
+and the bulk statement beside it, so the ER diagram, the mobile schema explorer and the inventory's
+`includeColumns` answer have carried it too.
+What the object tree changed is that the key mark is now on screen, where an absent key reads as a
+table without one.
+
+Measured 2026-09-22 against PostgreSQL 18 holding `dvdrental`, `public.film`, tables owned by
+`postgres`, probed through `POST /api/db/objects/describe`:
+
+| Connected as | Columns | Primary key | Foreign keys |
+|---|---|---|---|
+| `postgres`, the owner | 13 | `film_id` | 1 |
+| `libredb_agent`, `SELECT` only | 13 | none | none |
+
+And at the catalog, as `libredb_agent`: `information_schema.table_constraints` answers 0 rows for
+`constraint_type = 'PRIMARY KEY'` in `public` while `pg_constraint` answers 15, and
+`information_schema.referential_constraints` answers 0 while `pg_constraint` answers 18 foreign keys.
+`information_schema.columns` answers 128 and `pg_indexes` answers 32 to the same role, which is why
+only the keys go missing.
+
+The repair is `pg_catalog`, which `CTE_INDEX_INFO` beside them already reads, and it is not a local
+edit: both statements run against every PostgreSQL wire-compatible engine this repo measures, and one
+of them, Materialize, already needs the documented `constraint_column_usage` fallback that
+`tests/integration/db/postgres-provider.test.ts` pins. So the change owes a live measurement on
+Materialize, CockroachDB, YugabyteDB and RisingWave before it lands, which is why it is filed rather
+than folded into #789's column work.
+
+Repro: connect Studio to any PostgreSQL as a role that owns nothing and holds only `SELECT`, expand a
+table in the object tree, and read the column rows. No key mark appears. Connect as the owner and it
+does.
+
+**Done when:** a `SELECT`-only role sees the same keys the owner sees, on PostgreSQL and on every
+wire-compatible engine whose fallback behaviour was measured for the change, with a test that drives
+the provider as a non-owner role rather than asserting the statement text.
+
+### D103. `noAbstainingKinds` is enforced over the expectation's kinds, not the provider's declarations
+
+`assertColumnDeclarations` builds `abstained` by walking `listings`
+(`tests/helpers/object-surface-conformance.ts:595-603`), and `listings` holds only the kinds the
+expectation gave a non-zero `want` (`:307-335`). The field's own docblock (`:195-200`) defines it
+over something else: "This provider declares `hasColumns` on EVERY kind it has". A provider that
+declares one kind without `hasColumns` and whose fixture happens to hold none of that kind is
+therefore indistinguishable, to the guard, from a provider that has no abstaining kind at all, and
+the refusal at `:643` tells the author to set a flag whose stated meaning that provider's own
+declarations contradict.
+
+It is worse than one wrong direction, and the control that shows it is the one worth keeping.
+Omitting the declared abstainer from the expectation is refused too. A fake provider declaring
+`table` (with columns, answering columns) and `trigger` (abstaining) throws the same
+"listed no kind that abstains from hasColumns" whether `trigger` is listed with a `want` of 0 or left
+out of `expected.kinds` entirely, and the only way to green it is to set `noAbstainingKinds`. So the
+expectation has no form in which it can state the truth about that provider, and the guard's advice
+is to record a falsehood.
+
+No shipped engine trips it today, re-checked across all seventeen expectations: druid, mongodb and
+libredb set the flag correctly, and Trino's only zero-counted kind, `materialized_view`, declares
+`hasColumns` and so is not an abstainer. This is a guard that refuses a legal provider, not a live
+red.
+
+Repro: take any expectation, add a kind the provider declares without `hasColumns` with a `want` of
+0, run it, then delete that kind from `expected.kinds` and run it again. Both throw the same message.
+
+Splitting the flag into two variables, the declaration fact and the fixture fact, is necessary and
+not sufficient. After the split a declared-but-unlisted abstainer still runs the negative probe zero
+times, which is the vacuity the flag was added against, so the complete repair needs a third state:
+the probe ran, or the expectation says why it could not.
+
+**Done when:** `abstained` is derived from the provider's own `objectKinds()` rather than from
+`listings`, an expectation that omits a declared abstaining kind is refused by name instead of by the
+flag's message, a flag set against declarations that contradict it is refused, and the negative
+direction of invariant 8 reports whether it ran rather than only whether it could have.
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound
@@ -1770,6 +1929,321 @@ stated in `readDefaultBody`'s own docblock.
 **Done when:** a body above the framework's clone limit gets one answer that names the size, on every
 route, rather than an empty-body claim on five and a parser error on one.
 
+---
+
+`U24` to `U31` came out of the #789 design that put columns back under an object row. Each was named
+and left out of that PR on purpose, so the reason is recorded here rather than re-derived. They are
+about the desktop object tree unless the entry says otherwise.
+
+### U24. The tree fetches an object's indexes and foreign keys and draws neither
+
+`POST /api/db/objects/describe` answers an `ObjectDetail`, which is `columns`, `indexes` and
+`foreignKeys`.
+The tree issues one of those per expanded object row and renders the first array only, so two thirds
+of every answer it already paid for is discarded.
+
+Repro: connect to PostgreSQL in the desktop sidebar with the network panel open, expand a table that
+has a primary key and a foreign key.
+One `describe` request goes out, its response body carries all three arrays, and the rows drawn under
+the table are the columns alone.
+
+Left out of #789 for two reasons, both still standing.
+A heterogeneous sibling list where an index row and a column row are one 28px line with no way to
+tell them apart is worse than not drawing them, so this needs a visual distinction decided first, not
+a second `map`.
+And a set of providers never answers an index at all, measured per provider for the #789 design:
+trino, druid, elasticsearch and opensearch (one module, two type-ids), mongodb, redis and libredb.
+So whatever shape holds an index has to be absent on those engines rather than empty.
+
+**Done when:** an index and a foreign key are reachable from an open object row, told apart from a
+column row by something other than their text, with no extra round trip, and an engine that answers
+neither draws no empty affordance for them.
+
+### U25. The object tree has no filter, over object names or column names
+
+`docs/FEATURES.md` promises "Real-time, high-performance filtering across both table names and column
+names".
+That sentence is true of `SchemaExplorer`, which filters on `table.name` and on `col.name` and is
+what the mobile schema tab renders; it is false of the desktop sidebar, which has no filter box at
+all.
+This PR scoped the sentence to the schema tab rather than deleting it, which makes the desktop gap
+explicit instead of covered.
+
+Repro: open the desktop sidebar on a schema with 200 tables and look for a filter.
+Open the same connection at a mobile width, switch to the schema tab, and there is one.
+
+The tree's filter is not the flat list's, and that is the work.
+The flat list holds every table and every column in memory, so its filter is an array filter over
+data that is already there.
+The tree reads lazily: a filter over column names can only match a row whose `describe` has happened,
+and a filter over object names can only match a folder whose objects have been listed.
+What an unread subtree does under a filter has to be decided before anything is written, and the
+three answers are hide it, show it unfiltered, or read it, where the third is the eager
+whole-database read #789 removed.
+
+**Done when:** the tree has a filter over object and column names, its behaviour on an unread subtree
+is stated in the component's docblock and asserted by a test, and no keystroke in the box can trigger
+a whole-database read.
+
+### U26. The tree row menu is two items shorter than the flat explorer's
+
+`src/components/schema-explorer/TableItem.tsx` offers "Select Top 50" (the label is
+`labels.selectAction` where a provider sets one), "Generate Query" and "Copy Name".
+`rowActions` in `src/components/object-tree/row-actions.ts` offers `generate-select` and neither of
+the other two, so a desktop reader lost both when the sidebar stopped rendering the flat explorer.
+
+Repro: right-click a table row in the desktop sidebar, then open the same table's menu on the mobile
+schema tab and compare.
+
+"Copy Name" has a constraint that has to be decided before it is added, and it is the reason this is
+an entry rather than two lines.
+It writes the clipboard and reports through a toast, and the embedded shell mounts no `<Toaster />`,
+for the reason `StudioWorkspace` records; the standalone shell mounts one in `src/app/layout.tsx`.
+So the action either gets a report the embedded shell can make, or it is declared standalone-only the
+way the seam already declares other host-dependent actions, and silently copying with no feedback is
+neither.
+
+**Done when:** both items are offered from a tree object row wherever the shell can carry their side
+effect, and a shell that cannot carry one declares it rather than being quietly short.
+
+### U27. Every column the desktop shows is read twice, and the second read is not the fixable one
+
+On connect, `src/hooks/use-connection-manager.ts` posts `/api/db/objects/inventory` with
+`includeColumns: true`, which reads columns for the whole database before any row is expanded.
+The desktop sidebar then posts `/api/db/objects/describe` once per object row the reader opens, for
+columns the first read already has.
+
+Repro: open a connection on a desktop viewport with the network panel open.
+One inventory request carries every column of every table with no gesture behind it.
+Expand one table: a `describe` request fetches that table's columns again.
+
+The design filed this as "the fix is moving the mobile schema tab onto the tree and dropping
+`includeColumns`", and that remedy is wrong as stated.
+Measured in `src/components/Studio.tsx`, the inventory's answer (`conn.schema`) has more readers than
+the schema tab: `SchemaDiagram`, `BottomPanel`, `DataImportModal`, `CommandPalette`, the
+`objectAtPath(conn.schema, ...)` lookups behind the profiler, the code generator and the test-data
+generator, and `conn.schemaContext`.
+The inventory route's own docblock names the same population.
+So moving the mobile tab onto the tree removes one reader of seven and drops nothing.
+
+**Done when:** each reader of `conn.schema` either has a source that is not a whole-database eager
+column read or is named here with the reason it needs one, and a connection whose readers all moved
+costs no column read until a row is opened.
+
+### U28. The single-object describe answer is unbounded, on the route and on the embedded seam
+
+`describeObjects` answers an `ObjectDetailBatch`, which carries `truncated` and takes a `limit`, so
+the vocabulary for a bounded answer exists.
+`describeObject` has neither: `POST /api/db/objects/describe` hands the provider's answer straight
+back, and `WorkspaceObjectReader.describeObject` in `src/workspace/types.ts` lets a host answer
+whatever it likes.
+The tree renders one row per column of whatever arrives.
+
+Repro: implement `describeObject` in an embedded host so it answers 50,000 columns for one table and
+open that row.
+Nothing between the host and the flattened row list refuses, truncates or says a word about the size.
+
+Not fixed in #789 because the bound is not this seam's to invent: `listObjects` has the same open
+question, `INVENTORY_PAIR_LIMIT` bounds the pair fan-out and not the per-object answer, and two
+different bounds decided in two PRs is how a reader ends up with a truncated list and an untruncated
+detail of the same object.
+
+**Done when:** the single-object answer carries the same bound and the same truncation signal as the
+batch one, on the route and on the seam, the bound is the same decision as `list`'s, and the tree
+says so on a row where it was hit.
+
+### U30. A search alias or stream over more than one index is described by the first index's mapping
+
+`src/lib/db/providers/sql/search/` declares `index`, `alias` and `stream` as kinds that have columns,
+and the mapping read in `http-transport.ts` takes `Object.values(payload)[0]`, the first entry of the
+`_mapping` response.
+An alias or a data stream that spans several backing indices is therefore described by one of them,
+and which one is whatever the cluster serialised first.
+
+Where the backing indices share a mapping the answer is correct, which is the common case and the
+reason this ships rather than being blocked.
+Where they do not, a field present only on a later index is missing from the tree's column rows and
+from the agent's column grounding, which has read the same transport answer since #789.
+So this is an existing provider answer that the tree makes visible; the tree did not create it.
+
+Repro: on Elasticsearch, create `logs-000001` and `logs-000002` with different mappings, point an
+alias at both, and expand the alias in the object tree.
+Only the first index's fields are drawn.
+
+**Done when:** `describeObject` for an alias or a stream answers the union of every `_mapping` entry
+in the response, a field two backing indices type differently is reported rather than resolved
+silently to one side, and both products have a fixture for the disagreeing case.
+
+### U31. No per-folder column prefetch, and the break-even that decides one is unmeasured per engine
+
+The tree reads one object's columns at a time, on the gesture that opens the row.
+`describeObjects` reads a whole folder in one round trip and is cheaper per object once enough rows
+in that folder are opened.
+Where that crossover sits differs by more than an order of magnitude across the fleet, from the A/B
+tables the provider docs already carry:
+
+| Engine | One `describeObjects` over a folder | Per object, single read |
+|---|---|---|
+| Trino | 165 ms / 200 objects | 25.8 ms |
+| Druid | 23 ms / 4 objects | 22.5 ms |
+| PostgreSQL | 33 ms / 200 objects | 20.7 ms |
+| Couchbase | 293 ms / 40 collections | 11.6 ms |
+| DuckDB | 26 ms / 200 objects | 6.5 ms |
+| Elasticsearch | 9 ms / 261 indices | 5.3 ms |
+| SQL Server | 161 ms / 200 objects | 2.2 ms |
+| MongoDB | 108 ms / 200 collections | 2.1 ms |
+| Redis | 2 ms / 4 groupings | 1.5 ms |
+
+Roughly six opened rows on Trino, two on PostgreSQL and seventy on SQL Server, which is why a
+constant trigger is not available.
+Each figure is one engine's own doc, on one version, against one fixture, so they are a starting
+point for a measurement rather than the measurement.
+
+The prefetch was left out because a folder read pays its whole cost on the gesture that is today the
+primary way to browse, for columns nobody asked to see: 293 ms on Couchbase and 165 ms on Trino for a
+reader who opens Tables and expands nothing.
+It also needs a second cache shape, since `ObjectDetailBatch` is bounded and the rows past the bound
+still need the single read.
+
+**Done when:** the numbers above have been re-measured on the versions in `docker-compose` at the
+time, the prefetch triggers on a per-engine threshold derived from those numbers rather than a
+constant, and a bounded batch and a single read land in one cache shape rather than two.
+
+### U32. A catalog change that lands during an in-flight read is dropped, and the pre-DDL answer stays
+
+`run` refuses a read whose key is already in flight
+(`src/components/object-tree/use-tree-nodes.ts:517`) and `refresh` issues its reads without waiting
+for anything (`:696`), so a `refreshToken` bump that arrives while a read is still open issues
+nothing for that slot.
+The answer that lands is the one asked for before the DDL statement ran, `store` writes it as the
+row's current state, and nothing re-issues until the next bump.
+A column added by that statement is therefore missing behind the twisty, and the row asserts a
+column list the engine no longer has, for as long as the reader runs no further DDL.
+
+Pre-existing, and measured as such rather than assumed. The guard and `refresh` both predate the
+column rows, and the same gesture on a folder's `list` read, with a capability set that declares no
+`hasColumns` so nothing in the column path is exercised, loses the same way: the bump issues
+`containers` and `counts` and no second `list`, and a table the statement created is absent until
+the next bump. So this is a standing property of `refresh` and not something the column rows created.
+The column rows do make it easier to reach, because a describe is slower than a listing and there is
+one per open object.
+
+Repro: PostgreSQL, standalone shell. Hold `POST /api/db/objects/describe` for `orders` open, expand
+`orders`, and while the describe is still open run `ALTER TABLE orders ADD COLUMN note text` in the
+editor. Release the held describe with the pre-DDL answer. The row draws the pre-DDL columns, no
+second describe is issued for it, and `note` appears only after the next DDL statement.
+
+A plain second `run` call is NOT the fix, and that is the trap this entry exists to record. Two
+describes for one row would then be in flight with no ordering between them, and the older can land
+last and overwrite the newer, which is a worse failure than a stale answer the next bump corrects.
+The fix records that a key was refused while in flight and re-issues it once the first settles, and
+it has to do that for all four slot kinds rather than for `details` alone: teaching one read kind to
+survive this race and leaving the other three behind is a harder inconsistency to reason about than
+the race itself.
+
+**Done when:** a bump that arrives while a read is in flight causes exactly one re-read of that slot
+after the first settles, for every slot kind, with never two reads of one slot in flight at once, and
+a test holds a read open across a bump and asserts the second answer is the one on screen.
+
+### U33. Three tree spans miss 4.5:1 on a selected row, and the docblock measured one background
+
+Three spans in `src/components/object-tree/TreeRow.tsx` are `text-muted-foreground` at 10px:
+`tree-row-column-type`, `tree-row-count` and `tree-row-badge`. Cited by test id rather than by line,
+because the line numbers in that file moved twice while this entry was being written. Measured
+against the repository's own compiled stylesheet, with the token values read off the live page rather
+than the file:
+
+| row background | light | dark |
+|---|---|---|
+| plain | 4.74 | 7.76 |
+| hover | 4.50 | 6.70 |
+| selected (`bg-muted`) | 4.35 | 5.81 |
+
+WCAG 1.4.3 asks 4.5:1 for text below 18.66px, so the light theme fails on the selected row and sits
+exactly on the line on hover. The failing background is not an edge case: clicking a row is the
+primary gesture on the tree, and a clicked row carries `aria-selected="true"` and `bg-muted`, so it
+is the reader's own row that fails.
+
+The correctness note above the type slot, the paragraph beginning "NO `/70`", reaches its conclusion
+from one background. It records `#737373` on `#ffffff` (4.7:1) and `#a1a1aa` on `#09090b` (7.7:1) and
+names neither the hover nor the selected ground, so the `/70` opacity it correctly refuses is refused
+for a reason narrower than the slot's real range, and the note reads as a clearance it has not
+established.
+
+The count and the badge have carried the same ratio since before the column rows existed, so the
+type slot joins a defect rather than introducing one. Repairing the three together, rather than
+recolouring one span in the change that added it, is why this is an entry.
+
+Repro: open the object tree, click any row so it carries `bg-muted`, and measure
+`tree-row-column-type`, `tree-row-count` or the badge text against the row's own background in the
+light theme.
+
+**Done when:** all three spans clear 4.5:1 on the plain, hover and selected backgrounds in both
+themes, the docblock states the measurement per background instead of one, and the ratios are
+asserted in `tests/unit/theme-accent-contrast.test.ts` through `tests/helpers/contrast.ts` rather
+than written down as prose.
+
+### U34. A refresh that drops the focused row sends focus to the document body
+
+`ObjectTree` keeps exactly one tabbable row,
+`rows.find((row) => row.id === activeId)?.id ?? rows[0]?.id`
+(`src/components/object-tree/ObjectTree.tsx:174`), and the focus effect below it moves focus only on
+an explicit `focusRequest`. When a catalog refresh removes the focused row from the model, the
+focused element unmounts, the browser hands focus to `document.body`, and the tab stop falls back to
+the first row. Arrow keys then do nothing, because the key handler is on the row, and the reader has
+to press Tab to re-enter the tree at the top, several screens from where they were.
+
+Pre-existing, and the tempting reading that `DROP COLUMN` makes it newly reachable is refuted by its
+own control: the same gesture against an OBJECT row, which `DROP TABLE` reaches and which predates
+any column work, loses focus identically, focus on `BODY` and the tab stop back on the first row.
+`git diff origin/main...HEAD -- src/components/object-tree/ObjectTree.tsx` reaches neither the
+fallback nor the focus effect. Column rows add one more way in, not the fault.
+
+Repro: PostgreSQL, standalone shell. Focus a column row of `orders` with the keyboard, then run
+`ALTER TABLE orders DROP COLUMN note` for that column in the editor. After the refresh,
+`document.activeElement` is `BODY`, the tab stop is the first row, and ArrowDown does nothing. Repeat
+with a table row and `DROP TABLE` to see the pre-existing half.
+
+**Done when:** a refresh that removes the focused row moves focus to the nearest surviving row, the
+parent for a dropped child and the next sibling otherwise, keyboard navigation continues from there
+with no Tab, and both the object-row case and the column-row case are tested.
+
+### U35. The type slot shows the wrapper and not the type on engines whose types nest
+
+The `aria-hidden` half of the `tree-row-column-type` span in `src/components/object-tree/TreeRow.tsx`
+renders `row.column.type.split("(")[0]`. That rule is right where the parenthesis opens a parameter
+list, which is why `VARCHAR(255)` reads `VARCHAR`, and wrong where it opens the type itself. Driven
+through the component with the spellings
+`docs/providers/clickhouse.md` records as what that provider returns:
+
+| the provider's answer | on screen |
+|---|---|
+| `Int32` | `INT32` |
+| `Nullable(String)` | `NULLABLE` |
+| `Array(UInt8)` | `ARRAY` |
+| `Map(String,String)` | `MAP` |
+| `Enum8('x'=1,'y'=2)` | `ENUM8` |
+| `LowCardinality(String)` | `LOWCARDINALITY` |
+| `Decimal(10,3)` | `DECIMAL` |
+
+So for every nullable or low-cardinality ClickHouse column the visible slot says only that the column
+is wrapped and never what it holds, and a reader scanning a table's types learns nothing from the
+column that needed the annotation most. Degraded rather than lost: the full spelling stays in the
+`title` and in the `sr-only` twin, so the tooltip and the accessible name are correct.
+
+Not the tree's invention. `src/components/schema-explorer/ColumnList.tsx:36` does the identical
+split, so the tree restores behaviour the flat explorer already had on the same engines, which is
+why this is an entry covering both readers rather than a line in the change that added the second.
+There is no second field to fall back to either: the ClickHouse provider publishes the wrapped
+spelling and no base type beside it.
+
+Repro: connect ClickHouse, create a table with a `Nullable(String)` column, and expand it in the
+object tree. The right-hand slot reads `NULLABLE`.
+
+**Done when:** a nested type shows the reader the inner type rather than the wrapper, the choice is
+driven off what the provider publishes rather than off the shape of the string and without branching
+on a database type id in a component, and the tree slot and the flat explorer's column list take the
+same answer from one place.
 
 ## Dependencies
 

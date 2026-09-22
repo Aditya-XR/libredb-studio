@@ -694,6 +694,11 @@ than unfinished reads: the kernel is one ordered keyspace where a key's own byte
 only index there is, and the catalog records a namespace's lens and a table's columns and nothing
 that references another namespace (`declaresForeignKeys: false`).
 
+All three kinds declare `hasColumns`, so the object tree draws a column twisty on every object row
+this engine produces and no kind abstains, because `columnsForGroup()` has one arm per kind and none
+of them can answer an empty list; the conformance suite states that as `noAbstainingKinds`, since
+invariant 8's other direction has nothing to iterate here.
+
 An object the current read no longer holds **raises** rather than answering an empty shape, on
 all three kinds alike. Unlike Redis, where one kind can be described without asking, every kind
 here comes out of the same read, so checking costs nothing, and an empty shape would claim a

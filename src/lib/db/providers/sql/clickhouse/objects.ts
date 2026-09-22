@@ -130,10 +130,37 @@ export const CLICKHOUSE_CONTAINER_LEVELS: ContainerLevels = Object.freeze([
  * objects with no text at all - a config-file dictionary and a function whose `origin` is
  * `ExecutableUserDefined` or `WasmUserDefined` - and each is a refusal PART beside readable
  * siblings of the same kind, never a dropped declaration.
+ *
+ * `hasColumns` is declared on the four kinds `CLICKHOUSE_OBJECT_CATALOGS` gives a column
+ * statement to, which is the same split `describeObject` gates on: a function has no entry
+ * there and answers three empty arrays with no round trip (`describeObject` below), so it
+ * declares nothing and its rows stay leaves. A DICTIONARY declares columns although it is
+ * `role: "config"`, and that is the measurement rather than the role: `describeDictionary()`
+ * reads its key and attribute columns out of `system.dictionaries`, the only catalog both
+ * flavours of dictionary are in. Writing the four literally rather than deriving them from
+ * `CLICKHOUSE_OBJECT_CATALOGS` keeps this array free of a temporal dead zone - that map is
+ * declared after it - and invariant 8 in `tests/helpers/object-surface-conformance.ts` checks
+ * every one of them against what this provider's own `describeObject` answers.
  */
 export const CLICKHOUSE_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
-  { id: "table", role: "relation", label: "Table", labelPlural: "Tables", hasSource: true, sourceLanguage: "sql" },
-  { id: "view", role: "relation", label: "View", labelPlural: "Views", hasSource: true, sourceLanguage: "sql" },
+  {
+    id: "table",
+    role: "relation",
+    label: "Table",
+    labelPlural: "Tables",
+    hasSource: true,
+    sourceLanguage: "sql",
+    hasColumns: true,
+  },
+  {
+    id: "view",
+    role: "relation",
+    label: "View",
+    labelPlural: "Views",
+    hasSource: true,
+    sourceLanguage: "sql",
+    hasColumns: true,
+  },
   {
     id: "materialized_view",
     role: "relation",
@@ -141,6 +168,7 @@ export const CLICKHOUSE_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze(
     labelPlural: "Materialized Views",
     hasSource: true,
     sourceLanguage: "sql",
+    hasColumns: true,
   },
   {
     id: "dictionary",
@@ -149,6 +177,7 @@ export const CLICKHOUSE_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze(
     labelPlural: "Dictionaries",
     hasSource: true,
     sourceLanguage: "sql",
+    hasColumns: true,
   },
   {
     id: "function",

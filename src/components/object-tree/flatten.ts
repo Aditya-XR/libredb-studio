@@ -9,8 +9,9 @@
  * are computed here, per sibling group, before any row of that group is emitted, and the
  * row component takes all four numbers verbatim.
  */
-import { containerDepth, isCountSampled, isCountUnavailable } from "@/lib/db/object-kinds";
-import type { Container, DatabaseObject, KindCount, ObjectKindSpec } from "@/lib/db/types";
+import { containerDepth, isCountSampled, isCountUnavailable, kindHasColumns } from "@/lib/db/object-kinds";
+import type { Container, DatabaseObject, KindCount, ObjectDetail, ObjectKindSpec } from "@/lib/db/types";
+import type { ColumnSchema } from "@/lib/types";
 
 /**
  * One visible row.
@@ -24,12 +25,12 @@ import type { Container, DatabaseObject, KindCount, ObjectKindSpec } from "@/lib
  */
 export interface TreeRowModel {
   readonly id: string;
-  readonly kind: "container" | "folder" | "object";
+  readonly kind: "container" | "folder" | "object" | "column";
   /**
-   * What a person reads. A container's own name, the engine's plural for a folder, and
-   * `DatabaseObject.name` for an object, which is NOT the last path segment: an
+   * What a person reads. A container's own name, the engine's plural for a folder,
+   * `DatabaseObject.name` for an object, which is NOT the last path segment (an
    * overloaded routine is addressed as `order_total(integer)` and labelled
-   * `order_total`.
+   * `order_total`), and the column's own name for a column.
    */
   readonly label: string;
   /** `aria-level` is depth + 1. */
@@ -54,12 +55,44 @@ export interface TreeRowModel {
    * hovering to find out whether the number can be trusted.
    */
   readonly badgeTitle?: string;
-  /** The engine's own sentence for a read it refused. */
+  /**
+   * A sentence in the trailing slot where a number would be.
+   *
+   * On a FOLDER it is the engine's own refusal to count, and a folder carrying one is a leaf.
+   * On an OPEN OBJECT it is this walk's sentence for a describe that landed and carried
+   * nothing, which is not the same row as one that has not been read: that one has no key in
+   * `details`, draws the spinner, and carries no sentence. Four engines answer an object
+   * dropped between the listing and the expand with zero columns and no error, and a Couchbase
+   * `INFER` the user has no SELECT grant for answers the same way, so an open row with nothing
+   * under it and nothing said would be the tree's only report of three different states.
+   */
   readonly unavailable?: string;
-  /** The container path for a container and a folder, the object path for an object. */
+  /**
+   * The container path for a container and a folder, the object path for an object, and the
+   * object path plus the column's name for a column.
+   *
+   * A column row therefore addresses something no `listObjects` answer ever named, which is
+   * the point: `objectFor` looks an object up by `objectKey(path, kindId ?? "")`, so a column
+   * row MISSES by construction and cannot be handed its parent table's menu, its status or its
+   * row count. That miss is also asserted rather than left to arithmetic, in `objectFor` and in
+   * `rowActions`, because it currently rests on no provider ever declaring the empty string as
+   * a kind id and `ObjectKindSpec.id` is documented as an OPEN string.
+   */
   readonly path: readonly string[];
-  /** Folder and object rows only. */
+  /** Folder and object rows only. A column row carries none, which is what makes the miss above. */
   readonly kindId?: string;
+  /**
+   * The column this row IS, on a column row and nowhere else.
+   *
+   * Carried on the model rather than looked up the way `objectFor` looks an object up, and the
+   * asymmetry is deliberate. An object row omits `status` and `rowCount` because
+   * `DatabaseObject` has fields the walk never touches and the cache already indexes objects
+   * for the row menu; a column has no second reader, and a second index would have to be keyed
+   * by the column row id, which would put `columnRowId`'s rule in two places.
+   * `containerRowId` is exported for exactly that reason, so this module keeps that rule to
+   * itself instead.
+   */
+  readonly column?: ColumnSchema;
 }
 
 /**
@@ -86,6 +119,26 @@ export interface FlattenTreeState {
    */
   readonly objects: Readonly<Record<string, readonly DatabaseObject[]>>;
   /**
+   * `describeObject` answers, keyed by OBJECT row id, exactly as `objects` is keyed by folder
+   * row id.
+   *
+   * The same absent-versus-empty contract as `objects`, and it bites harder here: three engines
+   * measured (oracle, mysql, couchbase) answer an object that was dropped between the listing
+   * and the expand with zero columns and no error, so an empty `columns` is a real answer. A
+   * missing KEY is the unread state, which the cache that owns this map renders as a busy row.
+   */
+  readonly details: Readonly<Record<string, ObjectDetail>>;
+  /**
+   * Whether the SOURCE behind this tree can answer a describe read at all (B76).
+   *
+   * True in the standalone shell, whose own route always exists. An embedded host declares it
+   * by implementing the optional `WorkspaceObjectReader.describeObject`, and a host that has
+   * not gets NO twisty rather than a twisty over a read that cannot succeed. An absent
+   * affordance is not a regression; a read that cannot succeed is, and that is the regression
+   * B76 was.
+   */
+  readonly readsColumns: boolean;
+  /**
    * How many container levels this engine nests its objects in, which decides where the
    * kind folders sit.
    *
@@ -111,8 +164,8 @@ export interface FlattenTreeState {
 /**
  * A depth-first walk from a virtual root: containers, nested as deep as the engine
  * declares, then each leaf container's declared kinds in declaration order, then the
- * loaded objects of an expanded folder. Objects are leaves, for the reason
- * `appendObject` records.
+ * loaded objects of an expanded folder, and then the columns of an expanded object, for the
+ * reason `appendObject` records.
  */
 export function flattenTree(state: FlattenTreeState): readonly TreeRowModel[] {
   const rows: TreeRowModel[] = [];
@@ -276,7 +329,7 @@ function appendFolder(
     path: parentPath,
     kindId: spec.id,
   });
-  if (expanded === true) appendObjects(state, rows, id, depth);
+  if (expanded === true) appendObjects(state, rows, spec, id, depth);
 }
 
 /**
@@ -311,40 +364,154 @@ function formatCount(count: KindCount | undefined): {
   return { badge: `${badge}+`, badgeTitle: `At least ${badge}: counted from ${count.sampledFrom}` };
 }
 
-function appendObjects(state: FlattenTreeState, rows: TreeRowModel[], folderId: string, folderDepth: number): void {
+function appendObjects(
+  state: FlattenTreeState,
+  rows: TreeRowModel[],
+  spec: ObjectKindSpec,
+  folderId: string,
+  folderDepth: number,
+): void {
   const objects = state.objects[folderId] ?? [];
-  objects.forEach((object, index) => appendObject(rows, object, folderDepth + 1, objects.length, index + 1));
+  objects.forEach((object, index) =>
+    appendObject(state, rows, spec, object, folderDepth + 1, objects.length, index + 1),
+  );
 }
 
 /**
- * An object row is a LEAF, and that holds even for a kind that declares `childKinds`.
+ * An object row is a LEAF unless its kind declares that it has columns.
  *
- * The declaration is true: an Oracle package really does hold routines. What is missing is
- * a way to fill that folder. Both listing methods are container-scoped,
- * `countObjects(container)` and `listObjects(container, kind)`, and nothing on the
- * provider surface lists the children of one OBJECT, so a package's Procedures folder
- * would draw, never badge, and open on nothing. Inventing an object-scoped method across
- * every engine before the consumer that needs it exists is what this epic declined to do,
- * so the nesting lands with that method and not before. Tracked on issue #789.
+ * The Phase 1 ruling that every object row is a leaf rested on the LISTING surface, and that
+ * half of it still stands: `countObjects(container)` and `listObjects(container, kind)` are both
+ * container-scoped, nothing lists the children of one OBJECT, and so a kind's `childKinds` still
+ * draws no folder, an Oracle package included. It was never true of COLUMNS.
+ * `describeObject(path, kind)` is object-scoped, abstract on `src/lib/db/base-provider.ts`, and
+ * implemented by every provider in the fleet, so the object-scoped method the ruling was waiting
+ * for was already there for this one consumer. `POST /api/db/objects/describe` is its route, and
+ * it was landed for exactly this.
  *
- * No badge either: `DatabaseObject.rowCount` is an estimate on most engines and a badge is
- * a count.
+ * The twisty is gated on the DECLARATION and never on the answer, which is the rule
+ * `appendFolder` states one function up: a folder draws because a kind was declared, not because
+ * a count answered. A kind that declares no columns is a leaf, no read is derived for it, and a
+ * routine row never offers a twisty that opens on nothing. `kindHasColumns` is why this is not
+ * `role === "relation"`: five `config` kinds in the fleet have columns the role would hide, and
+ * one `sequence` has none the role would promise.
+ *
+ * `spec.id === object.kind` because the id, the describe request and this gate must read ONE
+ * fact. The folder asked for one kind; an answer carrying another gets no twisty rather than a
+ * twisty over a read addressing something else.
+ *
+ * A READ THAT LANDED AND CARRIED NOTHING says so, in the slot a folder's refusal already uses.
+ * The alternative is an open row with nothing under it, which is what a busy row, an empty
+ * answer, a dropped object and a refused `INFER` would all look like. Nothing is said before the
+ * read lands (no key) and nothing is said on a closed row, so the sentence appears exactly when
+ * the reader asked a question and the engine answered "none".
+ *
+ * Still no badge. `DatabaseObject.rowCount` is an estimate on most engines, the row already draws
+ * it in the trailing slot, and a column COUNT beside it would be a second number in the same
+ * place meaning something else.
  */
 function appendObject(
+  state: FlattenTreeState,
   rows: TreeRowModel[],
+  spec: ObjectKindSpec,
   object: DatabaseObject,
   depth: number,
   setSize: number,
   posInSet: number,
 ): void {
+  const id = pathKey([...object.path, object.kind]);
+  const describesColumns = state.readsColumns && kindHasColumns(spec) && spec.id === object.kind;
+  const expanded = describesColumns ? state.expanded.has(id) : undefined;
+  const detail = expanded === true ? state.details[id] : undefined;
   rows.push({
-    id: pathKey([...object.path, object.kind]),
+    id,
     kind: "object",
     label: object.name,
     depth,
     setSize,
     posInSet,
+    expanded,
+    unavailable: detail !== undefined && detail.columns.length === 0 ? NO_COLUMNS_REPORTED : undefined,
     path: object.path,
     kindId: object.kind,
+  });
+  if (expanded === true) appendColumns(state, rows, object, id, depth);
+}
+
+/** Written here rather than at the two readers, so the row and its test cannot spell it differently. */
+const NO_COLUMNS_REPORTED = "No columns reported";
+
+/**
+ * A column row's id, which is the one id in this walk deliberately OUTSIDE `pathKey`'s image.
+ *
+ * `pathKey` emits `%` only as the two openers `%25` and `%2F`, so any string carrying a `%`
+ * followed by anything else cannot equal a container id, a folder id or an object id, whatever an
+ * engine allows inside an identifier and whatever kind id a future provider invents. That is a
+ * proof about the ENCODER rather than a claim about the names an engine happens to permit, which
+ * is the standard `pathKey` itself sets.
+ *
+ * The naive `pathKey([...object.path, object.kind, column.name])` does NOT have that property,
+ * and the collision is reachable rather than theoretical. On SQLite, a column named `trigger` on
+ * table `orders` gives the sequence ["orders", "table", "trigger"]; a trigger literally named
+ * `table` on `orders` has the path ["orders", "table"] and the kind "trigger", which is the same
+ * sequence and therefore the same key. Both identifiers are legal on SQLite, PostgreSQL, MySQL
+ * and Oracle, and the same construction works at depth 1 on PostgreSQL. The id is React's list
+ * key, the `expanded` set member and the `data-row-id` the focus effect and `rowOf` match on, so
+ * a collision opens one row's twisty on the other: the #789 defect the escaping was introduced
+ * for.
+ *
+ * Appending a literal `column` segment was the other candidate and is not airtight:
+ * `ObjectKindSpec.id` is documented as an OPEN string, and `column` is the one id a future
+ * provider is most likely to pick for an `attachedTo: "table"` kind.
+ *
+ * Injective among column rows themselves because the inner `pathKey` is injective over sequences,
+ * so two column rows share an id only when they are the same column of the same object. A
+ * provider answering one column name twice for one object produces two rows with one id, which is
+ * the exposure the flat list had with `key={column.name}` and is not defended against here either.
+ */
+const COLUMN_ROW_PREFIX = "column%3A";
+
+function columnRowId(object: DatabaseObject, columnName: string): string {
+  return `${COLUMN_ROW_PREFIX}${pathKey([...object.path, object.kind, columnName])}`;
+}
+
+/**
+ * The columns of one OPEN object, as one sibling group, built in full before any of it is
+ * emitted, which is the rule every other group in this file follows and the only way
+ * `aria-setsize` can describe the group rather than the window.
+ *
+ * An absent key and an empty array are NOT the same and are not distinguished HERE, because both
+ * emit no child rows. They are distinguished on the object ROW: an absent key leaves it busy
+ * through the cache that owns the map, and an empty array gives it the sentence above.
+ */
+function appendColumns(
+  state: FlattenTreeState,
+  rows: TreeRowModel[],
+  object: DatabaseObject,
+  objectId: string,
+  objectDepth: number,
+): void {
+  const columns = state.details[objectId]?.columns ?? [];
+  columns.forEach((column, index) => appendColumn(rows, object, column, objectDepth + 1, columns.length, index + 1));
+}
+
+/** A column row is a leaf in every sense: no `expanded`, no badge, no kind id, no menu. */
+function appendColumn(
+  rows: TreeRowModel[],
+  object: DatabaseObject,
+  column: ColumnSchema,
+  depth: number,
+  setSize: number,
+  posInSet: number,
+): void {
+  rows.push({
+    id: columnRowId(object, column.name),
+    kind: "column",
+    label: column.name,
+    depth,
+    setSize,
+    posInSet,
+    path: [...object.path, column.name],
+    column,
   });
 }

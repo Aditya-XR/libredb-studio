@@ -254,6 +254,11 @@ const MONGODB_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     // `UPDATE ... SET`, which has no MongoDB spelling; an import into a collection is
     // an ordinary `insertMany`. See `kindAcceptsRowWrites()` in object-kinds.ts.
     acceptsRowWrites: true,
+    // Fields, and they are SAMPLED rather than read from a schema: `describeObject` infers
+    // them from up to `OBJECT_SAMPLE_SIZE` documents because MongoDB stores no schema at
+    // all. What a reader sees under a collection is therefore what those documents happen
+    // to carry, which is still the only answer this engine can give.
+    hasColumns: true,
   },
   {
     id: MONGODB_KIND_VIEW,
@@ -270,6 +275,11 @@ const MONGODB_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     // registers, unlike `plsql`, `tsql` and `cql`, which are not language ids at all.
     hasSource: true,
     sourceLanguage: "json",
+    // Sampled the same way a collection's are, over the view's own output rather than over
+    // the collection underneath it, which is the reason a view is worth listing at all
+    // (`describeObject` below). Both kinds this provider declares have columns, so nothing
+    // here abstains.
+    hasColumns: true,
   },
 ] as const);
 

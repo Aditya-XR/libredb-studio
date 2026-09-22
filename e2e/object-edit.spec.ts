@@ -191,7 +191,23 @@ async function login(page: Page): Promise<void> {
   await expect(page.locator("text=Query 1").first()).toBeVisible({ timeout: 20_000 });
 }
 
-/** The real connection modal, filled the way a user fills it. */
+/**
+ * The real connection modal, filled the way a user fills it, and PRESSED AGAIN when the account is
+ * rate limited.
+ *
+ * MEASURED on 2026-09-22, running this whole file in order against the fixture: the SIXTH
+ * login-and-connect in one window is refused, and the dialog draws `Too many requests. Try again in
+ * 40 seconds.` and stays open. It is the same shared bucket `waitForTheObjectTree` and
+ * `restoreTheTabAndWaitForItsRead` already carry - one `user@libredb.org` account, 120 requests per
+ * 60 seconds across every db-reaching route (src/lib/api/rate-limit.ts) - reached one test earlier
+ * than before because this file now has six tests rather than five. Which test pays is arithmetic
+ * and not a property of the test: in the run before this repair the same refusal landed on the
+ * FIFTH, the shipped marker-coordinate test, with nothing about it changed.
+ *
+ * So the recovery goes here, on the step that is refused, rather than into a longer timeout: this is
+ * the button the reader in front of that sentence presses, the ordinary path still closes the dialog
+ * on the first poll, and a refusal that is not the rate limiter's still costs one bounded wait.
+ */
 async function connectToTheFixture(page: Page): Promise<void> {
   const sidebarButtons = page.locator("text=LibreDB Studio").locator("..").locator("..").locator("button");
   await sidebarButtons.last().click();
@@ -204,8 +220,21 @@ async function connectToTheFixture(page: Page): Promise<void> {
   await dialog.locator("#user").fill("postgres");
   await dialog.locator("#password").fill(PG_PASSWORD);
   await dialog.locator("#database").fill("postgres");
-  await dialog.getByRole("button", { name: "Establish Connection" }).click();
-  await expect(dialog).toBeHidden({ timeout: 20_000 });
+  const establish = dialog.getByRole("button", { name: "Establish Connection" });
+  const refusal = dialog.getByText(/Try again in \d+ seconds/);
+  await establish.click();
+  await expect(async () => {
+    if (await dialog.isHidden()) return;
+    if (await refusal.isVisible()) {
+      const sentence = (await refusal.textContent()) ?? "";
+      // Recorded in the report, so a GREEN run still says the budget was hit and how long it waited.
+      test.info().annotations.push({ type: "rate-limited", description: `connect: ${sentence}` });
+      // The server's own number, and a floor for anything else that keeps the dialog open.
+      await sleep((Number(/Try again in (\d+) seconds/.exec(sentence)?.[1] ?? 10) + 2) * 1000);
+      await establish.click();
+    }
+    throw new Error("the connection dialog has not closed yet");
+  }).toPass({ timeout: 180_000, intervals: [1_000, 2_000, 5_000] });
 }
 
 /**
@@ -431,6 +460,44 @@ async function restoreTheTabAndWaitForItsRead(page: Page): Promise<void> {
   }).toPass({ timeout: 240_000, intervals: [0] });
 }
 
+/**
+ * Open `app.orders` through its OWN TWISTY, and press it again when the describe is refused.
+ *
+ * The gesture is the retry. `use-tree-nodes.ts` re-reads an object row only when the reader
+ * re-opens it - a row that recorded a failure keeps it until the twisty is pressed again - so
+ * collapse-then-expand is both what a reader does in front of that sentence and the only way back,
+ * exactly as `waitForTheObjectTree` presses `tree-retry` and `restoreTheTabAndWaitForItsRead`
+ * presses the pane's own control. The cause is the same one those two carry: `/api/db/objects/
+ * describe` is metered into the shared `query` bucket (src/lib/api/object-route.ts), 120 requests
+ * per 60 seconds for the one `user@libredb.org` account every test in this file and in
+ * functional-smoke.spec.ts signs in as.
+ *
+ * It waits for ANY level-4 row and never for a NAME, which is the split that matters: this helper
+ * answers "did the read land", and the test below answers "is the name right". A helper that waited
+ * for the name would turn the defect this test exists for into a three-minute timeout with nothing
+ * in the report saying which of the two failed.
+ */
+async function expandOrdersAndWaitForItsColumns(page: Page): Promise<void> {
+  const expand = page.getByRole("button", { name: "Expand orders" });
+  const collapse = page.getByRole("button", { name: "Collapse orders" });
+  const anyColumnRow = page.locator('[role="treeitem"][aria-level="4"]').first();
+  await expand.click();
+  await expect(async () => {
+    if (await anyColumnRow.isVisible()) return;
+    const refusal = page.getByTestId("tree-row-failure").first();
+    const sentence = (await refusal.isVisible()) ? ((await refusal.textContent()) ?? "") : "";
+    // Recorded in the report, so a GREEN run still says the budget was hit and how long it waited.
+    if (sentence !== "") test.info().annotations.push({ type: "describe-refused", description: sentence });
+    // The server's own number, and a floor for a refusal that is not the rate limiter's, so a
+    // different failure still costs one bounded wait instead of hanging.
+    const named = /Try again in (\d+) seconds/.exec(sentence);
+    await sleep((Number(named?.[1] ?? 3) + 2) * 1000);
+    if (await collapse.isVisible()) await collapse.click();
+    await expand.click();
+    throw new Error(`the columns of app.orders have not been read yet: ${sentence}`);
+  }).toPass({ timeout: 180_000, intervals: [1_000, 2_000, 5_000] });
+}
+
 test.describe("Functional smoke: object edit end to end", () => {
   test.skip(!dockerAvailable(), "Docker daemon not available - the object edit E2E needs its own PostgreSQL");
   // Serial: every test drives the SAME function in the same container, and an apply from one test
@@ -587,5 +654,78 @@ test.describe("Functional smoke: object edit end to end", () => {
     });
     // A refusal loses nothing: the definition in the engine is the one the seed wrote.
     expect(definitionInTheEngine()).not.toContain("ZZZ_NOT_SQL");
+  });
+
+  test("expanding an object row draws its columns, and the DECLARED TYPE reaches the row's name", async ({ page }) => {
+    // The assertion no unit test can make, though NOT for the reason this comment used to give.
+    // Playwright does not read Chromium's accessibility tree here: `getByRole({ name })` runs
+    // Playwright's OWN accessible-name computation inside the page (`getElementAccessibleName` in
+    // `playwright-core`; nothing in that package calls CDP `Accessibility.getFullAXTree`). What is
+    // real here, and is what happy-dom cannot give, is everything around the name: Chromium's DOM,
+    // CSS and layout, the app as it is actually built, and a live PostgreSQL behind the route.
+    //
+    // THE TWO COMPUTATIONS ARE NOT INTERCHANGEABLE, which is why the distinction is worth saying.
+    // Chromium applies CSS `text-transform` when it publishes a name and Playwright's
+    // implementation does not (`text-transform` appears nowhere in its accname path). MEASURED on
+    // 2026-09-22, with the `uppercase` class on the type span and so inherited by the `sr-only`
+    // twin inside it: Chromium published `id Primary key INTEGER`, Playwright computed
+    // `id Primary key integer`. The regex below is the lowercase one because it pins what
+    // Playwright computes; move that class onto the inner `aria-hidden` span and the two agree.
+    //
+    // WHAT IT PINS IS THE OUTCOME AND NOT THE MECHANISM, because the mechanism turned out to be two
+    // things rather than one. MEASURED in Chromium on 2026-09-22, against four hand-built copies of
+    // this row's markup and then against two rebuilds of this app. An `aria-hidden` descendant
+    // contributes nothing, so the truncated visible type - `NUMERIC` for `NUMERIC(10,2)` - never
+    // reaches the name, which is why the `sr-only` twin exists. But the type span's `title` is NOT
+    // dropped: a row drops its OWN title once it has a name, while `aria-labelledby` computes a name
+    // for each referenced element in turn, and an element whose whole subtree is `aria-hidden` falls
+    // back to its own `title`. So the type reaches the name through the twin AND through that title,
+    // and deleting either one alone leaves it intact - measured by rebuilding this app with the twin
+    // removed, where the run below still passed.
+    //
+    // Its red is therefore the row whose type slot is not referenced by `aria-labelledby` at all,
+    // which is the shape this row had before #789: measured by rebuilding with that `id` removed,
+    // where the two columns still draw, the level is still 4, and this line fails with the name not
+    // found.
+    //
+    // THE NAME IS MATCHED WHOLE, anchored at both ends, which is the whole point. Playwright's
+    // `name` is a case-insensitive SUBSTRING match by default, so `{ name: "total" }` cannot tell
+    // the fixed row from the broken one - it matches a row named "total" with no type in it just as
+    // happily - and on this very fixture it is ambiguous as well, which the control at the end of
+    // this test measures rather than asserts from the armchair.
+    await login(page);
+    await connectToTheFixture(page);
+    await waitForTheObjectTree(page);
+    await page.getByRole("treeitem", { name: "app", exact: true }).click();
+    await page.getByRole("treeitem", { name: "Tables 1" }).click();
+    // The twisty is a real button with a name of its own, so the pointer target is reached the way
+    // a reader reaches it and not through a testid.
+    await expect(page.getByRole("button", { name: "Expand orders" })).toBeVisible({ timeout: 30_000 });
+    await expandOrdersAndWaitForItsColumns(page);
+
+    // `id int PRIMARY KEY, total numeric` as the seed wrote it, as `format_type(atttypid, NULL)`
+    // renders it back: `integer` and `numeric`, in `attnum` order.
+    const idColumn = page.getByRole("treeitem", { name: /^id Primary key integer$/ });
+    const totalColumn = page.getByRole("treeitem", { name: /^total numeric$/ });
+    await expect(idColumn).toHaveAttribute("aria-level", "4");
+    await expect(totalColumn).toHaveAttribute("aria-level", "4");
+    // Two, and not two of the four an anchored regex would still be satisfied by one of: the column
+    // group under `orders` is the whole of level 4 on this tree.
+    await expect(page.locator('[role="treeitem"][aria-level="4"]')).toHaveCount(2);
+    // The object row now says it is open, which is the state the W3C tree pattern announces.
+    await expect(page.getByRole("treeitem", { name: /^orders\b/ })).toHaveAttribute("aria-expanded", "true");
+    // The POINTER's half of the same fact: the visible text is truncated at the first paren and the
+    // whole declared type is one hover away. Unmeasured here it would be a tooltip nobody reads.
+    await expect(idColumn.getByTestId("tree-row-column-type")).toHaveAttribute("title", "integer");
+    await expect(totalColumn.getByTestId("tree-row-column-type")).toHaveAttribute("title", "numeric");
+
+    // THE CONTROL for the anchoring above, measured on this fixture rather than argued: open the
+    // Functions folder and the seeded `order_total` is on screen beside the `total` column, so the
+    // substring matcher this test refuses to use resolves to TWO rows. An unanchored assertion here
+    // would be satisfied by the wrong one of them.
+    await page.getByRole("treeitem", { name: "Functions 1" }).click();
+    await expect(page.getByRole("treeitem", { name: "order_total" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("treeitem", { name: "total" })).toHaveCount(2);
+    // Nothing was applied here: this test only reads, so the fixture is as it found it.
   });
 });

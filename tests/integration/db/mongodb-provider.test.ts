@@ -1707,6 +1707,35 @@ describe("object surface", () => {
     ).toEqual(["collection"]);
   });
 
+  test("declares columns on every kind it has, and both answer a usable column shape", async () => {
+    const kinds = objectProvider.getCapabilities().objectKinds ?? [];
+    // BOTH, and there is no third: `describeObject` samples documents the same way for a
+    // collection and for a view (`mongodb.ts:1818-1821`), so no kind here abstains and the
+    // expectation above has to say `noAbstainingKinds`.
+    expect(kinds.filter((kind) => kind.hasColumns === true).map((kind) => kind.id)).toEqual(["collection", "view"]);
+    expect(kinds.filter((kind) => kind.hasColumns !== true).map((kind) => kind.id)).toEqual([]);
+    // `false` is not the spelling: a kind either declares the fact or abstains from it, and
+    // this engine has no abstainer to spell.
+    expect(kinds.some((kind) => kind.hasColumns === false)).toBe(false);
+
+    // The declaration is what draws the twisty, so what it promises is asserted against the
+    // provider's own answer rather than against the declaration alone: a name and a type
+    // that are both non-empty strings, which is what the column row dereferences.
+    for (const [path, kind] of [
+      [["app", "customers"], "collection"],
+      [["app", "active_customers"], "view"],
+    ] as const) {
+      const detail = await objectProvider.describeObject(path, kind);
+      expect(detail.columns.length).toBeGreaterThan(0);
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(column.type).not.toBe("");
+      }
+    }
+  });
+
   // --------------------------------------------------------------------------
   // Conformance
   // --------------------------------------------------------------------------
@@ -1720,6 +1749,12 @@ describe("object surface", () => {
       // does not hold. A view simply not being in the `listCollections` answer is absence
       // here, and absence RAISES rather than answering a refusal part (#789).
       absentSource: { path: ["app", "no_such_view"], kind: "view" },
+      // Every kind this engine has declares `hasColumns`, so invariant 8's negative
+      // direction iterates zero times and certifies nothing unless it is said out loud.
+      // There is no schema to read here: a collection and a view both get their fields
+      // SAMPLED from documents by the same code path (`mongodb.ts:1818-1821`), so there is
+      // no kind left that could abstain.
+      noAbstainingKinds: true,
     });
   });
 

@@ -727,6 +727,19 @@ Only the two `relation` kinds have columns, indexes or foreign keys. A routine, 
 sequence and a trigger answer three empty arrays **without a round trip**, which is a true fact
 about those kinds rather than a failed read.
 
+`table` and `view` are therefore the two kinds that declare `hasColumns`, which is what gives an
+object row in the object tree a twisty that opens on its columns; `procedure`, `function`,
+`trigger`, `synonym` and `sequence` declare nothing, stay leaves, and answer `columns: []` for any
+object of theirs the tree is ever asked about.
+A view's columns are real `sys.columns` rows here rather than a derivation, measured on the fixture
+server: `app.order_summary` answers `id`, `total` and `customer_name`, and none of them is primary,
+because a non-indexed view has no row in `sys.indexes` at all.
+A `sequence` having no columns is the contrast with PostgreSQL, where one answers `last_value`,
+`log_cnt` and `is_called`, which is why the declaration is the provider's and is never derived from
+the role.
+Both kinds are described at the full two-level path `[database, schema, name]`, so an expanded row
+reaches a bound value rather than the shape refusal below.
+
 Without the kind the same answer would come out by accident here, and the accident is reachable:
 measured, `CREATE TRIGGER orders ON DATABASE` succeeds while the table `app.orders` exists, because
 a DDL trigger is not in the schema namespace - while `CREATE PROCEDURE app.orders`,

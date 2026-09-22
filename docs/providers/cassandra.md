@@ -903,6 +903,12 @@ Nothing reads the name to work out what it is holding.
   trip**. A routine has no columns and neither has a trigger; that is a true fact about the kind
   rather than a failed read.
 
+`table`, `materialized_view` and `type` therefore declare `hasColumns`, which is what draws the
+object tree's twisty, and `index`, `function`, `aggregate` and `trigger` declare nothing and answer
+`columns: []`, so they stay leaves; `type` is `role: "config"` and still has columns, which is why
+the declaration is per kind and not derived from the role, and a UDT declared with no field is a
+legal empty answer rather than a defect.
+
 `foreignKeys` is always `[]` for the same reason [§6.2](#62-indexes-and-the-one-thing-they-never-are)
 gives.
 

@@ -629,6 +629,12 @@ measured, `index_info` answers `name = NULL, cid = -2` - so half an engine's ind
 themselves and the other half would silently describe themselves wrongly. A trigger's body is source
 text, which is Phase 2's Source tab.
 
+`hasColumns: true` is declared on `table` and `view` and on no other kind (#789), so those are the
+only rows the object tree gives a twisty to; `index` and `trigger` declare nothing and stay leaves,
+which is what their three empty arrays say. This engine declares zero container levels, so the path
+a column row is read at is the bare object name, or the parent table's name plus the trigger's for
+the one attached kind.
+
 For a `table` and a `view`:
 
 | Data | Source | Note |

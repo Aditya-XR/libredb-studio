@@ -1369,6 +1369,44 @@ export interface ObjectKindSpec {
   /** Phase 2. The Monaco language id the source renders in. */
   readonly sourceLanguage?: string;
   /**
+   * Whether an object of THIS KIND has COLUMNS a reader can be shown (#789, and the restoration
+   * of what the flat explorer drew until 0.15.0).
+   *
+   * Absent and undeclared both read as FALSE, and the name states the scope, for the reason
+   * `acceptsRowWrites` states it: the permissive default is wrong when only the provider knows.
+   * Read through `kindHasColumns()`. The object tree draws a twisty on an object of a kind that
+   * declares this and asks `describeObject` when it is opened; a kind that declares nothing is a
+   * leaf, exactly as every object row was before this field existed, so no read is ever derived
+   * for it and no twisty opens on nothing.
+   *
+   * IT IS NOT `role === "relation"`, and that is measured rather than argued. Five declarations
+   * in the fleet disagree with the role, all one way: a `config` kind that DOES have columns.
+   * PostgreSQL `sequence` answers `last_value`, `log_cnt` and `is_called`, MariaDB `sequence`
+   * answers eight columns, a ClickHouse `dictionary` answers its structure out of
+   * `system.dictionaries`, a Cassandra `type` answers the UDT's fields, and a Druid `lookup`
+   * answers `k` and `v`. Nothing in the fleet declares `relation` and answers no columns, so the
+   * role would never withhold a twisty a relation deserved; it would withhold those five and
+   * grant one it should not. Oracle's `sequence` is that one, and it is the case that settles the
+   * whole question: same kind id as PostgreSQL's, opposite answer, because that provider gates on
+   * the role (`oracle.ts:2000`) and PostgreSQL gates on `RELKIND_BY_KIND` (`postgres.ts:2970`).
+   * A rule written above the providers is wrong for at least one engine whichever way it is
+   * written, so the provider declares and nothing else decides.
+   *
+   * The declaration is pinned in BOTH directions, which is what `assertObjectSurface` already
+   * does for `hasSource` and what the first issue of this design left half done. Invariant 8 in
+   * `tests/helpers/object-surface-conformance.ts` asks the provider's own `describeObject`, for
+   * a sample object the provider's own `listObjects` produced: a kind declaring nothing must
+   * answer `columns: []`, and a kind declaring this must answer at least one column unless the
+   * expectation names it in `columnlessSamples` with the engine fact that makes an empty answer
+   * legal.
+   *
+   * It is a CLIENT GATE, unlike `acceptsSourceEdits`, and the MariaDB lever that field records
+   * cannot reach it: the client reads this off the same `ProviderCapabilities` copy that decides
+   * which folders draw at all, so a kind missing from that copy has no folder, no object rows and
+   * no column rows, and this field can never be wrong about a kind whose folder the reader sees.
+   */
+  readonly hasColumns?: boolean;
+  /**
    * Phase 3. Whether an object of THIS KIND can have its definition text edited and applied
    * back (#789, discussion #778).
    *

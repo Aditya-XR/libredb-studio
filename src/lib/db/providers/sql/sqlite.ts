@@ -350,10 +350,25 @@ const OBJECT_FOREIGN_KEYS_SQL = `
 const SOURCE_SQL: Pick<ObjectKindSpec, "hasSource" | "sourceLanguage"> = { hasSource: true, sourceLanguage: "sql" };
 
 const SQLITE_OBJECT_KINDS: readonly ObjectKindSpec[] = [
-  { id: "table", role: "relation", label: "Table", labelPlural: "Tables", acceptsRowWrites: true, ...SOURCE_SQL },
+  // `hasColumns` on the two relation kinds and on neither of the other two (#789). Written
+  // literally rather than derived from BULK_RELATION_TYPES, which holds the same two ids: that
+  // constant is declared after this array, so referencing it here would throw at module init.
+  // The literal is safe because invariant 8 in `tests/helpers/object-surface-conformance.ts`
+  // checks it against this provider's own `describeObject` in both directions, and the engine
+  // fact behind the two abstentions is measured: `pragma_table_xinfo` answers ZERO rows for an
+  // index name and for a trigger name, so an index and a trigger really have no column to draw.
+  {
+    id: "table",
+    role: "relation",
+    label: "Table",
+    labelPlural: "Tables",
+    acceptsRowWrites: true,
+    hasColumns: true,
+    ...SOURCE_SQL,
+  },
   // No `acceptsRowWrites`. SQLite refuses a write to a view outright unless an INSTEAD OF
   // trigger carries it, which is a per-OBJECT fact a per-kind declaration cannot state.
-  { id: "view", role: "relation", label: "View", labelPlural: "Views", ...SOURCE_SQL },
+  { id: "view", role: "relation", label: "View", labelPlural: "Views", hasColumns: true, ...SOURCE_SQL },
   { id: "index", role: "config", label: "Index", labelPlural: "Indexes", ...SOURCE_SQL },
   { id: "trigger", role: "attached", label: "Trigger", labelPlural: "Triggers", attachedTo: "table", ...SOURCE_SQL },
 ];

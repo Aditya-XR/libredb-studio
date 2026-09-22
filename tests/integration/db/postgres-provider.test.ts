@@ -3931,6 +3931,38 @@ describe("object surface", () => {
     ).toEqual(["materialized_view", "sequence", "table", "trigger", "view"]);
   });
 
+  /**
+   * The column declaration, both directions (#789, columns under an object row).
+   *
+   * DERIVED from `RELKIND_BY_KIND` rather than transcribed, so there is one writer: that map
+   * is what `describeObject` itself gates on (`postgres.ts:2970`), and a kind that is not a key
+   * in it returns three empty arrays without asking the server. The second assertion is the one
+   * that matters over time: a kind added to `objectKinds` later cannot quietly gain a twisty
+   * that opens on nothing.
+   *
+   * `sequence` is the interesting row and the reason this cannot be read off `role`. It is
+   * `role: "config"` and it DOES answer columns here - `last_value`, `log_cnt`, `is_called` out
+   * of `pg_attribute` - while Oracle's kind of the same id answers none.
+   */
+  test("declares columns on exactly the kinds a pg_class relation backs", () => {
+    const provider = makeProvider();
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["materialized_view", "sequence", "table", "view"]);
+    // The other direction. A routine and a trigger have no relation behind them, so
+    // `describeObject` answers them without a round trip at all (`postgres.ts:2969-2972`).
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["function", "procedure", "trigger"]);
+  });
+
   test("satisfies the shared object surface contract", async () => {
     // The relations each kind holds, one place, because the helper now reads the listing
     // and the bulk column read against each other: two lists that had to be kept in step
@@ -4033,6 +4065,22 @@ describe("object surface", () => {
             indexes: null,
             foreign_keys: null,
           })),
+        };
+      }
+      // The SINGLE-object detail read, which invariant 8 drives once per listed kind (#789).
+      // Checked BEFORE the container arm because `CTE_OBJECT_COLUMNS` also joins
+      // `pg_namespace` and also carries an `ORDER BY`, and that arm answering it was how this
+      // fixture used to report every relation as having no columns at all.
+      if (sql.includes("object_columns")) {
+        return {
+          rows: [
+            {
+              pk_columns: ["id"],
+              columns: [{ name: "id", type: "integer", nullable: false, defaultValue: null }],
+              indexes: null,
+              foreign_keys: null,
+            },
+          ],
         };
       }
       if (sql.includes("pg_namespace") && sql.includes("ORDER BY")) {
@@ -4522,6 +4570,64 @@ describe("PostgreSQL object listing and detail", () => {
       indexes: [],
       foreignKeys: [],
     });
+    await provider.disconnect();
+  });
+
+  /**
+   * The `hasColumns` declaration against what this provider actually answers, positive
+   * direction (#789). `sequence` is the kind that carries it: `role: "config"`, and columns
+   * all the same, because `describeObject` gates on `RELKIND_BY_KIND` and 'S' is a key there.
+   * The rows are the three `pg_attribute` publishes for a sequence on postgres:18.
+   */
+  test("a kind declaring hasColumns answers columns with a name and a type a reader can be shown", async () => {
+    mockQueryFn = async (sql, params) => {
+      if (!sql.includes("object_columns")) return { rows: [] };
+      expect(params).toEqual(["app", "invoice_number_seq"]);
+      return {
+        rows: [
+          {
+            pk_columns: null,
+            columns: [
+              { name: "last_value", type: "bigint", nullable: false, defaultValue: null },
+              { name: "log_cnt", type: "bigint", nullable: false, defaultValue: null },
+              { name: "is_called", type: "boolean", nullable: false, defaultValue: null },
+            ],
+            indexes: null,
+            foreign_keys: null,
+          },
+        ],
+      };
+    };
+    const provider = makeProvider();
+    await provider.connect();
+
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    expect(kinds.find((kind) => kind.id === "sequence")?.hasColumns).toBe(true);
+    const detail = await provider.describeObject(["app", "invoice_number_seq"], "sequence");
+    expect(detail.columns.length).toBeGreaterThan(0);
+    for (const column of detail.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+    await provider.disconnect();
+  });
+
+  /**
+   * The same declaration, negative direction. A kind that declares nothing is a LEAF in the
+   * object tree, so an answer carrying columns would be columns no reader can ever reach.
+   * `procedure` has no relation behind it, so the answer costs no round trip.
+   */
+  test("a kind declaring no hasColumns answers no columns at all", async () => {
+    mockQueryFn = async () => ({ rows: [] });
+    const provider = makeProvider();
+    await provider.connect();
+
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    expect(kinds.find((kind) => kind.id === "procedure")?.hasColumns).toBeUndefined();
+    const detail = await provider.describeObject(["app", "archive_orders(integer)"], "procedure");
+    expect(detail.columns).toEqual([]);
     await provider.disconnect();
   });
 

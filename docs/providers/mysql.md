@@ -894,6 +894,11 @@ one (`next_not_cached_value`, `minimum_value`, `maximum_value`, `start_value`, `
 `cache_size`, `cycle_option`, `cycle_count`), because a sequence is a table underneath. Its role is
 `config` rather than `relation` because nobody selects rows from it.
 
+**`hasColumns` is declared on `table`, `view` and MariaDB's `sequence`, and on no other kind (#789).**
+That declaration is the client gate the object tree draws a column twisty from, and it is derived at each kind from the same catalog predicate these two reads are keyed on, so the gate and the reads cannot drift apart.
+`procedure`, `function`, `trigger`, `event` and MariaDB's `package` declare nothing and answer `columns: []`, which is the three-empty-array answer above.
+An object dropped between the listing and the describe reaches the caller the same way: this surface has no zero-row check, so it answers three empty arrays and no error, unlike PostgreSQL, which raises.
+
 Three differences from the deleted flat reads over the same views, all deliberate:
 
 - **No `LIMIT`.** The flat column read stopped at 100 columns, which a flat tree could live with and a

@@ -1090,13 +1090,25 @@ const MYSQL_OBJECT_KINDS: readonly ObjectKindSpec[] = [
     label: "Table",
     labelPlural: "Tables",
     acceptsRowWrites: true,
+    // DERIVED, not transcribed (#789). `hasColumns()` (:1860) is the one rule `describeObject`
+    // and `describeObjects` already gate on, and a function declaration hoists, so calling it
+    // here is legal: `MYSQL_OBJECT_TYPES` (:694) is initialized ahead of this array. A second
+    // hand-written copy of the catalog fact is how the client gate and the reads would drift.
+    hasColumns: hasColumns("table"),
     ...MYSQL_SOURCE_DECLARATION,
   },
   // No `acceptsRowWrites`. MySQL takes an UPDATE against a simple updatable view and
   // refuses it against a view with an aggregate, a UNION or a DISTINCT, which is a
   // per-OBJECT fact this per-kind declaration cannot state; claiming it would offer an
   // import target that fails on most views in most databases.
-  { id: "view", role: "relation", label: "View", labelPlural: "Views", ...MYSQL_SOURCE_DECLARATION },
+  {
+    id: "view",
+    role: "relation",
+    label: "View",
+    labelPlural: "Views",
+    hasColumns: hasColumns("view"),
+    ...MYSQL_SOURCE_DECLARATION,
+  },
   {
     id: "procedure",
     role: "routine",
@@ -1132,7 +1144,17 @@ const MARIADB_EXTRA_OBJECT_KINDS: readonly ObjectKindSpec[] = [
     childKinds: ["procedure", "function"],
     ...MYSQL_SOURCE_DECLARATION,
   },
-  { id: "sequence", role: "config", label: "Sequence", labelPlural: "Sequences", ...MYSQL_SOURCE_DECLARATION },
+  {
+    id: "sequence",
+    role: "config",
+    label: "Sequence",
+    labelPlural: "Sequences",
+    // `config` and it still has columns, which is the entry that refutes deriving the client
+    // gate from the role: a sequence is a table underneath and `information_schema.COLUMNS`
+    // answers eight rows for it (measured on MariaDB 12.3.2). Same derivation as `table`.
+    hasColumns: hasColumns("sequence"),
+    ...MYSQL_SOURCE_DECLARATION,
+  },
 ];
 
 /**

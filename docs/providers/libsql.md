@@ -542,6 +542,12 @@ holding only the second shape makes this predicate look untestable when it is no
 An `index` and a `trigger` answer three empty arrays without touching the network, which is a true fact
 about those kinds rather than a failed read.
 
+`table` and `view` are therefore the only kinds here that declare `hasColumns`, so they are the only rows
+the object tree gives a twisty and expands into column rows; `index` and `trigger` declare nothing and stay
+leaves, which is what `describeObject()` answering no column for them means (#789).
+Both deployments this one type-id serves, self-hosted sqld and Turso Cloud, read the same pragmas through
+the same transport, so the declaration is one fact about the engine and not per deployment.
+
 For a `table` and a `view` the reads are batched, and that is where this provider stops being
 [sqlite.ts](../../src/lib/db/providers/sql/sqlite.ts): there every read is a call into a file handle, and
 here every read is an HTTP request.
