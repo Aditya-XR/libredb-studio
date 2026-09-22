@@ -18,7 +18,7 @@ import type { DatabaseProvider } from "@/lib/db/types";
 import { open, kv, doc, table, CATALOG_PREFIX } from "@libredb/libredb";
 import { buildObjectFixture } from "../../../docker/libredb-init/01-object-fixture";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
-import { containerDepth, kindHasSource } from "@/lib/db/object-kinds";
+import { containerDepth, kindHasColumns, kindHasSource } from "@/lib/db/object-kinds";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -689,7 +689,53 @@ describe("LibreDBProvider object surface (#789)", () => {
       containers: [],
       kinds: { table: 3, collection: 2, keyspace: 3 },
       sampleObject: { path: ["employees:*"], kind: "table" },
+      // Invariant 8's negative direction runs zero times here, and saying so is mandatory
+      // rather than polite: `columnsForGroup` (`libredb.ts:642-663`) has three arms and every
+      // one of them returns a non-empty list, so all three declared kinds declare columns and
+      // a silent zero-iteration loop would certify nothing (#789).
+      noAbstainingKinds: true,
     });
+  });
+
+  /**
+   * The `hasColumns` declaration against what the engine really answers, kind by kind (#789).
+   *
+   * Every kind this store has declares it, which is why the pair below is written as a whole
+   * population rather than a `some`: the negative half of invariant 8 has nothing to iterate
+   * here, so the only thing that can catch a kind quietly dropping its declaration is an
+   * assertion that names all three.
+   */
+  test("every declared kind declares hasColumns, because every one of them answers columns", () => {
+    const capabilities = provider.getCapabilities();
+    const kinds = capabilities.objectKinds ?? [];
+    expect(kinds.filter((kind) => kind.hasColumns === true).map((kind) => kind.id)).toEqual([
+      "table",
+      "collection",
+      "keyspace",
+    ]);
+    // Through the reader the tree walk actually calls, not the raw field alone.
+    expect(kinds.map((kind) => kindHasColumns(kind))).toEqual([true, true, true]);
+  });
+
+  test("describeObject answers a named, typed column for each of the three kinds", async () => {
+    // One object per kind, all three from the fixture: a cataloged table, a cataloged
+    // document collection and a derived raw grouping, which are exactly the three arms of
+    // `columnsForGroup`. Both fields are checked because the tree feeds `column.name` to
+    // `pathKey`, where a non-string throws inside the walk and unmounts the tree.
+    for (const [kind, objectPath] of [
+      ["table", ["employees:*"]],
+      ["collection", ["notes:*"]],
+      ["keyspace", ["cache:*"]],
+    ] as const) {
+      const detail = await provider.describeObject(objectPath, kind);
+      expect(detail.columns.length).toBeGreaterThan(0);
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name.trim()).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(String(column.type).trim()).not.toBe("");
+      }
+    }
   });
 
   /**

@@ -1,6 +1,7 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
+import { useDismissOnOutsideClick } from "@/hooks/use-dismiss-on-outside-click";
 import { QueryResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -20,7 +21,7 @@ import { Button } from "@/components/ui/button";
 import type { CellChange } from "@/components/ResultsGrid";
 import { describeWarning } from "@/components/results-grid/utils";
 
-const MASKED_LABEL = "MASKED";
+const MASKED_LABEL = "masked";
 const LOADING_LABEL = "Loading...";
 /**
  * The control's label, which names the size of the page the click will fetch.
@@ -42,14 +43,59 @@ const loadMoreLabel = (pageSize: number) => `load ${pageSize} more`;
  * about it. `ResultsGrid` decides when it is shown and will not show it where no next
  * page can be asked for.
  *
- * A badge in the AUTO-LIMITED idiom rather than a sentence, with the sentence itself on
- * the `title` and in an `sr-only` span the way the warning badge below carries its
- * detail. A sentence of this length wraps the strip onto a second line on a narrow
- * results panel, and a strip whose height changes with the query is the thing the footer
- * was deleted to stop.
+ * A badge rather than a sentence, with the sentence itself on the `title` and in an
+ * `sr-only` span the way the warning badge below carries its detail. A sentence of this
+ * length wraps the strip onto a second line on a narrow results panel, and a strip whose
+ * height changes with the query is the thing the footer was deleted to stop.
+ *
+ * ONE GLYPH, and it used to be the words "ORDER NOT GUARANTEED". MEASURED in the running
+ * app: those words took 154px of a 960px strip, next to 99px for the limit badge and 95px
+ * for a duration, so a third of the strip went to three facts of one word each while the
+ * right-hand end clipped. The glyph holds 23px and loses nothing, because everything the
+ * words said is in the `title` and the `sr-only` span already and always was: a reader who
+ * hovers or listens gets the sentence, and the words only ever told a sighted reader that
+ * SOMETHING about ordering applied here.
  */
-const ORDER_BADGE = "ORDER NOT GUARANTEED";
+const ORDER_BADGE = "!";
 const ORDER_NOTICE = "Without an ORDER BY the engine may return rows that repeat or are skipped between pages.";
+
+/**
+ * What a filtered count counted, said only where it is not the whole story (#870).
+ *
+ * The filter runs over `result.rows` (`ResultsGrid.tsx`), the rows loaded so far. While
+ * another page can still be fetched that is a strict subset of the object, so "1 shown"
+ * is read as a count over the table and nothing on screen contradicts it.
+ *
+ * Gated on `pageOffer`, the decision this strip already receives, rather than on
+ * `result.pagination?.hasMore`: the offer is the same condition the load-more control
+ * renders from, so the qualification cannot appear beside a control that is absent, and
+ * a result with no next page keeps its unqualified count.
+ *
+ * It rides the existing button's `title` after the action rather than adding a badge of
+ * its own, and the visible text carries the scope itself so a sighted reader is not left
+ * depending on a tooltip.
+ *
+ * "10 of 50" and not "10 of 50 loaded", MEASURED in the running app rather than chosen:
+ * with the agent rail open, the longer wording wrapped this strip from 55px to 71px while
+ * every shorter candidate held 55px, and a strip whose height changes with the query is
+ * what the footer was deleted to stop. The count it is "of" is the loaded row count, which
+ * the strip already names as "50 rows" at its left edge, and the sentence below says which
+ * rows those are.
+ */
+/**
+ * The limit badge, lower case since #870.
+ *
+ * It said "AUTO-LIMITED" in the strip's shouting idiom, which cost 99px to say one word.
+ * The word that carries the fact is "limited"; what applied the limit is in the sentence
+ * on the `title`, where the other badges beside it already keep theirs.
+ */
+const AUTO_LIMIT_BADGE = "limited";
+const AUTO_LIMIT_NOTICE = "Studio bounded this result. Rows beyond the bound were not fetched.";
+
+/** What the duration beside it is, for anyone who hovers or listens. */
+const EXEC_TIME_NOTICE = "Execution time";
+
+const FILTER_SCOPE_NOTICE = "Filtering runs over the rows loaded so far. Rows not yet loaded are not searched.";
 
 export interface StatsBarProps {
   result: QueryResult;
@@ -98,6 +144,21 @@ export interface StatsBarProps {
   pageOffer?: { onLoadMore: () => void; pageSize: number };
   /** Whether a page asked for through `pageOffer` is in flight; the control is disabled and says so. */
   isLoadingMore?: boolean;
+  /**
+   * The fields currently hidden from the grid, and the writer that flips one (#870).
+   *
+   * `columnVisibilityFeature` was registered in `ResultsGrid` with nothing calling
+   * `toggleVisibility`, so the capability was live and unreachable. The entry point is
+   * the column count already printed here, made clickable the way #816 made
+   * "(more available)" the load-more control, so the grid gains no chrome for it.
+   *
+   * `onToggleColumn` is what gates the control, not `hiddenColumns`: an empty set is the
+   * ordinary state of a grid whose columns can all be toggled, while a surface that owns
+   * no table supplies no writer at all and must keep inert text. Gated on the callback
+   * for the same reason `pageOffer` gates the load-more control.
+   */
+  hiddenColumns?: ReadonlySet<string>;
+  onToggleColumn?: (field: string) => void;
 }
 
 export function StatsBar({
@@ -120,8 +181,21 @@ export function StatsBar({
   orderAcrossPagesUnspecified,
   pageOffer,
   isLoadingMore,
+  hiddenColumns,
+  onToggleColumn,
 }: StatsBarProps) {
+  const [columnMenuOpen, setColumnMenuOpen] = useState(false);
+  /*
+    The ref goes on the span that holds the trigger AND the menu, so pressing the trigger
+    is not "outside" and keeps reaching its own toggle.
+  */
+  const columnMenuRef = useDismissOnOutsideClick<HTMLSpanElement>(columnMenuOpen, () => setColumnMenuOpen(false));
   const warnings = result.warnings ?? [];
+  const hiddenCount = hiddenColumns?.size ?? 0;
+  const columnLabel =
+    hiddenCount > 0
+      ? `${result.fields.length - hiddenCount} of ${result.fields.length} columns`
+      : `${result.fields.length} columns`;
   const warningDetail = warnings.map(describeWarning).join("\n");
 
   return (
@@ -164,20 +238,103 @@ export function StatsBar({
             </>
           )}
         </span>
-        <span className="hidden sm:inline">{result.fields.length} columns</span>
+        {/*
+          THE COLUMN VISIBILITY ENTRY POINT (#870). The count that was here stays the
+          only thing on screen; it becomes the control rather than gaining one beside it.
+          Inert where no writer was supplied, because a hydrated result owns no table.
+        */}
+        {onToggleColumn === undefined ? (
+          <span className="hidden sm:inline">{columnLabel}</span>
+        ) : (
+          <span className="hidden sm:inline relative" ref={columnMenuRef}>
+            <button
+              type="button"
+              className="hover:text-fg-secondary transition-colors"
+              onClick={() => setColumnMenuOpen((open) => !open)}
+              /*
+                Escape closes it, which is what the column filter popover in `ResultsGrid`
+                binds too. Bound on the TRIGGER and not on the wrapping span: the trigger
+                keeps focus while the menu is open so the key lands here anyway, and a
+                span carrying a handler is a `jsx-a11y(no-static-element-interactions)`
+                error, which is a hard lint gate in this repository.
+              */
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setColumnMenuOpen(false);
+              }}
+              title="Show or hide columns"
+              aria-expanded={columnMenuOpen}
+            >
+              {columnLabel}
+            </button>
+            {columnMenuOpen && (
+              <div
+                data-testid="column-visibility-menu"
+                /*
+                  DOWNWARD, into the results panel, and not `bottom-full` above the strip.
+                  This strip is the TOP edge of the results panel and the Monaco editor
+                  sits directly above it, so a menu opened upward renders inside the
+                  editor's stacking context: visible, and with every click swallowed by
+                  `.view-lines`. Measured in the running app, not reachable from jsdom,
+                  where nothing is mounted above this component. Same direction and the
+                  same `z-30` as the column filter popover in `ResultsGrid`.
+                */
+                className="absolute top-full left-0 mt-1 z-30 bg-overlay border border-hairline-strong rounded-lg shadow-xl p-1 w-48 max-h-64 overflow-auto"
+              >
+                {result.fields.map((field) => {
+                  const isHidden = hiddenColumns?.has(field) === true;
+                  return (
+                    <button
+                      key={field}
+                      type="button"
+                      data-column={field}
+                      aria-pressed={!isHidden}
+                      className="flex items-center gap-2 w-full px-2 py-1 rounded text-left hover:bg-fill transition-colors"
+                      onClick={() => onToggleColumn(field)}
+                    >
+                      {isHidden ? (
+                        <EyeOff strokeWidth={1.5} className="w-3 h-3 shrink-0 text-fg-muted" />
+                      ) : (
+                        <Eye strokeWidth={1.5} className="w-3 h-3 shrink-0 text-brand" />
+                      )}
+                      <span className={cn("truncate", isHidden && "text-fg-muted")}>{field}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </span>
+        )}
         {activeFilterCount > 0 && (
           <button
             className="flex items-center gap-1 text-brand text-xs bg-brand-tint/10 px-2 py-0.5 rounded hover:bg-brand-tint/20 transition-colors"
             onClick={onClearFilters}
-            title="Clear all filters"
+            title={pageOffer ? `Clear all filters. ${FILTER_SCOPE_NOTICE}` : "Clear all filters"}
           >
             <Funnel strokeWidth={1.5} className="w-3 h-3" />
-            {activeFilterCount} filter{activeFilterCount > 1 ? "s" : ""} &bull; {filteredRowCount} shown
+            {/*
+              THE COUNT, AND NOT "2 filters" BESIDE IT. Which columns carry a filter is
+              already on screen: the funnel in each filtered header renders in `text-brand`
+              while an unfiltered one is invisible until hover (`ResultsGrid`), so the
+              number here only restated what the headers show, in the one strip whose
+              width is scarce. The icon on this chip says a filter is active; the text says
+              the one thing nothing else does, which is how many rows came through it.
+
+              The filter count survives for a screen reader, which cannot see either funnel.
+            */}
+            <span data-testid="filter-summary">
+              {pageOffer ? `${filteredRowCount} of ${result.rows.length}` : `${filteredRowCount} shown`}
+            </span>
+            <span className="sr-only">
+              , {activeFilterCount} column filter{activeFilterCount > 1 ? "s" : ""} active
+            </span>
             <X strokeWidth={1.5} className="w-3 h-3" />
           </button>
         )}
         {result.pagination?.wasLimited && (
-          <span className="text-brand text-xs bg-brand-tint/10 px-2 py-0.5 rounded">AUTO-LIMITED</span>
+          <span className="text-brand text-xs bg-brand-tint/10 px-2 py-0.5 rounded" title={AUTO_LIMIT_NOTICE}>
+            {AUTO_LIMIT_BADGE}
+            <span className="sr-only">: {AUTO_LIMIT_NOTICE}</span>
+          </span>
         )}
         {orderAcrossPagesUnspecified && (
           <span className="text-fg-muted text-xs bg-fill px-2 py-0.5 rounded" title={ORDER_NOTICE}>
@@ -187,7 +344,7 @@ export function StatsBar({
         )}
         {warnings.length > 0 && (
           <span className="text-warning text-xs bg-warning-tint/10 px-2 py-0.5 rounded" title={warningDetail}>
-            {warnings.length} WARNING{warnings.length > 1 ? "S" : ""}
+            {warnings.length} warning{warnings.length > 1 ? "s" : ""}
             <span className="sr-only">: {warningDetail}</span>
           </span>
         )}
@@ -255,8 +412,14 @@ export function StatsBar({
           </div>
         )}
 
-        <span className="hidden sm:flex px-2 py-0.5 rounded bg-fill border border-hairline">
-          EXEC TIME: {result.executionTime || "0ms"}
+        {/*
+          THE DURATION, WITHOUT ITS LABEL. "EXEC TIME: " took 95px of a 960px strip to say
+          what a duration beside a row count already reads as. It also lost its unit: the
+          value is a number and `ms` sat only in the zero fallback, so a two millisecond
+          query rendered "EXEC TIME: 2". The full words stay on the `title`.
+        */}
+        <span className="hidden sm:flex px-2 py-0.5 rounded bg-fill border border-hairline" title={EXEC_TIME_NOTICE}>
+          {result.executionTime ?? 0}ms<span className="sr-only"> {EXEC_TIME_NOTICE}</span>
         </span>
 
         <div className="flex md:hidden items-center bg-fill rounded-lg p-0.5">

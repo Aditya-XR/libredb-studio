@@ -949,16 +949,26 @@ const OBJECT_INDEXES_SQL = `
  * decides WHICH objects a bound keeps and nothing else: the answer is re-sorted by path
  * below, and a caller joins on path rather than on position.
  *
- * `LIMIT ?` is bound and not interpolated. Measured on MySQL 26.7.0 through the binary
- * prepared protocol, a placeholder in a derived table's LIMIT is accepted.
+ * The bound is SPELLED INTO the statement rather than bound as a parameter, and it is the one
+ * thing here that is not the obvious shape. This paragraph used to say the opposite, that
+ * `LIMIT ?` is bound and not interpolated because MySQL 26.7.0 accepts a placeholder in a
+ * derived table's LIMIT. That measurement still holds and was the wrong one to generalise
+ * from: two of this driver's own relatives refuse a parameter in the LIMIT position under the
+ * binary prepared protocol, measured 2026-09-22 through mysql2. Apache Doris 4.1.3-rc02
+ * answers `mismatched input 'LIMIT' expecting {<EOF>, ';'}` and StarRocks 3.3.22-753696f
+ * answers `using parameter(?) as limit or offset not supported`, while both run the identical
+ * statement with the number written in, and the text protocol takes either form everywhere.
+ * Stock MySQL binds it either way, so writing the bound in costs nothing there.
+ * `describeObjects` validates the caller's limit as a positive whole number before this is
+ * reached, so what gets spelled in is only ever digits.
  */
-function bulkTargetSql(spellings: number, bounded: boolean): string {
+function bulkTargetSql(spellings: number, bound?: number): string {
   const placeholders = Array.from({ length: spellings }, () => "?").join(", ");
   return `
           SELECT TABLE_NAME AS name
           FROM information_schema.TABLES
           WHERE TABLE_SCHEMA = ? AND TABLE_TYPE IN (${placeholders})
-          ORDER BY TABLE_NAME${bounded ? "\n          LIMIT ?" : ""}`;
+          ORDER BY TABLE_NAME${bound === undefined ? "" : `\n          LIMIT ${bound}`}`;
 }
 
 /** The four statements one bulk read issues, all four sharing one target set. */
@@ -993,8 +1003,8 @@ interface BulkDetailStatements {
  * for an object the target's extra `limit + 1` row named are dropped by the caller below
  * rather than by a fourth bound.
  */
-function bulkDetailSql(spellings: number, bounded: boolean): BulkDetailStatements {
-  const target = bulkTargetSql(spellings, bounded);
+function bulkDetailSql(spellings: number, bound?: number): BulkDetailStatements {
+  const target = bulkTargetSql(spellings, bound);
   return {
     target,
     columns: `
@@ -1043,14 +1053,7 @@ function bulkDetailSql(spellings: number, bounded: boolean): BulkDetailStatement
 const BULK_DETAIL_SQL: Record<string, BulkDetailStatements> = Object.fromEntries(
   Object.entries(MYSQL_OBJECT_TYPES)
     .filter(([, spec]) => spec.catalog === "tables")
-    .map(([kind, spec]) => [kind, bulkDetailSql(spec.types.length, false)]),
-);
-
-/** The same four statements with the target bounded. */
-const BULK_DETAIL_SQL_BOUNDED: Record<string, BulkDetailStatements> = Object.fromEntries(
-  Object.entries(MYSQL_OBJECT_TYPES)
-    .filter(([, spec]) => spec.catalog === "tables")
-    .map(([kind, spec]) => [kind, bulkDetailSql(spec.types.length, true)]),
+    .map(([kind, spec]) => [kind, bulkDetailSql(spec.types.length)]),
 );
 
 // ----------------------------------------------------------------------------
@@ -1087,13 +1090,25 @@ const MYSQL_OBJECT_KINDS: readonly ObjectKindSpec[] = [
     label: "Table",
     labelPlural: "Tables",
     acceptsRowWrites: true,
+    // DERIVED, not transcribed (#789). `hasColumns()` (:1860) is the one rule `describeObject`
+    // and `describeObjects` already gate on, and a function declaration hoists, so calling it
+    // here is legal: `MYSQL_OBJECT_TYPES` (:694) is initialized ahead of this array. A second
+    // hand-written copy of the catalog fact is how the client gate and the reads would drift.
+    hasColumns: hasColumns("table"),
     ...MYSQL_SOURCE_DECLARATION,
   },
   // No `acceptsRowWrites`. MySQL takes an UPDATE against a simple updatable view and
   // refuses it against a view with an aggregate, a UNION or a DISTINCT, which is a
   // per-OBJECT fact this per-kind declaration cannot state; claiming it would offer an
   // import target that fails on most views in most databases.
-  { id: "view", role: "relation", label: "View", labelPlural: "Views", ...MYSQL_SOURCE_DECLARATION },
+  {
+    id: "view",
+    role: "relation",
+    label: "View",
+    labelPlural: "Views",
+    hasColumns: hasColumns("view"),
+    ...MYSQL_SOURCE_DECLARATION,
+  },
   {
     id: "procedure",
     role: "routine",
@@ -1129,7 +1144,17 @@ const MARIADB_EXTRA_OBJECT_KINDS: readonly ObjectKindSpec[] = [
     childKinds: ["procedure", "function"],
     ...MYSQL_SOURCE_DECLARATION,
   },
-  { id: "sequence", role: "config", label: "Sequence", labelPlural: "Sequences", ...MYSQL_SOURCE_DECLARATION },
+  {
+    id: "sequence",
+    role: "config",
+    label: "Sequence",
+    labelPlural: "Sequences",
+    // `config` and it still has columns, which is the entry that refutes deriving the client
+    // gate from the role: a sequence is a table underneath and `information_schema.COLUMNS`
+    // answers eight rows for it (measured on MariaDB 12.3.2). Same derivation as `table`.
+    hasColumns: hasColumns("sequence"),
+    ...MYSQL_SOURCE_DECLARATION,
+  },
 ];
 
 /**
@@ -2577,10 +2602,11 @@ export class MySQLProvider extends SQLBaseProvider {
     if (!hasColumns(kind)) return { details: [] };
 
     const bounded = limit !== undefined;
-    const statements = bounded ? BULK_DETAIL_SQL_BOUNDED[kind] : BULK_DETAIL_SQL[kind];
     const types = MYSQL_OBJECT_TYPES[kind].types;
-    // One row more than the bound, so the read itself says whether it stopped short.
-    const targetParams = bounded ? [schema, ...types, limit + 1] : [schema, ...types];
+    // One row more than the bound, so the read itself says whether it stopped short. The
+    // bound is rendered rather than bound, for the reason `bulkTargetSql` carries.
+    const statements = bounded ? bulkDetailSql(types.length, limit + 1) : BULK_DETAIL_SQL[kind];
+    const targetParams = [schema, ...types];
     // The three detail reads carry the target's own binds and then the schema again, for
     // the join. A prepared statement takes positional parameters, so the repeat is a second
     // bind of one value rather than a second question.

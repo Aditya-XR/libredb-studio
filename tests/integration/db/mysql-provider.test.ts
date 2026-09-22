@@ -4,7 +4,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
-import { callerBoundTruncationReason, isSourcePartUnavailable } from "@/lib/db/object-kinds";
+import { callerBoundTruncationReason, isSourcePartUnavailable, kindHasColumns } from "@/lib/db/object-kinds";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ColumnSchema, DatabaseConnection } from "@/lib/types";
@@ -4520,6 +4520,51 @@ describe("MySQL object listing and detail", () => {
     await provider.disconnect();
   });
 
+  test("hasColumns is declared exactly on the kinds the column dictionary answers for (#789)", async () => {
+    // The declaration is a CLIENT gate: the tree draws a twisty on a kind that declares it and
+    // asks `describeObject` when the row opens, so a kind declaring it and answering nothing is
+    // a twisty that opens on nothing. Derived at the declaration from the same `hasColumns()`
+    // predicate both read methods gate on (`mysql.ts:1860-1862`), and asserted here against the
+    // literal set, which is the only thing that can catch the derivation widening.
+    //
+    // MariaDB, because it is the flavour that has every kind: the MySQL six plus `package` and
+    // `sequence`. The sequence is the entry `role === "relation"` would have got wrong.
+    const provider = await connectedTo(true);
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    expect(
+      kinds
+        .filter((kind) => kindHasColumns(kind))
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["sequence", "table", "view"]);
+    for (const kind of kinds) {
+      // Absent, never `false`. Both read as false through `kindHasColumns`, and only the absence
+      // says the provider abstained rather than measured a negative.
+      if (!["sequence", "table", "view"].includes(kind.id)) expect(kind.hasColumns).toBeUndefined();
+    }
+    await provider.disconnect();
+  });
+
+  test("a declared kind answers a column a reader can be shown, and an abstaining kind answers none (#789)", async () => {
+    // Both fields are checked because the tree renders both, and `name` feeds `pathKey`, which
+    // calls `segment.replaceAll(...)`: a non-string name throws inside the walk and unmounts the
+    // whole tree rather than failing one row.
+    const provider = await connectedTo(false);
+
+    const table = await provider.describeObject(["app", "customers"], "table");
+    expect(table.columns.length).toBeGreaterThan(0);
+    for (const column of table.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+
+    expect((await provider.describeObject(["app", "touch_order"], "procedure")).columns).toEqual([]);
+    await provider.disconnect();
+  });
+
   test("an object path that is not [database, name] is refused", async () => {
     const provider = await connectedTo(false);
 
@@ -4835,7 +4880,7 @@ describe("MySQL bulk column read", () => {
     await provider.disconnect();
   });
 
-  test("a bounded read binds one row more than the bound and reports its own truncation", async () => {
+  test("a bounded read asks for one row more than the bound and reports its own truncation", async () => {
     const provider = await connectedTo(false);
     protocolCalls = [];
 
@@ -4843,10 +4888,27 @@ describe("MySQL bulk column read", () => {
 
     // limit + 1, which is how a saturated read is told from an exact one with no second
     // count. The bound is the caller's and is reported as the caller's.
-    expect(protocolCalls[0].params).toEqual(["app", "BASE TABLE", "SYSTEM VERSIONED", 2]);
-    expect(protocolCalls[0].sql).toContain("LIMIT ?");
+    expect(protocolCalls[0].params).toEqual(["app", "BASE TABLE", "SYSTEM VERSIONED"]);
     expect(batch.details.map((detail) => detail.path)).toEqual([["app", "customers"]]);
     expect(batch.truncated).toEqual({ limit: 1, reason: callerBoundTruncationReason(1) });
+    await provider.disconnect();
+  });
+
+  test("the bound is spelled into the statement, because two MySQL-wire engines refuse to bind one", async () => {
+    const provider = await connectedTo(false);
+    protocolCalls = [];
+
+    await provider.describeObjects(["app"], "table", 1);
+
+    // Measured 2026-09-22 through mysql2 against Apache Doris 4.1.3-rc02 and StarRocks
+    // 3.3.22-753696f: `execute()` with a literal LIMIT answers, `execute()` with `LIMIT ?`
+    // does not. Doris calls it `mismatched input 'LIMIT' expecting {<EOF>, ';'}` and
+    // StarRocks says it outright, `using parameter(?) as limit or offset not supported`.
+    // Stock MySQL 8 binds it happily, so this is the relatives' constraint and not the
+    // driver's. The value is the caller's `limit + 1`, already validated as a positive
+    // whole number above, which is why spelling it in cannot carry anything but digits.
+    expect(protocolCalls[0].sql).toContain("LIMIT 2");
+    expect(protocolCalls[0].sql).not.toContain("LIMIT ?");
     await provider.disconnect();
   });
 

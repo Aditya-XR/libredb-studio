@@ -2070,7 +2070,19 @@ function objectRead(sql: string): string {
   if (upper.includes("FROM INFORMATION_SCHEMA.COLUMNS")) return "flat-columns";
   if (upper.includes("WHERE I.IS_PRIMARY_KEY = 1") && upper.includes("T.NAME AS TABLE_NAME")) return "flat-pk";
   if (upper.includes("OBJECT_SCHEMA_NAME(FK.PARENT_OBJECT_ID)")) return "flat-fks";
-  if (upper.includes("I.IS_PRIMARY_KEY = 0") && upper.includes("IC.KEY_ORDINAL")) return "flat-indexes";
+  // `T.NAME AS TABLE_NAME` is what tells the flat reading's index statement from the
+  // SINGLE object's, exactly as the `flat-pk` arm above already guards itself. Without it
+  // this arm swallowed `objectIndexesSql` (`mssql.ts:776-787`), which names no table, and
+  // answered `app_orders_total_ix` for every object described: the canned row was right for
+  // `app.orders` and a fabrication for anything else, which only became visible when a
+  // second relation kind gained column rows here (#789).
+  if (
+    upper.includes("I.IS_PRIMARY_KEY = 0") &&
+    upper.includes("IC.KEY_ORDINAL") &&
+    upper.includes("T.NAME AS TABLE_NAME")
+  ) {
+    return "flat-indexes";
+  }
   // The source read (#789 Phase 2), before every arm below it: its object statement names
   // `sys.objects` and its trigger statement names `sys.triggers`, and both name
   // `sys.sql_modules`, which nothing else in this provider reads.
@@ -2224,6 +2236,49 @@ const FIXTURE_COLUMNS: Record<string, Array<Record<string, unknown>>> = {
     { name: "orders", data_type: "int", is_nullable: true, default_definition: null },
     { name: "customer_id", data_type: "int", is_nullable: true, default_definition: null },
   ],
+  // The VIEW, added for the `hasColumns` declaration (#789): a `V` carries one `sys.columns`
+  // row per projected column exactly as a `U` does, which is why `view` declares columns and
+  // the five kinds below it do not. Measured on the running fixture server
+  // (`docker/mssql-init/01-object-fixture.sql`, SQL Server 2022): three rows for
+  // `SELECT o.id, o.total, c.name AS customer_name`, and a view column carries no default.
+  order_summary: [
+    { name: "id", data_type: "int", is_nullable: false, default_definition: null },
+    { name: "total", data_type: "decimal", is_nullable: true, default_definition: null },
+    { name: "customer_name", data_type: "nvarchar", is_nullable: true, default_definition: null },
+  ],
+};
+
+/**
+ * The primary key, the foreign keys and the non-primary indexes of one object, keyed by the
+ * name the detail reads bind.
+ *
+ * Canned per READ until the view gained column rows above, which is the point at which a
+ * constant answer became a lie rather than a shortcut: measured on the fixture server,
+ * `app.order_summary` has no row in `sys.indexes` and none in `sys.foreign_keys`, because a
+ * non-indexed view has neither, so a canned `id` would have rendered a key mark the engine
+ * never reported. Only these three objects are reachable here at all: the single-object reads
+ * run only after the column read answered rows, and the bulk reads select on the same table.
+ */
+const FIXTURE_PRIMARY_KEYS: Record<string, readonly string[]> = {
+  orders: ["id"],
+  daily: ["day"],
+  order_summary: [],
+};
+
+const FIXTURE_FOREIGN_KEYS: Record<string, ReadonlyArray<Record<string, unknown>>> = {
+  // ONE row for both tables, deliberately: the referenced table is `app.customers` either way
+  // and it is the READING object's schema that differs, which is what decides whether the name
+  // comes back qualified. Both really carry this key - app.orders inside `app`,
+  // reporting.daily across the boundary.
+  orders: [{ column_name: "customer_id", ref_schema: "app", ref_table: "customers", ref_column: "id" }],
+  daily: [{ column_name: "customer_id", ref_schema: "app", ref_table: "customers", ref_column: "id" }],
+  order_summary: [],
+};
+
+const FIXTURE_INDEXES: Record<string, ReadonlyArray<Record<string, unknown>>> = {
+  orders: [{ index_name: "app_orders_total_ix", is_unique: false, column_name: "total" }],
+  daily: [],
+  order_summary: [],
 };
 
 /**
@@ -2452,21 +2507,15 @@ function fixtureRead(read: string, inputs: Record<string, unknown>, sql: string)
       return { recordset: rows, rowsAffected: [rows.length] };
     }
     case "bulk-pk": {
-      const rows = bulkTarget(sql, inputs)
-        .filter((target) => FIXTURE_COLUMNS[target.name] !== undefined)
-        .map((target) => ({ object_id: target.object_id, name: "id" }));
+      const rows = bulkTarget(sql, inputs).flatMap((target) =>
+        (FIXTURE_PRIMARY_KEYS[target.name] ?? []).map((name) => ({ object_id: target.object_id, name })),
+      );
       return { recordset: rows, rowsAffected: [rows.length] };
     }
     case "bulk-fks": {
-      const rows = bulkTarget(sql, inputs)
-        .filter((target) => FIXTURE_COLUMNS[target.name] !== undefined)
-        .map((target) => ({
-          object_id: target.object_id,
-          column_name: "customer_id",
-          ref_schema: "app",
-          ref_table: "customers",
-          ref_column: "id",
-        }));
+      const rows = bulkTarget(sql, inputs).flatMap((target) =>
+        (FIXTURE_FOREIGN_KEYS[target.name] ?? []).map((row) => ({ object_id: target.object_id, ...row })),
+      );
       return { recordset: rows, rowsAffected: [rows.length] };
     }
     case "bulk-indexes": {
@@ -2577,22 +2626,20 @@ function fixtureRead(read: string, inputs: Record<string, unknown>, sql: string)
       const rows = !listed || found === undefined ? [] : [found];
       return { recordset: rows, rowsAffected: [rows.length] };
     }
-    case "pk":
-      return { recordset: [{ name: "id" }], rowsAffected: [1] };
-    case "fks":
-      // ONE row for both objects, deliberately: the referenced table is `app.customers`
-      // either way and it is the READING object's schema that differs, which is what
-      // decides whether the name comes back qualified. Both fixture tables really do carry
-      // this key - app.orders inside `app`, reporting.daily across the boundary.
-      return {
-        recordset: [{ column_name: "customer_id", ref_schema: "app", ref_table: "customers", ref_column: "id" }],
-        rowsAffected: [1],
-      };
-    case "indexes":
-      return {
-        recordset: [{ index_name: "app_orders_total_ix", is_unique: false, column_name: "total" }],
-        rowsAffected: [1],
-      };
+    // The three detail reads, keyed on the bound NAME rather than canned, for the reason
+    // `FIXTURE_PRIMARY_KEYS` gives: the view has columns and none of these three.
+    case "pk": {
+      const rows = (FIXTURE_PRIMARY_KEYS[(inputs.name as string) ?? ""] ?? []).map((name) => ({ name }));
+      return { recordset: rows, rowsAffected: [rows.length] };
+    }
+    case "fks": {
+      const rows = FIXTURE_FOREIGN_KEYS[(inputs.name as string) ?? ""] ?? [];
+      return { recordset: rows, rowsAffected: [rows.length] };
+    }
+    case "indexes": {
+      const rows = FIXTURE_INDEXES[(inputs.name as string) ?? ""] ?? [];
+      return { recordset: rows, rowsAffected: [rows.length] };
+    }
     default:
       throw new Error(`the object-surface fixture has no rows for the read "${read}"`);
   }
@@ -2685,6 +2732,32 @@ describe("object surface", () => {
         .map((kind) => kind.id)
         .sort(),
     ).toEqual(["sequence", "synonym", "table"]);
+  });
+
+  test("declares columns on exactly the kinds SQL Server answers columns for", () => {
+    const kinds = new MSSQLProvider({ ...baseConfig, database: "libredb_objects" }).getCapabilities().objectKinds ?? [];
+
+    // `describeObject` answers columns for the two kinds this engine resolves as relations
+    // and returns three empty arrays for every other, without a round trip
+    // (`mssql.ts` describeObject, the `spec.role !== "relation"` arm). Measured on the
+    // fixture server: of the types a person writes, only `U` and `V` have `sys.columns` rows.
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["table", "view"]);
+
+    // The other direction, so a kind added later cannot quietly gain a twisty. Each of these
+    // ABSTAINS - no `hasColumns` field at all rather than `false` - which is what the fleet
+    // census reads. A `false` here would be a declaration this engine never measured.
+    for (const id of ["function", "procedure", "sequence", "synonym", "trigger"]) {
+      expect(kinds.find((kind) => kind.id === id)?.hasColumns).toBeUndefined();
+    }
+    // A SEQUENCE having none is the contrast with PostgreSQL, where one answers three
+    // columns: the same kind id, the opposite answer, which is why the declaration is the
+    // provider's and not a rule written above it.
+    expect(kinds.find((kind) => kind.id === "sequence")?.role).toBe("config");
   });
 
   test("the top level is databases, and a nested list reads the CALLER's catalog", async () => {
@@ -3215,6 +3288,48 @@ describe("SQL Server object containers, listings and detail", () => {
     // because the tests written for it stopped at the refusal path and never looked at what
     // was bound. Here the catalog, the schema and the name are three different strings.
     expect(issued.at(-1)!.inputs).toEqual({ schema: "reporting", name: "daily" });
+    await provider.disconnect();
+  });
+
+  test("a VIEW answers columns a reader can be shown, which is what its declaration promises", async () => {
+    const provider = await connectedForObjects();
+
+    // The declared-with-columns kind that is NOT the conformance sample, at the full
+    // two-level path this engine produces, so the assertion reaches a bound value rather
+    // than the shape refusal (standing ruling 5g). A view is where the declaration could
+    // most easily be wrong: SQL Server has no materialized view, an indexed view is this
+    // same `V`, and the twisty it draws opens on these rows.
+    const detail = await provider.describeObject(["libredb_objects", "app", "order_summary"], "view");
+
+    expect(detail.columns.length).toBeGreaterThan(0);
+    for (const column of detail.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+    // Measured on the fixture server, and the whole answer rather than a count: a view's
+    // `sys.columns` rows are the projected columns, in `column_id` order, with no default
+    // and - since `app.order_summary` carries no index at all - no primary key mark.
+    expect(detail.columns).toEqual([
+      { name: "id", type: "int", nullable: false, isPrimary: false, defaultValue: undefined },
+      { name: "total", type: "decimal", nullable: true, isPrimary: false, defaultValue: undefined },
+      { name: "customer_name", type: "nvarchar", nullable: true, isPrimary: false, defaultValue: undefined },
+    ]);
+    expect(detail.indexes).toEqual([]);
+    expect(detail.foreignKeys).toEqual([]);
+    await provider.disconnect();
+  });
+
+  test("a kind that declares no columns answers columns: [] for an object that exists", async () => {
+    const provider = await connectedForObjects();
+
+    // The negative half of the declaration, at an object `listObjects` really produces, so
+    // the empty list is this kind's answer rather than a miss. The tree draws no twisty on
+    // it, so a column answered here would reach no reader at all.
+    const detail = await provider.describeObject(["libredb_objects", "app", "order_number_seq"], "sequence");
+
+    expect(detail.columns).toEqual([]);
     await provider.disconnect();
   });
 

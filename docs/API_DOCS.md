@@ -1,6 +1,6 @@
 # LibreDB Studio API Documentation
 
-> **Version:** 0.16.1
+> **Version:** 0.16.2
 > **Base URL:** `https://your-domain.com` or `http://localhost:3000`
 > **Content-Type:** `application/json`
 
@@ -807,13 +807,93 @@ A `druid` connection fails the second check whatever the `type` is, with `{ "err
 
 A `trino` connection passes it for `kill` and fails it for everything else, which is the difference between an empty supported set and a set of one: `CALL system.runtime.kill_query` really terminates a statement (verified end to end - the target then fails `ADMINISTRATIVELY_KILLED`), while vacuum, reindex, optimize, check and analyze all describe work that belongs to the connector behind a catalog rather than to the engine.
 
+#### POST /api/db/objects/describe
+
+Read the columns, indexes and foreign keys of ONE object.
+
+This is the object tree's per-row read: one request when a reader expands an object row, and none
+before that.
+It executes nothing and writes nothing.
+
+**Authentication:** Required.
+No admin gate, for the same reason the two edit routes below have none: the role decides which
+connection may be OPENED and nothing about what may be read through it.
+
+**Request:**
+```json
+{
+  "connection": { "id": "conn-123", "type": "postgres", "host": "localhost", "port": 5432, "database": "mydb", "user": "app" },
+  "path": ["app", "orders"],
+  "kind": "table"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `connection` or `connectionId` | object or string | Yes | The same connection selector every database route takes |
+| `path` | string[] | Yes | The object's path, container segments first, then the object's own identifier. An empty array is refused |
+| `kind` | string | Yes | The object kind id, as the CONNECTED provider declares it. Never inferred from the path: without it a provider has to guess what it is holding from whatever the last segment matches in a catalog |
+
+There is no depth check on `path`.
+How deep a kind nests is a per-kind fact the provider declares (a trigger nests under its table),
+and the provider validates the path against that declaration.
+
+**Response (200 OK):** one `ObjectDetail`, exactly as the provider answered it.
+`ColumnSchema`, `IndexSchema` and `ForeignKeySchema` are defined under
+[DatabaseObject](#databaseobject).
+
+```json
+{
+  "path": ["app", "orders"],
+  "columns": [
+    { "name": "id", "type": "integer", "nullable": false, "isPrimary": true },
+    { "name": "total", "type": "numeric(12,2)", "nullable": true, "isPrimary": false, "defaultValue": "0" }
+  ],
+  "indexes": [{ "name": "orders_pkey", "columns": ["id"], "unique": true }],
+  "foreignKeys": [{ "columnName": "customer_id", "referencedTable": "customers", "referencedColumn": "id" }]
+}
+```
+
+Column order is the provider's own order, unchanged by this route: Cassandra answers partition key,
+then clustering columns, then the rest alphabetically, and that ordering reaches the client intact.
+
+A kind that has no columns is a `200` carrying three empty arrays and never a refusal.
+Oracle answers that shape for every kind whose role is not `relation`, MySQL for every kind its own
+column predicate rejects, and a caller is expected to render "nothing to show" rather than treat the
+engine as broken.
+
+**Statuses:**
+
+| Condition | Status | Body |
+|-----------|--------|------|
+| The provider answered | `200` | the `ObjectDetail` above, including the all-empty form |
+| `path` absent, or not an array of strings | `400` | `{ "error": "\"path\" must be an array of path segments" }` |
+| `path` empty | `400` | `{ "error": "\"path\" must name an object, and an empty path names none" }` |
+| `kind` absent, not a string, or blank | `400` | `{ "error": "\"kind\" must be a non-empty string" }` |
+| The engine refused the read: a kind it does not declare, a path shape that kind does not take, a permission error | `400` | `{ "error": "<the engine's own sentence>", "code": "QUERY_ERROR" }` |
+| No session | `401` | `{ "error": "Authentication required" }` |
+| Seed connection not available for the caller's role | `403` | the existing `SeedConnectionError` body |
+| Rate limited | `429` | `{ "error": "...", "code": "RATE_LIMITED" }` |
+| Anything undeclared | `500` | `createErrorResponse`'s body |
+
+**An object dropped between the listing and this read has two answers, and which one you get is a
+SHAPE rather than a count.**
+A provider that checks its catalog read for a zero-row answer refuses with `400` and
+`code: "QUERY_ERROR"`, carrying its own sentence: PostgreSQL's is `No detail row for app.orders`.
+A provider that does not check answers `200` with three empty arrays, which is indistinguishable
+from an object that genuinely has no columns.
+Both are correct answers from this route.
+A client must handle both, and must not read the empty answer as evidence that the object is still
+there.
+
 #### POST /api/db/objects/edit-plan
 
 Build a plan for an edited object definition, and answer what an apply would send.
 It executes nothing and writes nothing.
 
-These two routes are the first object routes documented in this file at all.
-Their seven Phase 2 siblings under `/api/db/objects/` are not documented here yet.
+The describe route above is the one Phase 2 sibling documented in this file.
+The other six under `/api/db/objects/` (`containers`, `counts`, `list`, `search`, `inventory`,
+`source`) are not documented here yet.
 
 **Authentication:** Required.
 There is NO admin gate on either route, and the reason is measured rather than preferred: a
@@ -983,7 +1063,7 @@ LLM_API_URL=http://localhost:11434/v1  # For ollama/custom
 
 ### Agent API
 
-Seven paths, eight handlers, under `src/app/api/agent/`. They drive the read-only agent runtime — full
+eight paths, ten handlers, under `src/app/api/agent/`. They drive the read-only agent runtime — full
 behaviour in [`docs/AGENT.md`](AGENT.md), the surface in [`docs/AGENT_GUIDE.md`](AGENT_GUIDE.md), and
 what a run sends to a model provider in [`docs/AGENT_DATA_FLOW.md`](AGENT_DATA_FLOW.md).
 
@@ -1375,7 +1455,7 @@ Body `{ "connections": [...] }`; returns per-connection health `{ "results": [{ 
 
 ---
 
-> **Internal routes (not part of this public reference).** The frontend also calls several internal `/api/db/*` endpoints that mirror provider internals and change with the UI: `multi-query`, `transaction`, `cancel`, `disconnect`, `test-connection`, `monitoring`, `pool-stats`, `profile`, `provider-meta`, and the object-surface routes under `objects/`. They're auth-gated by the middleware like everything else; consult the route handlers in `src/app/api/db/` for their shapes.
+> **Internal routes (not part of this public reference).** The frontend also calls several internal `/api/db/*` endpoints that mirror provider internals and change with the UI: `multi-query`, `transaction`, `cancel`, `disconnect`, `test-connection`, `monitoring`, `pool-stats`, `profile`, `provider-meta`, and the object-surface routes under `objects/` that are not documented above (`describe`, `edit-plan` and `edit-apply` are). They're auth-gated by the middleware like everything else; consult the route handlers in `src/app/api/db/` for their shapes.
 
 ---
 

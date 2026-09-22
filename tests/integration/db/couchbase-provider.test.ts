@@ -14,7 +14,12 @@ import type { DatabaseConnection, DatabaseType } from "@/lib/types";
 import { CouchbaseProvider } from "@/lib/db/providers/document/couchbase";
 import { COUCHBASE_CONTAINER_LEVELS, COUCHBASE_OBJECT_KINDS } from "@/lib/db/providers/document/couchbase/objects";
 import { AuthenticationError, ConnectionError, DatabaseConfigError, QueryError, TimeoutError } from "@/lib/db/errors";
-import { isSourcePartUnavailable, sourceBoundTruncationReason } from "@/lib/db/object-kinds";
+import {
+  declaredKinds,
+  isSourcePartUnavailable,
+  kindHasColumns,
+  sourceBoundTruncationReason,
+} from "@/lib/db/object-kinds";
 
 // ============================================================================
 // Connection
@@ -1204,6 +1209,7 @@ describe("CouchbaseProvider object surface (#789)", () => {
         label: "Collection",
         labelPlural: "Collections",
         acceptsRowWrites: true,
+        hasColumns: true,
       },
       {
         id: "function",
@@ -1235,6 +1241,34 @@ describe("CouchbaseProvider object surface (#789)", () => {
       // because `system:functions` filters by permission rather than refusing.
       absentSource: { path: [BUCKET, "inventory", "no_such_function"], kind: "function" },
     });
+  });
+
+  test("declares hasColumns on collection alone, and answers columns that match the declaration", async () => {
+    // Through `declaredKinds` and never `capabilities.objectKinds` directly: the field is
+    // optional, and its own docblock says an absent declaration and an empty one must not be
+    // answerable differently by two readers. It is also the reader the tree consults.
+    const kinds = declaredKinds(objectProvider.getCapabilities());
+    expect(kinds.filter((kind) => kindHasColumns(kind)).map((kind) => kind.id)).toEqual(["collection"]);
+
+    // A SEEDED NON-EMPTY collection, deliberately: `hotel` and `bookings` are empty in the
+    // fixture and an INFER over an empty collection answers error 7014 and no column at all
+    // (docs/providers/couchbase.md:763-764), so either of those would fail a correct provider
+    // for a fixture reason rather than a declaration one.
+    const collection = await objectProvider.describeObject([BUCKET, "inventory", "airline"], "collection");
+    expect(collection.columns.length).toBeGreaterThan(0);
+    for (const column of collection.columns) {
+      // Both fields, because the tree feeds `column.name` to a `replaceAll` and draws
+      // `column.type` in the trailing slot: a non-string in either is a throw, not a gap.
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+
+    // `function` declares nothing, so its object row is a LEAF and the tree derives no read
+    // for it. `describeObject` must agree by answering no column.
+    const fn = await objectProvider.describeObject([BUCKET, "inventory", "discount"], "function");
+    expect(fn.columns).toEqual([]);
   });
 
   // --------------------------------------------------------------------------

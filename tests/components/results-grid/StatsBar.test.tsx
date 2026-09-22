@@ -35,7 +35,7 @@ describe("results-grid/StatsBar", () => {
 
   test("renders stats and filter summary, clears filters", () => {
     const onClearFilters = mock(() => {});
-    const { queryByText } = render(
+    const { queryByText, queryByTestId } = render(
       <StatsBar
         result={makeResult()}
         filteredRowCount={1}
@@ -53,11 +53,251 @@ describe("results-grid/StatsBar", () => {
 
     expect(queryByText("2 rows")).not.toBeNull();
     expect(queryByText("2 columns")).not.toBeNull();
-    expect(queryByText("AUTO-LIMITED")).not.toBeNull();
-    expect(queryByText("2 filters • 1 shown")).not.toBeNull();
+    expect(queryByText("limited")).not.toBeNull();
+    const summary = queryByTestId("filter-summary")!;
+    expect(summary.textContent).toBe("1 shown");
+    // The filter COUNT is not on screen: the filtered headers carry their own marker.
+    // It stays reachable for a screen reader, which can see neither funnel.
+    expect(summary.closest("button")!.textContent).toContain("2 column filters active");
 
-    fireEvent.click(queryByText("2 filters • 1 shown")!);
+    fireEvent.click(summary);
     expect(onClearFilters).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The filtered count names what it counted whenever rows are still unfetched (#870).
+   *
+   * `filteredRowCount` is a count over `result.rows`, the rows loaded so far, and on a
+   * pageable result that is a strict subset of the object. "1 shown" then reads as a
+   * count over the table and nothing on screen contradicts it.
+   *
+   * Paired with the control below it, which must NOT carry the qualification: without
+   * that pair the assertion passes on a component that qualifies unconditionally, which
+   * would be a new lie on every result that has no next page.
+   */
+  test("names the scope of a filtered count while another page can be fetched", () => {
+    const { queryByTestId } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={1}
+        activeFilterCount={2}
+        onClearFilters={mock(() => {})}
+        viewMode="card"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        pageOffer={{ onLoadMore: mock(() => {}), pageSize: 2 }}
+      />,
+    );
+
+    const summary = queryByTestId("filter-summary");
+    expect(summary!.textContent).toBe("1 of 2");
+    expect(summary!.closest("button")!.getAttribute("title")).toContain("not yet loaded");
+  });
+
+  test("leaves a filtered count unqualified when there is no next page", () => {
+    const { queryByTestId } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={1}
+        activeFilterCount={2}
+        onClearFilters={mock(() => {})}
+        viewMode="card"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+      />,
+    );
+
+    const summary = queryByTestId("filter-summary");
+    expect(summary!.textContent).toBe("1 shown");
+    expect(summary!.closest("button")!.getAttribute("title")).not.toContain("not yet loaded");
+  });
+
+  /**
+   * The column count is the entry point to column visibility (#870).
+   *
+   * `columnVisibilityFeature` has been registered in `ResultsGrid` with no writer, so the
+   * capability was live and unreachable. It gains its writer here rather than a control of
+   * its own: the strip already prints "2 columns", and #816 turned "(more available)" into
+   * the load-more button on the same reasoning, so the grid gains no chrome.
+   *
+   * Hiding is asserted through the callback and the label, never through the menu's own
+   * markup: a menu that renders and calls nothing is the failure this pair is for.
+   */
+  test("opens the column list from the column count and reports a toggle", () => {
+    const onToggleColumn = mock((field: string) => {
+      void field;
+    });
+    const { getByTestId, queryByTestId, queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set<string>()}
+        onToggleColumn={onToggleColumn}
+      />,
+    );
+
+    expect(queryByTestId("column-visibility-menu")).toBeNull();
+    fireEvent.click(queryByText("2 columns")!);
+
+    const menu = getByTestId("column-visibility-menu");
+    fireEvent.click(menu.querySelector('[data-column="name"]')!);
+    expect(onToggleColumn).toHaveBeenCalledTimes(1);
+    expect(onToggleColumn.mock.calls[0]?.[0]).toBe("name");
+  });
+
+  /**
+   * Escape closes it, the way the column filter popover in `ResultsGrid` does.
+   *
+   * The menu covers the rows below it while open and is dismissed by clicking the count
+   * again, which is the only way out until this listener exists. Measured in the running
+   * app: it sits over the grid's own header row, so "click the trigger again" is the one
+   * gesture that is not also a click on something the menu hides.
+   */
+  test("closes the column list on Escape", () => {
+    const { queryByTestId, queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set<string>()}
+        onToggleColumn={mock(() => {})}
+      />,
+    );
+
+    const trigger = queryByText("2 columns")!;
+    fireEvent.click(trigger);
+    expect(queryByTestId("column-visibility-menu")).not.toBeNull();
+
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(queryByTestId("column-visibility-menu")).toBeNull();
+  });
+
+  test("closes the column list on a press outside it", () => {
+    const { queryByTestId, queryByText, container } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set<string>()}
+        onToggleColumn={mock(() => {})}
+      />,
+    );
+
+    fireEvent.click(queryByText("2 columns")!);
+    expect(queryByTestId("column-visibility-menu")).not.toBeNull();
+
+    fireEvent.mouseDown(container);
+    expect(queryByTestId("column-visibility-menu")).toBeNull();
+  });
+
+  /** The control: a press on a field inside the menu keeps it open, so several can be flipped. */
+  test("keeps the column list open while pressing inside it", () => {
+    const { getByTestId, queryByTestId, queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set<string>()}
+        onToggleColumn={mock(() => {})}
+      />,
+    );
+
+    fireEvent.click(queryByText("2 columns")!);
+    fireEvent.mouseDown(getByTestId("column-visibility-menu").querySelector('[data-column="name"]')!);
+    expect(queryByTestId("column-visibility-menu")).not.toBeNull();
+  });
+
+  test("names how many columns are visible while any are hidden", () => {
+    const { queryByText } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+        hiddenColumns={new Set(["name"])}
+        onToggleColumn={mock(() => {})}
+      />,
+    );
+
+    expect(queryByText("2 columns")).toBeNull();
+    expect(queryByText("1 of 2 columns")).not.toBeNull();
+  });
+
+  /**
+   * The control. A surface that supplies no writer keeps inert text, so the assertion
+   * above cannot pass on a strip that made the count clickable unconditionally: a
+   * hydrated agent result has no table to toggle.
+   */
+  test("leaves the column count inert where nothing can toggle a column", () => {
+    const { queryByText, queryByTestId } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+      />,
+    );
+
+    const count = queryByText("2 columns");
+    expect(count).not.toBeNull();
+    expect(count!.closest("button")).toBeNull();
+    fireEvent.click(count!);
+    expect(queryByTestId("column-visibility-menu")).toBeNull();
   });
 
   test("supports masking toggle and view switch", () => {
@@ -164,7 +404,7 @@ describe("results-grid/StatsBar", () => {
         userCanToggle={false}
       />,
     );
-    expect(queryByText("MASKED")).not.toBeNull();
+    expect(queryByText("masked")).not.toBeNull();
   });
 
   test("renders no warnings badge when the engine reported none", () => {
@@ -183,7 +423,7 @@ describe("results-grid/StatsBar", () => {
         userCanToggle={false}
       />,
     );
-    expect(container.textContent).not.toContain("WARNING");
+    expect(container.textContent).not.toContain("warning");
 
     // An empty array must not render an empty affordance either.
     rerender(
@@ -201,7 +441,7 @@ describe("results-grid/StatsBar", () => {
         userCanToggle={false}
       />,
     );
-    expect(container.textContent).not.toContain("WARNING");
+    expect(container.textContent).not.toContain("warning");
   });
 
   test("renders a warnings badge whose message is reachable by tooltip and by screen reader", () => {
@@ -225,7 +465,7 @@ describe("results-grid/StatsBar", () => {
     );
 
     const badge = getByTitle("2 segments of the queried data were unavailable.");
-    expect(badge.textContent).toContain("1 WARNING");
+    expect(badge.textContent).toContain("1 warning");
     expect(badge.querySelector(".sr-only")?.textContent).toContain("2 segments of the queried data were unavailable.");
   });
 
@@ -253,7 +493,7 @@ describe("results-grid/StatsBar", () => {
     // on the raw attribute.
     const badge = getByTitle(/index advice available/);
     expect(badge.getAttribute("title")).toBe("index advice available\nrows were sampled");
-    expect(badge.textContent).toContain("2 WARNINGS");
+    expect(badge.textContent).toContain("2 warnings");
   });
 
   test("falls back to the engine's code when a warning carries no message", () => {
@@ -276,7 +516,7 @@ describe("results-grid/StatsBar", () => {
 
     const badge = getByTitle(/Warning 0/);
     expect(badge.getAttribute("title")).toBe("Warning 0\nWarning");
-    expect(badge.textContent).toContain("2 WARNINGS");
+    expect(badge.textContent).toContain("2 warnings");
   });
 
   test("shows pending changes actions and executes callbacks", () => {
@@ -414,6 +654,41 @@ describe("results-grid/StatsBar - the load-more control (#816)", () => {
  * is not guaranteed. Whether it is said is `ResultsGrid`'s decision and is asserted there;
  * this is about the sentence itself.
  */
+/**
+ * The strip stopped shouting (#870 follow-up).
+ *
+ * MEASURED in the running app before the change: in a 960px strip these three badges took
+ * 154px, 99px and 95px, over a third of the width, for facts that are each one word. The
+ * duration also rendered as "EXEC TIME: 2" with no unit, because `ms` sat only in the
+ * zero fallback beside it.
+ */
+describe("results-grid/StatsBar — badge weight", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  test("gives the duration its unit and drops the label", () => {
+    const { container } = render(
+      <StatsBar
+        result={makeResult()}
+        filteredRowCount={2}
+        activeFilterCount={0}
+        onClearFilters={mock(() => {})}
+        viewMode="table"
+        onSetViewMode={mock(() => {})}
+        wrapText={false}
+        onToggleWrapText={mock(() => {})}
+        hasSensitive={false}
+        effectiveMaskingEnabled={false}
+        userCanToggle={false}
+      />,
+    );
+
+    expect(container.textContent).toContain("14ms");
+    expect(container.textContent).not.toContain("EXEC TIME");
+  });
+});
+
 describe("results-grid/StatsBar — the ordering notice (#816)", () => {
   afterEach(() => {
     cleanup();
@@ -436,7 +711,7 @@ describe("results-grid/StatsBar — the ordering notice (#816)", () => {
     />
   );
 
-  const BADGE = "ORDER NOT GUARANTEED";
+  const BADGE = "!";
   const NOTICE = "Without an ORDER BY the engine may return rows that repeat or are skipped between pages.";
 
   test("states the condition once, beside the auto-limited badge", () => {
@@ -445,7 +720,7 @@ describe("results-grid/StatsBar — the ordering notice (#816)", () => {
     expect(queryAllByText(BADGE)).toHaveLength(1);
     // Beside the badge, in the same left-hand group, so the two read as one sentence
     // about the same bound rather than as a warning of their own.
-    expect(getByText(BADGE).parentElement).toBe(getByText("AUTO-LIMITED").parentElement);
+    expect(getByText(BADGE).parentElement).toBe(getByText("limited").parentElement);
     // Terse in the strip, whole to anyone who hovers or listens: the sentence is on the
     // title and in an sr-only span, the idiom the warning badge beside it already uses.
     // A sentence of this length inline wraps the strip on a narrow panel, and a strip

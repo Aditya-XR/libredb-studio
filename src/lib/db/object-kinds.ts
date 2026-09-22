@@ -220,6 +220,18 @@ export function kindHasSource(capabilities: ProviderCapabilities, id: string): b
 }
 
 /**
+ * Whether THIS KIND has columns (#789, columns under an object row).
+ *
+ * Absent and undeclared both read as FALSE, and the name says the scope so a caller cannot inline
+ * the default. It takes the SPEC rather than `(capabilities, id)` like its siblings, because both
+ * readers already hold one: the tree walk holds the folder's spec, and the conformance guard
+ * iterates them. A caller holding only an id passes `findKind(capabilities, id)` straight in.
+ */
+export function kindHasColumns(kind: ObjectKindSpec | undefined): boolean {
+  return kind?.hasColumns === true;
+}
+
+/**
  * Whether THIS KIND accepts an edited definition back (#789 Phase 3).
  *
  * Absent and undeclared both read as FALSE, and it is NOT conjoined with `hasSource` for the

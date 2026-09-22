@@ -28,19 +28,19 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1–D98, U17 · 43
+- [Drivers and connections](#drivers-and-connections) — D1–D103, U17 · 48
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U21 · 12
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U35 · 23
 - [Dependencies](#dependencies) — P1–P5 · 5
 - [Documentation](#documentation) — DOC3–DOC4 · 2
 - [Release pipeline](#release-pipeline) — REL1–REL4 · 4
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
-- [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H8 · 2
+- [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H12 · 3
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B81 · 24
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B82 · 24
 
 ---
 
@@ -721,8 +721,17 @@ carry it. The object was reachable only by hand-writing a restored tab.
 This is load-bearing for the editing phase rather than cosmetic: any client-side predicate built on
 `provider-meta`'s answer is, on MariaDB, built on the wrong server's declaration.
 
+One sentence in the tree contradicts this entry, and it is the reason the entry is easy to lose.
+`flavourFor`'s docblock (`src/lib/db/providers/sql/mysql.ts:1189`) says that defaulting to MySQL
+"costs two folders a MariaDB user regains the moment the connection is live". Nothing re-reads
+capabilities once a connection opens, which is this entry's whole subject, so a reader who meets that
+sentence first concludes the gap closes itself and stops looking. It is on `origin/main` and
+untouched by the object-tree work, and it is corrected here rather than in an entry of its own
+because the sentence and the defect have one repair.
+
 **Done when:** a MariaDB connection draws its Packages and Sequences folders in both shells, or the
-provider doc says which surface cannot have them and why.
+provider doc says which surface cannot have them and why, and `flavourFor`'s docblock no longer says
+the two folders come back when the connection is live.
 
 ### D58. A ClickHouse function with a non-SQL origin has never been read live
 
@@ -1381,6 +1390,156 @@ What can be done is to re-probe, and to stop the claim drifting back to "whole o
 
 **Done when:** the focused repro has been run against a bun newer than 1.4.2 under the same load, and either it is whole 10 times out of 10 and this entry closes, or the entry names the newest version it still reproduces on and is reported upstream.
 
+### D99. The MariaDB flavour write is hand-copied into four declaration suites
+
+`MySQLProvider` resolves its object kinds from a private `measuredFlavour` that `connect()` writes
+from a server-version probe, so a suite that wants the MariaDB branch without a server writes the
+private field through a cast.
+Four files in `tests/isolated/` now carry the same `MARIADB_FLAVOUR` constant and the same
+`(provider as unknown as { measuredFlavour: "mysql" | "mariadb" }).measuredFlavour = MARIADB_FLAVOUR`
+line: `monaco-language-ids.test.ts`, `object-source-declarations.test.ts`,
+`object-edit-declarations.test.ts` and `object-column-declarations.test.ts`.
+
+Each of the first three disclosed the copy in its docblock rather than hoisting it, citing the
+standing ruling that a second copy is disclosed and a helper is earned; the fourth followed suit
+during the #789 column census and said so.
+Four is past that point.
+The cast is the part that matters: it names a private field's type in four places, so a rename of
+`measuredFlavour` or a third flavour compiles everywhere and silently stops driving the MariaDB
+branch in all four suites at once, and the census guards there would then be measuring MySQL while
+their names say MariaDB.
+
+Repro: rename `measuredFlavour` in `src/lib/db/providers/sql/mysql.ts` and run `bun run typecheck`.
+The four casts still compile, because a cast through `unknown` asserts a shape rather than checking
+one.
+
+**Done when:** one helper beside `tests/helpers/census-connection.ts` owns the constant and the
+write, the four suites call it, and the helper's own test fails when the private field it writes no
+longer exists on the provider.
+
+### D100. Five dead fixture arms in the SQL Server suite model a method that was removed
+
+`tests/integration/db/mssql-provider.test.ts` dispatches its double on statement text, and five arms
+answer for a `getSchema()` shape that no longer exists: `flat-tables`, `flat-columns`, `flat-pk`,
+`flat-fks` and `flat-indexes`.
+`src/lib/db/base-provider.ts` records that removal.
+
+They were not merely dead, they were live and wrong.
+During the #789 column census the single-object index statement fell into the `flat-indexes` arm,
+which answers a canned `app_orders_total_ix` row for any object, and the suite fabricated an index on
+`app.order_summary` the moment that object gained column rows.
+The arm's guard was narrowed with `T.NAME AS TABLE_NAME`, the same fragment the neighbouring
+`flat-pk` arm already uses, so the defect is fixed and all five arms are now unreachable.
+
+Repro: delete the five `case` bodies and their five `if` guards and run
+`bun tests/run-tests.ts tests/integration/db/mssql-provider.test.ts`.
+If the suite is green, nothing reached them.
+
+**Done when:** the five arms are gone, or the one that is still reachable is named with the statement
+that reaches it, and the suite is green either way.
+
+### D101. A `columnlessSamples` reason is not held to the bar `emptyKinds` sets
+
+`tests/helpers/object-surface-conformance.ts` takes two exemption maps whose values are reasons a
+person reads.
+`emptyKinds` holds its reasons to a bar: a blank sentence is refused, and the verdicts in
+`NOT_A_REASON` ("not applicable", "n/a", "none", "todo") are refused with a sentence saying to write
+what is absent and why.
+`columnlessSamples`, added by the #789 census so a provider may declare a kind has columns while a
+fixture's sampled object has none, is checked only for having excused something.
+So `columnlessSamples: { collection: "" }` and `columnlessSamples: { collection: "n/a" }` both buy the
+exemption, and the invariant that a declared twisty never opens on nothing is then waived by a string
+that states no fact.
+
+Repro: in any provider suite whose expectation carries a `columnlessSamples` entry, replace the reason
+with `"n/a"` and run that suite. It stays green.
+
+**Done when:** a `columnlessSamples` reason passes the same blank and `NOT_A_REASON` checks
+`emptyKinds` reasons pass, with the two negative cases asserted, and the two maps share one reason
+checker rather than two copies of it.
+
+### D102. PostgreSQL reports no primary key and no foreign key to a least-privilege role
+
+`CTE_PK_INFO` and `CTE_FK_INFO` in `src/lib/db/providers/sql/postgres.ts` read
+`information_schema.table_constraints`, which PostgreSQL defines as showing only constraints on
+tables a currently enabled role owns.
+A connection made as an ordinary `SELECT`-only role therefore sees every column and every index and
+NO key at all, and the answer is a claim rather than an absence: `describeObject` returns
+`isPrimary: false` on every column and `foreignKeys: []`.
+
+That role is not a corner case, it is what this product recommends and what its own seed fixture
+uses.
+The blind spot predates the object tree and is not confined to it: both CTEs feed `OBJECT_DETAIL_SQL`
+and the bulk statement beside it, so the ER diagram, the mobile schema explorer and the inventory's
+`includeColumns` answer have carried it too.
+What the object tree changed is that the key mark is now on screen, where an absent key reads as a
+table without one.
+
+Measured 2026-09-22 against PostgreSQL 18 holding `dvdrental`, `public.film`, tables owned by
+`postgres`, probed through `POST /api/db/objects/describe`:
+
+| Connected as | Columns | Primary key | Foreign keys |
+|---|---|---|---|
+| `postgres`, the owner | 13 | `film_id` | 1 |
+| `libredb_agent`, `SELECT` only | 13 | none | none |
+
+And at the catalog, as `libredb_agent`: `information_schema.table_constraints` answers 0 rows for
+`constraint_type = 'PRIMARY KEY'` in `public` while `pg_constraint` answers 15, and
+`information_schema.referential_constraints` answers 0 while `pg_constraint` answers 18 foreign keys.
+`information_schema.columns` answers 128 and `pg_indexes` answers 32 to the same role, which is why
+only the keys go missing.
+
+The repair is `pg_catalog`, which `CTE_INDEX_INFO` beside them already reads, and it is not a local
+edit: both statements run against every PostgreSQL wire-compatible engine this repo measures, and one
+of them, Materialize, already needs the documented `constraint_column_usage` fallback that
+`tests/integration/db/postgres-provider.test.ts` pins. So the change owes a live measurement on
+Materialize, CockroachDB, YugabyteDB and RisingWave before it lands, which is why it is filed rather
+than folded into #789's column work.
+
+Repro: connect Studio to any PostgreSQL as a role that owns nothing and holds only `SELECT`, expand a
+table in the object tree, and read the column rows. No key mark appears. Connect as the owner and it
+does.
+
+**Done when:** a `SELECT`-only role sees the same keys the owner sees, on PostgreSQL and on every
+wire-compatible engine whose fallback behaviour was measured for the change, with a test that drives
+the provider as a non-owner role rather than asserting the statement text.
+
+### D103. `noAbstainingKinds` is enforced over the expectation's kinds, not the provider's declarations
+
+`assertColumnDeclarations` builds `abstained` by walking `listings`
+(`tests/helpers/object-surface-conformance.ts:595-603`), and `listings` holds only the kinds the
+expectation gave a non-zero `want` (`:307-335`). The field's own docblock (`:195-200`) defines it
+over something else: "This provider declares `hasColumns` on EVERY kind it has". A provider that
+declares one kind without `hasColumns` and whose fixture happens to hold none of that kind is
+therefore indistinguishable, to the guard, from a provider that has no abstaining kind at all, and
+the refusal at `:643` tells the author to set a flag whose stated meaning that provider's own
+declarations contradict.
+
+It is worse than one wrong direction, and the control that shows it is the one worth keeping.
+Omitting the declared abstainer from the expectation is refused too. A fake provider declaring
+`table` (with columns, answering columns) and `trigger` (abstaining) throws the same
+"listed no kind that abstains from hasColumns" whether `trigger` is listed with a `want` of 0 or left
+out of `expected.kinds` entirely, and the only way to green it is to set `noAbstainingKinds`. So the
+expectation has no form in which it can state the truth about that provider, and the guard's advice
+is to record a falsehood.
+
+No shipped engine trips it today, re-checked across all seventeen expectations: druid, mongodb and
+libredb set the flag correctly, and Trino's only zero-counted kind, `materialized_view`, declares
+`hasColumns` and so is not an abstainer. This is a guard that refuses a legal provider, not a live
+red.
+
+Repro: take any expectation, add a kind the provider declares without `hasColumns` with a `want` of
+0, run it, then delete that kind from `expected.kinds` and run it again. Both throw the same message.
+
+Splitting the flag into two variables, the declaration fact and the fixture fact, is necessary and
+not sufficient. After the split a declared-but-unlisted abstainer still runs the negative probe zero
+times, which is the vacuity the flag was added against, so the complete repair needs a third state:
+the probe ran, or the expectation says why it could not.
+
+**Done when:** `abstained` is derived from the provider's own `objectKinds()` rather than from
+`listings`, an expectation that omits a declared abstaining kind is refused by name instead of by the
+flag's message, a flag set against declarations that contradict it is refused, and the negative
+direction of invariant 8 reports whether it ran rather than only whether it could have.
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound
@@ -1770,6 +1929,321 @@ stated in `readDefaultBody`'s own docblock.
 **Done when:** a body above the framework's clone limit gets one answer that names the size, on every
 route, rather than an empty-body claim on five and a parser error on one.
 
+---
+
+`U24` to `U31` came out of the #789 design that put columns back under an object row. Each was named
+and left out of that PR on purpose, so the reason is recorded here rather than re-derived. They are
+about the desktop object tree unless the entry says otherwise.
+
+### U24. The tree fetches an object's indexes and foreign keys and draws neither
+
+`POST /api/db/objects/describe` answers an `ObjectDetail`, which is `columns`, `indexes` and
+`foreignKeys`.
+The tree issues one of those per expanded object row and renders the first array only, so two thirds
+of every answer it already paid for is discarded.
+
+Repro: connect to PostgreSQL in the desktop sidebar with the network panel open, expand a table that
+has a primary key and a foreign key.
+One `describe` request goes out, its response body carries all three arrays, and the rows drawn under
+the table are the columns alone.
+
+Left out of #789 for two reasons, both still standing.
+A heterogeneous sibling list where an index row and a column row are one 28px line with no way to
+tell them apart is worse than not drawing them, so this needs a visual distinction decided first, not
+a second `map`.
+And a set of providers never answers an index at all, measured per provider for the #789 design:
+trino, druid, elasticsearch and opensearch (one module, two type-ids), mongodb, redis and libredb.
+So whatever shape holds an index has to be absent on those engines rather than empty.
+
+**Done when:** an index and a foreign key are reachable from an open object row, told apart from a
+column row by something other than their text, with no extra round trip, and an engine that answers
+neither draws no empty affordance for them.
+
+### U25. The object tree has no filter, over object names or column names
+
+`docs/FEATURES.md` promises "Real-time, high-performance filtering across both table names and column
+names".
+That sentence is true of `SchemaExplorer`, which filters on `table.name` and on `col.name` and is
+what the mobile schema tab renders; it is false of the desktop sidebar, which has no filter box at
+all.
+This PR scoped the sentence to the schema tab rather than deleting it, which makes the desktop gap
+explicit instead of covered.
+
+Repro: open the desktop sidebar on a schema with 200 tables and look for a filter.
+Open the same connection at a mobile width, switch to the schema tab, and there is one.
+
+The tree's filter is not the flat list's, and that is the work.
+The flat list holds every table and every column in memory, so its filter is an array filter over
+data that is already there.
+The tree reads lazily: a filter over column names can only match a row whose `describe` has happened,
+and a filter over object names can only match a folder whose objects have been listed.
+What an unread subtree does under a filter has to be decided before anything is written, and the
+three answers are hide it, show it unfiltered, or read it, where the third is the eager
+whole-database read #789 removed.
+
+**Done when:** the tree has a filter over object and column names, its behaviour on an unread subtree
+is stated in the component's docblock and asserted by a test, and no keystroke in the box can trigger
+a whole-database read.
+
+### U26. The tree row menu is two items shorter than the flat explorer's
+
+`src/components/schema-explorer/TableItem.tsx` offers "Select Top 50" (the label is
+`labels.selectAction` where a provider sets one), "Generate Query" and "Copy Name".
+`rowActions` in `src/components/object-tree/row-actions.ts` offers `generate-select` and neither of
+the other two, so a desktop reader lost both when the sidebar stopped rendering the flat explorer.
+
+Repro: right-click a table row in the desktop sidebar, then open the same table's menu on the mobile
+schema tab and compare.
+
+"Copy Name" has a constraint that has to be decided before it is added, and it is the reason this is
+an entry rather than two lines.
+It writes the clipboard and reports through a toast, and the embedded shell mounts no `<Toaster />`,
+for the reason `StudioWorkspace` records; the standalone shell mounts one in `src/app/layout.tsx`.
+So the action either gets a report the embedded shell can make, or it is declared standalone-only the
+way the seam already declares other host-dependent actions, and silently copying with no feedback is
+neither.
+
+**Done when:** both items are offered from a tree object row wherever the shell can carry their side
+effect, and a shell that cannot carry one declares it rather than being quietly short.
+
+### U27. Every column the desktop shows is read twice, and the second read is not the fixable one
+
+On connect, `src/hooks/use-connection-manager.ts` posts `/api/db/objects/inventory` with
+`includeColumns: true`, which reads columns for the whole database before any row is expanded.
+The desktop sidebar then posts `/api/db/objects/describe` once per object row the reader opens, for
+columns the first read already has.
+
+Repro: open a connection on a desktop viewport with the network panel open.
+One inventory request carries every column of every table with no gesture behind it.
+Expand one table: a `describe` request fetches that table's columns again.
+
+The design filed this as "the fix is moving the mobile schema tab onto the tree and dropping
+`includeColumns`", and that remedy is wrong as stated.
+Measured in `src/components/Studio.tsx`, the inventory's answer (`conn.schema`) has more readers than
+the schema tab: `SchemaDiagram`, `BottomPanel`, `DataImportModal`, `CommandPalette`, the
+`objectAtPath(conn.schema, ...)` lookups behind the profiler, the code generator and the test-data
+generator, and `conn.schemaContext`.
+The inventory route's own docblock names the same population.
+So moving the mobile tab onto the tree removes one reader of seven and drops nothing.
+
+**Done when:** each reader of `conn.schema` either has a source that is not a whole-database eager
+column read or is named here with the reason it needs one, and a connection whose readers all moved
+costs no column read until a row is opened.
+
+### U28. The single-object describe answer is unbounded, on the route and on the embedded seam
+
+`describeObjects` answers an `ObjectDetailBatch`, which carries `truncated` and takes a `limit`, so
+the vocabulary for a bounded answer exists.
+`describeObject` has neither: `POST /api/db/objects/describe` hands the provider's answer straight
+back, and `WorkspaceObjectReader.describeObject` in `src/workspace/types.ts` lets a host answer
+whatever it likes.
+The tree renders one row per column of whatever arrives.
+
+Repro: implement `describeObject` in an embedded host so it answers 50,000 columns for one table and
+open that row.
+Nothing between the host and the flattened row list refuses, truncates or says a word about the size.
+
+Not fixed in #789 because the bound is not this seam's to invent: `listObjects` has the same open
+question, `INVENTORY_PAIR_LIMIT` bounds the pair fan-out and not the per-object answer, and two
+different bounds decided in two PRs is how a reader ends up with a truncated list and an untruncated
+detail of the same object.
+
+**Done when:** the single-object answer carries the same bound and the same truncation signal as the
+batch one, on the route and on the seam, the bound is the same decision as `list`'s, and the tree
+says so on a row where it was hit.
+
+### U30. A search alias or stream over more than one index is described by the first index's mapping
+
+`src/lib/db/providers/sql/search/` declares `index`, `alias` and `stream` as kinds that have columns,
+and the mapping read in `http-transport.ts` takes `Object.values(payload)[0]`, the first entry of the
+`_mapping` response.
+An alias or a data stream that spans several backing indices is therefore described by one of them,
+and which one is whatever the cluster serialised first.
+
+Where the backing indices share a mapping the answer is correct, which is the common case and the
+reason this ships rather than being blocked.
+Where they do not, a field present only on a later index is missing from the tree's column rows and
+from the agent's column grounding, which has read the same transport answer since #789.
+So this is an existing provider answer that the tree makes visible; the tree did not create it.
+
+Repro: on Elasticsearch, create `logs-000001` and `logs-000002` with different mappings, point an
+alias at both, and expand the alias in the object tree.
+Only the first index's fields are drawn.
+
+**Done when:** `describeObject` for an alias or a stream answers the union of every `_mapping` entry
+in the response, a field two backing indices type differently is reported rather than resolved
+silently to one side, and both products have a fixture for the disagreeing case.
+
+### U31. No per-folder column prefetch, and the break-even that decides one is unmeasured per engine
+
+The tree reads one object's columns at a time, on the gesture that opens the row.
+`describeObjects` reads a whole folder in one round trip and is cheaper per object once enough rows
+in that folder are opened.
+Where that crossover sits differs by more than an order of magnitude across the fleet, from the A/B
+tables the provider docs already carry:
+
+| Engine | One `describeObjects` over a folder | Per object, single read |
+|---|---|---|
+| Trino | 165 ms / 200 objects | 25.8 ms |
+| Druid | 23 ms / 4 objects | 22.5 ms |
+| PostgreSQL | 33 ms / 200 objects | 20.7 ms |
+| Couchbase | 293 ms / 40 collections | 11.6 ms |
+| DuckDB | 26 ms / 200 objects | 6.5 ms |
+| Elasticsearch | 9 ms / 261 indices | 5.3 ms |
+| SQL Server | 161 ms / 200 objects | 2.2 ms |
+| MongoDB | 108 ms / 200 collections | 2.1 ms |
+| Redis | 2 ms / 4 groupings | 1.5 ms |
+
+Roughly six opened rows on Trino, two on PostgreSQL and seventy on SQL Server, which is why a
+constant trigger is not available.
+Each figure is one engine's own doc, on one version, against one fixture, so they are a starting
+point for a measurement rather than the measurement.
+
+The prefetch was left out because a folder read pays its whole cost on the gesture that is today the
+primary way to browse, for columns nobody asked to see: 293 ms on Couchbase and 165 ms on Trino for a
+reader who opens Tables and expands nothing.
+It also needs a second cache shape, since `ObjectDetailBatch` is bounded and the rows past the bound
+still need the single read.
+
+**Done when:** the numbers above have been re-measured on the versions in `docker-compose` at the
+time, the prefetch triggers on a per-engine threshold derived from those numbers rather than a
+constant, and a bounded batch and a single read land in one cache shape rather than two.
+
+### U32. A catalog change that lands during an in-flight read is dropped, and the pre-DDL answer stays
+
+`run` refuses a read whose key is already in flight
+(`src/components/object-tree/use-tree-nodes.ts:517`) and `refresh` issues its reads without waiting
+for anything (`:696`), so a `refreshToken` bump that arrives while a read is still open issues
+nothing for that slot.
+The answer that lands is the one asked for before the DDL statement ran, `store` writes it as the
+row's current state, and nothing re-issues until the next bump.
+A column added by that statement is therefore missing behind the twisty, and the row asserts a
+column list the engine no longer has, for as long as the reader runs no further DDL.
+
+Pre-existing, and measured as such rather than assumed. The guard and `refresh` both predate the
+column rows, and the same gesture on a folder's `list` read, with a capability set that declares no
+`hasColumns` so nothing in the column path is exercised, loses the same way: the bump issues
+`containers` and `counts` and no second `list`, and a table the statement created is absent until
+the next bump. So this is a standing property of `refresh` and not something the column rows created.
+The column rows do make it easier to reach, because a describe is slower than a listing and there is
+one per open object.
+
+Repro: PostgreSQL, standalone shell. Hold `POST /api/db/objects/describe` for `orders` open, expand
+`orders`, and while the describe is still open run `ALTER TABLE orders ADD COLUMN note text` in the
+editor. Release the held describe with the pre-DDL answer. The row draws the pre-DDL columns, no
+second describe is issued for it, and `note` appears only after the next DDL statement.
+
+A plain second `run` call is NOT the fix, and that is the trap this entry exists to record. Two
+describes for one row would then be in flight with no ordering between them, and the older can land
+last and overwrite the newer, which is a worse failure than a stale answer the next bump corrects.
+The fix records that a key was refused while in flight and re-issues it once the first settles, and
+it has to do that for all four slot kinds rather than for `details` alone: teaching one read kind to
+survive this race and leaving the other three behind is a harder inconsistency to reason about than
+the race itself.
+
+**Done when:** a bump that arrives while a read is in flight causes exactly one re-read of that slot
+after the first settles, for every slot kind, with never two reads of one slot in flight at once, and
+a test holds a read open across a bump and asserts the second answer is the one on screen.
+
+### U33. Three tree spans miss 4.5:1 on a selected row, and the docblock measured one background
+
+Three spans in `src/components/object-tree/TreeRow.tsx` are `text-muted-foreground` at 10px:
+`tree-row-column-type`, `tree-row-count` and `tree-row-badge`. Cited by test id rather than by line,
+because the line numbers in that file moved twice while this entry was being written. Measured
+against the repository's own compiled stylesheet, with the token values read off the live page rather
+than the file:
+
+| row background | light | dark |
+|---|---|---|
+| plain | 4.74 | 7.76 |
+| hover | 4.50 | 6.70 |
+| selected (`bg-muted`) | 4.35 | 5.81 |
+
+WCAG 1.4.3 asks 4.5:1 for text below 18.66px, so the light theme fails on the selected row and sits
+exactly on the line on hover. The failing background is not an edge case: clicking a row is the
+primary gesture on the tree, and a clicked row carries `aria-selected="true"` and `bg-muted`, so it
+is the reader's own row that fails.
+
+The correctness note above the type slot, the paragraph beginning "NO `/70`", reaches its conclusion
+from one background. It records `#737373` on `#ffffff` (4.7:1) and `#a1a1aa` on `#09090b` (7.7:1) and
+names neither the hover nor the selected ground, so the `/70` opacity it correctly refuses is refused
+for a reason narrower than the slot's real range, and the note reads as a clearance it has not
+established.
+
+The count and the badge have carried the same ratio since before the column rows existed, so the
+type slot joins a defect rather than introducing one. Repairing the three together, rather than
+recolouring one span in the change that added it, is why this is an entry.
+
+Repro: open the object tree, click any row so it carries `bg-muted`, and measure
+`tree-row-column-type`, `tree-row-count` or the badge text against the row's own background in the
+light theme.
+
+**Done when:** all three spans clear 4.5:1 on the plain, hover and selected backgrounds in both
+themes, the docblock states the measurement per background instead of one, and the ratios are
+asserted in `tests/unit/theme-accent-contrast.test.ts` through `tests/helpers/contrast.ts` rather
+than written down as prose.
+
+### U34. A refresh that drops the focused row sends focus to the document body
+
+`ObjectTree` keeps exactly one tabbable row,
+`rows.find((row) => row.id === activeId)?.id ?? rows[0]?.id`
+(`src/components/object-tree/ObjectTree.tsx:174`), and the focus effect below it moves focus only on
+an explicit `focusRequest`. When a catalog refresh removes the focused row from the model, the
+focused element unmounts, the browser hands focus to `document.body`, and the tab stop falls back to
+the first row. Arrow keys then do nothing, because the key handler is on the row, and the reader has
+to press Tab to re-enter the tree at the top, several screens from where they were.
+
+Pre-existing, and the tempting reading that `DROP COLUMN` makes it newly reachable is refuted by its
+own control: the same gesture against an OBJECT row, which `DROP TABLE` reaches and which predates
+any column work, loses focus identically, focus on `BODY` and the tab stop back on the first row.
+`git diff origin/main...HEAD -- src/components/object-tree/ObjectTree.tsx` reaches neither the
+fallback nor the focus effect. Column rows add one more way in, not the fault.
+
+Repro: PostgreSQL, standalone shell. Focus a column row of `orders` with the keyboard, then run
+`ALTER TABLE orders DROP COLUMN note` for that column in the editor. After the refresh,
+`document.activeElement` is `BODY`, the tab stop is the first row, and ArrowDown does nothing. Repeat
+with a table row and `DROP TABLE` to see the pre-existing half.
+
+**Done when:** a refresh that removes the focused row moves focus to the nearest surviving row, the
+parent for a dropped child and the next sibling otherwise, keyboard navigation continues from there
+with no Tab, and both the object-row case and the column-row case are tested.
+
+### U35. The type slot shows the wrapper and not the type on engines whose types nest
+
+The `aria-hidden` half of the `tree-row-column-type` span in `src/components/object-tree/TreeRow.tsx`
+renders `row.column.type.split("(")[0]`. That rule is right where the parenthesis opens a parameter
+list, which is why `VARCHAR(255)` reads `VARCHAR`, and wrong where it opens the type itself. Driven
+through the component with the spellings
+`docs/providers/clickhouse.md` records as what that provider returns:
+
+| the provider's answer | on screen |
+|---|---|
+| `Int32` | `INT32` |
+| `Nullable(String)` | `NULLABLE` |
+| `Array(UInt8)` | `ARRAY` |
+| `Map(String,String)` | `MAP` |
+| `Enum8('x'=1,'y'=2)` | `ENUM8` |
+| `LowCardinality(String)` | `LOWCARDINALITY` |
+| `Decimal(10,3)` | `DECIMAL` |
+
+So for every nullable or low-cardinality ClickHouse column the visible slot says only that the column
+is wrapped and never what it holds, and a reader scanning a table's types learns nothing from the
+column that needed the annotation most. Degraded rather than lost: the full spelling stays in the
+`title` and in the `sr-only` twin, so the tooltip and the accessible name are correct.
+
+Not the tree's invention. `src/components/schema-explorer/ColumnList.tsx:36` does the identical
+split, so the tree restores behaviour the flat explorer already had on the same engines, which is
+why this is an entry covering both readers rather than a line in the change that added the second.
+There is no second field to fall back to either: the ClickHouse provider publishes the wrapped
+spelling and no base type beside it.
+
+Repro: connect ClickHouse, create a table with a `Nullable(String)` column, and expand it in the
+object tree. The right-hand slot reads `NULLABLE`.
+
+**Done when:** a nested type shows the reader the inner type rather than the wrapper, the choice is
+driven off what the provider publishes rather than off the shape of the string and without branching
+on a database type id in a component, and the tree slot and the flat explorer's column list take the
+same answer from one place.
 
 ## Dependencies
 
@@ -2140,6 +2614,30 @@ considered each introduced a worse flaw.
 
 **Done when:** a cheaper, audit-visible eviction policy is found that does not reopen the oldest-first
 bypass.
+
+---
+
+### H12. A `jwtVerify` failure in the proxy leaves a log line and no audit event
+
+The proxy refuses a request on three grounds and audits two of them. `src/proxy.ts` emits
+`origin_mismatch` at `:65` and `insufficient_role` at `:156`, both through `emitAuditEvent`. The third
+is the trailing `catch` at `:173-176`: a token that fails `jwtVerify` because it is forged, tampered,
+expired or truncated falls into `logger.warn("JWT verification failed, redirecting to login")` and
+redirects. Nothing reaches the audit channel.
+
+An operator reading `GET /api/admin/audit` sees origin and role refusals and no forged-token attempts
+at all, which is the direction the blind spot matters: those are the probes a deployment most wants
+counted. The stdout line still exists and still lands in the aggregator, so the evidence is not lost,
+only off the surface an operator is pointed at.
+
+Recorded here rather than fixed with the note, because closing it is a behaviour change rather than a
+wording one: the catch has to distinguish a verification failure from a missing token, since
+`/login` redirects with no cookie are ordinary logged-out traffic and the note already excludes them.
+Whatever emits needs its own test in `tests/security/auth-audit.test.ts`, and the emit is metered
+through the anon bucket like every other `permission_denied` line.
+
+**Done when:** the verification-failure arm of that catch emits an audit event naming the route and
+the reason, distinct from a missing token, with the row 1.4 residual in `docs/SECURITY.md` deleted.
 
 ---
 
@@ -2543,109 +3041,57 @@ the new signal — and when classification no longer depends on a substring a ta
 satisfy. Driver error codes (PostgreSQL `SQLSTATE`, SQLite `errcode`) are the signal that does not
 collide, and each provider already has access to its own.
 
-### B5. The agent run ledger assumes one writer per run, and cannot enforce it
+### B5. The agent run ledger cannot fence two writers, so single ownership has to be asserted above it
 
 `run-store.ts` and `run-service.ts` are append-only over the durable world's stream primitives, which
 offer no compare-and-append: a writer cannot say "append this only if the stream is still at index N".
-Every operation is read-then-append. Two consequences follow that a single-writer run never meets:
+Two consequences follow, and only the process-local half of the second is closed:
 
 - **Two concurrent opens on one caller-supplied run id write two headers.** The fold refuses a ledger
   with a second header (`MALFORMED_LEDGER`), permanently, for every later read. The race does not
-  resolve in one side's favour — it bricks the run. Nothing minted internally can collide (UUIDv4, 122
-  random bits), so reaching this needs a caller that supplies its own id, which is what the
-  workflow-run-id path does.
-- **Two loops driving one running run would both perform the same step.** `runStep` reads the ledger,
-  sees the step neither settled nor invoked, and appends its invocation. Two readers of the same state
-  both pass that check. The write-ahead ordering makes a step at-most-once *per loop*, not *per run*.
-  The milestone's "no tool execution performed twice" criterion is about a restart, where the dead
-  process is gone by construction, and that case is genuinely covered.
-
-Not defended at the storage layer because every cross-process defence available is worse than the
-constraint: a lock file is single-instance only (which the Postgres backend exists to escape), and a
-lease in the ledger is a distributed-lock design with its own expiry semantics. Single ownership of a
-running workflow belongs to the layer above.
-
-How strong the guarantee is depends on the backend. On the zero-config local world it holds by
-construction: the queue awaits each delivery before attempting the next, so retries are sequential. On
-the opt-in Postgres backend a visibility-timeout redelivery can overlap a handler that is still alive,
-which is where the second bullet would bite.
-
-**Severity is a function of B9.** Nothing delivers an agent drive today: `mintAgentDriveToken` has no
-production caller, there is no `"use workflow"` function and no queue producer, so a run is driven
-exactly once, in the process that opened it. A second drive is not reachable through the product on
-either backend. Producing one takes a caller that mints its own drive credential from `JWT_SECRET`,
-which is how the fence below was exercised against a live run rather than only in a test. Closing B9 is
-what makes this live — and in that order, because a producer without the fence is a redelivery that runs
-the user's statement a second time.
-
-The process-local half of the fence exists (2026-08). `claimDrive`/`releaseDrive` refuse a second
-concurrent drive of one run inside a single process, and `AgentRunStore.append` refuses an append once
-the run's stream has been closed (`RUN_ALREADY_CLOSED`), turning the silent-loss mode into a loud
-refusal. The cross-process half is open: two replicas would still both pass the read-then-append check.
+  resolve in one side's favour — it bricks the run. Run creation still has to be serialized by its
+  caller.
+- **Two loops driving one running run would both perform the same step.** The drive claim is now a
+  DURABLE ledger record — `drive-claimed`/`drive-released` — rather than a memory-only set, and
+  `tryClaimDrive` serializes check-then-append per store instance (#998, pinned by a fifty-claim
+  concurrency test). The cross-process half is open: two replicas would still both pass the
+  read-then-append check, because the durable world offers no tail-index conditional append (B16).
 
 **Done when:** the ledger can append conditionally on the stream's tail index, or the single-ownership
-guarantee the runtime provides is asserted by a test rather than assumed by prose. The process-local
-claim is asserted in `tests/unit/lib/agent/run-service.test.ts`, the append-after-close guard in
-`tests/unit/lib/agent/run-store.test.ts`.
+guarantee is asserted for every backend a deployment can reach. The process-local durable claim is
+asserted in `tests/unit/lib/agent/run-store.test.ts`.
 
-### B6. Every agent cost ceiling is per-drive, so N resumes cost up to N times one drive's budget
+### B6. The repair ledger is per-drive, so a resumed run's repair attempts start over
 
-The three things that bound what a run may spend — `ExecutionBudgetTracker` (`maxStatementsPerRun`,
-`maxTotalRunMs`), `AgentRepairLedger` and `AgentRunDeadline` — are all constructed by the process that
-drives a run and live only in its memory. `runInvestigation` takes them as injected resources, so a run
-resumed after a process death is handed a fresh set and starts each ceiling again.
+`ExecutionBudgetTracker` (`maxStatementsPerRun`, `maxTotalRunMs`), `AgentRunDeadline` and the artifact
+allowance were all constructed by the process that drives a run and lived only in its memory, so a run
+resumed after a process death was handed a fresh set. Those are now derived from the run's own ledger
+(#999): the deadline from `createdAtMs`, the statement and elapsed-time spend folded from
+`tool-completed` entries, and the artifact allowance from the workflow ceiling. A run that dies and
+resumes ten times no longer multiplies those tenfold.
 
-A run that dies and resumes ten times may perform ten times `maxStatementsPerRun` statements and spend
-ten times its workflow's `runDeadlineMs`, even though each drive stayed honestly inside its bounds.
+`AgentRepairLedger` is the remaining per-drive piece: `runtime.ts` rebuilds it fresh for every drive,
+so a resumed run starts its repair attempts over. Ten resumes can therefore still spend ten repair
+budgets, even though each drive stayed honestly inside its bounds.
 
-Nothing claims otherwise: `AGENT_WORKFLOW_BUDGETS`'s docblock states the per-drive scope explicitly. It
-matters for two later tasks — a budget meter must not present a per-drive figure as a run total, and any
-retry policy that resumes automatically would multiply the ceiling without a user asking.
+**Done when:** a drive's repair attempts are derived from the run's own history — or the per-drive
+rebuild is asserted by a test rather than assumed — with a test that resumes a run twice and shows the
+second drive inheriting the first's repair spend.
 
-The data needed is already persisted. `AgentRunRecord` carries `createdAtMs`, and the ledger holds
-every settled step, so a drive could fold the run's own history into the ceilings it starts with: a
-deadline measured from `createdAtMs`, a statement count folded from `tool-completed` entries.
+### B9. The resume sweep is local-only, and a resumed run is not driven back into the rail
 
-**Done when:** the ceilings a drive enforces are derived from the run's ledger rather than from the
-drive's own construction, with a test that resumes a run twice and shows the second drive inheriting
-the first's spend.
+The local sweep (#1000) now finds runs a dead process left `running` and drives each one again, with
+the drive's own claim as the single-flight and B6's cross-drive ceilings accounted for. What remains:
 
-### B9. Nothing enqueues an agent drive, so an interrupted run is resumable but never resumed
+- **The sweep is local-only.** It lists the `local` world's ledger streams; the multi-replica Postgres
+  world is absent from the shipped artifacts (B16), so no cross-replica sweep exists.
+- **A user-visible resume does not re-attach the rail.** `resumeRun` sets the run back to `running`, but
+  `driveAgentRun`'s only callers are the start route and the drive route — neither on the resume path —
+  so a run resumed from the rail is picked up by the sweep, eventually, rather than by the rail's own
+  stream.
 
-Opened by #329 T9. `POST /api/agent/drive` exists, authenticates a server-minted single-purpose
-credential and resumes the run it names, and `src/lib/agent/runtime.ts` re-derives everything that run
-needs from its own ledger. So a resume WORKS. What does not exist is anything that asks for one.
-
-A run is driven exactly once, in the process that opened it. If that process dies mid-run the run stays
-`running` in the ledger with nobody to pick it up: `mintAgentDriveToken` has no production caller, and
-the workflow runtime is used only as the ledger's durable substrate — no `"use workflow"` function, no
-queue producer, so the backend's own re-enqueue-on-start never sees an agent run.
-
-Distinct from a drive that *fails*, which is recorded: a throw anywhere in `driveAgentRun` ends the run
-as `failed` with a classified reason, so an unconfigured model no longer leaves a run at `queued`
-forever. This entry is the case where the process is GONE — nothing threw, nothing can record.
-
-**Adopting the SDK's Next.js integration was refused deliberately.** Its documented setup asks for
-`/.well-known/workflow/*` to be excluded from the proxy matcher, and warns that a proxy on that path
-detaches the request body, so the callback could not authenticate its way through the middleware
-either. Worse than the requested edit: **this matcher already excludes it**, because the dot rule
-(`.*\..*`) skips every path containing a dot and `.well-known` contains one (AU2 records the same
-consequence). That route would sit outside `src/proxy.ts` entirely, unauthenticated, the moment it
-existed — with no matcher edit to review. The pinned decision for this case says driving in-process
-without a loopback hop is strictly better, which is what the start route does. The drive path is one
-the matcher DOES route, guarded by a credential rather than a path rule, and `tests/api/proxy.test.ts`
-pins both halves.
-
-Two things have to land together whenever a producer arrives, and neither is safe alone:
-
-- **A sweep that finds runs left `running`** and drives each one, at boot or on a timer, with the same
-  credential the callback already verifies.
-- **Single-flight per run.** Today no two drives of one run can overlap, because there is only ever one.
-  A producer removes that accident, and the ledger is read-then-append with no fencing (B5), so two
-  drives would both read "not invoked" for the same step and both perform it.
-
-**Done when:** a run whose process died is picked up without a person asking, no step is performed
-twice while that happens, and B6's per-drive ceilings are accounted for across the resumes it causes.
+**Done when:** a resumed run is driven on every backend a deployment can reach, and the rail re-attaches
+to the resumed run's stream instead of waiting for the sweep.
 
 ### B11. The rail can stop a run but cannot pause or resume one
 
@@ -2814,34 +3260,6 @@ depends on it and no user is waiting on it.
 
 **Done when:** the event model has settled and somebody is running Studio beside a stack that wants
 agent runs in it. #332 holds the full scope.
-
-### B35. A resumed run can evict its own still-cited results: the artifact cap is per drive
-
-`AGENT_MAX_ARTIFACTS` (`src/lib/agent/runtime.ts`) is `45 × 4 = 180`: the largest per-workflow statement
-ceiling times the four concurrent runs one agent process is sized for. Its justification used to be that
-"a run cannot produce more artifacts than it is allowed statements", which is true of a DRIVE and not of
-a run — every ceiling is per drive (B6), while a resumed run keeps its `runId` and its artifacts are
-keyed by it. A run driven three times may hold up to three times its statement ceiling, and one
-long-lived run can pass 180 with no concurrency at all.
-
-`ExecutionArtifactStore.put` spends the cap run-fairly: a store at the cap evicts the oldest artifact of
-the run that is STORING, which stops a busy run making "Show result" fail on a quieter one. Applied to a
-run past the cap, the same rule means the run evicts its own earliest evidence — the results its first
-drive read, which its report may still cite.
-
-Nothing about the ledger is wrong afterwards: a claim and its citation are durable, and the artifact
-route already answers "the rows are not here" for the run-ended and TTL-expired cases (B15). This is a
-third way to reach that answer, and the only one that can happen while the run is still live and the
-rail is still offering the control.
-
-Not closed with an artifact-only bound, deliberately. A ceiling that holds ACROSS drives is exactly what
-B6 describes as missing, and the run record already carries what it needs, so a second answer invented
-for artifacts alone would have to be unpicked when B6 lands. Raising the number cannot close it either:
-a run resumed often enough passes any constant.
-
-**Done when:** a drive's artifact allowance is derived from the run's own history rather than from a
-per-drive constant — most likely as part of B6 — with a test that drives one run twice past the cap and
-shows the first drive's cited results still readable, or the surface stating that they are not.
 
 ### B59. Per-model instructions have nowhere to go, and the mechanism that held them is gone
 
@@ -3079,3 +3497,18 @@ value are the same object shape, which is the same defect one level up.
 **Done when:** an unasked seed list is distinguishable from a measured empty one, a non-OK the
 server did not attribute leaves the browser in the unasked state rather than the empty one, and the
 two tests above wait on a fact that a hook which never fetched cannot satisfy.
+
+### B82. The resume sweep keeps re-driving a run that dies again at the same point
+
+The sweep that #1000 added finds a run a dead process left `running` and drives it again, once per
+interval. A run whose process dies WITHOUT recording a failure — a hard crash, `kill -9`, a host
+reboot — stays `running`, so after its claim expires the sweep picks it up again. If it dies again at
+the same point, the sweep repeats this at every interval, forever.
+
+`driveAgentRun` turns a THROW into a terminal `failed` run, so an ordinary failure does not loop; this
+entry is only the case where the process is gone before it can write anything. There is no attempt
+counter, no max-retry and no dead-letter, because the sweep cannot tell "crashed again" from "never
+attempted": neither writes a record.
+
+**Done when:** the sweep stops re-driving a run after a bounded number of consecutive unrecorded
+deaths and says so — in the run's ledger or in the operator log.

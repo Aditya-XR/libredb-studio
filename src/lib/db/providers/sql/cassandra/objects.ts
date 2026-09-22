@@ -77,6 +77,16 @@
  * node's filesystem rather than anything the database holds. The other six kinds DO
  * declare `hasSource`; see `CASSANDRA_OBJECT_KINDS` below, which is the list.
  *
+ * THREE kinds declare `hasColumns`, and the third is why the declaration is per kind rather
+ * than derived from `role` (#789). `table` and `materialized_view` are `relation` and answer
+ * the table's or the view's columns. `type` is `role: "config"` and answers the UDT's fields
+ * out of `system_schema.types` (`typeDetail` below), so a role-derived gate would withhold a
+ * twisty that opens on real content. `index` is `config` as well and declares NOTHING,
+ * because `indexDetail` answers `columns: []` and carries the index's whole content in
+ * `indexes` instead; `function`, `aggregate` and `trigger` have no columns at all. A UDT
+ * declared with no field is a legal empty answer rather than a defect, and the conformance
+ * expectation names it in `columnlessSamples` when a fixture holds one.
+ *
  * Only `table` declares `acceptsRowWrites`. A materialized view refuses every write
  * ("Cannot directly modify a materialized view", measured), and the other five kinds
  * have no rows at all. The provider's engine-wide `supportsInlineRowEdit: false` is a
@@ -151,6 +161,7 @@ export const CASSANDRA_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     label: "Table",
     labelPlural: "Tables",
     acceptsRowWrites: true,
+    hasColumns: true,
     hasSource: true,
     sourceLanguage: CASSANDRA_SOURCE_LANGUAGE,
   },
@@ -159,6 +170,7 @@ export const CASSANDRA_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     role: "relation",
     label: "Materialized View",
     labelPlural: "Materialized Views",
+    hasColumns: true,
     hasSource: true,
     sourceLanguage: CASSANDRA_SOURCE_LANGUAGE,
   },
@@ -175,6 +187,7 @@ export const CASSANDRA_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     role: "config",
     label: "Type",
     labelPlural: "Types",
+    hasColumns: true,
     hasSource: true,
     sourceLanguage: CASSANDRA_SOURCE_LANGUAGE,
   },

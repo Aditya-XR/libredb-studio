@@ -6,7 +6,7 @@ import { renderHook, act } from "@testing-library/react";
 import { useConnectionAdapter } from "@/workspace/hooks/use-connection-adapter";
 import type { WorkspaceConnection, WorkspaceObjectReader } from "@/workspace/types";
 import { relationObjects, type DetailedObject } from "@/lib/db/detailed-object";
-import type { ProviderCapabilities } from "@/lib/db/types";
+import type { Container, DatabaseObject, KindCount, ObjectDetail, ProviderCapabilities } from "@/lib/db/types";
 
 // ── Test Data ───────────────────────────────────────────────────────────────
 
@@ -866,5 +866,93 @@ describe("useConnectionAdapter and a slow host read", () => {
 
     expect(result.current.schema).toEqual([]);
     expect(result.current.isLoadingSchema).toBe(false);
+  });
+});
+
+// =============================================================================
+// The describe seam (#789, columns under an object row)
+// =============================================================================
+//
+// `objectSource` is what the object tree reads through in this shell, and its fourth arm is the
+// one an adopter can decline: `describeObject` is optional, so the two answers this block pins
+// are "the host's own method, bound" and "a rejection nobody can render a twisty over". The tree
+// never issues the second, because `readsColumns` withholds the affordance, and that is exactly
+// why the arm is asserted here: it is unreachable through the component and still executable.
+describe("useConnectionAdapter and the describe seam", () => {
+  /**
+   * A host as a CLASS, which is what makes the receiver assertion real.
+   *
+   * Every field this method needs is reached through `this`, so a seam that read the method off
+   * the object as a value and called it with no receiver gets a TypeError out of `this.details`
+   * rather than a detail. `readObjectSource`'s docblock in `src/workspace/types.ts` records the
+   * same fault for the read seam; the methods are on the prototype rather than arrow properties
+   * for that reason, since an arrow property would be bound whatever the caller did.
+   */
+  class HostWithDetail implements WorkspaceObjectReader {
+    public readonly asked: unknown[][] = [];
+    constructor(private readonly details: Record<string, ObjectDetail>) {}
+    async listContainers(): Promise<readonly Container[]> {
+      return [];
+    }
+    async countObjects(): Promise<Record<string, KindCount>> {
+      return {};
+    }
+    async listObjects(): Promise<readonly DatabaseObject[]> {
+      return [];
+    }
+    async describeObject(connectionId: string, path: readonly string[], kind: string): Promise<ObjectDetail> {
+      this.asked.push([connectionId, path, kind]);
+      return this.details[connectionId];
+    }
+  }
+
+  function adapterFor(onObjectsFetch: WorkspaceObjectReader) {
+    const connections = [makeWorkspaceConnection({ id: "host-conn-1" })];
+    return renderHook(() => useConnectionAdapter({ connections, onSchemaFetch: async () => [], onObjectsFetch }));
+  }
+
+  test("a describe read reaches the host's method, bound, with the connection id, path and kind", async () => {
+    const detail: ObjectDetail = {
+      path: ["app", "orders"],
+      columns: [{ name: "id", type: "integer", nullable: false, isPrimary: true }],
+      indexes: [],
+      foreignKeys: [],
+    };
+    const host = new HostWithDetail({ "host-conn-1": detail });
+    const { result } = adapterFor(host);
+
+    // NOT `table`, and the value is the assertion. An arm that dropped `request.kind` and passed
+    // the literal `"table"` was indistinguishable from one that threads it while this seam only
+    // ever asked about a table, and that mutant survived the suite. A host is asked about the
+    // kind the row declares: Cassandra answers a `materialized_view`, a `type` and a `table`
+    // through three different catalogs, so the wrong word here reads the wrong object or refuses.
+    const answer = await result.current.objectSource(result.current.connections[0], {
+      route: "describe",
+      path: ["app", "orders"],
+      kind: "materialized_view",
+    });
+
+    expect(answer).toBe(detail);
+    expect(host.asked).toEqual([["host-conn-1", ["app", "orders"], "materialized_view"]]);
+  });
+
+  test("a host that declares no describe read rejects, rather than answering nothing", async () => {
+    const { result } = adapterFor(noObjectReads);
+
+    // A rejection and not `undefined`: `undefined` fails the tree's shape check and is reported
+    // as "answered with a body this tree cannot render", which blames the host's answer for a
+    // method the host never declared.
+    await expect(
+      result.current.objectSource(result.current.connections[0], {
+        route: "describe",
+        path: ["app", "orders"],
+        kind: "table",
+      }),
+    ).rejects.toThrow("This host reads no object detail");
+  });
+
+  test("readsColumns is true only where the host declared the member", () => {
+    expect(adapterFor(new HostWithDetail({})).result.current.readsColumns).toBe(true);
+    expect(adapterFor(noObjectReads).result.current.readsColumns).toBe(false);
   });
 });

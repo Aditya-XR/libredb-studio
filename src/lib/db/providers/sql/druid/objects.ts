@@ -72,7 +72,14 @@
  */
 
 import { QueryError } from "@/lib/db/errors";
-import { callerBoundTruncationReason, containerDepth, declaredKinds, findKind } from "@/lib/db/object-kinds";
+import {
+  assertObjectPathShape,
+  callerBoundTruncationReason,
+  containerDepth,
+  declaredKinds,
+  findKind,
+  type ObjectPathShapeEngine,
+} from "@/lib/db/object-kinds";
 import { comparePaths } from "@/lib/db/object-path";
 import type {
   Container,
@@ -89,6 +96,19 @@ import { DRUID_CLIENT_DEADLINE_GRACE_MS, type DruidRow, type DruidTransport } fr
 import { DRUID_SCHEMA_NAME, DRUID_SYSTEM_READ_TIMEOUT_MS, readColumn, readIdentifier } from "./introspect";
 
 const PROVIDER = "druid" as const;
+
+/**
+ * Druid's identity for the shared path-shape renderer.
+ *
+ * `attachedSegment` is inert here: no kind this engine declares carries `attachedTo`, so
+ * the renderer emits one shape, the declared levels plus the name, and never consults the
+ * attached policy.
+ */
+const DRUID_PATH_SHAPE_ENGINE: ObjectPathShapeEngine = {
+  code: "druid",
+  label: "A Druid",
+  attachedSegment: "required",
+};
 
 /** Narrower than the whole transport: this module never opens or closes anything. */
 type DruidQueryRunner = Pick<DruidTransport, "query">;
@@ -117,11 +137,19 @@ export const DRUID_CONTAINER_LEVELS: ContainerLevels = Object.freeze([
  * posted to the Coordinator, not by DDL, and `ObjectRole` names a Druid lookup as the
  * example of that role. It is nonetheless queryable, which is why it is in this list at
  * all rather than only in a settings panel somewhere.
+ *
+ * All three declare `hasColumns`, which is the whole declaration on this engine and the
+ * reason `lookup` is the case that shows `role === "relation"` could never have been the
+ * gate (#789): it is `config` and it answers `k` and `v`. The fact is the one
+ * `describeObject` below states and `INFORMATION_SCHEMA.COLUMNS` answers for all three
+ * alike, so nothing here abstains and no object row in this engine is a leaf. The
+ * druid integration suite states that with `noAbstainingKinds`, because invariant 8's
+ * negative direction iterates zero times here and certifies nothing on its own.
  */
 export const DRUID_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
-  { id: "datasource", role: "relation", label: "Datasource", labelPlural: "Datasources" },
-  { id: "lookup", role: "config", label: "Lookup", labelPlural: "Lookups" },
-  { id: "system_table", role: "relation", label: "System Table", labelPlural: "System Tables" },
+  { id: "datasource", role: "relation", label: "Datasource", labelPlural: "Datasources", hasColumns: true },
+  { id: "lookup", role: "config", label: "Lookup", labelPlural: "Lookups", hasColumns: true },
+  { id: "system_table", role: "relation", label: "System Table", labelPlural: "System Tables", hasColumns: true },
 ] as const);
 
 // ============================================================================
@@ -582,18 +610,12 @@ export async function describeObject(
   path: readonly string[],
   kind: string,
 ): Promise<ObjectDetail> {
-  if (findKind(capabilities, kind) === undefined) {
+  const spec = findKind(capabilities, kind);
+  if (spec === undefined) {
     throw new QueryError(`Druid declares no object kind "${kind}"`, PROVIDER);
   }
 
-  // Derived, not counted: one segment per declared container level plus the name, and
-  // the segment NAMES are the declared level labels sliced to the same depth, so the
-  // message and the check cannot disagree. No kind here declares `attachedTo`, so there
-  // is a single shape rather than the two MySQL accepts.
-  const shape = [...declaredLevels(capabilities).map((level) => level.label.toLowerCase()), "name"];
-  if (path.length !== shape.length) {
-    throw new QueryError(`A Druid "${kind}" path is [${shape.join(", ")}], received ${JSON.stringify(path)}`, PROVIDER);
-  }
+  assertObjectPathShape(capabilities, spec, kind, path, DRUID_PATH_SHAPE_ENGINE);
 
   // Neither bind is positional. The schema comes from the segment the DECLARATION
   // assigns to the `schema` level, and the object's own name is the LAST segment, which

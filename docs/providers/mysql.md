@@ -894,6 +894,11 @@ one (`next_not_cached_value`, `minimum_value`, `maximum_value`, `start_value`, `
 `cache_size`, `cycle_option`, `cycle_count`), because a sequence is a table underneath. Its role is
 `config` rather than `relation` because nobody selects rows from it.
 
+**`hasColumns` is declared on `table`, `view` and MariaDB's `sequence`, and on no other kind (#789).**
+That declaration is the client gate the object tree draws a column twisty from, and it is derived at each kind from the same catalog predicate these two reads are keyed on, so the gate and the reads cannot drift apart.
+`procedure`, `function`, `trigger`, `event` and MariaDB's `package` declare nothing and answer `columns: []`, which is the three-empty-array answer above.
+An object dropped between the listing and the describe reaches the caller the same way: this surface has no zero-row check, so it answers three empty arrays and no error, unlike PostgreSQL, which raises.
+
 Three differences from the deleted flat reads over the same views, all deliberate:
 
 - **No `LIMIT`.** The flat column read stopped at 100 columns, which a flat tree could live with and a
@@ -935,7 +940,7 @@ A generated column is absence on both, recognised by `EXTRA` being exactly `STOR
 On MariaDB the remaining text is decoded by `unquoteLiteral()` (`src/lib/sql/values.ts`), the inverse of the `quoteLiteral()` this repo already uses for this family, so the doubled quote and the escaping backslash are both undone; text that is not exactly one literal, such as `current_timestamp()` or `concat('x','y')`, passes through as written.
 
 **Each column carries both readings, and only where they were measured.**
-`defaultValue` is the value the column defaults to, which is what the object browser shows, and this family is the only one that decodes it.
+`defaultValue` is the value the column defaults to, which is what the object browser shows, and this family decodes it, as SQLite, libSQL and DuckDB do for the same reason (#1029).
 Most other providers leave the engine's catalog text in that field; ClickHouse is the exception either way, because it builds a clause-naming string such as `MATERIALIZED a + b` that is neither (issue #1032).
 `defaultExpression` is the SQL text that produces it, which is what a reader emitting DDL, the schema-diff migration generator above all, must write after the word `DEFAULT`, and a provider carries it exactly where it decoded the value out of it.
 On MariaDB both are set: the catalog text is always valid SQL there, every form in the table above included, so the expression is the raw text unchanged.
@@ -1010,6 +1015,20 @@ That order decides WHICH objects a bound keeps and nothing else: the answer is r
 which is one rule on every server, and a caller joins the two answers on path rather than on position.
 A bounded read's membership is therefore the server's, and it is not promised to be the same on two servers
 of this family.
+
+**The bound is written into the statement, not bound to it.**
+`LIMIT 2`, never `LIMIT ?`, and that is a relative's constraint rather than a style choice.
+Measured 2026-09-22 through `mysql2` with the same statement four ways, against each server in turn:
+`execute()` with no bound answers everywhere, `execute()` with a literal `LIMIT` answers everywhere, and
+`execute()` with `LIMIT ?` answers on MySQL 8 and fails on **Apache Doris 4.1.3-rc02** with
+*mismatched input 'LIMIT' expecting {&lt;EOF&gt;, ';'}* and on **StarRocks 3.3.22-753696f** with
+*using parameter(?) as limit or offset not supported*.
+The text protocol (`query()`) takes `LIMIT ?` on all three, so this is the binary prepared protocol's
+placeholder in the LIMIT position specifically, not the LIMIT grammar and not prepared statements at large.
+Before the bound was written in, a Doris or StarRocks user got a 500 from the object browser the moment a
+folder was read, because the bulk read is the only caller that bounds.
+What is spelled in is the caller's `limit + 1`, which `describeObjects()` has already rejected unless it is a
+positive whole number, so the rendered statement can carry nothing but digits.
 
 **Mixed path depth (ruling 5f).**
 Not in this engine's relation set.

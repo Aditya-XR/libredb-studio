@@ -1586,7 +1586,13 @@ describe("RedisProvider", () => {
 
       expect(caps.containerLevels).toEqual([{ id: "schema", label: "Database", labelPlural: "Databases" }]);
       expect(caps.objectKinds).toEqual([
-        { id: "keyspace", role: "relation", label: "Key Pattern", labelPlural: "Key Patterns" },
+        {
+          id: "keyspace",
+          role: "relation",
+          label: "Key Pattern",
+          labelPlural: "Key Patterns",
+          hasColumns: true,
+        },
         {
           id: "function",
           role: "routine",
@@ -2018,6 +2024,32 @@ describe("RedisProvider", () => {
       expect(detail.columns[0]).toEqual({ name: "key", type: "string", nullable: false, isPrimary: true });
       expect(detail.indexes).toEqual([]);
       expect(detail.foreignKeys).toEqual([]);
+    });
+
+    /**
+     * The `hasColumns` declaration against this engine's own answer, both ways (#789).
+     *
+     * `keyspace` declares it because the three synthetic columns above ARE what this provider
+     * models a key pattern as; `function` abstains because a library has no columns at all and a
+     * twisty on it would open on nothing. Asserted here as well as through `assertObjectSurface`
+     * so the declaration cannot be changed without a redis-owned test going red.
+     */
+    test("declares hasColumns on keyspace alone, and describeObject agrees in both directions", async () => {
+      const kinds = provider.getCapabilities().objectKinds ?? [];
+
+      expect(kinds.filter((kind) => kind.hasColumns === true).map((kind) => kind.id)).toEqual(["keyspace"]);
+      expect(kinds.find((kind) => kind.id === "function")?.hasColumns).toBeUndefined();
+
+      const declared = await provider.describeObject(["0", "user:*"], "keyspace");
+      expect(declared.columns.length).toBeGreaterThan(0);
+      const [first] = declared.columns;
+      expect(typeof first.name).toBe("string");
+      expect(first.name.trim()).not.toBe("");
+      expect(typeof first.type).toBe("string");
+      expect(first.type.trim()).not.toBe("");
+
+      const abstaining = await provider.describeObject(["0", "libredb_probe"], "function");
+      expect(abstaining.columns).toEqual([]);
     });
 
     test("a grouping the current scan no longer holds raises rather than answering an empty shape", async () => {

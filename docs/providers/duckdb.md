@@ -732,6 +732,11 @@ two other providers in #789 broke on their first pass.
   parser error too, so zero column rows raises rather than rendering a dropped table as a table with
   no columns.
 
+`hasColumns: true` is declared on `table` and `view` and on nothing else, because `describeObject`
+gates the four reads above on `role: "relation"`: a `macro` and a `sequence` answer three empty
+arrays without a round trip, so both declare nothing and their rows are leaves in the object tree
+rather than twisties that open on nothing.
+
 #### `describeObject` takes the KIND, and on this engine that is not theoretical
 
 Measured on v1.5.5, in ONE schema: `CREATE SEQUENCE overlap` and `CREATE MACRO overlap(x)` both
@@ -810,6 +815,35 @@ The join is on BOTH `schema_name` and the name, never on the name alone, and the
 `database_name = $1` as well: the fixture holds `customers` in two schemas of one catalog with
 different columns AND in two catalogs with the same schema name, so a join on the name alone answers
 one table with another's columns rather than an error anybody would notice.
+
+#### Column defaults: the value, with the catalog text kept alongside (#1029)
+
+DuckDB reports a column default as the expression AS WRITTEN, through `information_schema.columns.column_default`. A string
+default therefore arrives quoted, with SQL standard quote doubling, while a number and an
+expression arrive bare. Measured 2026-09-21 on DuckDB v1.5.5 through `@duckdb/node-api`:
+
+| DDL | the value the column defaults to | catalog text |
+| --- | --- | --- |
+| `DEFAULT 'NULL'` | `NULL` | `'NULL'` |
+| `DEFAULT 'abc'` | `abc` | `'abc'` |
+| `DEFAULT ''` | the empty string | `''` |
+| `DEFAULT 'it''s'` | `it's` | `'it''s'` |
+| `DEFAULT 'a\b'` | `a\b` | `'a\b'` |
+| `DEFAULT 42` | `42` | `42` |
+| `DEFAULT CURRENT_TIMESTAMP` | the expression | `CURRENT_TIMESTAMP` |
+| `GENERATED ALWAYS AS (id * 2) VIRTUAL` | the expression | `CAST((id * 2) AS INTEGER)` |
+| no default | none | SQL NULL |
+
+Each column carries both readings. `defaultValue` is the value, decoded by `unquoteLiteral()`
+(`src/lib/sql/values.ts`) with this dialect's `"standard"` escaping, so `'it''s'` reads as
+`it's` and a backslash stays ordinary data. Text that is not exactly one complete literal,
+a number or an expression such as a generated column's `CAST((id * 2) AS INTEGER)`, passes through unchanged. `defaultExpression` is the
+catalog text itself, which is always valid SQL here and is what the schema-diff migration
+generator writes after the word `DEFAULT`; without it, a decoded `abc` would be emitted as
+`DEFAULT abc`. The empty string default stays the empty string, never `undefined`, and a
+column with no default carries neither field. `readCatalogDefault()` is local to this
+provider, the way per-provider normalization is everywhere else in this tree; the escape
+knowledge it relies on is the shared part.
 
 #### No row count on a listed object, deliberately
 

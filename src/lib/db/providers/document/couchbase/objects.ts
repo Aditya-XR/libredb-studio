@@ -107,7 +107,7 @@
  */
 
 import { QueryError } from "@/lib/db/errors";
-import { containerDepth } from "@/lib/db/object-kinds";
+import { assertObjectPathShape, containerDepth, type ObjectPathShapeEngine } from "@/lib/db/object-kinds";
 import { comparePaths } from "@/lib/db/object-path";
 import type {
   ColumnSchema,
@@ -156,6 +156,14 @@ export const COUCHBASE_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     // address a Couchbase document through the `__id` projection; an import into a
     // collection is an ordinary `UPSERT`. See `kindAcceptsRowWrites()` in object-kinds.ts.
     acceptsRowWrites: true,
+    // The ONE kind here with columns, and it is the same fact `describeObject` gates on:
+    // it answers three empty arrays for anything whose role is not `relation`
+    // (couchbase/index.ts:803-804). A collection's columns are INFERRED from a document
+    // sample rather than read from a schema, so an empty collection (error 7014) and an
+    // INFER the caller has no SELECT grant for both answer no column and no error
+    // (couchbase/introspect.ts:200-215); the tree reports that open row as having none
+    // rather than treating it as a failure.
+    hasColumns: true,
   },
   {
     id: COUCHBASE_KIND_FUNCTION,
@@ -428,17 +436,17 @@ export function containerRead(capabilities: ProviderCapabilities, container: rea
 }
 
 /**
- * The path shape one KIND's objects are addressed by, derived from the declaration.
+ * Couchbase's identity for the shared path-shape renderer.
  *
- * `attachedTo` inserts the base object's segment between the container and the name, which
- * is standing ruling 2's rule and is what gives an index its collection segment. The
- * container part comes from the declared LEVELS, so reversing or shortening the
- * declaration moves the shape with it.
+ * `attachedSegment: "required"` because the `index` kind declares
+ * `attachedTo: "collection"`, so an index path carries its collection segment and the bare
+ * container-plus-name shape is refused.
  */
-function objectShape(capabilities: ProviderCapabilities, spec: ObjectKindSpec): string[] {
-  const levels = declaredLevels(capabilities).map((level) => level.label.toLowerCase());
-  return spec.attachedTo === undefined ? [...levels, "name"] : [...levels, spec.attachedTo, "name"];
-}
+const COUCHBASE_PATH_SHAPE_ENGINE: ObjectPathShapeEngine = {
+  attachedSegment: "required",
+  code: "couchbase",
+  label: "A Couchbase",
+};
 
 /**
  * One object path checked against the shape its KIND is addressed by, or a refusal.
@@ -447,19 +455,18 @@ function objectShape(capabilities: ProviderCapabilities, spec: ObjectKindSpec): 
  * only a relation's path is then resolved into a keyspace. Returning a keyspace for an
  * index path would mean inventing one - an index's last segment is the index's name, not a
  * collection - and a value nothing reads is a value nothing can keep honest.
+ *
+ * `kind` is passed through as well as the spec because the shared renderer takes the id
+ * the message prints separately from the spec it reads `attachedTo` off. Callers resolve
+ * the spec through `findKind`, so the two carry the same id and the sentence is unchanged.
  */
 export function checkObjectPath(
   capabilities: ProviderCapabilities,
   spec: ObjectKindSpec,
+  kind: string,
   path: readonly string[],
 ): void {
-  const shape = objectShape(capabilities, spec);
-  if (path.length !== shape.length) {
-    throw new QueryError(
-      `A Couchbase "${spec.id}" path is [${shape.join(", ")}], received ${JSON.stringify(path)}`,
-      "couchbase",
-    );
-  }
+  assertObjectPathShape(capabilities, spec, kind, path, COUCHBASE_PATH_SHAPE_ENGINE);
 }
 
 /**

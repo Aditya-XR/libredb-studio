@@ -1560,12 +1560,42 @@ export class MSSQLProvider extends SQLBaseProvider {
       // VIEW with a clustered index on it, so it is already in the `view` folder with its
       // index in the detail row, and declaring a kind for it would draw a folder for a
       // concept the engine does not have.
+      // `hasColumns` on the two relation kinds and on nothing else (#789). It is written
+      // out rather than derived from the role, because the role is not the fact: Oracle's
+      // `sequence` is `config` with no columns and PostgreSQL's is `config` with three, so a
+      // rule above the providers is wrong for one of them whichever way it is written. Here
+      // the two agree, and what pins that agreement is the engine's own answer rather than
+      // this comment: `describeObject` below returns three empty arrays for every
+      // non-relation kind, and invariant 8 of `tests/helpers/object-surface-conformance.ts`
+      // asks this provider's `describeObject` about an object its own `listObjects`
+      // produced, in both directions. Measured on the fixture server, `sys.objects` left
+      // joined to `sys.columns` over `is_ms_shipped = 0`: of the types a person writes, a
+      // procedure, a scalar function, a synonym, a SEQUENCE and a trigger have no
+      // `sys.columns` rows, while `U` and `V` have them and so does a TABLE-VALUED function
+      // (`IF` and `TF`, 2 rows each on the fixture, both inside
+      // `MSSQL_OBJECT_TYPES.function`). So `function` abstains here as a SCOPE call and not
+      // because the engine is silent: reporting a routine's result shape belongs to the phase
+      // that renders a routine, which is where `describeObjects` below leaves it too.
       objectKinds: [
-        { id: "table", role: "relation", label: "Table", labelPlural: "Tables", acceptsRowWrites: true },
+        {
+          id: "table",
+          role: "relation",
+          label: "Table",
+          labelPlural: "Tables",
+          acceptsRowWrites: true,
+          hasColumns: true,
+        },
         // No `acceptsRowWrites` on a view. SQL Server takes an UPDATE against a view over
         // exactly one base table and refuses one over a join without an INSTEAD OF trigger,
         // which is a per-OBJECT fact this per-kind declaration cannot state.
-        { id: "view", role: "relation", label: "View", labelPlural: "Views", ...MSSQL_SOURCE_DECLARATION },
+        {
+          id: "view",
+          role: "relation",
+          label: "View",
+          labelPlural: "Views",
+          hasColumns: true,
+          ...MSSQL_SOURCE_DECLARATION,
+        },
         {
           id: "procedure",
           role: "routine",

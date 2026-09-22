@@ -53,6 +53,7 @@ import {
   requireSourceKind,
 } from "@/lib/db/object-kinds";
 import { comparePaths } from "@/lib/db/object-path";
+import { unquoteLiteral } from "@/lib/sql/values";
 import { readNumber, readText } from "./introspect";
 import type { LibSQLBatchOutcome, LibSQLRow, LibSQLStatement, LibSQLTransport } from "./transport";
 
@@ -369,10 +370,26 @@ const BULK_DETAIL_SQL_BOUNDED: Readonly<Record<string, BulkDetailStatements>> = 
 const SOURCE_SQL: Pick<ObjectKindSpec, "hasSource" | "sourceLanguage"> = { hasSource: true, sourceLanguage: "sql" };
 
 export const LIBSQL_OBJECT_KINDS: readonly ObjectKindSpec[] = [
-  { id: "table", role: "relation", label: "Table", labelPlural: "Tables", acceptsRowWrites: true, ...SOURCE_SQL },
+  // `hasColumns` is written on the two relation kinds and nowhere else, which is exactly
+  // what `describeLibSQLObject` answers: it returns three empty arrays for any kind whose
+  // role is not `relation` (see its gate below), so an index row and a trigger row would
+  // draw a twisty that opens on nothing. It is written literally rather than derived from
+  // the role, because the role is not the general rule - a MariaDB sequence is declared
+  // `config` and has real columns - and the literal is checked against this engine's own
+  // answer by invariant 8 of the object-surface contract rather than against a
+  // transcription (#789).
+  {
+    id: "table",
+    role: "relation",
+    label: "Table",
+    labelPlural: "Tables",
+    acceptsRowWrites: true,
+    hasColumns: true,
+    ...SOURCE_SQL,
+  },
   // No `acceptsRowWrites`. A write to a view is refused outright unless an INSTEAD OF
   // trigger carries it, which is a per-OBJECT fact a per-kind declaration cannot state.
-  { id: "view", role: "relation", label: "View", labelPlural: "Views", ...SOURCE_SQL },
+  { id: "view", role: "relation", label: "View", labelPlural: "Views", hasColumns: true, ...SOURCE_SQL },
   { id: "index", role: "config", label: "Index", labelPlural: "Indexes", ...SOURCE_SQL },
   { id: "trigger", role: "attached", label: "Trigger", labelPlural: "Triggers", attachedTo: "table", ...SOURCE_SQL },
 ];
@@ -649,6 +666,19 @@ export async function listLibSQLObjects(
     .sort((left, right) => comparePaths(left.path, right.path));
 }
 
+/**
+ * The VALUE a column defaults to, read out of the catalog text (#1029). libSQL reports a
+ * default as the expression AS WRITTEN, so a string default arrives as the quoted literal
+ * `'abc'`. `unquoteLiteral` decodes exactly one complete literal with this dialect's
+ * escaping and answers `undefined` for anything else, which is what lets a number such as
+ * `42` or an expression such as `CURRENT_TIMESTAMP` through unchanged. The text itself is
+ * kept alongside as `defaultExpression`, because once decoded this is no longer something
+ * that can be pasted after the word DEFAULT.
+ */
+function readCatalogDefault(raw: string | null | undefined): string | undefined {
+  return raw === null || raw === undefined ? undefined : (unquoteLiteral(raw, "libsql") ?? raw);
+}
+
 /** One column of an object, as `pragma_table_xinfo` publishes it. */
 function toColumn(row: LibSQLRow, sql: string): ColumnSchema {
   const defaultValue = row.dflt_value;
@@ -664,7 +694,9 @@ function toColumn(row: LibSQLRow, sql: string): ColumnSchema {
     // `=== 1` reports the second key column as ordinary. Measured on
     // `PRIMARY KEY (region, year)`.
     isPrimary: (readNumber(row.pk) ?? 0) > 0,
-    ...(defaultValue === null || defaultValue === undefined ? {} : { defaultValue: String(defaultValue) }),
+    ...(defaultValue === null || defaultValue === undefined
+      ? {}
+      : { defaultValue: readCatalogDefault(String(defaultValue)), defaultExpression: String(defaultValue) }),
   };
 }
 

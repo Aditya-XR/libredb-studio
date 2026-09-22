@@ -469,6 +469,11 @@ the catalog row to classify as the kind that was asked for, so `describeObject([
 - **`foreignKeys`** is always `[]`, because MongoDB has no foreign key constraint at all. The same
   measurement is behind `declaresForeignKeys: false`.
 
+Both kinds this provider declares, `collection` and `view`, declare `hasColumns: true`, so every
+object row in the tree expands and none of them abstains; the fields behind that twisty are SAMPLED
+from up to 100 documents rather than read from a schema, so they are what the sample happened to
+carry and not a declaration the engine holds.
+
 A listed object carries **no `rowCount` and no `sizeBytes`**, and that is a bound rather than a gap:
 either would need `collStats` or `estimatedDocumentCount` **per collection**, one round trip each,
 and this folder is the one a person opens to see what is there. `describeObject` is where a single

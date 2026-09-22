@@ -254,7 +254,15 @@ src/
 │   ├── results-grid/        # ResultCard, RowDetailSheet, StatsBar
 │   ├── admin/               # AdminDashboard shell (5 section routes) + tabs/ panels
 │   ├── monitoring/          # MonitoringDashboard + tabs
-│   ├── schema-explorer/     # SchemaExplorer
+│   ├── object-tree/         # The desktop sidebar's lazy object tree (containers, folders, objects, columns)
+│   │   ├── ObjectTree.tsx    # Tree shell: hand-rolled window, roving tabindex, keyboard, menu anchor
+│   │   ├── TreeRow.tsx       # One row, ARIA numbers taken verbatim; the chevron is its own hit target
+│   │   ├── RowMenu.tsx       # The row menu, rendered as a sibling of the tree element, not inside it
+│   │   ├── flatten.ts        # Expansion state to a flat row list, with each row's ARIA position (pure)
+│   │   ├── use-tree-nodes.ts # The lazy cache: containers, counts, a folder's objects, a row's columns
+│   │   ├── row-actions.ts    # What a row may be asked to do, read off the kind's own declaration
+│   │   └── index.ts          # What a shell imports: ObjectTree plus the two types its handlers need
+│   ├── schema-explorer/     # SchemaExplorer (the flat list: mobile schema tab, published export)
 │   └── ui/                  # Shadcn/UI primitives
 ├── workspace/               # Embeddable shell (StudioWorkspace) + host adapter hooks
 ├── exports/                 # Public npm-package barrel exports (tsup build:lib)
@@ -294,7 +302,7 @@ src/
 ## 6. Deployment
 
 - **Docker / Helm**: Multi-stage Bun build with standalone Next.js output; these channels resolve their bind address in the container entrypoint, preferring a dual-stack `::` that they verify by connecting an IPv4 client to a throwaway listener, and falling back to `0.0.0.0` where the namespace has no usable IPv6. `HOSTNAME` (chart: `config.bindAddress`) overrules that and is honoured verbatim. Canonical image `ghcr.io/libredb/libredb-studio`.
-- **Native channels** (`bin/studio.js` npx launcher, Homebrew tap, `.deb`/`.rpm`, Snap, standalone tarballs; sources under `bin/` and `packaging/`): local-first, bind `127.0.0.1` by default unless `--host`/`HOSTNAME` opts in. The npx launcher ships as a pure library and downloads the SHA256-verified standalone server tarball from GitHub Releases. Full matrix and per-channel details in [`docs/DISTRIBUTION.md`](DISTRIBUTION.md).
+- **Native channels** (`bin/studio.js` npx launcher, Homebrew tap, `.deb`/`.rpm`, Snap, standalone tarballs; sources under `bin/` and `packaging/`): local-first, bind `127.0.0.1` by default unless `--host` or `LIBREDB_BIND` opts in, or a `HOSTNAME` that differs from the machine's own name does (`resolveBindAddress`, #813: an inherited value is what a shell or a container runtime exported, not a choice). The npx launcher ships as a pure library and downloads the SHA256-verified standalone server tarball from GitHub Releases. Full matrix and per-channel details in [`docs/DISTRIBUTION.md`](DISTRIBUTION.md).
 - **Health Check**: `GET /health`, `GET /api/health` or `GET /api/db/health` — same answer, no dependencies
 - **Stateless API**: API routes are stateless, suitable for horizontal scaling
 - **Environment**: Configured via `.env.local` (see CLAUDE.md for full variable list). Missing auth secrets are generated on first standalone boot — see [§4.7](#47-standalone-boot-flow-srcinstrumentationts).

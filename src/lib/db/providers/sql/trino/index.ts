@@ -416,6 +416,15 @@ export class TrinoProvider extends SQLBaseProvider {
       // `table_constraints` nor `key_column_usage` is among them, and there is no index
       // catalog at all (#414). A declared kind draws a folder, and a folder for something
       // the engine cannot have is a lie its zero badge makes look like a fact.
+      //
+      // `hasColumns` on the three RELATION kinds and on `function` never, which is what
+      // `describeObject` below already does: it gates on `spec.role !== "relation"` and
+      // answers a routine three empty arrays without a round trip. Written literally rather
+      // than derived from the role, because the role is the wrong rule for at least one
+      // engine (#789) and the conformance contract checks the literal against this
+      // provider's own answer instead. One `describeObject` here is the most expensive
+      // single read in the fleet at 25.8 ms (docs/providers/trino.md:812), which the tree
+      // pays once per row a reader actually expands.
       objectKinds: [
         // A row write reaches whatever the CONNECTOR allows - measured on 476, an INSERT
         // into `memory.app.customers` succeeds while `tpch` answers that its connector does
@@ -429,11 +438,20 @@ export class TrinoProvider extends SQLBaseProvider {
           acceptsRowWrites: true,
           hasSource: true,
           sourceLanguage: "sql",
+          hasColumns: true,
         },
         // No `acceptsRowWrites` on either view kind, measured on 476: an INSERT answers
         // "Inserting into views is not supported" and "Inserting into materialized views is
         // not supported" respectively, on every connector.
-        { id: "view", role: "relation", label: "View", labelPlural: "Views", hasSource: true, sourceLanguage: "sql" },
+        {
+          id: "view",
+          role: "relation",
+          label: "View",
+          labelPlural: "Views",
+          hasSource: true,
+          sourceLanguage: "sql",
+          hasColumns: true,
+        },
         // Supported by SOME connectors only, Iceberg among them, and declared anyway: the
         // kind exists in the engine's model and `system.metadata.materialized_views` is an
         // engine-level catalog, so a catalog holding none answers an honest 0 rather than a
@@ -446,6 +464,7 @@ export class TrinoProvider extends SQLBaseProvider {
           labelPlural: "Materialized Views",
           hasSource: true,
           sourceLanguage: "sql",
+          hasColumns: true,
         },
         // Catalog-stored SQL functions, from release 431 and on the Hive and Memory
         // connectors only. Declared because it was CONFIRMED on the build

@@ -587,6 +587,17 @@ const RELKIND_BY_KIND: Record<string, string> = {
   sequence: "'S'",
 };
 
+/**
+ * Whether a kind id is backed by a `pg_class` relation, which is exactly whether an object of
+ * it can have columns (#789).
+ *
+ * Read by the `objectKinds` declaration and gated on by `describeObject`, so the declaration the
+ * object tree draws a twisty from and the read that fills it are one fact rather than two.
+ */
+function hasColumns(kind: string): boolean {
+  return Object.hasOwn(RELKIND_BY_KIND, kind);
+}
+
 // `reltuples` is read here for the same reason `CTE_TABLES_INFO` reads it, and is mapped
 // through the same `estimatedRowCount()`: PostgreSQL 14+ writes -1 for a relation nothing
 // has analysed, and that is an absence rather than an empty relation.
@@ -1277,8 +1288,16 @@ const OBJECT_DETAIL_SQL = withoutMaterializedHint(`
  * code-point order. That decides WHICH objects a bound keeps, and nothing else: the result
  * is re-sorted by path below, and a caller joins on path rather than on position.
  */
-function bulkDetailSql(relkinds: string, bounded: boolean): string {
-  const limit = bounded ? "\n          LIMIT $2" : "";
+function bulkDetailSql(relkinds: string, bound?: number): string {
+  // The bound is SPELLED IN rather than bound as `$2`. RisingWave 3.0.4 refuses a parameter
+  // in the LIMIT position, measured 2026-09-22 through `pg`: the identical statement answers
+  // with the number written in and fails with it bound, "Failed to prepare the statement ...
+  // expects an integer or expression". It is the same trait `compatibility.ts` already
+  // records for RisingWave's monitoring reads, where a parameterised LIMIT leaves the
+  // slow-query and active-session panels empty. Stock PostgreSQL binds it either way, so this
+  // costs nothing there. `describeObjects` validates the caller's limit as a positive whole
+  // number before this is reached, so what gets spelled in is only ever digits.
+  const limit = bound === undefined ? "" : `\n          LIMIT ${bound}`;
   return withoutMaterializedHint(`
         WITH described AS (
           SELECT c.oid, c.relname
@@ -1319,11 +1338,7 @@ function bulkDetailSql(relkinds: string, bounded: boolean): string {
 }
 
 const BULK_DETAIL_SQL: Record<string, string> = Object.fromEntries(
-  Object.entries(RELKIND_BY_KIND).map(([kind, relkinds]) => [kind, bulkDetailSql(relkinds, false)]),
-);
-
-const BULK_DETAIL_SQL_BOUNDED: Record<string, string> = Object.fromEntries(
-  Object.entries(RELKIND_BY_KIND).map(([kind, relkinds]) => [kind, bulkDetailSql(relkinds, true)]),
+  Object.entries(RELKIND_BY_KIND).map(([kind, relkinds]) => [kind, bulkDetailSql(relkinds)]),
 );
 
 /**
@@ -2061,18 +2076,45 @@ export class PostgresProvider extends SQLBaseProvider {
       // kind an engine cannot answer for is absent from the declaration and is never declared
       // and then refused, which is standing ruling 4 one level down.
       //
+      // The SAME four kinds `RELKIND_BY_KIND` holds declare `hasColumns`, and they declare it
+      // BY READING THAT MAP (#789, columns under an object row). One writer, not a
+      // transcription: `describeObject` gates on the very same map (`:2969-2972`) and answers
+      // three empty arrays without a round trip for anything that is not a key in it, so a kind
+      // leaving the map can never keep a twisty that opens on nothing. `RELKIND_BY_KIND` is a
+      // module-level const evaluated long before this method runs, so there is no
+      // temporal-dead-zone hazard in reading it here.
+      //
+      // `sequence` is the row that proves this cannot be read off `role`: it is `role: "config"`
+      // and it answers `last_value`, `log_cnt` and `is_called` out of `pg_attribute`, while
+      // Oracle's kind of the same id answers none because that provider gates on the role.
+      //
       // No `index` kind, deliberately. PostgreSQL's own catalog models an index as a
       // property of the relation it is on - `pg_index` is keyed by `indrelid` and an
       // index cannot exist without one - so it belongs in `describeObject`'s output,
       // where it already is, rather than in a container-level folder of its own.
       objectKinds: [
-        { id: "table", role: "relation", label: "Table", labelPlural: "Tables", acceptsRowWrites: true },
+        {
+          id: "table",
+          role: "relation",
+          label: "Table",
+          labelPlural: "Tables",
+          acceptsRowWrites: true,
+          hasColumns: hasColumns("table"),
+        },
         // No `acceptsRowWrites`. PostgreSQL does accept an UPDATE against a simple
         // updatable view and against any view carrying an INSTEAD OF trigger, and the
         // provider still declares nothing: whether a given view is one of those is a
         // per-object fact this declaration is per-kind, so claiming it would offer an
         // import target that fails on most views in most schemas.
-        { id: "view", role: "relation", label: "View", labelPlural: "Views", hasSource: true, sourceLanguage: "pgsql" },
+        {
+          id: "view",
+          role: "relation",
+          label: "View",
+          labelPlural: "Views",
+          hasSource: true,
+          sourceLanguage: "pgsql",
+          hasColumns: hasColumns("view"),
+        },
         {
           id: "materialized_view",
           role: "relation",
@@ -2080,8 +2122,15 @@ export class PostgresProvider extends SQLBaseProvider {
           labelPlural: "Materialized Views",
           hasSource: true,
           sourceLanguage: "pgsql",
+          hasColumns: hasColumns("materialized_view"),
         },
-        { id: "sequence", role: "config", label: "Sequence", labelPlural: "Sequences" },
+        {
+          id: "sequence",
+          role: "config",
+          label: "Sequence",
+          labelPlural: "Sequences",
+          hasColumns: hasColumns("sequence"),
+        },
         {
           id: "function",
           role: "routine",
@@ -3026,9 +3075,10 @@ export class PostgresProvider extends SQLBaseProvider {
     if (RELKIND_BY_KIND[kind] === undefined) return { details: [] };
 
     const bounded = limit !== undefined;
-    const sql = bounded ? BULK_DETAIL_SQL_BOUNDED[kind] : BULK_DETAIL_SQL[kind];
-    // One row more than the bound, so the read itself says whether it stopped short.
-    const params = bounded ? [schema, limit + 1] : [schema];
+    // One row more than the bound, so the read itself says whether it stopped short. The
+    // bound is rendered rather than bound, for the reason `bulkDetailSql` carries.
+    const sql = bounded ? bulkDetailSql(RELKIND_BY_KIND[kind], limit + 1) : BULK_DETAIL_SQL[kind];
+    const params = [schema];
 
     const client = await this.pool!.connect();
     try {
