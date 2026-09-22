@@ -17,6 +17,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "@/lib/utils";
 import { ArrowUpDown, ArrowUp, ArrowDown, Eye, Funnel, Lock, Rows3 } from "lucide-react";
+import { toast } from "sonner";
 import {
   type MaskingConfig,
   detectSensitiveColumnsFromConfig,
@@ -26,6 +27,8 @@ import {
   canReveal,
   loadMaskingConfig,
 } from "@/lib/data-masking";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
+import { writeToClipboard } from "@/components/copy-button";
 import { ResultCard } from "@/components/results-grid/ResultCard";
 import { RowDetailSheet } from "@/components/results-grid/RowDetailSheet";
 import { StatsBar } from "@/components/results-grid/StatsBar";
@@ -204,6 +207,7 @@ export function ResultsGrid({
     setActiveFilterCol(null),
   );
   const [revealedCells, setRevealedCells] = useState<Set<string>>(new Set());
+  const [contextCell, setContextCell] = useState<{ rowIndex: number; field: string } | null>(null);
 
   // Resolve config
   const resolvedConfig = useMemo(() => maskingConfig ?? loadMaskingConfig(), [maskingConfig]);
@@ -228,6 +232,12 @@ export function ResultsGrid({
   useEffect(() => {
     setRevealedCells(new Set());
   }, [result]);
+
+  // The copy menu names a row and a column, and a new result, a new sort or a new filter
+  // can retire either one while a menu still holds them.
+  useEffect(() => {
+    setContextCell(null);
+  }, [result, sorting, columnFilters]);
 
   // Per-cell reveal with auto-hide
   const revealCell = useCallback((key: string) => {
@@ -281,6 +291,16 @@ export function ResultsGrid({
     return map;
   }, [result.rows, columnFilters]);
 
+  /**
+   * That map, applied: the position in `result.rows` of a row the table is iterating.
+   * `tableIndex` is TanStack's own number, correct whenever no filter is on.
+   */
+  const resolveSourceIndex = useCallback(
+    (row: Record<string, unknown>, tableIndex: number): number =>
+      sourceRowIndex === null ? tableIndex : (sourceRowIndex.get(row) ?? -1),
+    [sourceRowIndex],
+  );
+
   const activeFilterCount = useMemo(() => {
     let count = 0;
     for (const [, v] of columnFilters) {
@@ -296,6 +316,83 @@ export function ResultsGrid({
     },
     [pendingChanges],
   );
+
+  const getDisplayedCellValue = useCallback(
+    (rowIndex: number, row: Record<string, unknown>, field: string): { value: unknown; isMasked: boolean } => {
+      const value = row[field];
+      const pattern = sensitiveColumns.get(field);
+      const isRevealed = revealedCells.has(`${rowIndex}:${field}`);
+
+      if (effectiveMaskingEnabled && pattern && value !== null && value !== undefined && !isRevealed) {
+        return { value: maskValueByPattern(value, pattern), isMasked: true };
+      }
+
+      const pendingChange = getCellChange(rowIndex, field);
+      return { value: isRevealed ? value : (pendingChange?.newValue ?? value), isMasked: false };
+    },
+    [effectiveMaskingEnabled, getCellChange, revealedCells, sensitiveColumns],
+  );
+
+  const getCopyCellValue = useCallback(
+    (rowIndex: number, row: Record<string, unknown>, field: string): string => {
+      return formatCellValue(getDisplayedCellValue(rowIndex, row, field).value).display;
+    },
+    [getDisplayedCellValue],
+  );
+
+  const copyToClipboard = useCallback((text: string, label: string) => {
+    void writeToClipboard(text).then((copied) => {
+      if (copied) toast.success(`${label} copied to clipboard`);
+      else toast.error(`Could not copy ${label} — select the text and copy it yourself`);
+    });
+  }, []);
+
+  const copyCell = useCallback(
+    (row: Record<string, unknown>, rowIndex: number, field: string) => {
+      copyToClipboard(getCopyCellValue(rowIndex, row, field), "Cell");
+    },
+    [copyToClipboard, getCopyCellValue],
+  );
+
+  const copyRow = useCallback(
+    (row: Record<string, unknown>, rowIndex: number) => {
+      if (effectiveMaskingEnabled && sensitiveColumns.size > 0) {
+        const maskedRow = { ...row };
+        for (const field of result.fields) {
+          const pattern = sensitiveColumns.get(field);
+          if (
+            pattern &&
+            row[field] !== null &&
+            row[field] !== undefined &&
+            !revealedCells.has(`${rowIndex}:${field}`)
+          ) {
+            maskedRow[field] = maskValueByPattern(row[field], pattern);
+          }
+        }
+        copyToClipboard(JSON.stringify(maskedRow, null, 2), "Row");
+        return;
+      }
+
+      copyToClipboard(JSON.stringify(row, null, 2), "Row");
+    },
+    [copyToClipboard, effectiveMaskingEnabled, result.fields, revealedCells, sensitiveColumns],
+  );
+
+  const renderCopyMenu = (row: Record<string, unknown>, rowIndex: number) => {
+    const field = contextCell?.rowIndex === rowIndex ? contextCell.field : null;
+
+    return (
+      <ContextMenuContent>
+        {field !== null && <ContextMenuItem onClick={() => copyCell(row, rowIndex, field)}>Copy Cell</ContextMenuItem>}
+        <ContextMenuItem onClick={() => copyRow(row, rowIndex)}>Copy Row as JSON</ContextMenuItem>
+      </ContextMenuContent>
+    );
+  };
+
+  const handleSetViewMode = useCallback((mode: "card" | "table") => {
+    setContextCell(null);
+    setViewMode(mode);
+  }, []);
 
   const handleClearFilters = useCallback(() => {
     setColumnFilters(new Map());
@@ -458,7 +555,7 @@ export function ResultsGrid({
         // the one path that reaches the database. Filtering keeps the row objects, so a
         // miss cannot happen — and if it ever did, -1 addresses no row and the apply
         // refuses rather than writing somewhere.
-        const sourceIndex = sourceRowIndex === null ? row.index : (sourceRowIndex.get(row.original) ?? -1);
+        const sourceIndex = resolveSourceIndex(row.original, row.index);
         const pendingChange = getCellChange(sourceIndex, column.id);
 
         if (isEditing) {
@@ -507,12 +604,12 @@ export function ResultsGrid({
         // screen unmasked.
         const cellKey = `${sourceIndex}:${column.id}`;
         const isRevealed = revealedCells.has(cellKey);
+        const { value: displayValue, isMasked } = getDisplayedCellValue(sourceIndex, row.original, column.id);
 
-        if (effectiveMaskingEnabled && sensitivePattern && val !== null && val !== undefined && !isRevealed) {
-          const masked = maskValueByPattern(val, sensitivePattern);
+        if (isMasked) {
           return (
             <div className={cn("w-full flex gap-1 group/cell", valueFlow, wrapText ? "items-start" : "items-center")}>
-              <span className="text-fg-muted italic">{masked}</span>
+              <span className="text-fg-muted italic">{String(displayValue)}</span>
               {userCanReveal && (
                 <button
                   className="opacity-0 group-hover/cell:opacity-100 transition-opacity p-0.5 rounded hover:bg-hue-purple-tint/10"
@@ -531,7 +628,7 @@ export function ResultsGrid({
 
         // Show revealed cell with lock indicator
         if (effectiveMaskingEnabled && sensitivePattern && isRevealed) {
-          const { display, className } = formatCellValue(val);
+          const { display, className } = formatCellValue(displayValue);
           return (
             <div className={cn("w-full flex gap-1", valueFlow, wrapText ? "items-start" : "items-center")}>
               <span className={className}>{display}</span>
@@ -541,8 +638,7 @@ export function ResultsGrid({
         }
 
         // Show pending change value
-        const displayVal = pendingChange !== undefined ? pendingChange.newValue : val;
-        const { display, className } = formatCellValue(displayVal);
+        const { display, className } = formatCellValue(displayValue);
 
         // No editor is opened unless editing is on: the commit paths above already
         // required it, so without this a cell offered an input whose edit was
@@ -586,7 +682,8 @@ export function ResultsGrid({
     editingEnabled,
     onCellChange,
     getCellChange,
-    sourceRowIndex,
+    getDisplayedCellValue,
+    resolveSourceIndex,
     columnFilters,
     activeFilterCol,
     revealedCells,
@@ -732,7 +829,7 @@ export function ResultsGrid({
         activeFilterCount={activeFilterCount}
         onClearFilters={handleClearFilters}
         viewMode={viewMode}
-        onSetViewMode={setViewMode}
+        onSetViewMode={handleSetViewMode}
         wrapText={wrapText}
         onToggleWrapText={() => {
           // Both virtualizers cache every row they measured. Dropping the cache on each
@@ -759,29 +856,34 @@ export function ResultsGrid({
       <div ref={cardContainerRef} className={cn("flex-1 overflow-auto p-4 md:hidden", viewMode !== "card" && "hidden")}>
         <div style={{ height: `${cardVirtualizer.getTotalSize()}px`, position: "relative" }}>
           {cardVirtualizer.getVirtualItems().map((virtualRow) => (
-            <div
-              key={virtualRow.index}
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                height: `${virtualRow.size}px`,
-                transform: `translateY(${virtualRow.start}px)`,
-                padding: "4px 0",
-              }}
-            >
-              <ResultCard
-                row={result.rows[virtualRow.index]}
-                fields={visibleFields}
-                primaryColumn={primaryColumn}
-                idColumn={idColumn}
-                index={virtualRow.index}
-                onSelect={() => setSelectedRow({ row: result.rows[virtualRow.index], index: virtualRow.index })}
-                maskingActive={effectiveMaskingEnabled}
-                sensitiveColumns={sensitiveColumns}
-              />
-            </div>
+            <ContextMenu key={virtualRow.index}>
+              <ContextMenuTrigger asChild>
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: `${virtualRow.size}px`,
+                    transform: `translateY(${virtualRow.start}px)`,
+                    padding: "4px 0",
+                  }}
+                  onContextMenu={() => setContextCell(null)}
+                >
+                  <ResultCard
+                    row={result.rows[virtualRow.index]}
+                    fields={visibleFields}
+                    primaryColumn={primaryColumn}
+                    idColumn={idColumn}
+                    index={virtualRow.index}
+                    onSelect={() => setSelectedRow({ row: result.rows[virtualRow.index], index: virtualRow.index })}
+                    maskingActive={effectiveMaskingEnabled}
+                    sensitiveColumns={sensitiveColumns}
+                  />
+                </div>
+              </ContextMenuTrigger>
+              {renderCopyMenu(result.rows[virtualRow.index], virtualRow.index)}
+            </ContextMenu>
           ))}
         </div>
       </div>
@@ -829,47 +931,51 @@ export function ResultsGrid({
             {mobileTableVirtualizer.getVirtualItems().map((virtualRow) => {
               const row = result.rows[virtualRow.index];
               return (
-                <button
-                  type="button"
-                  key={virtualRow.index}
-                  data-index={virtualRow.index}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    ...(wrapText ? { minHeight: "48px" } : { height: `${virtualRow.size}px` }),
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                  ref={wrapText ? mobileTableVirtualizer.measureElement : undefined}
-                  className="flex hover:bg-brand-tint/[0.03] transition-colors border-b border-hairline cursor-pointer text-left"
-                  onClick={() => setSelectedRow({ row, index: virtualRow.index })}
-                >
-                  {visibleFields.map((field, idx) => {
-                    const pattern = sensitiveColumns.get(field);
-                    const isMasked =
-                      effectiveMaskingEnabled && pattern && row[field] != null && row[field] !== undefined;
-                    const displayValue = isMasked
-                      ? maskValueByPattern(row[field], pattern)
-                      : formatCellValue(row[field]).display;
-                    const className = isMasked ? "text-fg-muted italic" : formatCellValue(row[field]).className;
+                <ContextMenu key={virtualRow.index}>
+                  <ContextMenuTrigger asChild>
+                    <button
+                      type="button"
+                      data-index={virtualRow.index}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        ...(wrapText ? { minHeight: "48px" } : { height: `${virtualRow.size}px` }),
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                      ref={wrapText ? mobileTableVirtualizer.measureElement : undefined}
+                      className="flex hover:bg-brand-tint/[0.03] transition-colors border-b border-hairline cursor-pointer text-left"
+                      onClick={() => setSelectedRow({ row, index: virtualRow.index })}
+                      onContextMenu={(event) => {
+                        if (event.target === event.currentTarget) setContextCell(null);
+                      }}
+                    >
+                      {visibleFields.map((field, idx) => {
+                        const { value: cellValue, isMasked } = getDisplayedCellValue(virtualRow.index, row, field);
+                        const { display: displayValue, className: formattedClassName } = formatCellValue(cellValue);
+                        const className = isMasked ? "text-fg-muted italic" : formattedClassName;
 
-                    return (
-                      <div
-                        key={field}
-                        className={cn(
-                          "px-4 py-3 border-r border-hairline text-xs font-mono overflow-hidden flex min-w-[120px]",
-                          wrapText
-                            ? "whitespace-pre-wrap break-words items-start"
-                            : "h-full whitespace-nowrap items-center",
-                          idx === 0 && "sticky left-0 z-10 bg-sunken shadow-[2px_0_8px_rgba(0,0,0,0.3)]",
-                        )}
-                      >
-                        <span className={className}>{displayValue}</span>
-                      </div>
-                    );
-                  })}
-                </button>
+                        return (
+                          <div
+                            key={field}
+                            className={cn(
+                              "px-4 py-3 border-r border-hairline text-xs font-mono overflow-hidden flex min-w-[120px]",
+                              wrapText
+                                ? "whitespace-pre-wrap break-words items-start"
+                                : "h-full whitespace-nowrap items-center",
+                              idx === 0 && "sticky left-0 z-10 bg-sunken shadow-[2px_0_8px_rgba(0,0,0,0.3)]",
+                            )}
+                            onContextMenu={() => setContextCell({ rowIndex: virtualRow.index, field })}
+                          >
+                            <span className={className}>{displayValue}</span>
+                          </div>
+                        );
+                      })}
+                    </button>
+                  </ContextMenuTrigger>
+                  {renderCopyMenu(row, virtualRow.index)}
+                </ContextMenu>
               );
             })}
           </div>
@@ -920,43 +1026,56 @@ export function ResultsGrid({
           <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
             {rowVirtualizer.getVirtualItems().map((virtualRow) => {
               const row = rows[virtualRow.index];
+              const sourceIndex = resolveSourceIndex(row.original, row.index);
               return (
-                <div
-                  key={row.id}
-                  data-index={virtualRow.index}
-                  ref={wrapText ? rowVirtualizer.measureElement : undefined}
-                  style={{
-                    // A fixed height is all measureElement would ever read back, so a
-                    // wrapping row sizes to its content and reports that instead.
-                    ...(wrapText ? { minHeight: "36px" } : { height: `${virtualRow.size}px` }),
-                    transform: `translateY(${virtualRow.start}px)`,
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                  }}
-                  className="flex group hover:bg-brand-tint/[0.03] transition-colors border-b border-hairline"
-                >
-                  {row.getVisibleCells().map((cell) => {
-                    const isRowDetail = cell.column.id === detailColumnId;
-                    return (
-                      <div
-                        key={cell.id}
-                        style={{ width: cell.column.getSize(), minWidth: cell.column.getSize() }}
-                        className={cn(
-                          "py-2 border-r border-hairline text-xs font-mono overflow-hidden group-hover:border-hairline-strong flex shrink-0",
-                          wrapText
-                            ? "whitespace-pre-wrap break-words items-start"
-                            : "h-full whitespace-nowrap items-center",
-                          // Sticky with the header above it, so the control is still
-                          // there once a wide result has been scrolled sideways.
-                          isRowDetail ? "px-1 justify-center sticky left-0 z-10 bg-sunken" : "px-4",
-                        )}
-                      >
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </div>
-                    );
-                  })}
-                </div>
+                <ContextMenu key={row.id}>
+                  <ContextMenuTrigger asChild>
+                    <div
+                      data-index={virtualRow.index}
+                      ref={wrapText ? rowVirtualizer.measureElement : undefined}
+                      style={{
+                        // A fixed height is all measureElement would ever read back, so a
+                        // wrapping row sizes to its content and reports that instead.
+                        ...(wrapText ? { minHeight: "36px" } : { height: `${virtualRow.size}px` }),
+                        transform: `translateY(${virtualRow.start}px)`,
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                      }}
+                      className="flex group hover:bg-brand-tint/[0.03] transition-colors border-b border-hairline"
+                      onContextMenu={(event) => {
+                        if (event.target === event.currentTarget) setContextCell(null);
+                      }}
+                    >
+                      {row.getVisibleCells().map((cell) => {
+                        const isRowDetail = cell.column.id === detailColumnId;
+                        return (
+                          <div
+                            key={cell.id}
+                            style={{ width: cell.column.getSize(), minWidth: cell.column.getSize() }}
+                            className={cn(
+                              "py-2 border-r border-hairline text-xs font-mono overflow-hidden group-hover:border-hairline-strong flex shrink-0",
+                              wrapText
+                                ? "whitespace-pre-wrap break-words items-start"
+                                : "h-full whitespace-nowrap items-center",
+                              // Sticky with the header above it, so the control is still
+                              // there once a wide result has been scrolled sideways.
+                              isRowDetail ? "px-1 justify-center sticky left-0 z-10 bg-sunken" : "px-4",
+                            )}
+                            // The detail control is not a value, so right-clicking it offers
+                            // the row and nothing to copy out of that column.
+                            onContextMenu={() =>
+                              setContextCell(isRowDetail ? null : { rowIndex: sourceIndex, field: cell.column.id })
+                            }
+                          >
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </ContextMenuTrigger>
+                  {renderCopyMenu(row.original, sourceIndex)}
+                </ContextMenu>
               );
             })}
           </div>
