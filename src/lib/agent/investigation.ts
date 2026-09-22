@@ -249,8 +249,9 @@ const AGENT_RULES = [
 ].join(" ");
 
 /**
- * What the run is told when it has come within the reserve of a ceiling (§1.5 of
- * `docs/AGENT_ANALYST_DESIGN.md`).
+ * What the run is told when it has come within the reserve of a ceiling (see "A run
+ * keeps its last turns back for its report" in the "What bounds a run" section of
+ * `docs/AGENT.md`).
  *
  * "Finish by calling compose_report" is already in `AGENT_RULES`; what nothing said
  * until now is WHEN the room ran out. That is the #350 lesson applied ahead of time:

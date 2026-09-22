@@ -9,8 +9,9 @@ import type { DatabaseType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
- * The consent step (§2.6 of `docs/AGENT_ANALYST_DESIGN.md`, and §"Why the consent step is
- * placed there"), lifted out of `AgentRail.tsx` unchanged in what it decides.
+ * The consent step (see the "Auto-execute: when the run runs the answer in your editor"
+ * section of `docs/AGENT_GUIDE.md`, and its "Three things about that step" discussion),
+ * lifted out of `AgentRail.tsx` unchanged in what it decides.
  *
  * It replaced the pre-start checkbox entirely. That checkbox rendered wherever the workflow
  * happened to be `data-analysis`, which is a state the user could leave without the tick

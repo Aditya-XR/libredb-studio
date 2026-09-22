@@ -111,9 +111,10 @@ const HANDOVER_STATEMENT_TIMEOUT_MS = 2_147_483_647;
  * - **Rows: the editor's own default**, imported rather than restated, because the
  *   number the checkbox names and the number the server enforces have to be one
  *   value. It refuses rather than truncates, like every other read on this path
- *   (§2.5 of `docs/AGENT_ANALYST_DESIGN.md` argues at length against injecting a
- *   `LIMIT`, and a server-side truncation would be the same lie with a different
- *   author). Condition 1 of the gate has already established that this statement
+ *   (the "Handing the answer to the editor (auto-execute)" section of `docs/AGENT.md`
+ *   argues at length against injecting a `LIMIT`, and a server-side truncation would
+ *   be the same lie with a different author). Condition 1 of the gate has already
+ *   established that this statement
  *   returned 200 rows or fewer on the agent's own path, so the headroom to 500 is
  *   real rather than nominal.
  * - **Time: no limit, spelled as the ceiling above.**
@@ -135,9 +136,9 @@ export const AGENT_HANDOVER_BUDGET: ReadOnlyStatementBudget = Object.freeze({
  * The three fields are enforced in three different places — the policy by the
  * operation pipeline, `runDeadlineMs` by `AgentRunDeadline`, `maxModelTurns` by the
  * run loop — and they are held together here because they only make sense together:
- * §1.3 of `docs/AGENT_ANALYST_DESIGN.md` shows that a turn ceiling raised without the
- * wall clock that makes it reachable is decoration, and a wall clock raised without
- * the turns is room nothing can use.
+ * the "What bounds a run" section of `docs/AGENT.md` shows that a turn ceiling raised
+ * without the wall clock that makes it reachable is decoration, and a wall clock
+ * raised without the turns is room nothing can use.
  */
 export interface AgentWorkflowBudget {
   /** The policy every tool call of a run of this workflow is evaluated against. */
