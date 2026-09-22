@@ -189,7 +189,8 @@ export interface AgentTimelineItem {
   readonly isAnswer?: true;
   /**
    * What the RUN already did with this entry's statement, when the entry is an
-   * answer the run handed to the editor (§2.3 of `docs/AGENT_ANALYST_DESIGN.md`).
+   * answer the run handed to the editor (see the "Handing the answer to the editor
+   * (auto-execute)" section of `docs/AGENT.md`).
    *
    * Present only for a handover that happened: `none` is the setting being off, and
    * carrying it here would ask the rail to act on a decision to do nothing. The

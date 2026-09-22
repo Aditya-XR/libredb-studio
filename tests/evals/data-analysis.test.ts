@@ -11,10 +11,10 @@ import { chatToolCallStream } from "../isolated/fixtures/agent-transport";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 
 /**
- * The `data-analysis` template, driven end to end (§4.4 of
- * `docs/AGENT_ANALYST_DESIGN.md`).
+ * The `data-analysis` template, driven end to end (see the "The data-analysis template"
+ * and "Presenting an answer" sections of `docs/AGENT.md`).
  *
- * §4.4 names three runs as prerequisites to shipping this workflow, and they are the
+ * This eval names three runs as prerequisites to shipping this workflow, and they are the
  * three describe blocks below. Each exists because it is a way the workflow could
  * ship broken while every unit test stayed green:
  *

@@ -771,8 +771,9 @@ export function useQueryExecution({
   );
 
   /**
-   * Run a statement an agent run handed to this editor (#329, §2.1/§2.5 of
-   * `docs/AGENT_ANALYST_DESIGN.md`; reshaped by the #373 review).
+   * Run a statement an agent run handed to this editor (#329, see the "Handing the
+   * answer to the editor (auto-execute)" section of `docs/AGENT.md`; reshaped by the
+   * #373 review).
    *
    * It takes a RUN, not a statement to execute. The statement is named only so this
    * hook can label the history entry with the text the user is looking at; what is

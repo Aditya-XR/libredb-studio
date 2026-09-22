@@ -2388,9 +2388,10 @@ describe("Studio", () => {
   });
 
   /**
-   * The handover the answer's `auto-executed` outcome names (§2.1 of
-   * `docs/AGENT_ANALYST_DESIGN.md`). The shell does both halves — the statement goes
-   * into the editor AND is run there — through the hook's own capped entry point,
+   * The handover the answer's `auto-executed` outcome names (see the "Handing the answer
+   * to the editor (auto-execute)" section of `docs/AGENT.md`). The shell does both
+   * halves — the statement goes into the editor AND is run there — through the hook's
+   * own capped entry point,
    * which is what keeps the run's answer off the tab's widened execution options.
    */
   test("a statement the run handed over is shown in the editor and run through the run's own route", async () => {
