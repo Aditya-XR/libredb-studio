@@ -35,9 +35,10 @@
   <a href="https://trino.io/ecosystem/client-application#libredb-studio">Trino</a>,
   <a href="https://cloudberry.apache.org/docs/ecosystem/sql-clients/libredb-studio/">Apache Cloudberry</a>,
   <a href="https://docs.yugabyte.com/stable/integrations/tools/libredb-studio/">YugabyteDB</a>,
-  <a href="https://www.dragonflydb.io/docs/integrations/libredb-studio">DragonflyDB</a>
-  and
+  <a href="https://www.dragonflydb.io/docs/integrations/libredb-studio">DragonflyDB</a>,
   <a href="https://opensearch.org/community-projects/">OpenSearch</a>
+  and
+  <a href="https://duckdb.org/docs/preview/guides/sql_editors/libredb_studio">DuckDB</a>
   docs
 </p>
 
