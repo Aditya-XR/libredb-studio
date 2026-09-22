@@ -47,7 +47,13 @@ mock.module("@/lib/data-masking", () => ({
 // ── Mock sub-components to simplify testing ─────────────────────────────────
 mock.module("@/components/results-grid/ResultCard", () => ({
   ResultCard: (props: Record<string, unknown>) =>
-    React.createElement("div", { "data-testid": "result-card", "data-index": props.index }),
+    React.createElement("div", {
+      "data-testid": "result-card",
+      "data-index": props.index,
+      // The card decides its own preview fields from this list, so what it is HANDED is
+      // the whole of the question here (#870).
+      "data-fields": (props.fields as string[]).join(","),
+    }),
 }));
 
 mock.module("@/components/results-grid/RowDetailSheet", () => ({
@@ -115,6 +121,20 @@ mock.module("@/components/results-grid/StatsBar", () => ({
       // the stats strip, so the only thing left for ResultsGrid to get right is whether it
       // hands down an offer at all, and with what page size. Rendering it inside the
       // stats-bar stub is also what lets a test assert the grid grew no chrome below.
+      // The menu is rendered and worded in StatsBar; what this file is about is whether
+      // ResultsGrid hands down a writer and what that writer does to the table, so the
+      // stub only reports the prop and flips one known field through it.
+      props.onToggleColumn
+        ? React.createElement(
+            "button",
+            {
+              "data-testid": "toggle-column",
+              "data-hidden": [...((props.hiddenColumns as Set<string>) ?? [])].join(","),
+              onClick: () => (props.onToggleColumn as (f: string) => void)("name"),
+            },
+            "toggle name",
+          )
+        : null,
       props.pageOffer
         ? React.createElement(
             "button",
@@ -248,6 +268,51 @@ describe("ResultsGrid", () => {
     expect(queryAllByText("Alice").length).toBeGreaterThan(0);
     expect(queryAllByText("Bob").length).toBeGreaterThan(0);
     expect(queryAllByText("Charlie").length).toBeGreaterThan(0);
+  });
+
+  /**
+   * Hiding a column stops the grid emitting it (#870).
+   *
+   * `columnVisibilityFeature` was registered here with no writer, so the assertion that
+   * matters is not that a menu exists but that the table state it writes reaches
+   * `row.getVisibleCells()`. The header AND a cell value are both asserted: a column
+   * dropped from the header while its cells still render would misalign every row.
+   */
+  test("stops rendering a column the stats strip hid", () => {
+    const { getByTestId, queryAllByText } = render(React.createElement(ResultsGrid, { result: mockResult }));
+
+    expect(queryAllByText("name").length).toBeGreaterThan(0);
+    expect(queryAllByText("Alice").length).toBeGreaterThan(0);
+
+    fireEvent.click(getByTestId("toggle-column"));
+
+    expect(queryAllByText("name").length).toBe(0);
+    expect(queryAllByText("Alice").length).toBe(0);
+    expect(getByTestId("toggle-column").getAttribute("data-hidden")).toBe("name");
+    // The control: a column nobody hid is untouched.
+    expect(queryAllByText("email").length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The card view hides it too (#870).
+   *
+   * Cards are what this grid renders on a phone and what a desktop reader can switch to,
+   * and they take their preview fields from the list they are handed. Handed
+   * `result.fields` they show a column the reader hid a moment earlier in the table, which
+   * is the same split the mobile table had: one hidden column, two answers on one result
+   * depending on which view is open.
+   */
+  test("stops handing a hidden column to the card view", () => {
+    const { getByTestId, getAllByTestId } = render(React.createElement(ResultsGrid, { result: mockResult }));
+
+    expect(getAllByTestId("result-card")[0]!.getAttribute("data-fields")).toContain("name");
+
+    fireEvent.click(getByTestId("toggle-column"));
+
+    const fields = getAllByTestId("result-card")[0]!.getAttribute("data-fields")!;
+    expect(fields.split(",")).not.toContain("name");
+    // The control: the columns nobody hid are still handed over.
+    expect(fields.split(",")).toContain("email");
   });
 
   // ── 4. Shows row count via StatsBar ───────────────────────────────────────
@@ -719,6 +784,37 @@ describe("ResultsGrid", () => {
   // ═══════════════════════════════════════════════════════════════════════
 
   describe("Column filtering", () => {
+    /**
+     * The filter panel closes on a press outside it (#870).
+     *
+     * It sits over the rows it filters, and until this it was dismissed only by pressing
+     * the same funnel again, which is the gesture the open panel covers. Escape already
+     * closed it from inside the input; a reader who had moved the mouse on had neither.
+     */
+    test("closes the filter panel on a press outside it", () => {
+      const { container, queryAllByPlaceholderText, queryAllByTitle } = render(
+        React.createElement(ResultsGrid, { result: mockResult }),
+      );
+
+      fireEvent.click(queryAllByTitle("Filter column")[0]!);
+      expect(queryAllByPlaceholderText(/^Filter /).length).toBeGreaterThan(0);
+
+      fireEvent.mouseDown(container);
+      expect(queryAllByPlaceholderText(/^Filter /).length).toBe(0);
+    });
+
+    /** The control: typing into the panel is a press inside it and must not close it. */
+    test("keeps the filter panel open while pressing inside it", () => {
+      const { queryAllByPlaceholderText, queryAllByTitle } = render(
+        React.createElement(ResultsGrid, { result: mockResult }),
+      );
+
+      fireEvent.click(queryAllByTitle("Filter column")[0]!);
+      const input = queryAllByPlaceholderText(/^Filter /)[0]!;
+      fireEvent.mouseDown(input);
+      expect(queryAllByPlaceholderText(/^Filter /).length).toBeGreaterThan(0);
+    });
+
     test("clicking filter button opens filter dropdown with input", () => {
       const { container } = render(React.createElement(ResultsGrid, { result: mockResult }));
 
