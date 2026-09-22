@@ -3067,8 +3067,8 @@ describe("useQueryExecution", () => {
   });
 
   /**
-   * A statement an agent run handed to the editor (§2.1, §2.5 of
-   * `docs/AGENT_ANALYST_DESIGN.md`, as reshaped by the #373 review).
+   * A statement an agent run handed to the editor (see the "Handing the answer to the
+   * editor (auto-execute)" section of `docs/AGENT.md`, as reshaped by the #373 review).
    *
    * The BOUNDARY is the feature here, and the caps ride on it. This path used to call
    * `executeQuery`, which posts to `/api/db/query` — the editor's ordinary read-WRITE

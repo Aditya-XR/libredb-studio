@@ -3499,8 +3499,9 @@ describe("AgentRail", () => {
   });
 
   /**
-   * Auto-execute (§2.1, §2.5, §2.6 of `docs/AGENT_ANALYST_DESIGN.md`), which is now
-   * asked for in the consent step rather than beside the objective.
+   * Auto-execute (see the "Auto-execute: when the run runs the answer in your editor"
+   * section of `docs/AGENT_GUIDE.md`), which is now asked for in the consent step
+   * rather than beside the objective.
    *
    * The control names the bound it gives up and the one it keeps, because "auto-mode"
    * transfers no responsibility: a checkbox that names no bound cannot be consented
