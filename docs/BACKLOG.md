@@ -1236,7 +1236,7 @@ Every other `file.ts:NNNN` in the repository is hand-copied prose, and a sample 
 | Citation | Cited in | Anchor actually at |
 |---|---|---|
 | `postgres.ts:917` (`queryReadOnly`) | `docs/AGENT_GUIDE.md:925` | 2396 |
-| `postgres.ts:891` (`BEGIN READ ONLY`) | `docs/AGENT_ANALYST_DESIGN.md:400`, `:718` | 2415 |
+| `postgres.ts:891` (`BEGIN READ ONLY`) | `docs/AGENT_ANALYST_DESIGN.md:400`, `:718` (file later deleted) | 2415 |
 | `postgres.ts:894` (`SET LOCAL statement_timeout`) | `src/lib/agent/tools.ts:1552` | 2418 |
 | `postgres.ts:2070-2074` (`{ ...baseConfig, connectionString }`) | `src/lib/db/connection-fingerprint.ts:67`, `tests/api/db/objects/edit-apply.test.ts:91`, `tests/unit/lib/db/connection-fingerprint.test.ts` x3 | 2256-2262 |
 | `postgres.ts:1241` (`pg_stat_statements extension not enabled`) | `docs/BACKLOG.md:326` | 4001 |

@@ -823,8 +823,8 @@ would close it, so "not yet" means deferred with a reason, not overlooked.
 
 | Not yet | What happens today | Waiting on |
 | --- | --- | --- |
-| **A verdict that fits an optimization run** | Every Optimize run ends `unanswered`, however good its plans and index recommendation were | B45 — a plan artifact is not an empty result, the same exemption the Operate template already has |
-| **Causal questions** — "why are sales down?" | Answered from the schema alone, which cannot know which decomposition of a metric is the business one | A per-connection business note, held server-side; sketched in `docs/AGENT_ANALYST_DESIGN.md` §5 |
+| **A verdict that fits a plan-only report on Investigate, Assess or Analyze** | An Optimize run citing only a plan is no longer marked wrong — B45 shipped that exemption — but the same report on any of the other three still ends `unanswered`, because a plan artifact is scored as an empty result there | B72 — the same exemption B45 gave `query-optimization`, extended to the other three verifiers |
+| **Causal questions** — "why are sales down?" | Answered from the schema alone, which cannot know which decomposition of a metric is the business one | A per-connection business note, held server-side — not yet designed |
 | **"This database cannot answer that"** | It does say so, but has to run a throwaway query to be scored as having answered — case 21 spends 5 tool invocations to report that an employees database holds no customer data | A second arm on the verdict, so a schema-only conclusion counts |
 | **Agent mode on MySQL, Oracle, MongoDB, Redis…** | Only Operate. The other four workflows refuse, correctly and clearly | A database-native read-only statement path per engine — the same `queryReadOnly` PostgreSQL, SQLite, DuckDB and SQL Server implement |
 | **A run you can watch from your own stack** | Everything is in the run's ledger and on the rail; nothing is exported | B33 — OpenTelemetry spans, designed in #332 and deliberately not built while the event model is still moving |
