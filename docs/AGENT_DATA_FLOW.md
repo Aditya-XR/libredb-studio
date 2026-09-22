@@ -185,7 +185,7 @@ routes for that reason.
 
 ## One agent run, message by message
 
-The transcript is assembled in `runInvestigation` (`src/lib/agent/investigation.ts:662-825`) and is
+The transcript is assembled in `runInvestigation` (`src/lib/agent/investigation.ts:2540`) and is
 sent by `takeTurn` through `streamText` (`investigation.ts:575-592`). Nothing else in the runtime
 sends anything.
 
@@ -208,7 +208,7 @@ all (see [What never leaves](#what-never-leaves)).
 ### 2. Your objective, verbatim
 
 The first user message is the text you typed, unmodified apart from the trim the rail applies
-(`investigation.ts:698`). Bounded to 4000 characters by the route and by the rail
+(`investigation.ts:2654`). Bounded to 4000 characters by the route and by the rail
 (`AGENT_MAX_OBJECTIVE_LENGTH`).
 
 ### 2a. The conversation, when a run continues one — fenced
@@ -216,7 +216,7 @@ The first user message is the text you typed, unmodified apart from the trim the
 **This is the one message whose content came from an EARLIER question of yours.** It is sent only
 when a run continues a conversation: a follow-up asked on the same connection, where the rail
 attaches the previous run's id and the route derives the block server-side from those runs' own
-ledgers (`thread-context.ts`, `investigation.ts:1923`). A run that starts a conversation of its own
+ledgers (`thread-context.ts`, `investigation.ts:2660-2661`). A run that starts a conversation of its own
 sends nothing here, and there is no such message at all.
 
 What is in it, and where each half came from:
@@ -322,7 +322,7 @@ that was hard-coded before.
 So on an Operate run this section is narrower than what follows and section 4 does not happen. On
 every other workflow, the inventory is captured once per run by whichever of the two readings that
 dialect gets, then packed for the task
-(`packContextForTask`, `src/lib/agent/context-snapshot.ts:466-505`). Per table it renders
+(`packContextForTask`, `src/lib/agent/context-snapshot.ts:1392`). Per table it renders
 (`renderTable`, `context-snapshot.ts:428-441`):
 
 - the table name;
@@ -343,7 +343,7 @@ name is what the block carries.
 ### 4. The relations block — identifiers only, quoted and escaped
 
 The inventory's foreign keys, rendered as a relation list and fenced beside the inventory
-(`packRelations`, `investigation.ts:288-294`; rendering in `src/lib/agent/er-diagram.ts:228-269`).
+(`packRelations`, `investigation.ts:1806`; rendering in `src/lib/agent/er-diagram.ts:228-269`).
 It carries table names, column names, and at the deepest detail level a table's primary-key and
 leading-index column names (`keyColumns`, `er-diagram.ts:145-157`). **Never a row value.**
 
@@ -362,7 +362,7 @@ rendered characters — a bound in characters, because a count of edges is not a
 
 | Outcome | What is sent back to the model | Call site |
 | --- | --- | --- |
-| A completed read | A server sentence naming the artifact id, then the **rows**: one `JSON.stringify` per row, newline separated, inside a fence labelled `<what it was>, N row(s)` | `tools.ts:918-932`, rendering at `tools.ts:620-624` |
+| A completed read | A server sentence naming the artifact id, then the **rows**: one `JSON.stringify` per row, newline separated, inside a fence labelled `<what it was>, N row(s)` | `tools.ts:2079`, rendering at `tools.ts:620-624` |
 | A statement that failed at the database | The **engine's own message**, fenced, referenced by the statement's fingerprint | `tools.ts:872-882` |
 | A policy denial | Server text only: the deny code, the policy version, and advice that a boundary decided this. There is no engine text because a denial produced none | `denialText`, `tools.ts:568-574` |
 | An approval requirement | Server text naming the operation id | `approvalText`, `tools.ts:576-581` |
@@ -481,7 +481,7 @@ statement rather than as an opaque token.
 ## The fence, and what it does not do
 
 Everything derived from the database is wrapped by `fenceUntrustedContent`
-(`src/lib/agent/untrusted-content.ts:71-76`): a header naming what the block is, which operation
+(`src/lib/agent/untrusted-content.ts:119`): a header naming what the block is, which operation
 produced it and which id it joins to; a fixed instruction that the lines are data and must never be
 followed as instructions; and a pair of markers bounding the region.
 
