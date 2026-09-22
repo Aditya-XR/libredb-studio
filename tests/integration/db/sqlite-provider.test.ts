@@ -577,6 +577,48 @@ describe("SQLiteProvider", () => {
       expect(overview.activeConnections).toBe(1);
       expect(overview.maxConnections).toBe(1);
     });
+
+    // Review on #1050: `result?.size || 0` cannot tell a measured zero apart from
+    // `sizeStmt.get()` answering no row, or a row whose `size` came back
+    // `undefined` - `as { size: number }` casts past both rather than ruling them
+    // out. `page_count * page_size` never actually produces either in real
+    // operation, so both are reproduced here by intercepting the statement.
+    describe("a :memory: size read that answers no measurement", () => {
+      test("no row at all leaves databaseSizeBytes absent, not 0", async () => {
+        provider = new SQLiteProvider(makeSQLiteConfig());
+        await provider.connect();
+        answerReadsMatching(provider, "page_count", []);
+
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+      });
+
+      test("a row whose size is undefined leaves databaseSizeBytes absent, not 0", async () => {
+        provider = new SQLiteProvider(makeSQLiteConfig());
+        await provider.connect();
+        answerReadsMatching(provider, "page_count", [{ size: undefined }]);
+
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+      });
+
+      // The control: a real zero (an edge case in principle, since page_count and
+      // page_size are never actually 0 on a real :memory: handle) is a
+      // measurement and must be kept, not folded into the same absence.
+      test("a row whose size really is 0 is kept as a measurement", async () => {
+        provider = new SQLiteProvider(makeSQLiteConfig());
+        await provider.connect();
+        answerReadsMatching(provider, "page_count", [{ size: 0 }]);
+
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBe(0);
+        expect(overview.databaseSize).not.toBe("N/A");
+      });
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -905,6 +947,26 @@ describe("SQLiteProvider", () => {
       const integrityInfo = health.slowQueries.find((sq) => sq.query.includes("Integrity"));
       expect(integrityInfo!.query).toContain("OK");
       expect(health.activeSessions[0].database).toBe("health.db");
+    });
+
+    // Review on #1050: `getHealth()` used to report a failed file stat as
+    // "Unknown" while `getOverview()` reported the same failure as "N/A" - two
+    // different sentences for the same unmeasured database. Both now read the
+    // same helper and say the same thing.
+    test("getHealth reads N/A, not Unknown, when the file cannot be stat'd", async () => {
+      const dbPath = join(fileTmpDir, "unreadable-health.db");
+      provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
+      await provider.connect();
+      await provider.query("CREATE TABLE h (id INTEGER PRIMARY KEY)");
+
+      const spy = spyOn(fsNode, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        expect((await provider.getHealth()).databaseSize).toBe("N/A");
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test("getOverview reads the database size from the file", async () => {
