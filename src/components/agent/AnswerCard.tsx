@@ -16,7 +16,7 @@ import {
   guardSummaryLine,
   HydrationControls,
   InfoNote,
-  LIVE_STATUSES,
+  OPEN_STATUSES,
   QuotedBlock,
 } from "./rail-parts";
 import {
@@ -98,6 +98,7 @@ const EYEBROWS: Readonly<Record<AnswerState, string>> = Object.freeze({
 const STATUS_TONES: Readonly<Record<AgentRunStatus, string>> = Object.freeze({
   queued: "bg-brand-tint/10 text-brand-bright",
   running: "bg-brand-tint/10 text-brand-bright",
+  paused: "bg-brand-tint/10 text-brand-bright",
   succeeded: "bg-success-tint/10 text-success-bright",
   failed: "bg-hue-rose-tint/10 text-hue-rose-alt",
   cancelled: "bg-warning-tint/10 text-warning-bright",
@@ -455,11 +456,14 @@ function PlanChips({
  */
 export function answerCardState(timeline: AgentRunTimeline): AnswerState | null {
   if (timeline.items.length === 0) return null;
+  // A paused run is not finished: it holds its resources and will be driven again,
+  // so whatever it has composed so far is not yet "the answer".
+  if (timeline.status === "paused") return "running";
   if (timeline.items.some((item) => item.planStatement !== undefined)) return "plan";
   if (timeline.report !== null) return "report";
   if (timeline.items.some((item) => item.planRefusal === true)) return "refused";
   if (timeline.status === "failed") return "failed";
-  return LIVE_STATUSES.has(timeline.status) ? "running" : null;
+  return OPEN_STATUSES.has(timeline.status) ? "running" : null;
 }
 
 export function AnswerCard({

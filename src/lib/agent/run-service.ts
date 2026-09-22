@@ -235,7 +235,8 @@ export type AgentRunStepResult =
   | { readonly kind: "performed"; readonly settlement: AgentRunStepSettlement }
   | { readonly kind: "replayed"; readonly event: AgentSettledStepEvent }
   | { readonly kind: "indeterminate"; readonly stepId: string }
-  | { readonly kind: "cancelled" };
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "paused" };
 
 export type AgentRunServiceReason =
   | "RUN_NOT_FOUND"
@@ -243,6 +244,9 @@ export type AgentRunServiceReason =
   | "RUN_NOT_RESUMABLE"
   | "RUN_NOT_STARTABLE"
   | "RUN_NOT_RUNNING"
+  | "RUN_NOT_PAUSED"
+  /** A stop was already asked for; pausing would strand it with a pending cancel. */
+  | "RUN_CANCELLATION_PENDING"
   | "RUN_HAS_LIVE_EXECUTION"
   /** The caller's target scope is not the connection the run was opened for. */
   | "RUN_CONNECTION_MISMATCH"
@@ -421,13 +425,14 @@ export class AgentRunService {
    * to write the entries the durability argument rests on, so the type refuses at
    * compile time rather than a check refusing at run time.
    *
-   * A narrative entry may only be added to a RUNNING run, for the same reason a
-   * step may: a terminal run's ledger is closed, and an append after `close`
-   * resolves while `read` never returns it (`run-store.ts`).
+   * A narrative entry may be added to a RUNNING run or a PAUSED one: a pause means
+   * "take no new step", not "lose the sentence the model already wrote". A queued
+   * run has nothing in flight to narrate, and a terminal run's ledger is closed —
+   * an append after `close` resolves while `read` never returns it (`run-store.ts`).
    */
   async recordEvent(runId: string, narrative: AgentRunNarrative): Promise<void> {
     const view = await this.readOrThrow(runId);
-    if (view.record.status !== "running") {
+    if (view.record.status !== "running" && view.record.status !== "paused") {
       throw new AgentRunServiceError("RUN_NOT_RUNNING", `agent run "${runId}" is ${view.record.status}, not running`);
     }
     await this.store.appendEvent(runId, { ...narrative, atMs: this.clock() } as AgentRunNarrativeEvent);
@@ -442,11 +447,11 @@ export class AgentRunService {
   /**
    * Asks for a run to stop.
    *
-   * A run no loop has picked up is ended here and now: there is no checkpoint to
-   * wait for, and leaving it queued with a pending request would be a cancel that
-   * never lands. A running run gets the request recorded — its own loop is what
-   * ends it, at the next step, which is the only place where the run's resources
-   * can be released with nothing in flight.
+   * A run with nothing in flight — queued, or paused — is ended here and now:
+   * there is no checkpoint to wait for, and leaving it with a pending request
+   * would be a cancel that never lands. A running run gets the request recorded —
+   * its own loop is what ends it, at the next step, which is the only place where
+   * the run's resources can be released with nothing in flight.
    *
    * The gap that leaves, stated rather than implied: a run whose loop DIED while
    * running keeps a pending request and is not ended by anything this service
@@ -462,7 +467,7 @@ export class AgentRunService {
     try {
       const view = await this.readOrThrow(runId);
       if (view.terminal) return report(view);
-      if (view.record.status === "queued") {
+      if (view.record.status === "queued" || view.record.status === "paused") {
         return report(await this.finalize(runId, "cancelled", { stopReason: "cancelled" }));
       }
       await this.store.requestCancellation(runId, by);
@@ -501,7 +506,70 @@ export class AgentRunService {
     if (view.terminal) {
       throw new AgentRunServiceError("RUN_ALREADY_TERMINAL", `agent run "${runId}" already ${view.record.status}`);
     }
+    // A paused run is not advanced to terminal from here: it has not failed, and
+    // finishing it would record an outcome its drive never reached. Resume it, or
+    // cancel it; the drive's own pause checkpoints are what stop it cleanly.
+    if (view.record.status === "paused") {
+      throw new AgentRunServiceError("RUN_NOT_RUNNING", `agent run "${runId}" is paused, not running`);
+    }
     return (await this.finalize(runId, status, ending)).record;
+  }
+
+  /**
+   * Pauses a RUNNING run: its ledger records `run-paused`, and the run holds no
+   * further steps until it is unpaused. A paused run is not terminal — it keeps
+   * its artifacts, and an unpause continues the same run.
+   *
+   * A pause after a stop was asked for is refused: the run is already on its way
+   * to being cancelled, and pausing it would strand it with a pending request. A
+   * pause that lost a race to the run ending answers the run's current state
+   * instead of throwing, the way `cancel` reconciles the same race.
+   */
+  async pause(runId: string): Promise<AgentRunRecord> {
+    try {
+      const view = await this.readOrThrow(runId);
+      if (view.terminal) return view.record;
+      if (view.cancellationRequestedAtMs !== null) {
+        throw new AgentRunServiceError("RUN_CANCELLATION_PENDING", `agent run "${runId}" has a pending cancellation`);
+      }
+      if (view.record.status !== "running") {
+        throw new AgentRunServiceError("RUN_NOT_RUNNING", `agent run "${runId}" is ${view.record.status}, not running`);
+      }
+      await this.store.appendEvent(runId, { kind: "run-paused", atMs: this.clock() });
+      return (await this.readOrThrow(runId)).record;
+    } catch (error) {
+      if (error instanceof AgentRunStoreError && error.reasonCode === "RUN_ALREADY_CLOSED") {
+        const settled = await this.readOrThrow(runId);
+        if (settled.terminal) return settled.record;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Unpauses a PAUSED run: its ledger records `run-resumed` and it is `running`
+   * again, claimable and drivable by the next drive. The user-visible unpause is
+   * what the PATCH route then drives in-process; see the route.
+   *
+   * An unpause that lost a race to the run ending answers the run's current state
+   * instead of throwing.
+   */
+  async unpause(runId: string): Promise<AgentRunRecord> {
+    try {
+      const view = await this.readOrThrow(runId);
+      if (view.terminal) return view.record;
+      if (view.record.status !== "paused") {
+        throw new AgentRunServiceError("RUN_NOT_PAUSED", `agent run "${runId}" is ${view.record.status}, not paused`);
+      }
+      await this.store.appendEvent(runId, { kind: "run-resumed", atMs: this.clock() });
+      return (await this.readOrThrow(runId)).record;
+    } catch (error) {
+      if (error instanceof AgentRunStoreError && error.reasonCode === "RUN_ALREADY_CLOSED") {
+        const settled = await this.readOrThrow(runId);
+        if (settled.terminal) return settled.record;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -560,6 +628,13 @@ export class AgentRunService {
     const view = await this.readOrThrow(runId);
     if (view.terminal) {
       throw new AgentRunServiceError("RUN_ALREADY_TERMINAL", `agent run "${runId}" already ${view.record.status}`);
+    }
+    // A pause is a stop the drive must honour, not an error to record: without this
+    // checkpoint the next step would throw RUN_NOT_RUNNING and the drive would end
+    // the run as failed. Like the cancellation checkpoint below, the run stays
+    // non-terminal and the drive stops of its own accord.
+    if (view.record.status === "paused") {
+      return { kind: "paused" };
     }
     // A step may only run on a run that is RUNNING. Without this, "a queued run
     // has nothing in flight" would be an assumption, and `cancel` ends a queued

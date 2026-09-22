@@ -599,6 +599,12 @@ export async function openEvalRun(options: EvalRunOptions = {}): Promise<EvalRun
       ...(driveOptions.turnTimeoutMs === undefined ? {} : { turnTimeoutMs: driveOptions.turnTimeoutMs }),
     });
 
+    if (outcome.status === "paused") {
+      // A paused drive is not an eval outcome: the harness never asks to pause, so a
+      // paused return can only mean the run was stopped from outside the script.
+      throw new Error(`run ${record.runId} paused mid-eval`);
+    }
+
     const view = await store.read(record.runId);
     if (!view) throw new Error(`run ${record.runId} has no ledger`);
     const sent = statements.slice(before);

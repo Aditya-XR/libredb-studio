@@ -1063,7 +1063,7 @@ LLM_API_URL=http://localhost:11434/v1  # For ollama/custom
 
 ### Agent API
 
-eight paths, ten handlers, under `src/app/api/agent/`. They drive the read-only agent runtime — full
+eight paths, eleven handlers, under `src/app/api/agent/`. They drive the read-only agent runtime — full
 behaviour in [`docs/AGENT.md`](AGENT.md), the surface in [`docs/AGENT_GUIDE.md`](AGENT_GUIDE.md), and
 what a run sends to a model provider in [`docs/AGENT_DATA_FLOW.md`](AGENT_DATA_FLOW.md).
 
@@ -1312,6 +1312,21 @@ run exists and belongs to the calling session.
 Requests a stop, and returns the run's status report. Cancellation is enforced by the run loop's own
 persisted state rather than by a driver cancel propagating — so this means *asked to stop*, not *has
 stopped*.
+
+#### PATCH /api/agent/runs/{runId}
+
+Pauses or resumes the run, named by the `action` field: `{"action": "pause"}` or
+`{"action": "resume"}`. Pause lands only on a `running` run; resume only on a `paused` one, and a
+resume that answers `running` also drives the run again in this process.
+
+```json
+// 200 — the run's record after the action
+{ "runId": "arun_…", "status": "paused", "…": "…" }
+```
+
+A refusal is a `409`, never a `500`: the ledger moved between the render and the click (for example,
+a resume that lost the race to the run's end answers the terminal record), or the action cannot be
+honoured. An `action` this route has no words for is a `400`.
 
 #### GET /api/agent/runs/{runId}/stream
 

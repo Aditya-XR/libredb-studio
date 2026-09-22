@@ -1201,6 +1201,17 @@ function describeEvent(
         },
       };
     }
+    case "run-paused":
+      return {
+        tone: "progress",
+        headline: "Paused",
+        detail: "The run is paused; resume it to continue from where it stopped.",
+      };
+    case "run-resumed":
+      return {
+        tone: "progress",
+        headline: "Resumed",
+      };
     default:
       return {
         tone: TERMINAL_TONES[event.status],
@@ -1550,6 +1561,10 @@ export function foldLedgerEntries(entries: readonly AgentLedgerEntry[]): AgentRu
       if (event.kind === "run-started") {
         status = "running";
         mode = event.mode;
+      } else if (event.kind === "run-paused") {
+        status = "paused";
+      } else if (event.kind === "run-resumed") {
+        status = "running";
       } else if (event.kind === "run-finished") {
         status = event.status;
         failureReason = event.reason ?? null;

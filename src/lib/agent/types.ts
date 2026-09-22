@@ -282,7 +282,7 @@ export type AgentRunTerminalStatus = "succeeded" | "failed" | "cancelled";
  */
 export type AgentToolProtocol = "native" | "prompted";
 
-export type AgentRunStatus = "queued" | "running" | AgentRunTerminalStatus;
+export type AgentRunStatus = "queued" | "running" | "paused" | AgentRunTerminalStatus;
 
 /**
  * The terminal statuses as a set, EXHAUSTIVE by construction.
@@ -293,9 +293,9 @@ export type AgentRunStatus = "queued" | "running" | AgentRunTerminalStatus;
  * and on the follow-up path that is a legitimate conversation refused with a message
  * that names nothing — the caller is told only that the run may not be continued.
  *
- * `LIVE_STATUSES` in the rail is deliberately NOT derived from this: `queued | running`
- * is drift-safe on its own, since a new terminal status correctly reads as not live.
- * This one is the direction that needed pinning.
+ * The rail's `OPEN_STATUSES` is deliberately NOT derived from this: `queued |
+ * running | paused` is drift-safe on its own, since a new terminal status correctly
+ * reads as not open. This one is the direction that needed pinning.
  */
 const TERMINAL_STATUS_MEMBERS = {
   succeeded: true,
@@ -820,6 +820,8 @@ export type AgentGuidanceNotice =
  */
 export type AgentRunEvent =
   | (AgentRunEventBase & { readonly kind: "run-started"; readonly mode: AgentRunMode })
+  | (AgentRunEventBase & { readonly kind: "run-paused" })
+  | (AgentRunEventBase & { readonly kind: "run-resumed" })
   | (AgentRunEventBase & {
       /**
        * What drove this stretch of the run: the model, and where its settings came from.

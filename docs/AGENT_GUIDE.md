@@ -969,8 +969,13 @@ Stated plainly, because a surface that hides its edges is the one that surprises
 - **It never executes a recommendation**, and never applies one to your editor by itself. The single
   exception anywhere in the rail is auto-execute, which is off unless the run was opened with it, and
   which covers only the answer's own statement under the three conditions above.
-- **It cannot be paused or resumed from the rail.** There is a Stop control and nothing standing in
-  for a capability this build does not have (`docs/BACKLOG.md` B11).
+- **It can be paused and resumed from the rail.** Pause lands only on a running run that was not
+  asked to stop; Resume drives the paused run again in this process. A paused run is not terminal —
+  its stored rows stay reachable, and it holds its budget and artifacts until it is unpaused or
+  cancelled (B83). Its statement and database-time ceilings carry over from the earlier drive (the
+  ledger's completed reads), but the run's wall-clock deadline does not: it is measured from the
+  moment the run opened, so a pause spends it. A long pause can leave a resumed run with almost no
+  deadline left, and Resume then ends it `deadline-exceeded`.
 - **A stopped run stops at its next checkpoint**, not instantly: cancellation is enforced by the run
   loop's own persisted state, and the checkpoint sits in the step that reaches a database. A run that
   was already composing its report therefore finishes it and answers — twice on 2026-08-12 it did,
@@ -981,8 +986,10 @@ Stated plainly, because a surface that hides its edges is the one that surprises
   A result opens in the grid, the explain view or the charts view — whichever
   the run's own record names — and cannot be exported from any of them, because Export writes the
   tab's own rows (B34).
-- **An interrupted run is resumable but is not resumed on its own** — nothing enqueues a drive yet
-  (`docs/BACKLOG.md` B9).
+- **An interrupted run is picked up on its own, eventually.** A sweep finds runs a dead process left
+  `running` and drives each one again — but only AFTER its claim expires, so this is eventual resume,
+  not immediate. It is guaranteed on the `local` backend only; the multi-replica Postgres world is out
+  of scope until B16 lands.
 - **It reads what your connection's role can read.** The declared-target allowlist, the statement
   guard and the role's own grants are the whole boundary on out-of-scope reads
   (`docs/BACKLOG.md`, "Agent M1 deferrals", A3).

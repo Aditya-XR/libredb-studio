@@ -1104,3 +1104,203 @@ describe("AgentRunService — run history", () => {
     }
   });
 });
+
+// ─── pause and resume ─────────────────────────────────────────────────────
+
+describe("AgentRunService — pause and resume", () => {
+  test("pauses a running run and records the pause in the ledger", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+
+    const record = await h.service.pause(runId);
+
+    expect(record.status).toBe("paused");
+    expect(record.events.map((entry) => entry.kind)).toEqual(["run-started", "run-paused"]);
+  });
+
+  test("a paused run still records narrative the model already composed", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+    await h.service.pause(runId);
+
+    await h.service.recordEvent(runId, {
+      kind: "statement-drafted",
+      stepId: "s1",
+      sql: "SELECT 1",
+      rationale: "inspect",
+    });
+
+    const report = await h.service.status(runId);
+    expect(report?.record.status).toBe("paused");
+    expect(report?.record.events.map((entry) => entry.kind)).toEqual([
+      "run-started",
+      "run-paused",
+      "statement-drafted",
+    ]);
+  });
+
+  test("finishing a paused run refuses rather than advancing it", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+    await h.service.pause(runId);
+
+    const error = await captureServiceError(() => h.service.finish(runId, "failed"));
+
+    expect(error.reasonCode).toBe("RUN_NOT_RUNNING");
+    const report = await h.service.status(runId);
+    expect(report?.record.status).toBe("paused");
+  });
+
+  test("resumes a paused run back to running", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+    await h.service.pause(runId);
+
+    const record = await h.service.unpause(runId);
+
+    expect(record.status).toBe("running");
+    expect(record.events.map((entry) => entry.kind)).toEqual(["run-started", "run-paused", "run-resumed"]);
+  });
+
+  test("pausing a queued run refuses", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+
+    expect((await captureServiceError(() => h.service.pause(runId))).reasonCode).toBe("RUN_NOT_RUNNING");
+  });
+
+  test("resuming a run that is not paused refuses", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+
+    expect((await captureServiceError(() => h.service.unpause(runId))).reasonCode).toBe("RUN_NOT_PAUSED");
+  });
+
+  test("cancelling a paused run ends it immediately, with no pending request", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+    await h.service.pause(runId);
+
+    const report = await h.service.cancel(runId, OTHER_ACTOR);
+
+    expect(report.record.status).toBe("cancelled");
+    expect(report.cancellationRequested).toBe(false);
+    expect(report.record.events.at(-1)).toMatchObject({ kind: "run-finished", status: "cancelled" });
+  });
+
+  test("pausing a run with a pending cancellation refuses", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+    await h.service.cancel(runId, OTHER_ACTOR);
+
+    const error = await captureServiceError(() => h.service.pause(runId));
+
+    expect(error.reasonCode).toBe("RUN_CANCELLATION_PENDING");
+  });
+
+  test("pausing a run that just ended answers its current state", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+    await h.service.finish(runId, "succeeded", { stopReason: "model-stopped" });
+
+    const record = await h.service.pause(runId);
+
+    expect(record.status).toBe("succeeded");
+  });
+
+  test("pausing a run another writer finished mid-pause answers with its terminal record", async () => {
+    // The same race `cancel` tolerates, on the pause path: the read sees a running
+    // run, another writer finalizes it (append + close), and only then does the
+    // `run-paused` append reach the closed stream. The refusal must not escape as a
+    // 500 — the run IS ended, which is the answer the caller asked for.
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+
+    const read = h.store.read.bind(h.store);
+    spyOn(h.store, "read").mockImplementationOnce(async (id: string) => {
+      const stale = await read(id);
+      await h.service.finish(runId, "failed", { reason: "internal" });
+      return stale;
+    });
+
+    const record = await h.service.pause(runId);
+
+    expect(record.status).toBe("failed");
+  });
+
+  test("unpausing a run another writer cancelled mid-unpause answers with its terminal record", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+    await h.service.pause(runId);
+
+    const read = h.store.read.bind(h.store);
+    spyOn(h.store, "read").mockImplementationOnce(async (id: string) => {
+      const stale = await read(id);
+      await h.service.cancel(runId, OTHER_ACTOR);
+      return stale;
+    });
+
+    const record = await h.service.unpause(runId);
+
+    expect(record.status).toBe("cancelled");
+  });
+
+  test("a paused run is not terminal, and the next step reads the pause checkpoint", async () => {
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+    await h.service.pause(runId);
+
+    const report = await h.service.status(runId);
+    expect(report?.record.status).toBe("paused");
+
+    let executed = false;
+    const result = await h.service.runStep(runId, { stepId: "s2", tool: "run_read_query" }, async () => {
+      executed = true;
+      return COMPLETED(runId);
+    });
+
+    expect(result.kind).toBe("paused");
+    expect(executed).toBe(false);
+    const after = await h.service.status(runId);
+    expect(after?.record.status).toBe("paused");
+    expect(after?.record.events.some((entry) => entry.kind === "run-finished")).toBe(false);
+  });
+
+  test("a pause that lands mid-step keeps the run paused for the step after it", async () => {
+    // The pause arrives while a tool is executing: the step in flight completes (its
+    // effect was already allowed), and the NEXT step reads the checkpoint and stops,
+    // instead of throwing RUN_NOT_RUNNING and letting the drive end the run as failed.
+    const h = harness();
+    const { runId } = await h.service.start(START_INPUT);
+    await h.service.markRunning(runId);
+
+    const first = await h.service.runStep(runId, { stepId: "s1", tool: "run_read_query" }, async () => {
+      await h.service.pause(runId);
+      return COMPLETED(runId);
+    });
+    expect(first.kind).toBe("performed");
+
+    let executed = false;
+    const second = await h.service.runStep(runId, { stepId: "s2", tool: "run_read_query" }, async () => {
+      executed = true;
+      return COMPLETED(runId);
+    });
+
+    expect(second.kind).toBe("paused");
+    expect(executed).toBe(false);
+    const report = await h.service.status(runId);
+    expect(report?.record.status).toBe("paused");
+    expect(report?.record.events.some((entry) => entry.kind === "run-finished")).toBe(false);
+  });
+});

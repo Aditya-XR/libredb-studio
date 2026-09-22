@@ -57,6 +57,28 @@ describe("deriveDriveCeilings", () => {
     expect(ceilings.deadlineMs).toBe(1);
   });
 
+  test("the deadline is wall clock, so a pause spends it and a long one leaves only the floor", () => {
+    // `operations` runs on 360s. The deadline reads the run's OPENING instant, not its
+    // resume, so a pause spends it like any other wall-clock time — seven minutes of
+    // pause leaves the run nothing to resume into, with no tool-completed entry to
+    // explain the shortfall.
+    const operationsDeadline = AGENT_WORKFLOW_BUDGETS.operations.runDeadlineMs;
+    const sevenMinutePause = deriveDriveCeilings(
+      { workflowType: "operations", createdAtMs: CREATED_AT, events: [] },
+      CREATED_AT + 7 * 60_000,
+    );
+    expect(sevenMinutePause.deadlineMs).toBe(1);
+    // A shorter pause spends exactly that much, and the statement and elapsed-time
+    // figures are untouched by it.
+    const oneMinutePause = deriveDriveCeilings(
+      { workflowType: "operations", createdAtMs: CREATED_AT, events: [] },
+      CREATED_AT + 60_000,
+    );
+    expect(oneMinutePause.deadlineMs).toBe(operationsDeadline - 60_000);
+    expect(oneMinutePause.executedStatements).toBe(0);
+    expect(oneMinutePause.executedMs).toBe(0);
+  });
+
   test("only tool-completed entries count as spend; other events do not", () => {
     const events: AgentRunEvent[] = [
       completedEvent("s1", 10),

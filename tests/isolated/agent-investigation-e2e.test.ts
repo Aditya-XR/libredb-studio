@@ -433,6 +433,10 @@ async function driveArc(fixture: Fixture): Promise<Arc> {
     resources,
   });
 
+  if (result.status === "paused") {
+    throw new Error(`run ${run.runId} paused mid-e2e`);
+  }
+
   const view = await store.read(run.runId);
   if (!view) throw new Error(`run ${run.runId} has no ledger`);
 

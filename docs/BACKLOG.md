@@ -40,7 +40,7 @@ None of it is a GitHub issue.
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B82 · 24
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B83 · 24
 
 ---
 
@@ -3093,24 +3093,6 @@ the drive's own claim as the single-flight and B6's cross-drive ceilings account
 **Done when:** a resumed run is driven on every backend a deployment can reach, and the rail re-attaches
 to the resumed run's stream instead of waiting for the sweep.
 
-### B11. The rail can stop a run but cannot pause or resume one
-
-Opened by #329 T10b. `AgentRunService` has no pause: a run holds a provider and a budget while it is
-running, and nothing in this milestone can put those down and pick them up again.
-
-Resuming exists (`POST /api/agent/drive`, `driveAgentRun`) but is authenticated by a server-minted
-single-purpose credential a browser never holds. It is the seam a machine producer will use (B9), not a
-user control. The rail therefore offers stop and nothing else, and does not render a disabled pause or
-resume, because a disabled control reads as a capability that is merely unavailable right now.
-
-Resume becomes offerable the moment B9's producer exists — a user-visible "pick this run up" is then
-just asking for a delivery. Pause is larger: it needs a run state between running and terminal that
-releases the run's resources without ending it, and a resumed run would have to re-acquire them, which
-is the path B6 already complicates.
-
-**Done when:** either control exists in the service with its own ledger record, and the rail renders it
-because the service can honour it.
-
 ### B16. The opt-in multi-replica backend cannot load in the container image or the npx payload
 
 Found while landing #329 T1 and carried forward, because the commit that found it could not validate a
@@ -3512,3 +3494,19 @@ attempted": neither writes a record.
 
 **Done when:** the sweep stops re-driving a run after a bounded number of consecutive unrecorded
 deaths and says so — in the run's ledger or in the operator log.
+
+### B83. A paused run holds its budget, artifacts and ledger stream until it is unpaused or cancelled
+
+Pause (#1001) added `paused` as a non-terminal state, but the state does not release the run's
+resources: `releaseExecutionRun` and the ledger `close` run only inside `finalize`, so a run paused
+for a long time keeps its budget registration, its stored artifacts and an open ledger stream.
+Cancelling a paused run releases them (cancel finalizes it immediately), and unpausing drives it
+again — but a run left paused holds them for as long as it stays paused.
+
+This is the half of the old B11 that closing it did not build. B11 asked for "a run state between
+running and terminal that releases the run's resources without ending it, and a resumed run would
+have to re-acquire them". The state exists; the release-and-re-acquire half does not.
+
+**Done when:** a paused run releases its budget and artifacts (and closes its stream) while it stays
+paused, and a resumed run re-acquires them — or the decision is recorded that pause deliberately
+retains them, with the resource bound that makes that safe.
