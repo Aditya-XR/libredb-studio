@@ -70,6 +70,26 @@ function objectRow(kindId: string): TreeRowModel {
   };
 }
 
+/**
+ * A column row, as `flattenTree` builds one: no kind id, and a path that names the COLUMN.
+ *
+ * Built here with the id prefix the walk uses rather than an invented one, because the guard
+ * being pinned is about the row's ADDRESSING and a row that addressed itself like an object
+ * would be a different subject.
+ */
+function columnRow(): TreeRowModel {
+  return {
+    id: "column%3Aapp/x/table/order_id",
+    kind: "column",
+    label: "order_id",
+    depth: 3,
+    setSize: 1,
+    posInSet: 1,
+    path: ["app", "x", "order_id"],
+    column: { name: "order_id", type: "integer", nullable: false, isPrimary: false },
+  };
+}
+
 function folderRow(kindId: string): TreeRowModel {
   return {
     id: `app/${kindId}`,
@@ -302,6 +322,39 @@ describe("rowActions on a folder row", () => {
 describe("rowActions on a container row", () => {
   test("a container is offered nothing", () => {
     expect(idsFor(containerRow, postgres)).toEqual([]);
+  });
+});
+
+describe("rowActions on a column row", () => {
+  test("a column row is offered nothing", () => {
+    // The object is handed in DELIBERATELY: a resolved parent is exactly the state the refusal
+    // has to survive, and passing `undefined` here would pin nothing.
+    expect(idsFor(columnRow(), postgres, allHandlers(), orders)).toEqual([]);
+  });
+
+  test("and still nothing where the row carries its parent's kind id", () => {
+    // This is what the first line of `rowActions` is FOR, and it is the one case that can fail
+    // without it. The row above misses by CONSTRUCTION, because `flattenTree` gives a column row
+    // no kind id and the lookup below needs one; that is a property of how a column row is built
+    // today, not a statement about this function. So the fixture here is a column row that does
+    // carry one, which no walk produces and which a later change to how a column row addresses
+    // itself would produce. Without the refusal it resolves the parent's kind and offers
+    // "Vacuum Table" on `order_id`, with the table's status and row count drawn beside it.
+    expect(idsFor({ ...columnRow(), kindId: "table" }, postgres, allHandlers(), orders)).toEqual([]);
+  });
+
+  test("the control: the rows that DO get a menu still get the same one", () => {
+    // The new first line is a refusal for one row kind and must not be a refusal for any
+    // other, which a bare "a column gets nothing" cannot say on its own.
+    expect(idsFor(objectRow("table"), postgres)).toEqual([
+      "generate-select",
+      "profile",
+      "generate-code",
+      "generate-test-data",
+      "maintenance-analyze",
+      "maintenance-vacuum",
+    ]);
+    expect(idsFor(folderRow("table"), postgres)).toEqual(["create"]);
   });
 });
 

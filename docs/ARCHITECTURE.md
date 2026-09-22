@@ -254,7 +254,15 @@ src/
 │   ├── results-grid/        # ResultCard, RowDetailSheet, StatsBar
 │   ├── admin/               # AdminDashboard shell (5 section routes) + tabs/ panels
 │   ├── monitoring/          # MonitoringDashboard + tabs
-│   ├── schema-explorer/     # SchemaExplorer
+│   ├── object-tree/         # The desktop sidebar's lazy object tree (containers, folders, objects, columns)
+│   │   ├── ObjectTree.tsx    # Tree shell: hand-rolled window, roving tabindex, keyboard, menu anchor
+│   │   ├── TreeRow.tsx       # One row, ARIA numbers taken verbatim; the chevron is its own hit target
+│   │   ├── RowMenu.tsx       # The row menu, rendered as a sibling of the tree element, not inside it
+│   │   ├── flatten.ts        # Expansion state to a flat row list, with each row's ARIA position (pure)
+│   │   ├── use-tree-nodes.ts # The lazy cache: containers, counts, a folder's objects, a row's columns
+│   │   ├── row-actions.ts    # What a row may be asked to do, read off the kind's own declaration
+│   │   └── index.ts          # What a shell imports: ObjectTree plus the two types its handlers need
+│   ├── schema-explorer/     # SchemaExplorer (the flat list: mobile schema tab, published export)
 │   └── ui/                  # Shadcn/UI primitives
 ├── workspace/               # Embeddable shell (StudioWorkspace) + host adapter hooks
 ├── exports/                 # Public npm-package barrel exports (tsup build:lib)

@@ -68,6 +68,16 @@ export interface ObjectTreeProps {
    */
   readonly source?: ObjectSource;
   /**
+   * Whether the SOURCE can answer a describe read, which is what draws a twisty on a table.
+   *
+   * Meaningless without `source`, and that is why it is resolved against it below rather than
+   * defaulted: the standalone shell passes neither (`src/components/Studio.tsx` names no
+   * `objectSource`), and its own route always exists, so it gets columns by passing nothing. A
+   * shell that supplied a source declares what that source can answer, and an omission withholds
+   * the twisty instead of issuing a read the host cannot serve (B76).
+   */
+  readonly readsColumns?: boolean;
+  /**
    * A counter the shell bumps when a statement it ran changed the catalog (#789).
    *
    * A TOKEN rather than a callback registration or an imperative handle, because the signal is
@@ -129,9 +139,11 @@ export function ObjectTree({
   actions,
   labels,
   source,
+  readsColumns,
   refreshToken = 0,
 }: ObjectTreeProps) {
-  const tree = useTreeNodes(connection, capabilities, deferred, source);
+  const columnsReadable = source === undefined || readsColumns === true;
+  const tree = useTreeNodes(connection, capabilities, deferred, source, columnsReadable);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   const [pinned, setPinned] = useState(false);
@@ -267,9 +279,38 @@ export function ObjectTree({
     [openMenu],
   );
 
+  /**
+   * Open or close a row, which is now a gesture of its own rather than a synonym for activation.
+   *
+   * The arrow keys used to call `activate`, which was the same thing for a container and a folder
+   * and became wrong the moment an object row grew a twisty: `activate` returns before the toggle
+   * on an object row, so ArrowRight on a closed table would have opened a query tab instead of
+   * its columns and ArrowLeft on an open one would have opened a second. Identical to the old
+   * path for every other kind, `focusRow` included, and `focusRow` is also what pulls DOM focus
+   * back out of the twisty button after a pointer press.
+   */
+  const toggleRow = useCallback(
+    (row: TreeRowModel) => {
+      focusRow(row.id);
+      tree.toggle(row.id);
+    },
+    [focusRow, tree],
+  );
+
   const activate = useCallback(
     (row: TreeRowModel) => {
       focusRow(row.id);
+      // A COLUMN row selects and does nothing else, which is what the flat list's column did
+      // (`cursor-default`, no handler). The three alternatives all cost a new handler across the
+      // published embedded seam for a gesture nobody asked for: inserting the name at the cursor
+      // needs an editor the embedded shell does not mount, a clipboard write is invisible in the
+      // EMBEDDED shell, which mounts no `<Toaster />` and records why at `StudioWorkspace.tsx`
+      // (the standalone one does mount it, in `app/layout.tsx`, so this is a two-shell constraint
+      // and not a missing surface), and generating a SELECT from one click is a heavier side
+      // effect than any other row's activation. Stated as an arm rather than left to the
+      // `expanded !== undefined` fall-through below, so giving a column children later cannot
+      // make this silently wrong.
+      if (row.kind === "column") return;
       if (row.kind === "object") {
         const object = tree.objectFor(row);
         if (object !== undefined) onObjectClick?.(object);
@@ -303,12 +344,13 @@ export function ObjectTree({
           break;
         case "ArrowRight":
           // Opens a closed row, then moves into it. A row that is open but holds nothing has no
-          // child to move to, and a leaf has neither.
-          if (row.expanded === false) activate(row);
+          // child to move to, and a leaf has neither. `toggleRow` rather than `activate`, which
+          // on an object row opens a data tab and never its columns.
+          if (row.expanded === false) toggleRow(row);
           else if (firstChildIndex(rows, index) >= 0) moveTo(index + 1);
           break;
         case "ArrowLeft":
-          if (row.expanded === true) activate(row);
+          if (row.expanded === true) toggleRow(row);
           else if (parentIndex(rows, index) >= 0) moveTo(parentIndex(rows, index));
           break;
         case "Enter":
@@ -333,7 +375,7 @@ export function ObjectTree({
       }
       event.preventDefault();
     },
-    [activate, activeRowId, moveTo, openMenuOnRow, rows],
+    [activate, activeRowId, moveTo, openMenuOnRow, rows, toggleRow],
   );
 
   /** The row a pointer event landed in, by the dataset rather than by a CSS selector. */
@@ -501,6 +543,7 @@ export function ObjectTree({
               hasActions={hasRowMenu(row)}
               menuOpen={menu?.rowId === row.id}
               onOpenMenu={openMenuOnTrigger}
+              onToggle={toggleRow}
               top={(start + offset) * TREE_ROW_HEIGHT}
             />
           ))}

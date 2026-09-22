@@ -67,6 +67,15 @@ interface SidebarProps {
    */
   objectSource?: ObjectSource;
   /**
+   * Whether that source can answer a describe read, handed straight through (#789).
+   *
+   * Absent is the standalone shell, which passes no source either: its own route always exists,
+   * and `ObjectTree` resolves the pair rather than defaulting this one. The embedded workspace
+   * declares it, because only its host knows whether it implemented `describeObject`, and an
+   * object row offered a twisty over a read the host cannot serve is B76 again.
+   */
+  objectReadsColumns?: boolean;
+  /**
    * Bumped by the shell when a statement it ran changed the catalog (#789), handed straight
    * through. The standalone shell drives it from the same DDL detection that re-reads the flat
    * inventory; the embedded workspace does not, because its host runs the statements.
@@ -95,6 +104,7 @@ export function Sidebar({
   onLoadObjects,
   objectActions,
   objectSource,
+  objectReadsColumns,
   objectRefreshToken,
 }: SidebarProps) {
   const appVersion = getAppVersion();
@@ -176,6 +186,7 @@ export function Sidebar({
               onObjectClick={onObjectClick}
               actions={objectActions}
               source={objectSource}
+              readsColumns={objectReadsColumns}
               refreshToken={objectRefreshToken}
             />
           ) : metadataError !== null ? (

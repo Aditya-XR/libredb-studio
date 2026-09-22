@@ -342,10 +342,31 @@ export function useConnectionAdapter({
           return onObjectsFetch.countObjects(conn.id, request.container);
         case "list":
           return onObjectsFetch.listObjects(conn.id, request.container, request.kind);
+        case "describe":
+          // UNREACHABLE while `readsColumns` below is honoured, and a rejected promise rather
+          // than a `throw` or a silent `undefined`. `undefined` would fail the tree's shape check
+          // and report "answered with a body this tree cannot render", which blames the host's
+          // answer for a method the host never declared. A bare `throw` is caught in production,
+          // because this arrow is called inside `readThrough`, which is `async`, but it makes the
+          // function's declared `Promise<unknown>` a lie for any direct caller: the hook test for
+          // this arm could not be written as `await expect(...).rejects.toThrow(...)`. CALLED
+          // BOUND, like the three arms above it.
+          return onObjectsFetch.describeObject === undefined
+            ? Promise.reject(new Error("This host reads no object detail"))
+            : onObjectsFetch.describeObject(conn.id, request.path, request.kind);
       }
     },
     [onObjectsFetch],
   );
+
+  /**
+   * Whether the host can answer the tree's describe read, which is what draws a twisty on a table.
+   *
+   * Beside the source rather than inside it: the tree has to know BEFORE it renders a row, and an
+   * affordance withheld is the whole of the degradation. A plain boolean, so it is stable without
+   * a memo.
+   */
+  const readsColumns = onObjectsFetch.describeObject !== undefined;
 
   /**
    * The source read's own seam, which is not a tree read (#789 Phase 2).
@@ -459,6 +480,8 @@ export function useConnectionAdapter({
     objectScanDeferred: activeConnection !== null && scanDeferred(activeConnection),
     loadObjects,
     objectSource,
+    /** Whether the host declared a describe read, which is what gives an object row a twisty. */
+    readsColumns,
     /** The host's own source read, or `undefined` where it declared none. */
     sourceReader,
     /** The host's own object editor, or `undefined` where it declared none. */

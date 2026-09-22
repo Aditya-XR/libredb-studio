@@ -1420,6 +1420,15 @@ describe("SQLiteProvider object surface (#789)", () => {
       // Keyed by the container path joined with "/", so the root container's key is "".
       counts: { "": counts },
       objects: { table: tables },
+      // Nothing is described here, and that is the point of naming both fields rather than
+      // letting a default answer for them. `readsColumns` is the STANDALONE shell's value,
+      // which is what SQLite really renders now that its `table` and `view` declare
+      // `hasColumns`; `details` is empty because `expanded` holds only the folder id, so no
+      // object row is open and no column row can be emitted. This assertion is about the
+      // zero-container arm and stays green either way, which is why both are spelled out
+      // instead of being tuned until it passes.
+      details: {},
+      readsColumns: true,
       containerDepth: containerDepth(capabilities),
     });
 
