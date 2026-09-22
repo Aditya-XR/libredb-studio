@@ -132,7 +132,7 @@ other four workflows have no answer to present.
 **3. The objective** — what the run is asked, and what the reading above reads. The box is labelled
 *"What should the run investigate?"*, placeholder *"Why is checkout slow?"*, and it is bounded to
 4000 characters (`AGENT_MAX_OBJECTIVE_LENGTH` in
-`src/lib/agent/execution-policy.ts:410`). It is **emptied once the server has opened the run**, so
+`src/lib/agent/execution-policy.ts:479`). It is **emptied once the server has opened the run**, so
 the next question needs no deleting; the question itself is not lost, since the run's header carries
 it and the timeline's first entry quotes it. A start that was *refused* leaves what you typed exactly
 where it was, so retrying is one click rather than one retyping.
@@ -338,28 +338,28 @@ and the bar its verdict is judged against.
 ### Investigate
 
 The default. The objective is a question about the database and the model answers it from what it
-establishes (`WORKFLOW_OBJECTIVES.investigation` in `src/lib/agent/investigation.ts:505`). Tools:
+establishes (`WORKFLOW_OBJECTIVES.investigation` in `src/lib/agent/investigation.ts:1466`). Tools:
 `inspect_schema`, `run_read_query`, `inspect_plan`, `compose_report`
-(`AGENT_MODE_TOOLS`, `src/lib/agent/tools.ts:601-606`).
+(`AGENT_MODE_TOOLS`, `src/lib/agent/tools.ts:900-905`).
 
 **Answered when** the run composed at least one claim and the claims do not rest entirely on empty
-results (`verifyInvestigationGoal`, `src/lib/agent/goal-verifier.ts:281-284`).
+results (`verifyInvestigationGoal`, `src/lib/agent/goal-verifier.ts:349-355`).
 
 ### Optimize
 
 For a statement that is too slow. The model is told that what matters is *how the engine reaches its
-rows* (`investigation.ts:506-507`), and it is offered two further tools: `compare_plans`, which
+rows* (`investigation.ts:1467-1468`), and it is offered two further tools: `compare_plans`, which
 takes the ids of two plans the run already inspected, and `recommend_change`, which records one
-index or rewrite (`tools.ts:630-634`).
+index or rewrite (`tools.ts:870,876`).
 
 Two things this workflow will not do, and it says so rather than implying otherwise:
 
 - **Every plan is an estimate.** `EXPLAIN ANALYZE` executes the statement and is policy-denied, so
   the comparison entry carries a sentence the application wrote: *"Estimates only: these plans were
   described, not executed. EXPLAIN ANALYZE is policy-denied because it would run the statement."*
-  (`PLAN_ESTIMATE_CAVEAT`, `timeline.ts:355-357`).
+  (`PLAN_ESTIMATE_CAVEAT`, `timeline.ts:499`, used at `:1019`).
 - **A recommendation is never applied.** Every recommendation entry carries *"Not applied: nothing
-  here runs this statement."* (`NOT_APPLIED_CAVEAT`, `timeline.ts:359`), and the only thing offered
+  here runs this statement."* (`NOT_APPLIED_CAVEAT`, `timeline.ts:503`, used at `:1029`), and the only thing offered
   is an **Apply to editor** button, which puts the text in your editor and runs nothing
   (`HydrationControls`, `AgentRail.tsx:401-447`).
 
@@ -371,7 +371,7 @@ to already exist — the recommendation citing the plan it diagnosed (`verifyQue
 ### Assess
 
 For the state of the data itself — where it is incomplete, inconsistent or surprising
-(`investigation.ts:508-509`). It adds one tool, `profile_table`, and the rule that matters is worth
+(`investigation.ts:1469-1470`). It adds one tool, `profile_table`, and the rule that matters is worth
 reading before you point it at a table of personal data:
 
 **A profile records counts, never values.** Row counts, present counts, distinct counts, and how
@@ -389,7 +389,7 @@ in it means "any character". The findings — `high_null`, `constant`,
 those counts, with stated thresholds; the model may interpret them and cannot invent one.
 
 **Answered when** the Investigate bar is met **and** a table was actually profiled
-(`verifyDatabaseAssessmentGoal`, `goal-verifier.ts:358`).
+(`verifyDatabaseAssessmentGoal`, `goal-verifier.ts:446`).
 
 ### Operate
 
@@ -503,7 +503,7 @@ figures that move, so how far in a run is takes nothing to read. See
 that is open, because it is what you asked for; the spend is what it took to get there.
 
 The rail's timeline is a fold over the run's ledger, one line per recorded event
-(`foldLedgerEntries`, `timeline.ts:1018-1189`). Before anything has happened it says *"No activity
+(`foldLedgerEntries`, `timeline.ts:1416`). Before anything has happened it says *"No activity
 yet. A run's steps appear here as they are recorded."*
 
 **The three entries that only say a run began are folded** — `Run opened`, `Run started` and
@@ -586,7 +586,7 @@ section at the foot of the rail: it rendered the same claims and the same citati
 how one statement came to be offered to your editor three times over. A citation the rail cannot
 resolve in what it has read says so rather than looking checked — in words and not only in amber, on
 the chip in the answer as well as in the evidence beneath it, because a gap in what a run established
-is not a thing to say in a colour (`UNRESOLVED_DETAIL`, `timeline.ts:967`).
+is not a thing to say in a colour (`UNRESOLVED_DETAIL`, `timeline.ts:1359`).
 
 ---
 
@@ -611,7 +611,7 @@ finishes with a report, not with a statement it is nominating as the answer, so 
 nothing to hand over. (The API refuses `autoExecute: true` on the other workflows outright, rather
 than accepting it and quietly doing nothing.)
 
-**You are asked for it after Start, not before it** (`AgentRail.tsx:1655-1737`). Pressing Start on
+**You are asked for it after Start, not before it** (`AgentRail.tsx:847,2305`). Pressing Start on
 an Analyze run in Agent mode — whether you named the workflow or the server read it — raises a
 consent step in place of opening the run:
 
@@ -931,7 +931,7 @@ Stated plainly, because a surface that hides its edges is the one that surprises
 - **It cannot write.** Every database reach the agent makes goes through the agent's own audited
   pipeline — the policy decision, the audit event and the budget accounting that
   `executeAuditedOperation` performs before the driver is touched
-  (`src/lib/db/operations/execution.ts:129`, reached only from `src/lib/agent/tools.ts:1214`) — under
+  (`src/lib/db/operations/execution.ts:129`, reached only from `src/lib/agent/tools.ts:1906`) — under
   a read-only execution profile whose boundary is database-native rather than a parser: a read-only
   transaction on PostgreSQL, `PRAGMA query_only` re-asserted per statement on SQLite, a `READ_ONLY`
   engine handle plus an SQL-level guard on DuckDB, and on SQL Server a verified least-privilege
