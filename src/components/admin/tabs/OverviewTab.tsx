@@ -1,6 +1,7 @@
 "use client";
 
 import { appFetch, withBasePath } from "@/lib/config/base-path";
+import { adminSectionPath } from "@/lib/admin-sections";
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -999,12 +1000,29 @@ function AnalyticsSection({
 
         {/* Recent Activity Feed */}
         <div className="rounded-xl border border-hairline bg-panel p-5">
-          <h3 className="text-sm font-bold text-fg-secondary mb-4 flex items-center gap-2">
-            <Clock className="h-4 w-4 text-brand" />
-            Recent Activity
-          </h3>
+          <div className="mb-4 flex items-center justify-between gap-2">
+            <h3 className="text-sm font-bold text-fg-secondary flex items-center gap-2">
+              <Clock className="h-4 w-4 text-brand" />
+              Recent Activity
+            </h3>
+            {/* Unconditional: the preview cannot show proxy-recorded boundary denials, so the
+                Audit tab's scope disclosure must stay one click away in every feed state. */}
+            <Link
+              href={adminSectionPath("audit")}
+              data-testid="overview-audit-link"
+              className="inline-flex items-center gap-1 text-xs text-fg-subtle hover:text-fg-tertiary transition-colors"
+            >
+              Audit
+              <ArrowRight className="h-3 w-3" aria-hidden="true" />
+            </Link>
+          </div>
           {activityFeed.length === 0 ? (
-            <div className="flex items-center justify-center py-8 text-sm text-fg-subtle">No recent activity.</div>
+            <div
+              data-testid="overview-recent-activity-empty"
+              className="flex items-center justify-center py-8 text-sm text-fg-subtle"
+            >
+              No recent activity here. The Audit tab explains what this feed does not capture.
+            </div>
           ) : (
             <div className="max-h-[260px] overflow-y-auto editor-scrollbar space-y-1">
               <AnimatePresence>
