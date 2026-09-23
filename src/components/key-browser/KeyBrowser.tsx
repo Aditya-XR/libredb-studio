@@ -18,19 +18,14 @@
  * into a query the way a table is, and why the row says `shape` rather than claiming an object.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronRight, Folder, KeyRound, LoaderCircle, TriangleAlert } from "lucide-react";
+import { ChevronRight, Folder, KeyRound, LoaderCircle, PackageOpen, TriangleAlert } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { DatabaseConnection } from "@/lib/types";
 import type { KeyScanCapability } from "@/lib/db/types";
-import { buildKeyTree, filterKeyTree, flattenKeyTree } from "./tree";
+import { buildKeyTree, filterKeyTree, flattenKeyTree, KEY_SEPARATOR, pathKey } from "./tree";
 import { useKeyScan } from "./use-key-scan";
-
-/** A row's identity: the whole path, because two siblings can share a segment under two parents. */
-function pathKey(path: readonly string[]): string {
-  return JSON.stringify(path);
-}
 
 export interface KeyBrowserProps {
   readonly connection: DatabaseConnection;
@@ -43,8 +38,23 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
   const [term, setTerm] = useState("");
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
 
-  const { keys, scanned, total, busy, scanningAll, exhausted, stoppedBy, error, scanMore, scanAll, stop, reset } =
-    useKeyScan({ connection, capability, pattern });
+  const {
+    keys,
+    scanned,
+    total,
+    busy,
+    scanningAll,
+    exhausted,
+    stoppedBy,
+    error,
+    nodeCursors,
+    nodeLoading,
+    scanMore,
+    scanAll,
+    loadMoreUnder,
+    stop,
+    reset,
+  } = useKeyScan({ connection, capability, pattern });
 
   /*
    * The first page loads itself. A panel whose first gesture is "find the Scan button" reads as
@@ -78,9 +88,29 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
   const visible = useMemo(() => filterKeyTree(tree, term), [tree, term]);
   // While a filter is on, every surviving folder is open: a match two levels down that stayed
   // collapsed would look like no match at all, which is the one answer a filter must never give.
+  const canLoadMore = useCallback(
+    (path: readonly string[]) => {
+      /*
+       * THREE REASONS NOT TO OFFER IT, and each is a fact rather than a preference.
+       *
+       * The walk is SPENT: a cursor of `"0"` at the database level means the sample IS the keyspace,
+       * so every prefix in it is complete and a "there may be more" row would be a lie.
+       *
+       * The prefix is SPENT: its own scoped walk came back `"0"`, which is the one thing that proves
+       * there is nothing more under it.
+       *
+       * A FILTER IS ON: the visible tree is a view of what is held, and a row that pulled more keys
+       * into it would make what a reader sees depend on clicks the filter's term does not explain.
+       * Clearing the box brings the rows back.
+       */
+      if (exhausted || filtering) return false;
+      return nodeCursors.get(pathKey(path)) !== "0";
+    },
+    [exhausted, filtering, nodeCursors],
+  );
   const rows = useMemo(
-    () => flattenKeyTree(visible, (path) => filtering || open.has(pathKey(path))),
-    [visible, filtering, open],
+    () => flattenKeyTree(visible, (path) => filtering || open.has(pathKey(path)), canLoadMore),
+    [visible, filtering, open, canLoadMore],
   );
 
   return (
@@ -132,19 +162,31 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
         </div>
       )}
 
+      {/*
+        A FAILED PAGE IS A BANNER, NOT A REPLACEMENT. A page that failed did not invalidate the pages
+        that did — the keys already in the tree are still answers the server really gave — so taking
+        the tree away would hide correct data because a later request could not be made. It is now
+        load-bearing rather than a preference: a scoped Load more can fail on its own, and blanking
+        the panel for it would punish the reader for one prefix.
+      */}
       {error !== null && (
-        <div className="flex flex-col items-center px-2 py-6 text-center" data-testid="key-browser-error">
-          <TriangleAlert strokeWidth={1.5} className="h-5 w-5 text-warning" />
-          <p className="mt-2 break-words text-xs leading-relaxed text-muted-foreground">{error}</p>
+        <div
+          className="mb-2 flex items-start gap-2 rounded border border-warning/40 bg-warning/5 px-2 py-1.5"
+          data-testid="key-browser-error"
+        >
+          <TriangleAlert strokeWidth={1.5} className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+          <p className="break-words text-[10px] leading-relaxed text-muted-foreground">{error}</p>
         </div>
       )}
 
-      {error === null && stoppedBy !== null && (
+      {stoppedBy !== null && (
         <p className="px-1 pb-2 text-[10px] leading-relaxed text-warning" data-testid="key-browser-stopped">
           {stoppedBy}
         </p>
       )}
 
+      {/* Suppressed by an error because it is a claim about the DATABASE, and a read that failed is
+          not evidence about what the database holds. */}
       {error === null && rows.length === 0 && (
         <div
           className="flex flex-col items-center px-2 py-6 text-center text-muted-foreground"
@@ -166,34 +208,69 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
       <ScrollArea className="min-h-0 flex-1">
         <div role="tree" aria-label="Keys">
           {rows.map((row) => {
-            const key = pathKey(row.node.path);
+            if (row.kind === "loadMore") {
+              const key = pathKey(row.path);
+              const loading = nodeLoading.has(key);
+              return (
+                <button
+                  key={`more:${key}`}
+                  type="button"
+                  data-testid="key-browser-load-more"
+                  disabled={loading}
+                  onClick={() => void loadMoreUnder(row.path)}
+                  // One level deeper than the folder it belongs to, so it reads as following the
+                  // children above it rather than as one of them.
+                  style={{ paddingLeft: 8 + row.depth * 12 }}
+                  className="flex h-6 w-full items-center gap-1 rounded pr-1 text-left outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-brand disabled:pointer-events-none disabled:opacity-50"
+                >
+                  <span className="h-3.5 w-3.5 shrink-0" />
+                  {loading ? (
+                    <LoaderCircle
+                      strokeWidth={1.5}
+                      className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
+                    />
+                  ) : (
+                    <PackageOpen strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="truncate text-xs text-muted-foreground">
+                    {loading ? "Loading..." : "Click to load more"}
+                  </span>
+                </button>
+              );
+            }
+
+            const { node, depth, folder } = row;
+            const key = pathKey(node.path);
             const isOpen = filtering || open.has(key);
             return (
               <div
                 key={key}
                 role="treeitem"
-                aria-expanded={row.folder ? isOpen : undefined}
+                aria-expanded={folder ? isOpen : undefined}
                 tabIndex={0}
-                title={row.node.path.join(":")}
+                // The FULL name, which is what a key is identified by. A folder's own row is its
+                // prefix and says so with `:*`; a leaf's identity is the whole path, and the depth it
+                // is drawn at only says where the tree put it.
+                title={folder ? `${node.path.join(KEY_SEPARATOR)}:*` : node.path.join(KEY_SEPARATOR)}
                 onClick={() => {
-                  if (row.folder) openPath(row.node.path);
+                  if (folder) openPath(node.path);
                 }}
                 onKeyDown={(event) => {
-                  if (row.folder && (event.key === "Enter" || event.key === " ")) {
+                  if (folder && (event.key === "Enter" || event.key === " ")) {
                     event.preventDefault();
-                    openPath(row.node.path);
+                    openPath(node.path);
                   }
                 }}
                 // The project's own row recipe: `8 + depth * 12`, the same induction the object tree
                 // uses, so a key two levels down lines up with a table two levels down.
-                style={{ paddingLeft: 8 + row.depth * 12 }}
+                style={{ paddingLeft: 8 + depth * 12 }}
                 className={cn(
                   "flex h-6 cursor-default select-none items-center gap-1 rounded pr-1 outline-none hover:bg-accent",
                   "focus-visible:ring-1 focus-visible:ring-brand",
-                  row.folder && "cursor-pointer",
+                  folder && "cursor-pointer",
                 )}
               >
-                {row.folder ? (
+                {folder ? (
                   <ChevronRight
                     strokeWidth={1.5}
                     className={cn(
@@ -206,18 +283,30 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
                   // pads a row with no twisty.
                   <span className="h-3.5 w-3.5 shrink-0" />
                 )}
-                {row.folder ? (
+                {folder ? (
                   <Folder strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-hue-yellow/70" />
                 ) : (
                   <KeyRound strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 )}
                 <span className="truncate font-mono text-xs">
-                  {row.node.segment}
-                  {row.folder && ":*"}
+                  {folder ? `${node.segment}:*` : node.path.join(KEY_SEPARATOR)}
                 </span>
-                <span className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground">
-                  {row.node.count}
-                </span>
+                {/*
+                  A FOLDER COUNTS ITS CHILDREN, and a leaf carries no number at all.
+                  The badge on a folder is the number of rows it can be opened to show, which is what
+                  a reader compares against that list. The number of KEYS under the prefix is a
+                  different question — it is larger, it includes everything deeper, and reading it as
+                  "children" is how a folder comes to look like it is missing rows. That number is on
+                  the row's tooltip instead.
+                */}
+                {folder && (
+                  <span
+                    className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground"
+                    title={`${node.count.toLocaleString("en-US")} scanned key${node.count === 1 ? "" : "s"} under this prefix`}
+                  >
+                    {node.children.length}
+                  </span>
+                )}
               </div>
             );
           })}

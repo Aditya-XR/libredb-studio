@@ -7,6 +7,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { mockGlobalFetch, restoreGlobalFetch, type MockFetchResponse } from "../helpers/mock-fetch";
 
 import { useKeyScan, SCAN_ALL_MAX_KEYS } from "@/components/key-browser/use-key-scan";
+import { pathKey } from "@/components/key-browser/tree";
 import type { DatabaseConnection } from "@/lib/types";
 
 /**
@@ -110,11 +111,13 @@ describe("useKeyScan", () => {
     expect(bodiesOf(fetchMock)).toEqual([{ connection: WIRE_CONNECTION, cursor: "0", pattern: "app:*", count: 500 }]);
   });
 
-  test("keeps every key it was handed, repeats included, and counts them the same way", async () => {
-    // `SCAN` may return a key twice while the table rehashes, and the two numbers answer different
-    // questions: `scanned` is what the walk has been through, which is the number the progress
-    // indicator is measured against, and `keys` goes to a tree that merges. Deduplicating here would
-    // put the indicator below the denominator's own accounting for no gain.
+  test("counts a repeat the walk was handed but hands the tree one of it", async () => {
+    // `SCAN` may return a key twice while the table rehashes, and the two answers are for two
+    // readers. `scanned` is what the walk has been through — the number the progress line is measured
+    // against, so a repeat counts — while `keys` is the tree's input, and a tree cannot draw one key
+    // twice. Deduplicating at the source is also what keeps that list bounded: with a scoped Load
+    // more appending whole batches, an undeduped list grows until the search feeding the tree is the
+    // slowest thing on screen.
     let call = 0;
     mockGlobalFetch({
       "/api/db/keys/scan": () => {
@@ -131,7 +134,7 @@ describe("useKeyScan", () => {
       await result.current.scanMore();
     });
 
-    expect(result.current.keys).toEqual(["a", "b", "b", "c"]);
+    expect(result.current.keys).toEqual(["a", "b", "c"]);
     expect(result.current.scanned).toBe(4);
   });
 
@@ -480,5 +483,325 @@ describe("useKeyScan", () => {
       await bad;
     });
     expect(second.result.current.error).toBeNull();
+  });
+
+  /**
+   * The walk scoped to ONE PREFIX, which is the only thing that can answer "is there more under
+   * here" about a prefix the global sample happened to miss.
+   *
+   * The assertions are on the REQUEST as much as on the answer, because the two things that make
+   * this different from the global walk are exactly the two fields it sends: a pattern built from the
+   * prefix, and a cursor that belongs to that prefix rather than to the walk.
+   */
+  describe("loadMoreUnder()", () => {
+    const APP = ["app", "cache"];
+    const APP_PATTERN = "app:cache:*";
+
+    /** The body of the nth request, as the route would have received it. */
+    const bodyAt = (fetchMock: { mock: { calls: unknown[][] } }, index: number) =>
+      JSON.parse(String((fetchMock.mock.calls[index][1] as RequestInit).body)) as Record<string, unknown>;
+
+    test("asks about the prefix itself, starting where that prefix's walk starts", async () => {
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": (req) => {
+          void req;
+          return page(["app:cache:ttl"], "17");
+        },
+      });
+      const { result } = hook();
+
+      // The global walk is not started here on purpose: a scoped load must work without it, since the
+      // panel's first page may have failed while a folder is still worth asking about.
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+
+      expect(bodyAt(fetchMock, 0)).toMatchObject({ cursor: "0", pattern: APP_PATTERN, count: 500 });
+      expect(result.current.keys).toEqual(["app:cache:ttl"]);
+      expect(result.current.nodeCursors.get(pathKey(APP))).toBe("17");
+    });
+
+    test("continues that prefix's own walk on the next press", async () => {
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": () => page(["app:cache:a"], "17"),
+      });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+
+      // The SECOND request carries this prefix's cursor, not the global walk's and not `"0"` again: a
+      // row that restarted the prefix every press would re-read the same first page forever.
+      expect(bodyAt(fetchMock, 0)).toMatchObject({ cursor: "0" });
+      expect(bodyAt(fetchMock, 1)).toMatchObject({ cursor: "17" });
+    });
+
+    test("records a spent prefix so the row can stop offering itself", async () => {
+      mockGlobalFetch({ "/api/db/keys/scan": page(["app:cache:ttl"], "0") });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+
+      expect(result.current.nodeCursors.get(pathKey(APP))).toBe("0");
+    });
+
+    test("drops names the server returned that are not under the prefix", async () => {
+      // `MATCH` is an unescaped glob and a real key segment can contain `*`, so a scoped answer can
+      // carry keys from outside the prefix. They are the server's answer to a question that was not
+      // asked, and letting them in would put a key under a folder it does not belong to.
+      mockGlobalFetch({
+        "/api/db/keys/scan": page(["app:cache:ttl", "app:cached:other", "app:envelope", "elsewhere:x"], "0"),
+      });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+
+      expect(result.current.keys).toEqual(["app:cache:ttl"]);
+    });
+
+    test("escapes the prefix half of the pattern, and ONLY that half", async () => {
+      // `[` opens a character class in a Redis glob, so an unescaped prefix would ask the server for
+      // a different set of keys entirely. The escaping is the repository's shared `escapeGlob` rule
+      // (#427) rather than a copy of it, so this walk and the object surface's own prefix listing
+      // cannot drift apart.
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": page(["weird[1:inner", "weirder[x:other"], "0"),
+      });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.loadMoreUnder(["weird[1"]);
+      });
+
+      expect(bodyAt(fetchMock, 0)).toMatchObject({ pattern: "weird\\[1:*" });
+      // And the ANSWER is compared against the real name, unescaped: escaping the keys would drop a
+      // literal key that genuinely contains `*`.
+      expect(result.current.keys).toEqual(["weird[1:inner"]);
+    });
+
+    test("leaves the global walk's progress and cursor alone", async () => {
+      let call = 0;
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": () => {
+          call += 1;
+          // First the global walk's page, then the scoped one, then the global walk's again.
+          if (call === 1) return page(["top:one"], "7", 31);
+          if (call === 2) return page(["app:cache:ttl"], "3");
+          return page(["top:two"], "0", 31);
+        },
+      });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      expect(result.current.scanned).toBe(1);
+
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+      // The scoped page handed back a key the global walk had not counted, and it still does not
+      // count: `scanned` is measured against `total`, which is the DATABASE's key count, so adding a
+      // scoped batch would push the progress line past its own denominator.
+      expect(result.current.scanned).toBe(1);
+      expect(result.current.total).toBe(31);
+
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      // And the global cursor is where the global walk left it, not where the scoped page did.
+      expect(bodyAt(fetchMock, 2)).toMatchObject({ cursor: "7" });
+      expect(result.current.keys).toEqual(["top:one", "app:cache:ttl", "top:two"]);
+    });
+
+    test("shares the tree's one copy of a key with the global walk", async () => {
+      let call = 0;
+      mockGlobalFetch({
+        "/api/db/keys/scan": () => {
+          call += 1;
+          return call === 1 ? page(["app:cache:ttl"], "9") : page(["app:cache:ttl"], "0");
+        },
+      });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+
+      expect(result.current.keys).toEqual(["app:cache:ttl"]);
+    });
+
+    test("refuses a second page for one prefix while the first is in flight", async () => {
+      // A callable default rather than `| null`: the executor below replaces it before anything waits,
+      // and a nullable declaration narrows to `null` at the call site, where the call then has type
+      // `never`. The opener is assigned inside a promise's executor, which TypeScript cannot see.
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": async () => {
+          await gate;
+          return page(["app:cache:ttl"], "0");
+        },
+      });
+      const { result } = hook();
+
+      let first: Promise<void> = Promise.resolve();
+      act(() => {
+        first = result.current.loadMoreUnder(APP);
+      });
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+
+      // Both presses would read the same scoped cursor and both advance from it, so the second would
+      // overwrite the position the first earned — the same rule the global walk keeps.
+      expect(fetchMock.mock.calls.length).toBe(1);
+      release();
+      await act(async () => {
+        await first;
+      });
+      expect(result.current.nodeLoading.size).toBe(0);
+    });
+
+    test("marks the prefix while its page is in flight", async () => {
+      // A callable default rather than `| null`: the executor below replaces it before anything waits,
+      // and a nullable declaration narrows to `null` at the call site, where the call then has type
+      // `never`. The opener is assigned inside a promise's executor, which TypeScript cannot see.
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockGlobalFetch({
+        "/api/db/keys/scan": async () => {
+          await gate;
+          return page(["app:cache:ttl"], "0");
+        },
+      });
+      const { result } = hook();
+
+      let pending: Promise<void> = Promise.resolve();
+      act(() => {
+        pending = result.current.loadMoreUnder(APP);
+      });
+      await waitFor(() => {
+        expect(result.current.nodeLoading.has(pathKey(APP))).toBe(true);
+      });
+
+      release();
+      await act(async () => {
+        await pending;
+      });
+      expect(result.current.nodeLoading.has(pathKey(APP))).toBe(false);
+    });
+
+    test("reports a scoped failure without ending the walk somebody else started", async () => {
+      let call = 0;
+      mockGlobalFetch({
+        "/api/db/keys/scan": () => {
+          call += 1;
+          if (call === 1) return page(["top:one"], "7", 31);
+          if (call === 2) return { status: 500, json: { error: "NOPERM no scan for you" } };
+          return page(["top:two"], "0", 31);
+        },
+      });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+      expect(result.current.error).toBe("NOPERM no scan for you");
+      // The prefix keeps no cursor, so its next press re-asks the batch that failed rather than
+      // skipping it — the same rule the global walk keeps.
+      expect(result.current.nodeCursors.get(pathKey(APP))).toBeUndefined();
+
+      // AND THE WALK STILL RUNS. A prefix that refused is not a reason to end a walk started at the
+      // database level, which is why this path does not set the loop's own failure flag.
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      expect(result.current.keys).toEqual(["top:one", "top:two"]);
+    });
+
+    test("clears every prefix's walk on reset", async () => {
+      const fetchMock = mockGlobalFetch({ "/api/db/keys/scan": page(["app:cache:ttl"], "17") });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+      act(() => {
+        result.current.reset();
+      });
+      expect(result.current.nodeCursors.size).toBe(0);
+      expect(result.current.nodeLoading.size).toBe(0);
+
+      await act(async () => {
+        await result.current.loadMoreUnder(APP);
+      });
+      // From the start, not from where the discarded walk stood: a cursor left standing would answer
+      // the next walk's Load more with keys from the walk that was thrown away.
+      expect(bodyAt(fetchMock, 1)).toMatchObject({ cursor: "0" });
+    });
+
+    test("ignores a scoped page that lands after unmount", async () => {
+      const releases: Array<() => void> = [];
+      let mode: "ok" | "fail" = "ok";
+      mockGlobalFetch({
+        "/api/db/keys/scan": async () => {
+          await new Promise<void>((resolve) => {
+            releases.push(resolve);
+          });
+          if (mode === "fail") throw new Error("late scoped failure");
+          return page(["app:cache:ttl"], "0");
+        },
+      });
+
+      const first = hook();
+      let ok: Promise<void> = Promise.resolve();
+      act(() => {
+        ok = first.result.current.loadMoreUnder(APP);
+      });
+      await waitFor(() => {
+        expect(releases.length).toBe(1);
+      });
+      first.unmount();
+      releases[0]();
+      await act(async () => {
+        await ok;
+      });
+      expect(first.result.current.nodeCursors.size).toBe(0);
+
+      mode = "fail";
+      const second = hook();
+      let bad: Promise<void> = Promise.resolve();
+      act(() => {
+        bad = second.result.current.loadMoreUnder(APP);
+      });
+      await waitFor(() => {
+        expect(releases.length).toBe(2);
+      });
+      second.unmount();
+      releases[1]();
+      await act(async () => {
+        await bad;
+      });
+      expect(second.result.current.error).toBeNull();
+    });
   });
 });

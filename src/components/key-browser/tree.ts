@@ -27,6 +27,17 @@
  */
 export const KEY_SEPARATOR = ":";
 
+/**
+ * A path's identity as a map key.
+ *
+ * `JSON.stringify` rather than a join because a segment may contain any byte, the separator
+ * included: `["a:b"]` and `["a", "b"]` are two different prefixes, and a joined key would collide
+ * them onto one node's state.
+ */
+export function pathKey(path: readonly string[]): string {
+  return JSON.stringify(path);
+}
+
 export interface KeyTreeNode {
   /** This node's own segment. The ROOT carries the empty string and is not drawn as a row. */
   readonly segment: string;
@@ -119,34 +130,75 @@ function toTreeNode(node: MutableNode): KeyTreeNode {
   return { segment: node.segment, path: node.path, children, count: node.count, isKey: node.isKey };
 }
 
-export interface KeyTreeRow {
-  readonly node: KeyTreeNode;
-  /** How deep the row sits, which is what its indentation is computed from. */
-  readonly depth: number;
-  /** True when the row can be opened. A node that is also a key is a folder as well as a key. */
-  readonly folder: boolean;
-}
+/**
+ * The rows a tree draws.
+ *
+ * TWO SHAPES RATHER THAN A NODE WITH A FLAG, because a "load more" row is not a key prefix at all:
+ * it names no segment, holds no count and cannot be opened. Giving it a `KeyTreeNode` would mean
+ * inventing a segment for it to display and a count for it to show — two lies to avoid one union.
+ */
+export type KeyTreeRow =
+  | {
+      readonly kind: "node";
+      readonly node: KeyTreeNode;
+      /** How deep the row sits, which is what its indentation is computed from. */
+      readonly depth: number;
+      /** True when the row can be opened. A node that is also a key is a folder as well as a key. */
+      readonly folder: boolean;
+    }
+  | {
+      readonly kind: "loadMore";
+      /** The prefix this row would ask about. */
+      readonly path: readonly string[];
+      readonly depth: number;
+    };
 
 /**
- * The rows a tree draws, given which paths are open.
+ * The rows a tree draws, given which paths are open and which prefixes can be asked for more.
  *
  * A FLAT LIST RATHER THAN A COMPONENT THAT RECURSES INTO ITSELF, because the one thing a nested
  * renderer cannot state plainly is the depth — and the depth is the whole of a row's indentation.
  * A depth-first walk knows it for free, and the panel draws top to bottom without holding any of
  * the tree's shape.
+ *
+ * A `loadMore` ROW IS EMITTED AFTER A NODE'S CHILDREN, one level deeper than the node itself, so it
+ * reads as "and there are more where these came from" rather than as one of them. It is emitted only
+ * for a node that is OPEN: a collapsed folder has no children on screen for more to follow.
  */
-export function flattenKeyTree(root: KeyTreeNode, isExpanded: (path: readonly string[]) => boolean): KeyTreeRow[] {
+export function flattenKeyTree(
+  root: KeyTreeNode,
+  isExpanded: (path: readonly string[]) => boolean,
+  canLoadMore: (path: readonly string[]) => boolean = () => false,
+): KeyTreeRow[] {
   const rows: KeyTreeRow[] = [];
 
   const walk = (node: KeyTreeNode, depth: number): void => {
     for (const child of node.children) {
-      rows.push({ node: child, depth, folder: child.children.length > 0 });
-      if (child.children.length > 0 && isExpanded(child.path)) walk(child, depth + 1);
+      const folder = child.children.length > 0;
+      rows.push({ kind: "node", node: child, depth, folder });
+      if (!folder || !isExpanded(child.path)) continue;
+      walk(child, depth + 1);
+      if (canLoadMore(child.path)) rows.push({ kind: "loadMore", path: child.path, depth: depth + 1 });
     }
   };
 
   walk(root, 0);
   return rows;
+}
+
+/**
+ * Whether a key name sits UNDER a prefix, compared segment by segment.
+ *
+ * THIS IS A CORRECTNESS GUARD AND NOT A CONVENIENCE. A scoped walk asks the server for
+ * `MATCH <prefix>:*`, and `MATCH` is a glob with no escape: a segment that itself contains `*`, `?`
+ * or `[` (Redis keys are arbitrary bytes, so they can) makes the pattern match MORE than the prefix
+ * asked about. Nothing can be done about what the server sends back, so the caller filters — and a
+ * filter that compared the joined strings would be wrong in the other direction, because
+ * `app:env` and `app:envelope` share a prefix of characters and not of segments.
+ */
+export function isUnderPrefix(key: string, prefix: readonly string[]): boolean {
+  const segments = splitKey(key);
+  return prefix.length < segments.length && prefix.every((segment, index) => segments[index] === segment);
 }
 
 /**

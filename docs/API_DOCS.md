@@ -1051,7 +1051,7 @@ be OPENED and nothing about what may be read through it.
 |-------|------|----------|-------------|
 | `connection` or `connectionId` | object or string | Yes | The same connection selector every database route takes |
 | `cursor` | string | No | The cursor the previous page answered with. Absent means `"0"`, which starts a walk. Refused unless it is a run of digits — Redis cursors are opaque, and only the obviously malformed one is refused here rather than passed through |
-| `pattern` | string | No | A `MATCH` pattern, forwarded verbatim. Absent means every key, which is NOT the same as an empty string: `MATCH ""` is a pattern no key satisfies. Note that `MATCH` is applied per batch server-side and is not indexed, so a scoped walk still costs the server a full pass over the keyspace |
+| `pattern` | string | No | A `MATCH` pattern, forwarded verbatim. Absent means every key, which is NOT the same as an empty string: `MATCH ""` is a pattern no key satisfies. Two things a caller scoping a walk has to know. `MATCH` is applied per batch server-side and is **not indexed**, so a scoped walk costs the server a full pass over the keyspace rather than a lookup. And it is a glob with **no escape**, so a key segment that contains `*`, `?` or `[` matches more than the prefix asked about — the answer must be filtered by the caller, compared segment by segment (`app:envelope` is not under `app:env`) |
 | `count` | number | No | The batch size. Absent takes the provider's declared `defaultCount`. A value above the declared `maxCount` is **refused rather than clamped**, because a silent clamp answers a request for 10,000 with 1,000 and says nothing |
 | `database` | number | No | Which numbered database to walk. Absent means the one the session is in, since `SELECT` state lives on the connection and not in this route |
 
@@ -1094,7 +1094,10 @@ driving a walk spends the same allowance their statements do. That is why `Scan 
 on this route rather than asking the server for one unbounded walk.
 
 The sidebar's Keys panel drives this route; what it does with a sample is recorded in the Redis
-provider doc ([§6.2](providers/redis.md#62-the-key-space-walk-panel)).
+provider doc ([§6.2](providers/redis.md#62-the-key-space-walk-panel)). A prefix-scoped walk — the
+panel's Load more row — is this route again with a `pattern` built from the prefix and a cursor that
+belongs to that prefix, so a caller that wants one costs no second contract
+([§6.3](providers/redis.md#63-the-prefix-scoped-walk-load-more)).
 
 ---
 

@@ -76,7 +76,7 @@ describe("KeyBrowser", () => {
     // with a table two levels down elsewhere in the product. It is drawn only once its folder is
     // opened, which is the state every level below the top starts in.
     fireEvent.click(screen.getByText("app:*"));
-    expect(rows()).toEqual(["app:*@0", "env@1"]);
+    expect(rows()).toEqual(["app:*@0", "app:env@1"]);
     expect(progress()).toBe("Scanned 1/31");
   });
 
@@ -132,12 +132,12 @@ describe("KeyBrowser", () => {
     // The keys are already here, so a twisty is a local rearrangement — which is the whole reason a
     // sampled walk can answer a click instantly.
     fireEvent.click(screen.getByText("app:*"));
-    expect(rows()).toEqual(["app:*@0", "cache:*@1", "env@1"]);
+    expect(rows()).toEqual(["app:*@0", "cache:*@1", "app:env@1"]);
     expect(fetchMock.mock.calls.length).toBe(before);
 
     // Each level opens on its own: opening `app` did not open `cache`, and nothing re-fetched.
     fireEvent.click(screen.getByText("cache:*"));
-    expect(rows()).toEqual(["app:*@0", "cache:*@1", "ttl@2", "env@1"]);
+    expect(rows()).toEqual(["app:*@0", "cache:*@1", "app:cache:ttl@2", "app:env@1"]);
     expect(fetchMock.mock.calls.length).toBe(before);
 
     fireEvent.click(screen.getByText("app:*"));
@@ -152,7 +152,7 @@ describe("KeyBrowser", () => {
     });
 
     fireEvent.keyDown(screen.getByText("app:*"), { key: "Enter" });
-    expect(rows()).toEqual(["app:*@0", "env@1"]);
+    expect(rows()).toEqual(["app:*@0", "app:env@1"]);
 
     fireEvent.keyDown(screen.getByText("app:*"), { key: " " });
     expect(rows()).toEqual(["app:*@0"]);
@@ -173,7 +173,7 @@ describe("KeyBrowser", () => {
 
     // The match is two levels down. Left collapsed it would look like no match at all, which is the
     // one answer a filter must never give.
-    expect(rows()).toEqual(["user:*@0", "1001:*@1", "name@2"]);
+    expect(rows()).toEqual(["user:*@0", "1001:*@1", "user:1001:name@2"]);
 
     fireEvent.change(screen.getByLabelText("Filter the keys found"), { target: { value: "nothing-here" } });
     expect(screen.getByText("No key matches the filter")).toBeDefined();
@@ -342,5 +342,139 @@ describe("KeyBrowser", () => {
     });
     // Three keys with no separator are three leaves at the top level, each its own segment.
     expect(rows()).toEqual(["a@0", "b@0", "c-2@0"]);
+  });
+
+  /**
+   * The prefix-scoped walk, which is the only thing that can answer "is there more under here" about
+   * a prefix the global sample missed. Its row is a SIBLING of the children it follows, one level
+   * deeper than the folder it belongs to.
+   */
+  describe("Load more", () => {
+    test("offers itself under an open folder and asks about that prefix", async () => {
+      const fetchMock = mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "9") });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      // Nothing to continue while the folder is closed: the row would be an offer with nothing above
+      // it.
+      expect(screen.queryByTestId("key-browser-load-more")).toBeNull();
+
+      fireEvent.click(screen.getByText("app:*"));
+      const more = screen.getByTestId("key-browser-load-more");
+      expect(more.textContent).toContain("Click to load more");
+
+      fireEvent.click(more);
+
+      await waitFor(() => {
+        expect(fetchMock.mock.calls.length).toBe(2);
+      });
+      const body = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body)) as Record<string, unknown>;
+      // The pattern is built from the prefix, and the cursor starts at `"0"` because this row's own
+      // walk is what moves it from there.
+      expect(body).toMatchObject({ pattern: "app:*", cursor: "0" });
+    });
+
+    test("stops offering itself for a prefix whose own walk came back spent", async () => {
+      let call = 0;
+      mockGlobalFetch({
+        "/api/db/keys/scan": () => {
+          call += 1;
+          return call === 1 ? page(["app:env"], "9") : page(["app:only"], "0");
+        },
+      });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+
+      fireEvent.click(screen.getByTestId("key-browser-load-more"));
+      await waitFor(() => {
+        expect(rows()).toContain("app:only@1");
+      });
+      // Cursor `"0"` is the one thing that PROVES there is nothing more under the prefix, so the row
+      // goes rather than staying as an offer that can only come back empty.
+      expect(screen.queryByTestId("key-browser-load-more")).toBeNull();
+    });
+
+    test("stops offering itself everywhere once the database walk is spent", async () => {
+      mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "0", 1) });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+
+      // A spent cursor at the DATABASE level means the sample IS the key space, so every prefix in it
+      // is complete: a "there may be more" row would be a claim the walk already disproved.
+      expect(screen.queryByTestId("key-browser-load-more")).toBeNull();
+    });
+
+    test("keeps the tree when a scoped page fails, and says so", async () => {
+      let call = 0;
+      mockGlobalFetch({
+        "/api/db/keys/scan": () => {
+          call += 1;
+          return call === 1 ? page(["app:env"], "9", 31) : { status: 500, json: { error: "NOPERM no scan" } };
+        },
+      });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+      fireEvent.click(screen.getByTestId("key-browser-load-more"));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("key-browser-error").textContent).toContain("NOPERM no scan");
+      });
+      // The rows the server really gave are still answers, so a page that could not be taken does not
+      // take them away.
+      expect(rows()).toEqual(["app:*@0", "app:env@1"]);
+      expect(screen.queryByTestId("key-browser-empty")).toBeNull();
+    });
+
+    test("does not offer itself while a filter is on", async () => {
+      mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "9") });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+      expect(screen.getByTestId("key-browser-load-more")).toBeDefined();
+
+      // A filtered view is a view of WHAT IS HELD, and a row that pulled more keys into it would make
+      // what a reader sees depend on clicks the filter's term does not explain.
+      fireEvent.change(screen.getByLabelText("Filter the keys found"), { target: { value: "env" } });
+      expect(screen.queryByTestId("key-browser-load-more")).toBeNull();
+      expect(rows()).toEqual(["app:*@0", "app:env@1"]);
+
+      fireEvent.change(screen.getByLabelText("Filter the keys found"), { target: { value: "" } });
+      expect(screen.getByTestId("key-browser-load-more")).toBeDefined();
+    });
+
+    test("counts a folder's CHILDREN, not the keys under it", async () => {
+      // `app` can be opened to two rows and holds three keys, which is the whole point: a reader
+      // compares the badge against the list below it, and reading the deeper number as "children" is
+      // how a folder comes to look like it is missing rows.
+      mockGlobalFetch({ "/api/db/keys/scan": page(["app:a:1", "app:a:2", "app:b"], "0", 3) });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+      expect(rows()).toEqual(["app:*@0", "a:*@1", "app:b@1"]);
+
+      const appRow = screen
+        .queryAllByRole("treeitem")
+        .find((row) => row.querySelector("span.truncate")?.textContent === "app:*");
+      const badge = appRow?.querySelector("span.ml-auto");
+      expect(badge?.textContent).toBe("2");
+      // The number that is NOT shown is still reachable, because it answers a different question and
+      // hiding it altogether would make the badge look like an error.
+      expect(badge?.getAttribute("title")).toContain("3");
+      expect(badge?.getAttribute("title")).toContain("scanned keys");
+    });
   });
 });

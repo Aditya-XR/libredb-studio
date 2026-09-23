@@ -26,6 +26,8 @@ import type { DatabaseConnection } from "@/lib/types";
 import type { KeyScanCapability, KeyScanOptions, KeyScanPage } from "@/lib/db/types";
 import { buildConnectionPayload } from "@/hooks/use-connection-payload";
 import { appFetch } from "@/lib/config/base-path";
+import { escapeGlob } from "@/lib/query-generators";
+import { isUnderPrefix, KEY_SEPARATOR, pathKey } from "./tree";
 
 /**
  * How many keys one `Scan all` may walk before it stops and says it did.
@@ -58,6 +60,16 @@ export interface KeyScanResult {
   readonly stoppedBy: string | null;
   /** The sentence a failed page answered with, in the route's own words where it gave one. */
   readonly error: string | null;
+  /**
+   * Where each PREFIX's own walk stands, by `pathKey`.
+   *
+   * Absent means that prefix has never been scoped, which is not the same as "no more": the whole
+   * point of a scoped walk is that the global sample cannot answer the question. `"0"` means the
+   * scoped walk reached the end of that prefix and there is provably nothing more under it.
+   */
+  readonly nodeCursors: ReadonlyMap<string, string>;
+  /** Prefixes whose scoped page is in flight, so a row can say so instead of taking a second press. */
+  readonly nodeLoading: ReadonlySet<string>;
 }
 
 export interface KeyScanControls {
@@ -65,6 +77,14 @@ export interface KeyScanControls {
   readonly scanMore: () => Promise<void>;
   /** Page until the walk is spent, the cap is reached, someone presses Stop, or a page fails. */
   readonly scanAll: () => Promise<void>;
+  /**
+   * Take one more batch of the walk scoped to ONE PREFIX, for the row under an open folder.
+   *
+   * The keys it brings back join the tree and NOT the walk's own progress: `scanned` counts what the
+   * GLOBAL walk has been handed, and a scoped page hands back keys the global walk may already have
+   * counted. Adding them would push the progress line above its own denominator.
+   */
+  readonly loadMoreUnder: (path: readonly string[]) => Promise<void>;
   /** Ask a running `Scan all` to stop after the page in flight. */
   readonly stop: () => void;
   /** Throw the walk away and start again at cursor `"0"`. */
@@ -87,6 +107,8 @@ export function useKeyScan(options: {
   const [exhausted, setExhausted] = useState(false);
   const [stoppedBy, setStoppedBy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [nodeCursors, setNodeCursors] = useState<ReadonlyMap<string, string>>(new Map());
+  const [nodeLoading, setNodeLoading] = useState<ReadonlySet<string>>(new Set());
 
   /*
    * Refs, not state, and the reason is the loop rather than performance. `scanAll` takes several
@@ -102,6 +124,23 @@ export function useKeyScan(options: {
   const scannedKeys = useRef(0);
   const failure = useRef<string | null>(null);
   const alive = useRef(true);
+  /*
+   * The keys the tree has already been handed.
+   *
+   * Two pages can name the same key — a `SCAN` may return it twice, and a scoped page certainly
+   * overlaps the global walk — and a tree cannot draw one key twice. Deduplicating HERE rather than
+   * leaving it to `buildKeyTree` is what keeps the accumulated list bounded: without it, every scoped
+   * page would append its whole batch again, and a reader pressing Load more down a deep prefix would
+   * grow the array until the search that feeds the tree was the slowest thing on screen.
+   */
+  const walked = useRef(new Set<string>());
+  /*
+   * Each prefix's own walk, keyed by `pathKey`. In a ref because the read has to see what the last
+   * scoped page wrote, exactly as the global cursor does, and mirrored into state below because a row
+   * has to RENDER the difference between "never asked" and "asked and there is no more".
+   */
+  const nodeCursor = useRef(new Map<string, string>());
+  const nodeInFlight = useRef(new Set<string>());
 
   useEffect(() => {
     // Set on the way IN as well as cleared on the way out: React runs an effect twice on one mount
@@ -113,27 +152,49 @@ export function useKeyScan(options: {
     };
   }, []);
 
-  const readPage = useCallback(async (): Promise<KeyScanPage> => {
-    const payload = buildConnectionPayload(connection);
-    const request: Omit<KeyScanOptions, "database"> = {
-      cursor: cursor.current,
-      count: batchSize(capability),
-      ...(pattern === "" ? {} : { pattern }),
-    };
-    const response = await appFetch("/api/db/keys/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, ...request }),
-    });
+  /**
+   * One page, from a cursor and a pattern the CALLER names.
+   *
+   * Parameterised rather than reading this hook's own cursor and pattern, because there are two
+   * walks now: the global one this hook drives, and one per prefix that a reader asks for by pressing
+   * Load more. They differ in exactly these two arguments and in nothing else.
+   */
+  const readPageAt = useCallback(
+    async (at: string, match: string): Promise<KeyScanPage> => {
+      const payload = buildConnectionPayload(connection);
+      const request: Omit<KeyScanOptions, "database"> = {
+        cursor: at,
+        count: batchSize(capability),
+        ...(match === "" ? {} : { pattern: match }),
+      };
+      const response = await appFetch("/api/db/keys/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, ...request }),
+      });
 
-    // A route that answered with no body still answered something worth showing, so the status
-    // stands in for the sentence rather than the read being reported as a parse error.
-    const body = (await response.json().catch(() => ({}))) as Partial<KeyScanPage> & { error?: string };
-    if (!response.ok) {
-      throw new Error(body.error ?? `The key walk failed with HTTP ${response.status}`);
-    }
-    return { keys: body.keys ?? [], cursor: body.cursor ?? "0", total: body.total ?? 0 };
-  }, [connection, capability, pattern]);
+      // A route that answered with no body still answered something worth showing, so the status
+      // stands in for the sentence rather than the read being reported as a parse error.
+      const body = (await response.json().catch(() => ({}))) as Partial<KeyScanPage> & { error?: string };
+      if (!response.ok) {
+        throw new Error(body.error ?? `The key walk failed with HTTP ${response.status}`);
+      }
+      return { keys: body.keys ?? [], cursor: body.cursor ?? "0", total: body.total ?? 0 };
+    },
+    [connection, capability],
+  );
+
+  /**
+   * The names in a page the tree does not hold yet, and the record that it now does.
+   *
+   * One function because two callers need the same two steps in the same order, and a caller that
+   * read `walked` before the other had written it would append a batch twice.
+   */
+  const absorb = useCallback((names: readonly string[]): string[] => {
+    const fresh = names.filter((name) => !walked.current.has(name));
+    for (const name of fresh) walked.current.add(name);
+    return fresh;
+  }, []);
 
   const scanMore = useCallback(async (): Promise<void> => {
     // One page at a time. Two in flight would both read the same cursor and both advance from it,
@@ -144,12 +205,13 @@ export function useKeyScan(options: {
     setBusy(true);
 
     try {
-      const page = await readPage();
+      const page = await readPageAt(cursor.current, pattern);
       if (!alive.current) return;
       cursor.current = page.cursor;
       scannedKeys.current += page.keys.length;
       failure.current = null;
-      setKeys((previous) => (page.keys.length === 0 ? previous : [...previous, ...page.keys]));
+      const fresh = absorb(page.keys);
+      setKeys((previous) => (fresh.length === 0 ? previous : [...previous, ...fresh]));
       setScanned(scannedKeys.current);
       setTotal(page.total);
       setError(null);
@@ -171,7 +233,7 @@ export function useKeyScan(options: {
       running.current = false;
       if (alive.current) setBusy(false);
     }
-  }, [readPage]);
+  }, [absorb, pattern, readPageAt]);
 
   const scanAll = useCallback(async (): Promise<void> => {
     if (running.current) return;
@@ -208,6 +270,82 @@ export function useKeyScan(options: {
     if (stopped.current) setStoppedBy("Stopped.");
   }, [scanMore]);
 
+  /**
+   * One page of a walk scoped to ONE PREFIX, for the Load more row under an open folder.
+   *
+   * WHY THIS EXISTS AT ALL. The global walk is a SAMPLE of the keyspace, so a prefix's contents in the
+   * tree are whatever that sample happened to include — and a deep prefix can be entirely absent from
+   * a thousand keys of a million. A scoped walk asks the server about that prefix directly, which is
+   * the only way to answer "is there more under here" truthfully. It is also why the answer is not free:
+   * `MATCH` is applied per batch server-side and is not indexed, so this costs the server a full pass
+   * over the keyspace, exactly as the global walk's every page does.
+   *
+   * IT RUNS ONE WALK PER PREFIX AND KEEPS ITS CURSOR, so pressing Load more twice continues that
+   * prefix rather than restarting it. `nodeCursor` is the authority and the state below is its mirror
+   * for rendering, for the same reason the global cursor is a ref: the decision has to read what the
+   * last page wrote.
+   *
+   * IT DOES NOT TOUCH THE WALK'S PROGRESS. `scanned` and `total` are the global walk's, and a scoped
+   * page hands back keys the global walk may already have counted — adding them would push the
+   * progress line past its own denominator. It also does not set the loop's failure flag: a prefix
+   * that refuses is not a reason to end the walk somebody started at the database level.
+   *
+   * THE ANSWER IS FILTERED, because `MATCH` is a glob with no escape and a real key segment can
+   * contain `*` or `[`. See `isUnderPrefix`.
+   */
+  const loadMoreUnder = useCallback(
+    async (path: readonly string[]): Promise<void> => {
+      const key = pathKey(path);
+
+      // One page per prefix at a time, for the reason `scanMore` gives about the global walk: two in
+      // flight would both read this prefix's cursor and both advance from it.
+      if (nodeInFlight.current.has(key)) return;
+      nodeInFlight.current.add(key);
+      setNodeLoading((previous) => new Set(previous).add(key));
+
+      try {
+        /*
+         * THE PREFIX HALF OF THE PATTERN IS ESCAPED, and the key half never is (#427).
+         *
+         * A real key segment can contain a glob metacharacter: `a[b:1` groups to a prefix holding
+         * `[`, and an unescaped one opens a character class that matches a different set of keys
+         * entirely. The escaping comes from `escapeGlob` rather than a local copy so that this walk
+         * and the object surface's "list keys under this prefix" cannot drift — the same rule, in
+         * one place. Note the asymmetry the other way: the `isUnderPrefix` filter below compares
+         * REAL key names, so it must stay unescaped, and a caller that escaped those would corrupt
+         * a literal key that genuinely contains `*`.
+         */
+        const page = await readPageAt(
+          nodeCursor.current.get(key) ?? "0",
+          `${escapeGlob(path.join(KEY_SEPARATOR))}:*`,
+        );
+        if (!alive.current) return;
+        nodeCursor.current.set(key, page.cursor);
+        setNodeCursors(new Map(nodeCursor.current));
+
+        const fresh = absorb(page.keys.filter((name) => isUnderPrefix(name, path)));
+        setKeys((previous) => (fresh.length === 0 ? previous : [...previous, ...fresh]));
+        setError(null);
+      } catch (thrown) {
+        if (!alive.current) return;
+        // NOT written to the loop's failure flag: see this callback's own note. The panel shows the
+        // sentence and keeps the keys it already has, because a page that failed did not invalidate
+        // the pages that did not.
+        setError(thrown instanceof Error ? thrown.message : String(thrown));
+      } finally {
+        nodeInFlight.current.delete(key);
+        if (alive.current) {
+          setNodeLoading((previous) => {
+            const next = new Set(previous);
+            next.delete(key);
+            return next;
+          });
+        }
+      }
+    },
+    [absorb, readPageAt],
+  );
+
   const stop = useCallback((): void => {
     // Read by the loop between pages, so this stops a walk rather than a request: the page already
     // in flight lands, is counted, and is the last one.
@@ -220,13 +358,36 @@ export function useKeyScan(options: {
     spent.current = false;
     scannedKeys.current = 0;
     failure.current = null;
+    // Every prefix's walk goes with the global one: the keys they brought are about to leave the
+    // tree, and a cursor left standing would answer the NEXT walk's Load more with keys from this one.
+    nodeCursor.current.clear();
+    nodeInFlight.current.clear();
+    walked.current.clear();
     setKeys([]);
     setScanned(0);
     setTotal(null);
     setExhausted(false);
     setStoppedBy(null);
     setError(null);
+    setNodeCursors(new Map());
+    setNodeLoading(new Set());
   }, []);
 
-  return { keys, scanned, total, busy, scanningAll, exhausted, stoppedBy, error, scanMore, scanAll, stop, reset };
+  return {
+    keys,
+    scanned,
+    total,
+    busy,
+    scanningAll,
+    exhausted,
+    stoppedBy,
+    error,
+    nodeCursors,
+    nodeLoading,
+    scanMore,
+    scanAll,
+    loadMoreUnder,
+    stop,
+    reset,
+  };
 }

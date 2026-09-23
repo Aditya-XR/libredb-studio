@@ -3,9 +3,11 @@ import {
   buildKeyTree,
   filterKeyTree,
   flattenKeyTree,
+  isUnderPrefix,
   splitKey,
   KEY_SEPARATOR,
   type KeyTreeNode,
+  type KeyTreeRow,
 } from "@/components/key-browser/tree";
 
 /** The child segments of a node, which is what most of these assertions are about. */
@@ -157,14 +159,20 @@ describe("buildKeyTree()", () => {
 describe("flattenKeyTree()", () => {
   const KEYS = ["app:env", "app:cache:ttl", "healthcheck"];
 
+  /** Rows as `label@depth`, spelling the load-more row `more` so both shapes fit one assertion. */
+  const labels = (rows: readonly KeyTreeRow[]): string[] =>
+    rows.map((row) => `${row.kind === "loadMore" ? "more" : row.node.segment}@${row.depth}`);
+
   test("draws the top level when nothing is open", () => {
     const rows = flattenKeyTree(buildKeyTree(KEYS), () => false);
 
     // Folders before leaves, as the tree orders them: `app` and then `healthcheck`.
-    expect(rows.map((row) => [row.node.segment, row.depth, row.folder])).toEqual([
-      ["app", 0, true],
-      ["healthcheck", 0, false],
+    expect(rows.map((row) => [row.kind, row.depth])).toEqual([
+      ["node", 0],
+      ["node", 0],
     ]);
+    expect(labels(rows)).toEqual(["app@0", "healthcheck@0"]);
+    expect(rows.every((row) => row.kind === "node" && row.folder === (row.node.segment === "app"))).toBe(true);
   });
 
   test("walks into an open path and deepens each level", () => {
@@ -172,23 +180,12 @@ describe("flattenKeyTree()", () => {
     // Only the top level is open, so `cache` is drawn and its own child is not.
     const rows = flattenKeyTree(root, (path) => path.length === 1 && path[0] === "app");
 
-    expect(rows.map((row) => [row.node.segment, row.depth])).toEqual([
-      ["app", 0],
-      ["cache", 1],
-      ["env", 1],
-      ["healthcheck", 0],
-    ]);
+    expect(labels(rows)).toEqual(["app@0", "cache@1", "env@1", "healthcheck@0"]);
 
     // Opening one more level is a property of the PATH and not of the row, which is what makes a
     // second sibling's children stay closed while the first one's open.
     const deeper = flattenKeyTree(root, (path) => path.length <= 2 && path[0] === "app");
-    expect(deeper.map((row) => [row.node.segment, row.depth])).toEqual([
-      ["app", 0],
-      ["cache", 1],
-      ["ttl", 2],
-      ["env", 1],
-      ["healthcheck", 0],
-    ]);
+    expect(labels(deeper)).toEqual(["app@0", "cache@1", "ttl@2", "env@1", "healthcheck@0"]);
   });
 
   test("calls a node that is both a key and a folder a folder", () => {
@@ -197,8 +194,69 @@ describe("flattenKeyTree()", () => {
     // `app` is a real key and the parent of one. It has to draw as openable, and it is the only
     // node here where `isKey` and `folder` are both true.
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ depth: 0, folder: true });
-    expect(rows[0].node.isKey).toBe(true);
+    expect(rows[0]).toMatchObject({ kind: "node", depth: 0, folder: true });
+    expect(rows[0].kind === "node" && rows[0].node.isKey).toBe(true);
+  });
+
+  test("puts a load-more row AFTER the children it follows, one level deeper", () => {
+    const rows = flattenKeyTree(
+      buildKeyTree(KEYS),
+      (path) => path[0] === "app",
+      () => true,
+    );
+
+    // After `cache`'s own child, and beside it rather than under it: the row is a sibling of the
+    // children, which is what makes it read as "and there is more where these came from".
+    expect(labels(rows)).toEqual(["app@0", "cache@1", "ttl@2", "more@2", "env@1", "more@1", "healthcheck@0"]);
+    const more = rows.filter((row) => row.kind === "loadMore");
+    expect(more.map((row) => row.path)).toEqual([["app", "cache"], ["app"]]);
+  });
+
+  test("emits no load-more row for a folder that is closed", () => {
+    // A collapsed folder has no children on screen for more to follow, so the row would be an
+    // offer with nothing above it to continue.
+    const rows = flattenKeyTree(
+      buildKeyTree(KEYS),
+      () => false,
+      () => true,
+    );
+
+    expect(labels(rows)).toEqual(["app@0", "healthcheck@0"]);
+  });
+
+  test("emits no load-more row for a leaf, whatever the predicate says", () => {
+    // A key is not a prefix, so there is nothing under it to ask about — and a caller that answered
+    // `true` for every path must not turn a leaf into a folder.
+    const rows = flattenKeyTree(
+      buildKeyTree(["healthcheck"]),
+      () => true,
+      () => true,
+    );
+
+    expect(labels(rows)).toEqual(["healthcheck@0"]);
+  });
+});
+
+describe("isUnderPrefix()", () => {
+  test("compares segment by segment rather than by characters", () => {
+    // The reason this is not `key.startsWith(`${prefix}:`)`: both spellings of a prefix agree here,
+    // but only one agrees about `app:envelope`.
+    expect(isUnderPrefix("app:env", ["app"])).toBe(true);
+    expect(isUnderPrefix("app:cache:ttl", ["app", "cache"])).toBe(true);
+    expect(isUnderPrefix("app:envelope", ["app", "env"])).toBe(false);
+    expect(isUnderPrefix("apple:env", ["app"])).toBe(false);
+  });
+
+  test("a key is not under itself", () => {
+    // `app` is a prefix of `app:env` and NOT under `app`; it IS the prefix. Treating it as under
+    // would make a scoped walk for `app` hand back `app` itself, which the tree already draws as its
+    // own row.
+    expect(isUnderPrefix("app", ["app"])).toBe(false);
+  });
+
+  test("holds for the empty-segment keys a scoped walk can really return", () => {
+    expect(isUnderPrefix("app::ttl", ["app", ""])).toBe(true);
+    expect(isUnderPrefix(":app:ttl", [""])).toBe(true);
   });
 });
 

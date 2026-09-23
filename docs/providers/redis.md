@@ -1304,11 +1304,24 @@ One page carries four fields in and three out:
   between pages. The cap is a client budget and the panel says so in its own words when it ends a
   walk: `SCAN` is O(N) over the whole keyspace, so an unbounded "all" against a key space of millions
   is a request that never returns and a server that is busy while it does not.
+- **Click to load more**, under an open folder — one page of a walk **scoped to that prefix**
+  ([§6.3](#63-the-prefix-scoped-walk-load-more)). It is the one control that can find keys the global
+  sample never happened to include.
 - **Filter** — narrows the tree the walk has ALREADY collected, client-side and without a request. A
   matching segment keeps its whole subtree, and the folders that lead to a match are opened, because
   a match left collapsed looks like no match at all.
 - **Pattern** — forwarded as `MATCH`, and a new pattern starts a NEW walk rather than appending to
   the old one, whose keys are not answers to the question now being asked.
+
+A FOLDER'S BADGE IS ITS CHILD COUNT, and a leaf carries none. The badge is the number of rows the
+folder can be opened to show, which is the number a reader compares against the list beneath it. The
+number of KEYS under the prefix is larger — it includes everything deeper, and everything the sample
+has seen there — and it is on the row's tooltip instead, because reading that number as "children" is
+exactly how a folder comes to look as though it is missing rows.
+
+A LEAF DRAWS ITS FULL NAME. `app:env` rather than `env`, since the name is what a key is identified
+by and the depth already says where the tree put it. Folders keep the `prefix:*` form they are
+advertised under, because a prefix is not a key and has no name of its own.
 
 Every refusal is 400 and in the route's own words: a `count` outside `[1, keyScan.maxCount]`
 (refused rather than clamped, because a silent clamp answers a request for 10,000 with 1,000 and says
@@ -1317,7 +1330,41 @@ negative `database`, and any engine declaring no `keyScan` at all. A provider th
 capability and implements no method is a distinct 500 — the state an external implementer of the
 published interface can genuinely be in — rather than a `TypeError` that reads as a crash.
 
-#### Known limitation: clustered deployments
+A FAILED PAGE IS A BANNER AND NOT A REPLACEMENT. The keys already in the tree are answers the server
+really gave, so a page that could not be taken does not take them away — which matters most for a
+scoped walk, where one prefix refusing is no reason to blank the panel. It also does not end a
+`Scan all` in progress: the loop's failure flag belongs to the walk that started at the database
+level, and a prefix that refused is not a reason to end it. The empty state, which is a claim about
+the DATABASE rather than about one read, is the one thing the banner suppresses.
+
+### 6.3 The prefix-scoped walk (Load more)
+
+The global walk is a sample, so a prefix's contents in the tree are whatever that sample happened to
+include — and a deep prefix can be entirely absent from a thousand keys out of a million. The Load
+more row asks the server about ONE prefix directly, which is the only honest way to answer "is there
+more under here".
+
+- **It is the same route**, with `pattern` built from the prefix (`app:cache` → `app:cache:*`) and a
+  cursor that belongs to that prefix. No second endpoint, no second contract.
+- **Each prefix keeps its own cursor**, so pressing the row twice continues that prefix rather than
+  restarting it, and `"0"` from a prefix proves there is nothing more under it — which is what
+  retires the row.
+- **It costs what a global page costs.** `MATCH` is applied per batch server-side and is not indexed,
+  so this is a full pass over the keyspace per press, exactly like every page of the main walk. That
+  is why it is a row a person presses and not something the panel does for every open folder.
+- **Its keys do not touch the walk's progress.** `scanned` and `total` are the global walk's numbers;
+  a scoped page hands back keys the global walk may already have counted, and adding them would push
+  the progress line past its own denominator.
+- **Its answer is filtered client-side.** `MATCH` is a glob with no escape and a real key segment can
+  contain `*`, `?` or `[`, so the server can return keys that are not under the prefix asked about.
+  `isUnderPrefix()` keeps only the ones that are, compared segment by segment — `app:envelope` is not
+  under `app:env`, whatever a character comparison of the joined names would say.
+- **The row is not offered when the answer is already known.** A spent cursor at the DATABASE level
+  means the sample IS the key space, so every prefix in it is complete; a prefix whose own walk came
+  back `"0"` is complete too; and while a filter is on the view is of what is held, so a row that
+  pulled more into it would make the visible set depend on clicks the filter's term does not explain.
+
+### 6.4 Known limitation: clustered deployments
 
 `SCAN` walks one node's slots and `DBSIZE` counts one node's keys, and neither has a cluster-wide
 form. On `--cluster-enabled yes` the panel therefore walks and reports **the node the connection
