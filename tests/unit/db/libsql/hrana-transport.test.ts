@@ -20,6 +20,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { LibSQLHranaTransport } from "@/lib/db/providers/sql/libsql/hrana-transport";
 import { LibSQLTransportError } from "@/lib/db/providers/sql/libsql/transport";
+import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
 import type { DatabaseConnection, DatabaseType } from "@/lib/db/types";
 
 // ============================================================================
@@ -144,7 +145,8 @@ describe("LibSQLHranaTransport endpoint", () => {
       ssl: { mode: "require" },
     }).execute("SELECT 1");
 
-    expect(calls[0]?.url).toBe("https://libredb-probe-424-cevheri.aws-eu-west-1.turso.io:443/v2/pipeline");
+    // The URL leaves the scheme's own default port out of its serialization.
+    expect(calls[0]?.url).toBe("https://libredb-probe-424-cevheri.aws-eu-west-1.turso.io/v2/pipeline");
   });
 
   test("brackets an IPv6 literal so the URL stays parseable", async () => {
@@ -165,6 +167,64 @@ describe("LibSQLHranaTransport endpoint", () => {
 
     const headers = new Headers(calls[0]?.init?.headers);
     expect(headers.has("authorization")).toBe(false);
+  });
+
+  // A host is spliced into nothing: one that would rewrite the URL around it is
+  // refused before the transport exists, so no request can carry the token.
+  test.each(["evil.example/steal?", "user@evil.example", "db#x", "db\\evil", "db%2f", "db evil"])(
+    "refuses the host %p before any request is sent",
+    (host) => {
+      expect(() => transport({ host })).toThrow(DatabaseConfigError);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  test.each([0, 65536, 1.5, "8080abc"])("refuses the port %p before any request is sent", (port) => {
+    expect(() => transport({ port: port as number })).toThrow(DatabaseConfigError);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("LibSQLHranaTransport redirects", () => {
+  // Drained like any other answer, so the socket goes back to the pool instead of
+  // being held by a body nobody reads.
+  test("reads the redirect's body before refusing it", async () => {
+    const redirect = new Response("moved", { status: 302, headers: { location: "https://evil.example/" } });
+    handler = () => redirect;
+
+    await expect(transport().execute("SELECT 1")).rejects.toBeInstanceOf(ConnectionError);
+    expect(redirect.bodyUsed).toBe(true);
+  });
+
+  test("asks fetch not to follow a redirect on a pipeline", async () => {
+    await transport().execute("SELECT 1");
+
+    expect(calls[0]?.init?.redirect).toBe("manual");
+  });
+
+  test("refuses a 3xx pipeline response with a ConnectionError naming only the target origin", async () => {
+    handler = () =>
+      new Response("", { status: 308, headers: { location: "https://evil.example:9443/steal?token=SECRET" } });
+
+    const error = await transport()
+      .execute("SELECT 1")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect((error as Error).message).toContain("HTTP 308");
+    expect((error as Error).message).toContain("https://evil.example:9443");
+    expect((error as Error).message).not.toContain("SECRET");
+    expect(calls).toHaveLength(1);
+  });
+
+  // serverVersion answers null for every failure by contract, so a redirect is one
+  // more "no version to show" - but it is still not followed.
+  test("does not follow a redirect from the version route", async () => {
+    handler = () => new Response("", { status: 302, headers: { location: "https://evil.example/version" } });
+
+    expect(await transport().serverVersion()).toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.init?.redirect).toBe("manual");
   });
 });
 

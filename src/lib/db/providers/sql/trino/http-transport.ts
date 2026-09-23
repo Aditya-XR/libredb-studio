@@ -42,6 +42,7 @@
  *    a completed answer terminates it explicitly.
  */
 
+import { endpointUrl, type HttpOrigin, httpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { DatabaseConnection } from "@/lib/db/types";
 // A `bigint` column arrives as an UNQUOTED JSON number and this protocol has no
 // setting that would quote it, so the raw body is rewritten before it is parsed.
@@ -386,11 +387,6 @@ function withoutTerminator(sql: string, grammar: SqlGrammar): string {
   return rewritable && LONE_TERMINATOR.test(sql.slice(end)) ? sql.slice(0, end) : sql;
 }
 
-/** Bracket a bare IPv6 literal, which is otherwise not a legal URL authority. */
-function formatHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-}
-
 /** A member the document reported as usable text, or null when it reported none. */
 function textField(source: Record<string, unknown>, field: string): string | null {
   const value = source[field];
@@ -687,7 +683,7 @@ interface HttpOutcome {
 export class TrinoHttpTransport implements TrinoTransport {
   public readonly dialect: TrinoDialect;
 
-  private readonly origin: string;
+  private readonly origin: HttpOrigin;
   private readonly user: string;
   private readonly catalog: string | undefined;
   private readonly schema: string | undefined;
@@ -699,8 +695,11 @@ export class TrinoHttpTransport implements TrinoTransport {
     // `connectionFields`, and an explicit `disable` has to turn TLS OFF as well as
     // an explicit mode turns it on (the #264 lesson).
     const secure = config.ssl !== undefined && config.ssl.mode !== "disable";
-    const host = formatHost(config.host ?? DEFAULT_HOST);
-    this.origin = `${secure ? "https" : "http"}://${host}:${config.port ?? dialect.defaultPort}`;
+    this.origin = httpOrigin(
+      secure ? "https" : "http",
+      config.host ?? DEFAULT_HOST,
+      config.port ?? dialect.defaultPort,
+    );
     this.user = config.user ?? DEFAULT_USER;
     // The connection's `database` holds the CATALOG, the way a PostgreSQL
     // connection pins one database. It is a default for unqualified names, not a
@@ -759,7 +758,7 @@ export class TrinoHttpTransport implements TrinoTransport {
 
   public async cancel(queryId: string, signal?: AbortSignal): Promise<void> {
     await this.send(
-      `${this.origin}${QUERY_PATH}/${encodeURIComponent(queryId)}`,
+      endpointUrl(this.origin, `${QUERY_PATH}/${encodeURIComponent(queryId)}`),
       { method: "DELETE", headers: this.sessionHeaders() },
       signal,
     );
@@ -847,7 +846,7 @@ export class TrinoHttpTransport implements TrinoTransport {
 
   private async submit(sql: string, options: TrinoQueryOptions): Promise<Record<string, unknown>> {
     return await this.request(
-      `${this.origin}${STATEMENT_PATH}`,
+      endpointUrl(this.origin, STATEMENT_PATH),
       // The grammar comes from the DESCRIPTOR's type-id, like everything else that
       // differs between the products this transport can speak to.
       {
@@ -948,7 +947,8 @@ export class TrinoHttpTransport implements TrinoTransport {
       let response: Response;
       let text: string;
       try {
-        response = await fetch(url, { ...init, ...(signal ? { signal } : {}) });
+        // A followed redirect would carry the credential to wherever it points.
+        response = await fetch(url, { ...init, redirect: "manual", ...(signal ? { signal } : {}) });
         text = await response.text();
       } catch (error) {
         // A refused socket, an unresolvable host, an abort and a body that stopped
@@ -956,6 +956,7 @@ export class TrinoHttpTransport implements TrinoTransport {
         throw requestFailure(this.dialect, error, signal);
       }
 
+      rejectRedirect(response, url);
       if (response.ok) return { status: response.status, text };
 
       const wait = retryDelayMs(response.status, response.headers.get(RETRY_AFTER_HEADER), attempt);

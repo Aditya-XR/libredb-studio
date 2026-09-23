@@ -31,6 +31,7 @@
  *   that publishes no version is not a broken one.
  */
 
+import { endpointUrl, type HttpOrigin, httpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { DatabaseConnection } from "@/lib/db/types";
 import { isSQLiteInt64Digits } from "../sqlite-int64";
 import {
@@ -140,10 +141,6 @@ function parseJson(text: string): unknown {
   } catch {
     return null;
   }
-}
-
-function formatHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 /**
@@ -380,13 +377,13 @@ function httpError(status: number, text: string): LibSQLTransportError {
 export class LibSQLHranaTransport implements LibSQLTransport {
   public readonly kind = "hrana-http" as const;
 
-  private readonly origin: string;
+  private readonly origin: HttpOrigin;
   private readonly authorization: string | undefined;
 
   constructor(config: DatabaseConnection) {
     const secure = config.ssl !== undefined && config.ssl.mode !== "disable";
     const port = config.port ?? (secure ? DEFAULT_TLS_PORT : DEFAULT_PORT);
-    this.origin = `${secure ? "https" : "http"}://${formatHost(config.host ?? DEFAULT_HOST)}:${port}`;
+    this.origin = httpOrigin(secure ? "https" : "http", config.host ?? DEFAULT_HOST, port);
     // The credential is a token, not a password: libSQL has no user names, and
     // Turso mints a JWT per database. A connection with no token sends no header,
     // which is what an unauthenticated local sqld expects - sending an empty
@@ -443,9 +440,11 @@ export class LibSQLHranaTransport implements LibSQLTransport {
 
   public async serverVersion(): Promise<string | null> {
     try {
-      const response = await fetch(`${this.origin}${VERSION_PATH}`, {
+      const response = await fetch(endpointUrl(this.origin, VERSION_PATH), {
         method: "GET",
         headers: this.headers(),
+        // Not followed, like every other request: a 3xx is one more "no version".
+        redirect: "manual",
       });
       if (!response.ok) return null;
       const text = (await response.text()).trim();
@@ -471,12 +470,15 @@ export class LibSQLHranaTransport implements LibSQLTransport {
   }
 
   private async send(path: string, body: string, timeoutMs?: number): Promise<string> {
+    const url = endpointUrl(this.origin, path);
     let response: Response;
     try {
-      response = await fetch(`${this.origin}${path}`, {
+      response = await fetch(url, {
         method: "POST",
         headers: this.headers(),
         body,
+        // A followed redirect would carry the token to wherever it points.
+        redirect: "manual",
         // A statement that hangs would otherwise hang the request forever: fetch
         // has no default timeout. The signal covers the connect and the read,
         // which a timer wrapped around the promise would not.
@@ -488,6 +490,7 @@ export class LibSQLHranaTransport implements LibSQLTransport {
     }
 
     const text = await response.text();
+    rejectRedirect(response, url);
     if (!response.ok) throw httpError(response.status, text);
     return text;
   }

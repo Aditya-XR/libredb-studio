@@ -21,6 +21,7 @@
 import { promises as dns, type SrvRecord } from "node:dns";
 import { request as httpRequest, type RequestOptions as HttpRequestOptions } from "node:http";
 import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";
+import { endpointUrl, httpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { DatabaseConnection } from "@/lib/db/types";
 import type { SSLConfig } from "@/lib/types";
 import { quoteIdentifier } from "./keyspace";
@@ -158,11 +159,6 @@ function readMessage(record: Record<string, unknown>, fallback: string): string 
   return fallback;
 }
 
-/** Bracket a bare IPv6 literal so it can be used in a URL authority. */
-function formatHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-}
-
 /**
  * Parse a Go-style duration ("1.234ms", "1.5s", "2m30s") into milliseconds.
  * Anything unparsable counts as zero rather than NaN.
@@ -287,11 +283,14 @@ function buildTlsMaterial(ssl: SSLConfig | undefined): CouchbaseTlsMaterial | nu
 async function fetchJson(url: string, init: JsonRequestInit): Promise<JsonResponse> {
   let response: Response;
   try {
-    response = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
+    // A followed redirect would carry the credential to wherever it points.
+    response = await fetch(url, { method: init.method, headers: init.headers, body: init.body, redirect: "manual" });
   } catch (error) {
     throw networkError(error);
   }
-  return { httpCode: response.status, payload: parseJsonBody(await response.text()) };
+  const text = await response.text();
+  rejectRedirect(response, url);
+  return { httpCode: response.status, payload: parseJsonBody(text) };
 }
 
 /**
@@ -365,6 +364,10 @@ export class CouchbaseHttpTransport implements CouchbaseTransport {
     this.tls = buildTlsMaterial(config.ssl);
     this.scheme = this.tls ? "https" : "http";
     this.managementPort = config.port ?? (this.tls ? DEFAULT_MANAGEMENT_TLS_PORT : DEFAULT_MANAGEMENT_PORT);
+    // Validated now so a bad host or port is refused before any lookup or request.
+    // Every URL is built through the same check again, because the host that is
+    // finally used may come from an SRV record or from the cluster itself.
+    httpOrigin(this.scheme, this.host, this.managementPort);
     this.authorization = `Basic ${Buffer.from(`${config.user ?? ""}:${config.password ?? ""}`).toString("base64")}`;
     this.resolveSrv = deps.resolveSrv ?? dns.resolveSrv.bind(dns);
     this.requestJson = deps.requestJson ?? nodeRequestJson;
@@ -402,7 +405,7 @@ export class CouchbaseHttpTransport implements CouchbaseTransport {
 
   public async manage<T>(path: string): Promise<T> {
     const host = await this.getHost();
-    const response = await this.send(`${this.scheme}://${formatHost(host)}:${this.managementPort}${path}`, {
+    const response = await this.send(endpointUrl(httpOrigin(this.scheme, host, this.managementPort), path), {
       method: "GET",
       headers: this.baseHeaders(),
     });
@@ -485,6 +488,6 @@ export class CouchbaseHttpTransport implements CouchbaseTransport {
   }
 
   private queryUrl(host: string, port: number): string {
-    return `${this.scheme}://${formatHost(host)}:${port}${QUERY_PATH}`;
+    return endpointUrl(httpOrigin(this.scheme, host, port), QUERY_PATH);
   }
 }
