@@ -306,7 +306,8 @@ describe("LibSQLProvider configuration", () => {
       connectionString: "libsql://libredb-probe-424-cevheri.aws-eu-west-1.turso.io?authToken=jwt-123",
     });
 
-    expect(calls[0]?.url).toBe("https://libredb-probe-424-cevheri.aws-eu-west-1.turso.io:443/v2/pipeline");
+    // Port 443 is the https default, which the URL leaves out of its serialization.
+    expect(calls[0]?.url).toBe("https://libredb-probe-424-cevheri.aws-eu-west-1.turso.io/v2/pipeline");
     await provider.disconnect();
   });
 

@@ -22,6 +22,7 @@
  *   a header, so an empty body is success rather than an error (spec 2.2).
  */
 
+import { endpointUrl, type HttpOrigin, httpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { DatabaseConnection } from "@/lib/db/types";
 import {
   type ClickHouseQueryOptions,
@@ -149,11 +150,6 @@ function parseJson(text: string): unknown {
   } catch {
     return null;
   }
-}
-
-/** Bracket a bare IPv6 literal, which is otherwise not a legal URL authority. */
-function formatHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 /** A counter the server reports as a string, or 0 when it reported nothing usable. */
@@ -353,14 +349,14 @@ function transportError(cause: unknown): ClickHouseTransportError {
 export class ClickHouseHttpTransport implements ClickHouseTransport {
   public readonly kind = "http" as const;
 
-  private readonly origin: string;
+  private readonly origin: HttpOrigin;
   private readonly database: string | undefined;
   private readonly authorization: string | undefined;
 
   constructor(config: DatabaseConnection) {
     const secure = config.ssl !== undefined && config.ssl.mode !== "disable";
     const port = config.port ?? (secure ? DEFAULT_TLS_PORT : DEFAULT_PORT);
-    this.origin = `${secure ? "https" : "http"}://${formatHost(config.host ?? DEFAULT_HOST)}:${port}`;
+    this.origin = httpOrigin(secure ? "https" : "http", config.host ?? DEFAULT_HOST, port);
     this.database = config.database;
     // Live-verified: an EMPTY Basic username fails hard - "Got an empty user name
     // from Authorization HTTP header", code 516 - while sending no header at all
@@ -404,7 +400,7 @@ export class ClickHouseHttpTransport implements ClickHouseTransport {
     const database = opts.database ?? this.database;
     if (database) params.set("database", database);
 
-    return `${this.origin}/?${params.toString()}`;
+    return endpointUrl(this.origin, "/", params);
   }
 
   private async send(url: string, sql: string, timeoutMs?: number): Promise<HttpOutcome> {
@@ -414,19 +410,25 @@ export class ClickHouseHttpTransport implements ClickHouseTransport {
     // timer around fetch alone would not.
     const signal = timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
 
+    let response: Response;
+    let text: string;
     try {
-      const response = await fetch(url, {
+      response = await fetch(url, {
         method: "POST",
         headers: this.authorization ? { authorization: this.authorization } : {},
         body: sql,
+        // A followed redirect would carry the credential to wherever it points.
+        redirect: "manual",
         ...(signal ? { signal } : {}),
       });
-
-      return { ok: response.ok, status: response.status, headers: response.headers, text: await response.text() };
+      text = await response.text();
     } catch (error) {
       // A refused socket, an abort and a truncated body all arrive here, and all
       // have to leave as the seam's own error type.
       throw transportError(error);
     }
+
+    rejectRedirect(response, url);
+    return { ok: response.ok, status: response.status, headers: response.headers, text };
   }
 }

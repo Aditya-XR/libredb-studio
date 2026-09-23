@@ -15,6 +15,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { ClickHouseHttpTransport } from "@/lib/db/providers/sql/clickhouse/http-transport";
 import { CLICKHOUSE_UNKNOWN_ERROR_NAME, ClickHouseTransportError } from "@/lib/db/providers/sql/clickhouse/transport";
+import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
 import type { DatabaseConnection, DatabaseType } from "@/lib/db/types";
 
 // ============================================================================
@@ -313,6 +314,82 @@ describe("ClickHouseHttpTransport endpoint", () => {
     await makeTransport({ host: "[::1]" }).query("SELECT 1");
 
     expect(lastUrl().origin).toBe("http://[::1]:18123");
+  });
+
+  // A host is spliced into nothing: one that would rewrite the URL around it is
+  // refused before the transport exists, so no request can carry the credential.
+  test.each(["evil.example/steal?", "user@evil.example", "db#x", "db\\evil", "db%2f", "db evil"])(
+    "refuses the host %p before any request is sent",
+    (host) => {
+      expect(() => makeTransport({ host })).toThrow(DatabaseConfigError);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  test.each([0, 65536, 1.5, "8123abc"])("refuses the port %p before any request is sent", (port) => {
+    expect(() => makeTransport({ port: port as number })).toThrow(DatabaseConfigError);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("builds the URL without the query parameters reaching the path", async () => {
+    await makeTransport().query("SELECT 1", { database: "a/b?c#d" });
+
+    expect(lastUrl().pathname).toBe("/");
+    expect(lastParam("database")).toBe("a/b?c#d");
+  });
+});
+
+describe("ClickHouseHttpTransport redirects", () => {
+  test("asks fetch not to follow a redirect", async () => {
+    await makeTransport().query("SELECT 1");
+
+    expect(lastCall().init?.redirect).toBe("manual");
+  });
+
+  test("refuses a 3xx response with a ConnectionError naming only the target origin", async () => {
+    handler = () => respond("", { status: 302, headers: { location: "https://evil.example:9443/steal?token=SECRET" } });
+
+    const error = await makeTransport()
+      .query("SELECT 1")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect((error as Error).message).toContain("HTTP 302");
+    expect((error as Error).message).toContain("https://evil.example:9443");
+    expect((error as Error).message).not.toContain("SECRET");
+    expect(calls).toHaveLength(1);
+  });
+
+  // The runtime's own fetch, against two real sockets: the redirect target must
+  // never see a request, and above all never the Authorization header.
+  test("does not follow a real redirect to another server", async () => {
+    globalThis.fetch = originalFetch;
+    const reached: string[] = [];
+    const target = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(request) {
+        reached.push(request.headers.get("authorization") ?? "");
+        return new Response("");
+      },
+    });
+    const redirecting = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => new Response("", { status: 307, headers: { location: `http://127.0.0.1:${target.port}/` } }),
+    });
+
+    try {
+      const error = await makeTransport({ port: redirecting.port })
+        .query("SELECT 1")
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(ConnectionError);
+      expect(reached).toEqual([]);
+    } finally {
+      await redirecting.stop(true);
+      await target.stop(true);
+    }
   });
 });
 

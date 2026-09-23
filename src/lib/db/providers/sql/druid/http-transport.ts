@@ -29,6 +29,7 @@
  *   `fetch` cannot read, so a truncated body is the only evidence there is.
  */
 
+import { endpointUrl, httpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { DatabaseConnection } from "@/lib/db/types";
 // Shared with `lib/explain/druid-native.ts`, which parses the EXPLAIN plan columns:
 // those arrive as JSON *text* inside this body, so the pass below correctly leaves
@@ -224,11 +225,6 @@ function parseJson(text: string): unknown {
   } catch {
     return null;
   }
-}
-
-/** Bracket a bare IPv6 literal, which is otherwise not a legal URL authority. */
-function formatHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 /** A field the envelope reported as usable text, or null when it reported none. */
@@ -498,8 +494,8 @@ export class DruidHttpTransport implements DruidTransport {
     // `connectionFields`, and an explicit `disable` has to turn TLS OFF as well as
     // an explicit mode turns it on (the #264 lesson).
     const secure = config.ssl !== undefined && config.ssl.mode !== "disable";
-    const host = formatHost(config.host ?? DEFAULT_HOST);
-    this.endpoint = `${secure ? "https" : "http"}://${host}:${config.port ?? DEFAULT_PORT}${SQL_PATH}`;
+    const origin = httpOrigin(secure ? "https" : "http", config.host ?? DEFAULT_HOST, config.port ?? DEFAULT_PORT);
+    this.endpoint = endpointUrl(origin, SQL_PATH);
     // Spec section 1, live-verified: a default install loads no security extension
     // and IGNORES this header entirely - a bogus Basic header still answers 200 -
     // so credentials are optional, and sending none is the normal case. When they
@@ -564,27 +560,33 @@ export class DruidHttpTransport implements DruidTransport {
     // help with, since it only starts counting once the statement was accepted.
     const signal = clientDeadlineMs === undefined ? undefined : AbortSignal.timeout(clientDeadlineMs);
 
+    let response: Response;
+    let text: string;
     try {
-      const response = await fetch(this.endpoint, {
+      response = await fetch(this.endpoint, {
         method: "POST",
         headers: {
           "content-type": JSON_CONTENT_TYPE,
           ...(this.authorization === undefined ? {} : { authorization: this.authorization }),
         },
         body,
+        // A followed redirect would carry the credential to wherever it points.
+        redirect: "manual",
         ...(signal ? { signal } : {}),
       });
-
-      return {
-        ok: response.ok,
-        status: response.status,
-        text: await response.text(),
-        unavailableSegments: unavailableSegmentCount(response.headers),
-      };
+      text = await response.text();
     } catch (error) {
       // A refused socket, an abort and a truncated body all arrive here, and all
       // have to leave as the seam's own error type.
       throw transportError(error);
     }
+
+    rejectRedirect(response, this.endpoint);
+    return {
+      ok: response.ok,
+      status: response.status,
+      text,
+      unavailableSegments: unavailableSegmentCount(response.headers),
+    };
   }
 }
