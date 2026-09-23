@@ -87,6 +87,11 @@ requires `collection` and `operation`:
 { "collection": "users", "operation": "insertOne", "documents": [{"name": "John"}] }
 ```
 
+`database` is optional: absent means the connected database. When it names another
+database, the command runs there — `{ "database": "analytics", "collection": "events",
+"operation": "find" }` reads `analytics.events`, not the connected database's `events`
+(#843). It must be a string; anything else is a `QueryError`.
+
 `distinct` is the one operation with a key of its own: `field`, the driver's own parameter name, and
 it is **required**. The example above answers one row per category, shaped `{ "category": <value> }`.
 A missing or non-string `field` is a `QueryError` naming the key it wanted — it used to read the

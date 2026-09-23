@@ -56,6 +56,8 @@ describe("generateTableQuery", () => {
     expect(parsed.collection).toBe("users");
     expect(parsed.operation).toBe("find");
     expect(parsed.options.limit).toBe(50);
+    // A one-segment path names no database, so no `database` key is emitted.
+    expect(parsed.database).toBeUndefined();
   });
 
   test("Oracle (port 1521) carries no row bound either", () => {
@@ -1151,18 +1153,23 @@ describe("the generated statement addresses an object by its path", () => {
 // ============================================================================
 
 describe("the dialects that address one key or collection, not a qualified name", () => {
-  test("MongoDB names the COLLECTION, not the database that holds it", () => {
+  test("MongoDB names the collection and carries its database as its own key", () => {
     // A collection's path is [database, collection] (`MONGODB_CONTAINER_LEVELS`), and the
     // driver takes the collection name alone: `db.collection("sample_shop.users")` would
-    // create a collection literally called that.
+    // create a collection literally called that. The database rides as the `database`
+    // key instead (#843), which is what makes the statement read the collection's own
+    // database rather than the connected one.
     const out = generateTableQuery(["sample_shop", "users"], makeCaps({ queryLanguage: "json", defaultPort: null }));
-    expect(JSON.parse(out).collection).toBe("users");
-    expect(out).not.toContain("sample_shop");
+    const parsed = JSON.parse(out);
+    expect(parsed.collection).toBe("users");
+    expect(parsed.database).toBe("sample_shop");
   });
 
-  test("MongoDB's Generate Query names the collection too", () => {
+  test("MongoDB's Generate Query names the collection and its database too", () => {
     const caps = makeCaps({ queryLanguage: "json", defaultPort: null });
-    expect(JSON.parse(generateSelectQuery(["sample_shop", "users"], sampleColumns, caps)).collection).toBe("users");
+    const parsed = JSON.parse(generateSelectQuery(["sample_shop", "users"], sampleColumns, caps));
+    expect(parsed.collection).toBe("users");
+    expect(parsed.database).toBe("sample_shop");
   });
 
   test("Redis takes the bare key, never the database segment with it", () => {

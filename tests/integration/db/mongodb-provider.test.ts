@@ -864,7 +864,7 @@ describe("MongoDBProvider", () => {
       // The keys a runnable command is built from - the ones `parseQuery` reads.
       // `field` is here because a model that cannot see it writes a `distinct` with no
       // field, which is now refused rather than answered with `_id`.
-      for (const key of ["collection", "operation", "filter", "pipeline", "field"]) {
+      for (const key of ["collection", "operation", "filter", "pipeline", "field", "database"]) {
         expect(statementLanguage).toContain(key);
       }
       // The two forms a model reaches for instead, named so they are excluded.
@@ -902,6 +902,25 @@ describe("MongoDBProvider", () => {
       expect(result.executionTime).toBeGreaterThanOrEqual(0);
       // ObjectId should be serialized to string
       expect(typeof result.rows[0]._id).toBe("string");
+    });
+
+    // #843: `database` names the database a command runs in, so a collection outside
+    // the connected one is reachable. Before the key existed, the same statement
+    // silently read the same-named collection in the CONNECTED database instead - a
+    // wrong answer, not an error.
+    test("database key reads a collection in another database", async () => {
+      mockDocumentsByNs["otherdb.users"] = [{ _id: new MockObjectId("z1"), name: "Zoe" }];
+      const result = await provider.query(
+        JSON.stringify({ database: "otherdb", collection: "users", operation: "find", filter: {} }),
+      );
+      expect(result.rows.length).toBe(1);
+      expect(result.rows[0].name).toBe("Zoe");
+    });
+
+    test("a non-string database is a QueryError", async () => {
+      await expect(
+        provider.query(JSON.stringify({ database: 42, collection: "users", operation: "find" })),
+      ).rejects.toThrow();
     });
 
     test("findOne returns a single document", async () => {

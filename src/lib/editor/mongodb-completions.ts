@@ -82,7 +82,13 @@ const MONGO_SNIPPETS: { label: string; template: string; detail: string }[] = [
   {
     label: "find",
     template: JSON.stringify(
-      { collection: "${1:collection}", operation: "find", filter: {}, options: { limit: 50 } },
+      {
+        database: "${2:database}",
+        collection: "${1:collection}",
+        operation: "find",
+        filter: {},
+        options: { limit: 50 },
+      },
       null,
       2,
     ),

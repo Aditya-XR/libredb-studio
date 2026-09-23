@@ -66,6 +66,9 @@ import { CACHE_HIT_RATIO_UNAVAILABLE, formatCacheHitRatio, measuredNumber } from
 
 interface MongoQuery {
   collection: string;
+  // The database the command runs in. Absent means the connected database, which is
+  // every statement written before the key existed (#843).
+  database?: string;
   operation:
     | "find"
     | "findOne"
@@ -689,7 +692,7 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       // it excludes: naming only what the language IS did not survive contact with
       // the model's prior on Elasticsearch, and does not here either.
       statementLanguage:
-        'the JSON command object this editor executes - {"collection": "<name>", "operation": "find" | "findOne" | "aggregate" | "count" | "distinct", "filter": {...}, "pipeline": [...], "field": "<name>" (distinct only), "options": {"limit": 50}} - and NOT mongosh shell syntax: a statement that starts with `db.` cannot be run here',
+        'the JSON command object this editor executes - {"collection": "<name>", "operation": "find" | "findOne" | "aggregate" | "count" | "distinct", "database": "<name>" (optional, another database than the connected one), "filter": {...}, "pipeline": [...], "field": "<name>" (distinct only), "options": {"limit": 50}} - and NOT mongosh shell syntax: a statement that starts with `db.` cannot be run here',
       // `getSlowQueries()` reads `system.profile`, which does not exist until the
       // profiler is switched on - so the empty panel is the ordinary case here, and it
       // used to name a PostgreSQL extension (#463).
@@ -867,7 +870,11 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       const { result, executionTime } = await this.measureExecution(async () => {
         try {
           const query = this.parseQuery(queryStr);
-          const collection = this.db!.collection(query.collection);
+          // #843: a statement may name the database it runs in. `this.db` is the
+          // connected database and nothing else, so a collection in another database
+          // read the same-named collection of the connected one instead.
+          const db = query.database !== undefined ? this.client!.db(query.database) : this.db!;
+          const collection = db.collection(query.collection);
 
           if (!SUPPORTED_OPERATIONS.has(query.operation)) {
             throw new QueryError(`Unsupported operation: ${query.operation}`, "mongodb");
@@ -1011,6 +1018,9 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       }
       if (!parsed.operation) {
         throw new QueryError("Operation is required in query (find, findOne, aggregate, etc.)", "mongodb");
+      }
+      if (parsed.database !== undefined && typeof parsed.database !== "string") {
+        throw new QueryError("Database name must be a string in query", "mongodb");
       }
 
       return parsed as MongoQuery;

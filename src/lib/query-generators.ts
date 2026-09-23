@@ -434,7 +434,15 @@ export function generateTableQuery(
     return renderRedisCommand(keyType ? REDIS_COMMANDS[keyType].read(base) : ["TYPE", base]);
   }
   if (capabilities.queryLanguage === "json") {
-    return JSON.stringify({ collection: tableName, operation: "find", filter: {}, options: { limit: 50 } }, null, 2);
+    // `database` carries the path's container segment, so the statement reads the
+    // collection's own database rather than the connected one (#843). Dropped when
+    // the path names no database, keeping a bare `collection` runnable as before.
+    const database = path.length > 1 ? path[0] : undefined;
+    return JSON.stringify(
+      { database, collection: tableName, operation: "find", filter: {}, options: { limit: 50 } },
+      null,
+      2,
+    );
   }
   const table = quoteObjectPath(path, capabilities);
   // Couchbase (SQL++). The one SQL branch left, and it is about the PROJECTION: the
@@ -583,6 +591,7 @@ export function generateSelectQuery(
     });
     return JSON.stringify(
       {
+        database: path.length > 1 ? path[0] : undefined,
         collection: tableName,
         operation: "find",
         filter: {},
