@@ -52,6 +52,8 @@ import {
   type ContainerLevels,
   type ContainerLevelSpec,
   type DatabaseObject,
+  type KeyScanOptions,
+  type KeyScanPage,
   type KindCount,
   type ObjectDetail,
   type ObjectDetailBatch,
@@ -820,6 +822,14 @@ export class RedisProvider extends BaseDatabaseProvider {
       // measurements behind the one container level and the two kinds.
       containerLevels: REDIS_CONTAINER_LEVELS,
       objectKinds: REDIS_OBJECT_KINDS,
+      // The key-space walk. `defaultCount` is the batch a caller that names none gets, and it
+      // is larger than the object surface's `COUNT 100` on purpose: this is a WALK a person
+      // drives with a visible progress bar, so a bigger batch is fewer round trips for the
+      // same gesture. `maxCount` bounds what one request can ask the server to do, because
+      // `COUNT` is only a hint to Redis and a huge one still makes the server build a huge
+      // reply in one go. 1000 is the same budget `KEY_SCAN_LIMIT` already puts on the object
+      // surface's walk, so the two readings of one keyspace are bounded alike.
+      keyScan: { defaultCount: 500, maxCount: 1000 },
       schemaRefreshPattern: "(DEL|FLUSHDB|FLUSHALL|RENAME)\\b",
     };
   }
@@ -1431,6 +1441,41 @@ export class RedisProvider extends BaseDatabaseProvider {
       // unlike a PostgreSQL `search_path` there is one answer and it is never ambiguous.
       isSessionDefault: index === session,
     }));
+  }
+
+  /**
+   * One page of a resumable walk of one database's key space.
+   *
+   * A CONNECTION OF ITS OWN, NOT `this.client`, for the reason `withDatabase` exists: the walk
+   * names the database it is walking, and `SELECT` on the pooled client would move the session
+   * out from under a query somebody is typing in another pane. `withDatabase` opens, selects,
+   * reads and closes, so a page here cannot move anybody else's cursor — or their `SELECT`.
+   *
+   * `DBSIZE` TRAVELS WITH EVERY PAGE RATHER THAN BEING ITS OWN CALL. It is O(1) on the server
+   * and it is the denominator a progress indicator divides by; a caller that had to ask
+   * separately would have to keep two round trips in step, and the number would be stale
+   * between them for no saving worth having.
+   *
+   * NO DEDUPLICATION AND NO ORDERING, because `SCAN` promises neither: a key present for the
+   * whole walk is returned at least once and may be returned twice, and the order is the hash
+   * table's rather than the caller's. A caller building a tree from successive pages is
+   * therefore merging into a SET, which is what the key browser does. Sorting here would imply
+   * an order this engine does not have.
+   *
+   * THE CURSOR IS THE CALLER'S and is passed through verbatim in both directions, so nothing
+   * here parses one.
+   */
+  public async scanKeysPage(options: KeyScanOptions): Promise<KeyScanPage> {
+    this.ensureConnected();
+    const db = options.database ?? this.sessionDatabase();
+
+    return this.withDatabase(db, async (client) => {
+      const [cursor, keys] = options.pattern
+        ? await client.scan(options.cursor, "MATCH", options.pattern, "COUNT", options.count)
+        : await client.scan(options.cursor, "COUNT", options.count);
+      const total = await client.dbsize();
+      return { keys, cursor, total };
+    });
   }
 
   /**

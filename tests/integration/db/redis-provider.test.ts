@@ -348,6 +348,66 @@ let scanOverflows = false;
 const OVERFLOW_KEYS: string[] = Array.from({ length: 1000 }, (_, index) => `bulk:${index}`);
 
 /**
+ * When set, `SCAN` answers like a cursor walk instead of handing back the whole keyspace in one
+ * page: `COUNT` bounds the page, `MATCH` filters, and a non-zero cursor comes back until the walk
+ * is spent.
+ *
+ * The other arms answer everything at once, which is all the object surface needs — it wants one
+ * walk and one grouping. A walk DRIVEN BY A CALLER needs this shape, because the two facts it is
+ * built on are unobservable when every call answers cursor `"0"`: that a page is bounded, and that
+ * the cursor is the thing which says there is more.
+ */
+let scanPages: string[] | null = null;
+
+/**
+ * Every `(cursor, args)` the provider handed `SCAN` since a test reset it.
+ *
+ * An assertion about the CURSOR is an assertion about the wire, and the return value cannot carry
+ * it: a walk that ignored the cursor it was given and restarted from zero would answer a plausible
+ * first page. Only the argv shows which cursor left, and only the argv shows whether `MATCH` was
+ * omitted rather than forwarded as an empty string.
+ */
+const scanArgv: Array<{ cursor: string | number; args: (string | number)[] }> = [];
+
+/**
+ * The keys the walk tests page through, in the order the mock's scan answers them.
+ *
+ * Mixed in prefix DEPTH on purpose: a walk whose pages were cut from a list sorted by grouping
+ * would look identical whether it paged correctly or re-grouped what it had, and the depth is the
+ * one property the consumer of these pages actually reads a key for.
+ */
+const KEYS_FOR_THE_WALK = ["app:env", "app:region", "app:cache:ttl", "app:config:limits", "user:1001:name"];
+
+/**
+ * One page of a cursor walk over `keys`.
+ *
+ * AN OFFSET INTO A LIST STANDS IN FOR THE HASH-TABLE CURSOR, and `MATCH` is applied to the whole
+ * fixture before the page is cut rather than inside a server-side batch. That difference is real
+ * and deliberate: a real `SCAN MATCH` walks the WHOLE keyspace and filters what each batch happens
+ * to contain, so the same pattern can answer an empty page and a non-zero cursor at once. Nothing
+ * in this provider depends on where the filter runs — it forwards `MATCH` verbatim and never reads
+ * the keys it is handing back — so a faithful emulation of that ordering would buy the assertions
+ * here nothing and cost the reader a paragraph like this one.
+ */
+function scanPage(keys: string[], cursor: string | number, args: (string | number)[]): [string, string[]] {
+  const countIndex = args.indexOf("COUNT");
+  const count = countIndex >= 0 ? Number(args[countIndex + 1]) : 10;
+  const matchIndex = args.indexOf("MATCH");
+  const pattern = matchIndex >= 0 ? String(args[matchIndex + 1]) : null;
+  // `*` is the only metacharacter these tests use, so this is a pattern filter and not a Redis
+  // glob implementation: every other metacharacter is escaped rather than honoured.
+  const matching =
+    pattern === null
+      ? keys
+      : keys.filter((key) =>
+          new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(key),
+        );
+  const start = Number(cursor);
+  const next = start + count >= matching.length ? "0" : String(start + count);
+  return [next, matching.slice(start, start + count)];
+}
+
+/**
  * Every options object the provider handed the `Redis` constructor. The TLS
  * selection is observable nowhere else: ioredis takes it at construction time and
  * never exposes it again.
@@ -404,9 +464,11 @@ mock.module("ioredis", () => {
       return 42;
     }
 
-    async scan(): Promise<[string, string[]]> {
+    async scan(cursor: string | number, ...args: (string | number)[]): Promise<[string, string[]]> {
       scanCalls += 1;
+      scanArgv.push({ cursor, args });
       if (scanRefusal !== null) throw new Error(scanRefusal);
+      if (scanPages !== null) return scanPage(scanPages, cursor, args);
       if (scanOverflows) return ["42", [...(MOCK_KEYS_BY_DB[this._db] ?? []), ...OVERFLOW_KEYS]];
       return ["0", MOCK_KEYS_BY_DB[this._db] ?? []];
     }
@@ -697,6 +759,101 @@ describe("RedisProvider", () => {
       // branch on `queryLanguage === "json"` and every schema-explorer action
       // emits JSON this provider rejects.
       expect(provider.getCapabilities().queryDialect).toBe("redis");
+    });
+
+    test("declares the key-space walk, and the declaration and the method agree", () => {
+      const caps = provider.getCapabilities();
+
+      // A batch size is a DECLARATION rather than a default invented two layers up, so that a
+      // panel and its provider cannot come to disagree about what a batch is.
+      expect(caps.keyScan).toEqual({ defaultCount: 500, maxCount: 1000 });
+
+      // The pair, checked where this file checks its other declaration pairs
+      // (`supportsExplain` against `explainFormat`): a `keyScan` with no walk behind it would
+      // draw a control whose every gesture fails, and a walk with no declaration is a feature
+      // nothing can find.
+      expect(typeof provider.scanKeysPage).toBe(caps.keyScan === undefined ? "undefined" : "function");
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // scanKeysPage()
+  // --------------------------------------------------------------------------
+
+  /**
+   * The key-space walk a caller drives, one page at a time.
+   *
+   * THE CURSOR IS THE CONTRACT, so these assertions are about the WIRE and not only about the
+   * answers. A walk that ignored the cursor it was handed and restarted from zero would answer a
+   * perfectly plausible first page, and a suite that read only the returned keys would pass against
+   * it — which is why `scanArgv` is read below and the cursor is asserted where it is sent.
+   */
+  describe("scanKeysPage()", () => {
+    beforeEach(async () => {
+      scanPages = [...KEYS_FOR_THE_WALK];
+      scanArgv.length = 0;
+      scanRefusal = null;
+      scanOverflows = false;
+      capturedRedisOptions.length = 0;
+      await provider.connect();
+    });
+
+    afterEach(() => {
+      // Left set, this would change what `SCAN` answers for every later describe in this file.
+      scanPages = null;
+    });
+
+    test("walks in bounded pages and answers the cursor for the next one", async () => {
+      const first = await provider.scanKeysPage({ cursor: "0", count: 2 });
+      expect(first.keys).toEqual(["app:env", "app:region"]);
+      expect(first.cursor).toBe("2");
+
+      const second = await provider.scanKeysPage({ cursor: first.cursor, count: 2 });
+      expect(second.keys).toEqual(["app:cache:ttl", "app:config:limits"]);
+      expect(second.cursor).toBe("4");
+
+      // The spent cursor is the ONLY signal a caller gets that a walk is over: `SCAN` publishes no
+      // total, and `total` below is the database's count rather than the walk's.
+      const third = await provider.scanKeysPage({ cursor: second.cursor, count: 2 });
+      expect(third.keys).toEqual(["user:1001:name"]);
+      expect(third.cursor).toBe("0");
+    });
+
+    test("forwards the pattern as MATCH, and omits MATCH when the caller names none", async () => {
+      const filtered = await provider.scanKeysPage({ cursor: "0", pattern: "app:*", count: 2 });
+      expect(filtered.keys).toEqual(["app:env", "app:region"]);
+      expect(scanArgv.at(-1)).toEqual({ cursor: "0", args: ["MATCH", "app:*", "COUNT", 2] });
+
+      await provider.scanKeysPage({ cursor: "0", count: 2 });
+      // ABSENT, not an empty string: `MATCH ""` is a pattern no key satisfies, so forwarding a
+      // missing pattern as one would turn "every key" into "no key".
+      expect(scanArgv.at(-1)).toEqual({ cursor: "0", args: ["COUNT", 2] });
+    });
+
+    test("answers the database's own key count, not the length of the page", async () => {
+      const page = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // The page holds two keys and this mock's `DBSIZE` answers 42. A total taken from the page
+      // would read 2, which is the defect being asserted against: it is the denominator a progress
+      // indicator divides by, and a walk's own length is not knowable from where in it you stand.
+      expect(page.keys).toHaveLength(2);
+      expect(page.total).toBe(42);
+    });
+
+    test("walks the database the caller names rather than the one the session is in", async () => {
+      await provider.scanKeysPage({ cursor: "0", count: 10, database: 3 });
+      expect(capturedRedisOptions.at(-1)?.db).toBe(3);
+
+      await provider.scanKeysPage({ cursor: "0", count: 10 });
+      // No `database` names the session's own, which is the connection's `db` option (`baseConfig`
+      // declares none) and not a constant this provider keeps.
+      expect(capturedRedisOptions.at(-1)?.db).toBe(0);
+    });
+
+    test("passes a refusal through with the server's own sentence", async () => {
+      scanRefusal = "NOPERM this user has no permissions to run the 'scan' command";
+
+      await expect(provider.scanKeysPage({ cursor: "0", count: 10 })).rejects.toThrow(/NOPERM/);
     });
   });
 
