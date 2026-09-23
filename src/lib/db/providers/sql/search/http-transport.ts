@@ -69,6 +69,7 @@
  */
 
 import { DatabaseConfigError } from "@/lib/db/errors";
+import { endpointUrl, type HttpOrigin, httpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { DatabaseConnection } from "@/lib/db/types";
 import {
   type SearchClusterHealth,
@@ -617,11 +618,6 @@ function parseJson(text: string): unknown {
   }
 }
 
-/** Bracket a bare IPv6 literal, which is otherwise not a legal URL authority. */
-function formatHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-}
-
 /** A field the payload reported as usable text, or null when it reported none. */
 function textField(source: Record<string, unknown>, field: string): string | null {
   const value = source[field];
@@ -1098,7 +1094,7 @@ export class SearchHttpTransport implements SearchTransport {
   public readonly dialect: SearchDialectId;
 
   private readonly spec: SearchDialectSpec;
-  private readonly origin: string;
+  private readonly origin: HttpOrigin;
   private readonly authorization: string | undefined;
 
   constructor(dialect: SearchDialectId, config: DatabaseConnection) {
@@ -1109,8 +1105,7 @@ export class SearchHttpTransport implements SearchTransport {
     // an explicit mode turns it on (the #264 lesson). No connection-string parsing:
     // this provider is configured by host and port, like Druid.
     const secure = config.ssl !== undefined && config.ssl.mode !== "disable";
-    const host = formatHost(config.host ?? DEFAULT_HOST);
-    this.origin = `${secure ? "https" : "http"}://${host}:${config.port ?? DEFAULT_PORT}`;
+    this.origin = httpOrigin(secure ? "https" : "http", config.host ?? DEFAULT_HOST, config.port ?? DEFAULT_PORT);
     // Measured on both probe clusters, which run with security disabled: a bogus
     // `Basic` header is IGNORED (HTTP 200), so credentials are optional and sending
     // none is the normal local case. When they are configured they are for the
@@ -1177,11 +1172,11 @@ export class SearchHttpTransport implements SearchTransport {
    * stops early is closed on the way out, because that one IS server-side state.
    */
   public async query(sql: string, signal?: AbortSignal): Promise<SearchQueryResult> {
-    const path = `${this.spec.sqlPath}${this.spec.sqlQuery === "" ? "" : `?${this.spec.sqlQuery}`}`;
+    const url = this.url(this.spec.sqlPath, this.spec.sqlQuery);
 
     const first = asRecord(
       await this.request(
-        path,
+        url,
         signal,
         JSON.stringify({
           query: sql,
@@ -1196,7 +1191,7 @@ export class SearchHttpTransport implements SearchTransport {
     let pages = 1;
 
     while (cursor !== null && cursor !== "" && pages < MAX_PAGES) {
-      const next = asRecord(await this.request(path, signal, JSON.stringify({ cursor })));
+      const next = asRecord(await this.request(url, signal, JSON.stringify({ cursor })));
       if (next === null) throw unreadableBody(this.spec, "a SQL result page");
 
       // The column declaration is page one's; `result.fieldNames` is what the rows
@@ -1230,14 +1225,14 @@ export class SearchHttpTransport implements SearchTransport {
    */
   private async closeCursor(cursor: string, signal?: AbortSignal): Promise<void> {
     try {
-      await this.request(`${this.spec.sqlPath}/close`, signal, JSON.stringify({ cursor }));
+      await this.request(this.url(`${this.spec.sqlPath}/close`), signal, JSON.stringify({ cursor }));
     } catch {
       // Deliberately swallowed; see the doc comment.
     }
   }
 
   public async version(signal?: AbortSignal): Promise<{ version: string; product: string }> {
-    const version = asRecord(asRecord(await this.request(ROOT_PATH, signal))?.[VERSION_FIELDS.VERSION]);
+    const version = asRecord(asRecord(await this.request(this.url(ROOT_PATH), signal))?.[VERSION_FIELDS.VERSION]);
     if (version === null) throw unreadableBody(this.spec, "a version payload");
 
     return {
@@ -1247,7 +1242,7 @@ export class SearchHttpTransport implements SearchTransport {
   }
 
   public async indices(signal?: AbortSignal): Promise<SearchIndexInfo[]> {
-    const listing = await this.request(`${CAT_INDICES_PATH}?${CAT_INDICES_QUERY}`, signal);
+    const listing = await this.request(this.url(CAT_INDICES_PATH, CAT_INDICES_QUERY), signal);
     if (!Array.isArray(listing)) throw unreadableBody(this.spec, "an index listing");
 
     return (listing as unknown[]).flatMap((row) => {
@@ -1257,7 +1252,7 @@ export class SearchHttpTransport implements SearchTransport {
   }
 
   public async mapping(index: string, signal?: AbortSignal): Promise<SearchMappingField[]> {
-    const payload = asRecord(await this.request(`/${encodeURIComponent(index)}${MAPPING_SUFFIX}`, signal));
+    const payload = asRecord(await this.request(this.url(`/${encodeURIComponent(index)}${MAPPING_SUFFIX}`), signal));
     if (payload === null) throw unreadableBody(this.spec, "a mapping");
 
     // Keyed by the CONCRETE index name, which is not necessarily the name asked
@@ -1275,7 +1270,7 @@ export class SearchHttpTransport implements SearchTransport {
     const byIndex = new Map<string, SearchMappingField[]>();
 
     for (const chunk of mappingChunks(indices)) {
-      const payload = asRecord(await this.request(`/${chunk}${MAPPING_SUFFIX}`, signal));
+      const payload = asRecord(await this.request(this.url(`/${chunk}${MAPPING_SUFFIX}`), signal));
       if (payload === null) throw unreadableBody(this.spec, "a mapping");
 
       for (const [name, entry] of Object.entries(payload)) {
@@ -1298,7 +1293,7 @@ export class SearchHttpTransport implements SearchTransport {
    * verdict depends only on the name.
    */
   public async aliases(signal?: AbortSignal): Promise<SearchObjectInfo[]> {
-    const payload = asRecord(await this.request(ALIAS_PATH, signal));
+    const payload = asRecord(await this.request(this.url(ALIAS_PATH), signal));
     if (payload === null) throw unreadableBody(this.spec, "an alias listing");
 
     const byName = new Map<string, SearchObjectInfo>();
@@ -1327,7 +1322,7 @@ export class SearchHttpTransport implements SearchTransport {
    * {@link HTTP_NOT_FOUND}.
    */
   public async pipelines(signal?: AbortSignal): Promise<SearchObjectInfo[]> {
-    const body = await this.request(INGEST_PIPELINE_PATH, signal, undefined, LISTING_ABSENCE);
+    const body = await this.request(this.url(INGEST_PIPELINE_PATH), signal, undefined, LISTING_ABSENCE);
     if (body === null) return [];
 
     const payload = asRecord(body);
@@ -1338,7 +1333,7 @@ export class SearchHttpTransport implements SearchTransport {
 
   /** Every composable index template in the cluster (#789). */
   public async templates(signal?: AbortSignal): Promise<SearchObjectInfo[]> {
-    const payload = asRecord(await this.request(INDEX_TEMPLATE_PATH, signal));
+    const payload = asRecord(await this.request(this.url(INDEX_TEMPLATE_PATH), signal));
     if (payload === null) throw unreadableBody(this.spec, "an index template listing");
 
     return listedObjects(
@@ -1359,7 +1354,7 @@ export class SearchHttpTransport implements SearchTransport {
    * whereas a template nests its definition one level down.
    */
   public async dataStreams(signal?: AbortSignal): Promise<SearchObjectInfo[]> {
-    const payload = asRecord(await this.request(DATA_STREAM_PATH, signal));
+    const payload = asRecord(await this.request(this.url(DATA_STREAM_PATH), signal));
     if (payload === null) throw unreadableBody(this.spec, "a data stream listing");
 
     return listedObjects(
@@ -1391,7 +1386,7 @@ export class SearchHttpTransport implements SearchTransport {
    */
   public async pipelineSource(name: string, signal?: AbortSignal): Promise<SearchObjectDefinition | null> {
     const body = await this.request(
-      `${INGEST_PIPELINE_PATH}/${encodeURIComponent(name)}`,
+      this.url(`${INGEST_PIPELINE_PATH}/${encodeURIComponent(name)}`),
       signal,
       undefined,
       OBJECT_ABSENCE,
@@ -1420,7 +1415,7 @@ export class SearchHttpTransport implements SearchTransport {
    */
   public async templateSource(name: string, signal?: AbortSignal): Promise<SearchObjectDefinition | null> {
     const body = await this.request(
-      `${INDEX_TEMPLATE_PATH}/${encodeURIComponent(name)}`,
+      this.url(`${INDEX_TEMPLATE_PATH}/${encodeURIComponent(name)}`),
       signal,
       undefined,
       OBJECT_ABSENCE,
@@ -1448,7 +1443,7 @@ export class SearchHttpTransport implements SearchTransport {
   }
 
   public async health(signal?: AbortSignal): Promise<SearchClusterHealth> {
-    const health = asRecord(await this.request(CLUSTER_HEALTH_PATH, signal));
+    const health = asRecord(await this.request(this.url(CLUSTER_HEALTH_PATH), signal));
     if (health === null) throw unreadableBody(this.spec, "a cluster health payload");
 
     return {
@@ -1472,7 +1467,7 @@ export class SearchHttpTransport implements SearchTransport {
    */
   private async storeSizeBytes(signal?: AbortSignal): Promise<number | null> {
     try {
-      const stats = asRecord(await this.request(CLUSTER_STATS_PATH, signal));
+      const stats = asRecord(await this.request(this.url(CLUSTER_STATS_PATH), signal));
       const store = asRecord(asRecord(stats?.[STATS_FIELDS.INDICES])?.[STATS_FIELDS.STORE]);
 
       return toNumberOrNull(store?.[STATS_FIELDS.SIZE_IN_BYTES]);
@@ -1493,8 +1488,13 @@ export class SearchHttpTransport implements SearchTransport {
    * and a result envelope are read the same way - and so a non-OK response is
    * described by its body rather than by its status.
    */
+  /** One fixed path on the connection's origin, with the query string an endpoint needs. */
+  private url(pathname: string, query = ""): string {
+    return endpointUrl(this.origin, pathname, query === "" ? undefined : new URLSearchParams(query));
+  }
+
   private async request(
-    path: string,
+    url: string,
     signal?: AbortSignal,
     body?: string,
     /**
@@ -1507,7 +1507,7 @@ export class SearchHttpTransport implements SearchTransport {
     let response: Response;
     let text: string;
     try {
-      response = await fetch(`${this.origin}${path}`, {
+      response = await fetch(url, {
         method: body === undefined ? "GET" : "POST",
         headers: {
           // Sent on GETs too: harmless, and it keeps one header block for one
@@ -1517,6 +1517,8 @@ export class SearchHttpTransport implements SearchTransport {
           ...(this.authorization === undefined ? {} : { authorization: this.authorization }),
         },
         ...(body === undefined ? {} : { body }),
+        // A followed redirect would carry the credential to wherever it points.
+        redirect: "manual",
         ...(signal ? { signal } : {}),
       });
       text = await response.text();
@@ -1526,6 +1528,7 @@ export class SearchHttpTransport implements SearchTransport {
       throw requestFailure(this.spec, error, signal);
     }
 
+    rejectRedirect(response, url);
     // The BODY decides, not the status: an empty set carries `{}` while a refusal
     // carries the error envelope this file categorises everywhere else, and both
     // arrive with the same code (see {@link HTTP_NOT_FOUND}). A folder badged 0 where
