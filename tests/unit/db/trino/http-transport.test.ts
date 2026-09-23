@@ -38,6 +38,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { TrinoHttpTransport } from "@/lib/db/providers/sql/trino/http-transport";
 import { TRINO_DIALECT, type TrinoErrorCategory, TrinoTransportError } from "@/lib/db/providers/sql/trino/transport";
+import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
 import type { DatabaseConnection, DatabaseType } from "@/lib/db/types";
 
 // ============================================================================
@@ -53,6 +54,7 @@ interface FetchCall {
   method: string | undefined;
   headers: Record<string, string>;
   body: string | undefined;
+  redirect: RequestRedirect | undefined;
 }
 
 const originalFetch = globalThis.fetch;
@@ -336,6 +338,7 @@ beforeEach(() => {
       method: init?.method,
       headers: (init?.headers as Record<string, string> | undefined) ?? {},
       body: init?.body === undefined ? undefined : String(init.body),
+      redirect: init?.redirect,
     });
     return await handler(typeof input === "string" ? input : input.toString(), init);
   }) as unknown as typeof fetch;
@@ -521,6 +524,67 @@ describe("TrinoHttpTransport request", () => {
     await makeTransport({ ssl: { mode: "disable" } }).query("SELECT 1");
 
     expect(firstCall().url).toBe("http://127.0.0.1:8080/v1/statement");
+  });
+
+  // A host is spliced into nothing: one that would rewrite the URL around it is
+  // refused before the transport exists, so no request can carry the credential.
+  test.each(["evil.example/steal?", "user@evil.example", "db#x", "db\\evil", "db%2f", "db evil"])(
+    "refuses the host %p before any request is sent",
+    (host) => {
+      expect(() => makeTransport({ host })).toThrow(DatabaseConfigError);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  test.each([0, 65536, 1.5, "8080abc"])("refuses the port %p before any request is sent", (port) => {
+    expect(() => makeTransport({ port: port as number })).toThrow(DatabaseConfigError);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("TrinoHttpTransport redirects", () => {
+  const redirect = () =>
+    respond("", { status: 302, headers: { location: "https://evil.example:9443/steal?token=SECRET" } });
+  const running = `{"id":"${QUERY_ID}","nextUri":"${RUNNING_LINK}","stats":${RUNNING_STATS},"warnings":[]}`;
+
+  test("asks fetch not to follow a redirect on the submission, the next page and a cancel", async () => {
+    sequence(running, SINGLE_PAGE);
+    await makeTransport().query("SELECT 1");
+    await makeTransport().cancel(QUERY_ID);
+
+    expect(calls.map((call) => call.redirect)).toEqual(["manual", "manual", "manual"]);
+  });
+
+  test("refuses a 3xx submission with a ConnectionError naming only the target origin", async () => {
+    handler = redirect;
+
+    const error = await makeTransport()
+      .query("SELECT 1")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect((error as Error).message).toContain("HTTP 302");
+    expect((error as Error).message).toContain("https://evil.example:9443");
+    expect((error as Error).message).not.toContain("SECRET");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("refuses a 3xx next page and cancels the statement on its own coordinator", async () => {
+    let served = 0;
+    handler = (url) => {
+      served += 1;
+      if (served === 1) return respond(running);
+      return url.includes("/v1/query/") ? respond("") : redirect();
+    };
+
+    const error = await makeTransport()
+      .query("SELECT 1")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect(calls.map((call) => new URL(call.url).hostname)).not.toContain("evil.example");
+    expect(lastCall().method).toBe("DELETE");
+    expect(lastCall().url).toBe(`http://127.0.0.1:8080/v1/query/${QUERY_ID}`);
   });
 });
 
