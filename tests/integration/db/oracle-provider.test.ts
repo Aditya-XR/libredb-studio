@@ -586,6 +586,123 @@ describe("OracleProvider", () => {
       expect(provider.isConnected()).toBe(true);
     });
 
+    // -------------------------------------------------------------------------
+    // A failed connect must not orphan its pool (#1102).
+    //
+    // `createPool` resolves before anything is dialled in Thin mode, so the
+    // failure lands on the test borrow below and the pool already exists. Dropping
+    // the reference there leaves oracledb's background creator looping toward
+    // `poolMin` with no backoff and nothing able to stop it - measured at ~14,000
+    // connect attempts and one full core per second.
+    //
+    // These four arms count `close` calls rather than assert on `this.pool`
+    // alone: a pool can be unreferenced and still running, which is the defect.
+    // -------------------------------------------------------------------------
+
+    test("a getConnection failure closes the pool it just created", async () => {
+      const closeFn = mock(() => Promise.resolve());
+      const pool = {
+        getConnection: async () => {
+          throw new Error("NJS-503: connection to host 127.0.0.1 port 1521 could not be established");
+        },
+        close: closeFn,
+        connectionsOpen: 0,
+        connectionsInUse: 0,
+      };
+      mockCreatePoolFn = async () => pool;
+
+      await expect(provider.connect()).rejects.toThrow(ConnectionError);
+
+      expect(closeFn).toHaveBeenCalledTimes(1);
+      expect(closeFn).toHaveBeenCalledWith(0);
+      expect(provider.isConnected()).toBe(false);
+    });
+
+    test("the NJS-138 config path closes the pool too", async () => {
+      const closeFn = mock(() => Promise.resolve());
+      const pool = {
+        getConnection: async () => {
+          throw new Error(
+            "NJS-138: connections to this database server version are not supported by node-oracledb in Thin mode",
+          );
+        },
+        close: closeFn,
+        connectionsOpen: 0,
+        connectionsInUse: 0,
+      };
+      mockCreatePoolFn = async () => pool;
+
+      await expect(provider.connect()).rejects.toThrow(DatabaseConfigError);
+
+      expect(closeFn).toHaveBeenCalledTimes(1);
+      expect(closeFn).toHaveBeenCalledWith(0);
+      expect(provider.isConnected()).toBe(false);
+    });
+
+    test("a connect retried after a closed failure creates a new pool", async () => {
+      let createPoolCalls = 0;
+      let failFirst = true;
+
+      mockCreatePoolFn = async () => {
+        createPoolCalls += 1;
+        const shouldFail = failFirst;
+        failFirst = false;
+
+        return {
+          getConnection: async () => {
+            if (shouldFail) {
+              throw new Error("NJS-503: connection to host 127.0.0.1 port 1521 could not be established");
+            }
+            return createMockConnection();
+          },
+          close: async () => {},
+          connectionsOpen: 0,
+          connectionsInUse: 0,
+        };
+      };
+
+      await expect(provider.connect()).rejects.toThrow(ConnectionError);
+      expect(provider.isConnected()).toBe(false);
+
+      // `this.pool` has to be cleared, not just closed. Left set, the `if (this.pool)`
+      // guard at the top of connect() returns without dialling and without an error,
+      // so a caller that retries believes it is connected to nothing.
+      await provider.connect();
+
+      expect(createPoolCalls).toBe(2);
+      expect(provider.isConnected()).toBe(true);
+    });
+
+    test("a close that itself rejects does not replace the connect error", async () => {
+      const closeFn = mock(() => Promise.reject(new Error("NJS-501: connection is busy")));
+
+      mockCreatePoolFn = async () => ({
+        getConnection: async () => {
+          throw new Error("NJS-503: connection to host 127.0.0.1 port 1521 could not be established");
+        },
+        close: closeFn,
+        connectionsOpen: 0,
+        connectionsInUse: 0,
+      });
+
+      let caught: unknown;
+      try {
+        await provider.connect();
+      } catch (error) {
+        caught = error;
+      }
+
+      // The caller acts on the connect failure. A close failure is cleanup noise
+      // and must not become the reason a connect was refused.
+      expect(caught).toBeInstanceOf(ConnectionError);
+      expect((caught as Error).message).toContain("NJS-503");
+      expect((caught as Error).message).not.toContain("NJS-501");
+      // Asserting the close was attempted is what makes this arm fail on the
+      // unfixed code: without it the old path passes by never calling close.
+      expect(closeFn).toHaveBeenCalledTimes(1);
+      expect(provider.isConnected()).toBe(false);
+    });
+
     test("disconnect closes pool and marks disconnected", async () => {
       await provider.connect();
       await provider.disconnect();
