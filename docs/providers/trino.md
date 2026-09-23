@@ -528,6 +528,30 @@ listening.
 authentication disabled ([§3.6](#36-a-password-is-a-tls-only-credential)). A password on a plain-HTTP
 connection is refused by the transport constructor rather than sent and 401'd.
 
+
+### 4.4 Endpoint validation and redirects
+
+`host` and `port` are validated when the transport is constructed, which happens in `connect()`, so
+a bad value fails Test Connection and never a capability read. A host must be a hostname, an IPv4
+address or an IPv6 address (bracketed or not), and a port must be an integer from 1 to 65535.
+Anything else is a `DatabaseConfigError` that names the field and does not repeat the value.
+Every request URL is built by the shared [`endpoint.ts`](../../src/lib/db/http/endpoint.ts) with
+`URL` and `URLSearchParams` and checked against the intended hostname, port and path before it is
+sent, so no value can move a request to another path or another server. A scheme's default port
+(80 for `http`, 443 for `https`) is left out of the URL the way `URL` serializes it.
+
+Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx answer becomes a
+`ConnectionError` naming the status and only the origin of its `Location`, since a followed
+redirect would take the Basic credential and the statement to wherever the server pointed.
+
+Two things differ from the other HTTP transports. The constructor runs inside `connect()`'s guard
+(it also refuses a password over plain HTTP, [§3.6](#36-a-password-is-a-tls-only-credential)), so a
+refused host or port arrives wrapped in the connect failure, `Failed to connect to Trino: Invalid
+host: ...`. And the `nextUri` links the coordinator returns are requested as it sends them: they
+are never redirected, but they are not checked against the configured origin either. Holding them
+to that origin is a separate decision, since nothing here has measured which address a coordinator
+behind a proxy advertises.
+
 ---
 
 ## 5. Query interface

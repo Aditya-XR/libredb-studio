@@ -274,6 +274,7 @@ src/
     │   │   ├── document/    # mongodb, couchbase/ (transport seam + SQL++ over REST)
     │   │   ├── keyvalue/    # redis
     │   │   └── embedded/    # libredb (built-in embedded provider for the sample connection)
+    │   ├── http/            # endpoint.ts: the validated URL builder every HTTP transport uses (no redirects)
     │   ├── factory.ts       # Provider factory
     │   └── types.ts         # Database types
     ├── agent/               # Agent runtime: run ledger, workflow, tools, policy (docs/AGENT.md)

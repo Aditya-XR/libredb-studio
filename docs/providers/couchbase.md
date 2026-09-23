@@ -496,6 +496,32 @@ explicit `ssl.rejectUnauthorized` always wins
 (`buildTlsMaterial()`,
 [`http-transport.ts`](../../src/lib/db/providers/document/couchbase/http-transport.ts)).
 
+
+### 4.4 Endpoint validation and redirects
+
+`host` and `port` are validated when the transport is constructed, which happens in `connect()`, so
+a bad value fails Test Connection and never a capability read. A host must be a hostname, an IPv4
+address or an IPv6 address (bracketed or not), and a port must be an integer from 1 to 65535.
+Anything else is a `DatabaseConfigError` that names the field and does not repeat the value.
+Every request URL is built by the shared [`endpoint.ts`](../../src/lib/db/http/endpoint.ts) with
+`URL` and `URLSearchParams` and checked against the intended hostname, port and path before it is
+sent, so no value can move a request to another path or another server. A scheme's default port
+(80 for `http`, 443 for `https`) is left out of the URL the way `URL` serializes it.
+
+Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx answer becomes a
+`ConnectionError` naming the status and only the origin of its `Location`, since a followed
+redirect would take the Basic credential and the statement to wherever the server pointed.
+
+The host a request finally uses can come from somewhere other than the form: an SRV record for a
+host with no port, or the node addresses `/pools/default/nodeServices` reports
+([§3.3](#33-ports-are-discovered-not-configured)). Both go through the same builder, so an address
+the cluster reports that is not a valid host or port fails the query with a `DatabaseConfigError`
+before it is sent.
+
+The TLS path uses `node:https`, which does not follow a redirect on its own; a test pins that. A 3xx
+there is reported as an HTTP failure, `Couchbase request failed with HTTP 302`, rather than as the
+`ConnectionError` above.
+
 ---
 
 ## 5. Query interface
