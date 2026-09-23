@@ -111,11 +111,19 @@ function declaringProvider(walk?: (options: KeyScanOptions) => Promise<KeyScanPa
   return provider;
 }
 
-async function post(body: Record<string, unknown>) {
+/**
+ * Post a body and read the answer back.
+ *
+ * `T` is the caller's, and it is the reason this is generic: `parseResponseJSON<T>()` types its
+ * result as `T`, and `toEqual` will not compare a `T` against a bare `Record<string, unknown>`. The
+ * success case names `KeyScanPage`; every refusal case keeps the default, because a refusal body is
+ * read field by field.
+ */
+async function post<T = Record<string, unknown>>(body: Record<string, unknown>) {
   const response = await scanRoute.POST(
     createMockRequest("/api/db/keys/scan", { method: "POST", body: { connection: CONNECTION, ...body } }) as never,
   );
-  return { status: response.status, body: await parseResponseJSON<Record<string, unknown>>(response) };
+  return { status: response.status, body: await parseResponseJSON<T>(response) };
 }
 
 beforeEach(() => {
@@ -154,7 +162,7 @@ describe("POST /api/db/keys/scan", () => {
     const walk = mock(async () => PAGE);
     activeProvider = declaringProvider(walk);
 
-    const { status, body } = await post({});
+    const { status, body } = await post<KeyScanPage>({});
 
     expect(status).toBe(200);
     expect(body).toEqual(PAGE);

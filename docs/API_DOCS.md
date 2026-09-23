@@ -1015,6 +1015,87 @@ Neither event ever carries the statement, the command payload, the reader's text
 engine's message, the engine's code, the revision token or the plan token.
 A plan the seal refuses emits ONE event, with `reason: "object_edit_plan_invalid"`.
 
+#### POST /api/db/keys/scan
+
+One page of a resumable walk of an engine's own **key space**.
+
+This is not an object read and does not replace one. `listObjects` answers a whole folder in one call
+and is finite by definition, which is true of every catalog-backed engine and false of a key space:
+there is no prefix index to enumerate from, so the only way to learn what exists is `SCAN`, and `SCAN`
+answers a cursor rather than a listing. A caller that stops at one page holds a sample, and the only
+way to hold more is to come back with the cursor it was given. That is a different contract, so it is
+a route of its own rather than an option on the object routes.
+
+The walk is offered by an engine that declares `keyScan` in `POST /api/db/provider-meta`'s
+`capabilities`; Redis declares `{ "defaultCount": 500, "maxCount": 1000 }`. Every other connection
+answers `400`, in this route's own words. A provider that declares the capability and implements no
+walk is a distinct `500` rather than a crash: `ProviderCapabilities` is published, so that is a state
+an external implementer can genuinely be in.
+
+**Authentication:** Required.
+No admin gate, for the same reason the object routes have none: the role decides which connection may
+be OPENED and nothing about what may be read through it.
+
+**Request:**
+```json
+{
+  "connection": { "id": "conn-123", "type": "redis", "host": "localhost", "port": 6379 },
+  "cursor": "0",
+  "pattern": "app:cache:*",
+  "count": 500,
+  "database": 0
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `connection` or `connectionId` | object or string | Yes | The same connection selector every database route takes |
+| `cursor` | string | No | The cursor the previous page answered with. Absent means `"0"`, which starts a walk. Refused unless it is a run of digits — Redis cursors are opaque, and only the obviously malformed one is refused here rather than passed through |
+| `pattern` | string | No | A `MATCH` pattern, forwarded verbatim. Absent means every key, which is NOT the same as an empty string: `MATCH ""` is a pattern no key satisfies. Note that `MATCH` is applied per batch server-side and is not indexed, so a scoped walk still costs the server a full pass over the keyspace |
+| `count` | number | No | The batch size. Absent takes the provider's declared `defaultCount`. A value above the declared `maxCount` is **refused rather than clamped**, because a silent clamp answers a request for 10,000 with 1,000 and says nothing |
+| `database` | number | No | Which numbered database to walk. Absent means the one the session is in, since `SELECT` state lives on the connection and not in this route |
+
+**Response (200 OK):**
+
+```json
+{ "keys": ["app:cache:ttl", "app:cache:user:1"], "cursor": "17", "total": 31 }
+```
+
+| Field | Description |
+|-------|-------------|
+| `keys` | The batch. **Not deduplicated and not ordered** — `SCAN` promises neither, so a key present for the whole walk may be returned twice while the table rehashes, and the order is the hash table's rather than the caller's |
+| `cursor` | The cursor for the next page. `"0"` means the walk reached the end, and it is the only end-of-walk signal the engine publishes |
+| `total` | `DBSIZE` for the database walked: the engine's own key count, and the only denominator a progress indicator can divide by, since a cursor says nothing about how much is left. On a clustered deployment it is the LOCAL node's count — `SCAN` walks one node's slots and `DBSIZE` has no cluster-wide form |
+
+The cursor belongs to the CALLER. Nothing is retained between two pages, so a page costs a round trip
+rather than a session, and a cursor arriving after a reconnect is still valid: it is a position in a
+hash table, not a handle.
+
+**Statuses:**
+
+| Condition | Status | Body |
+|-----------|--------|------|
+| The page was read | `200` | the body above |
+| The connection's engine declares no `keyScan` | `400` | `{ "error": "<type> declares no key-space walk: its objects are enumerated from a catalog, so there is nothing to page" }` |
+| `cursor` is present and not a run of digits | `400` | `{ "error": "\"cursor\" must be a decimal cursor the previous page answered with" }` |
+| `pattern` is present but blank | `400` | `{ "error": "\"pattern\" must be a non-empty string" }` |
+| `count` is present and not a positive integer | `400` | `{ "error": "\"count\" must be a positive integer" }` |
+| `count` exceeds the declared `maxCount` | `400` | `{ "error": "\"count\" must be at most <maxCount>, which is the batch size this engine declares" }` |
+| `database` is negative or not an integer | `400` | `{ "error": "\"database\" must be a non-negative integer" }` |
+| The engine declares `keyScan` and implements no walk | `500` | `{ "error": "<type> declares keyScan but implements no scanKeysPage" }` |
+| Rate limited | `429` | `{ "error": "...", "code": "RATE_LIMITED" }` |
+
+A failed page does not advance the caller's cursor. The position already held is the last one the
+server acknowledged, so a retry re-asks the batch that failed rather than silently skipping it.
+
+The budget is SHARED and this route carries no bucket of its own: it meters into the `query` bucket
+through the same helper the object routes use, 120 requests per 60 seconds by default, so a person
+driving a walk spends the same allowance their statements do. That is why `Scan all` loops client-side
+on this route rather than asking the server for one unbounded walk.
+
+The sidebar's Keys panel drives this route; what it does with a sample is recorded in the Redis
+provider doc ([§6.2](providers/redis.md#62-the-key-space-walk-panel)).
+
 ---
 
 ### AI API

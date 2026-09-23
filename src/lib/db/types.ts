@@ -556,8 +556,8 @@ export interface ProviderCapabilities {
    *
    * OPTIONAL BECAUSE THIS INTERFACE IS PUBLISHED. A required field added after the fact stops
    * every external implementer from compiling — the same reason `supportsInlineRowEdit` is
-   * optional. Absent reads as "no such walk", which is the honest answer for the sixteen
-   * catalog-backed engines: they enumerate from a stored definition and have nothing to page.
+   * optional. Absent reads as "no such walk", which is the honest answer for the other sixteen
+   * shipped type ids: they enumerate what they hold from a catalog, so there is nothing to page.
    *
    * Present IMPLIES `scanKeysPage` is implemented, and a provider test enforces that pair the
    * way it already enforces `explainFormat` against `supportsExplain`. A declaration with no

@@ -61,6 +61,26 @@ mock.module("@/components/object-tree", () => ({
 }));
 
 // Mock radix scroll area to pass through children
+// The keys panel has its own suite and its own fetch double; here it is a stand-in that reports what
+// the sidebar handed it, because what the sidebar decides is the HANDOVER.
+mock.module("@/components/key-browser", () => ({
+  KeyBrowser: (props: Record<string, unknown>) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const React = require("react");
+    const connection = props.connection as Record<string, unknown> | undefined;
+    const capability = props.capability as Record<string, unknown> | undefined;
+    return React.createElement(
+      "div",
+      {
+        "data-testid": "key-browser",
+        "data-connection": String(connection?.id ?? "none"),
+        "data-default-count": String(capability?.defaultCount ?? "none"),
+      },
+      "KeyBrowser Mock",
+    );
+  },
+}));
+
 mock.module("@radix-ui/react-scroll-area", () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const React = require("react");
@@ -136,6 +156,19 @@ function createDefaultProps(overrides: Record<string, unknown> = {}) {
     onShowDiagram: mock(() => {}),
     ...overrides,
   };
+}
+
+/**
+ * A declaration that includes the key-space walk — what a provider with no catalog answers.
+ *
+ * Declared here rather than reused from a connection fixture, because the sidebar reads the
+ * DECLARATION and never the connection's type: a fixture named after an engine would suggest the
+ * panel keys off that name, which is the one thing it must not do.
+ */
+function walkMetadata(): ProviderMetadata {
+  return {
+    capabilities: { ...oneLevel, keyScan: { defaultCount: 500, maxCount: 1000 } },
+  } as unknown as ProviderMetadata;
 }
 
 describe("Sidebar", () => {
@@ -450,5 +483,68 @@ describe("Sidebar", () => {
     fireEvent.click(button);
 
     expect(props.onAddConnection).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The key browser is a SECOND READING of the same connection, offered where the engine declares
+   * one and absent everywhere else.
+   *
+   * The tab pair is driven by `capabilities.keyScan` and never by the connection's type, which is
+   * the rule the whole db layer runs on: a provider that gained the walk without being one of the
+   * engines this was written for gets the panel, and one that merely LOOKS like such an engine does
+   * not.
+   */
+  test("offers the key browser only where the engine declares a key-space walk", () => {
+    const withoutWalk = render(<Sidebar {...createDefaultProps()} />);
+    // A tree engine keeps the sidebar it had: no tab strip at all, rather than a disabled one.
+    expect(withoutWalk.queryByRole("tab", { name: "Keys" })).toBeNull();
+    expect(withoutWalk.queryByTestId("key-browser")).toBeNull();
+    withoutWalk.unmount();
+
+    const withWalk = render(<Sidebar {...createDefaultProps({ metadata: walkMetadata() })} />);
+    expect(withWalk.getByRole("tab", { name: "Objects" })).toBeDefined();
+    expect(withWalk.getByRole("tab", { name: "Keys" })).toBeDefined();
+    // The tree is what opens, because the panel is an addition rather than a replacement.
+    expect(withWalk.queryByTestId("object-tree")).not.toBeNull();
+    expect(withWalk.queryByTestId("key-browser")).toBeNull();
+  });
+
+  test("hands the panel the connection and the declared batch size when Keys is chosen", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+    });
+    const { getByRole, queryByTestId } = render(<Sidebar {...props} />);
+
+    fireEvent.click(getByRole("tab", { name: "Keys" }));
+
+    const panel = queryByTestId("key-browser");
+    expect(panel).not.toBeNull();
+    // The sidebar joins neither question: it hands over the connection and the declaration, and the
+    // panel decides what a batch is from the declaration rather than from a number here.
+    expect(panel?.getAttribute("data-connection")).toBe(mockPostgresConnection.id);
+    expect(panel?.getAttribute("data-default-count")).toBe("500");
+    expect(queryByTestId("object-tree")).toBeNull();
+
+    fireEvent.click(getByRole("tab", { name: "Objects" }));
+    expect(queryByTestId("object-tree")).not.toBeNull();
+    expect(queryByTestId("key-browser")).toBeNull();
+  });
+
+  test("falls back to the tree when the next connection declares no walk", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+    });
+    const { getByRole, queryByTestId, rerender } = render(<Sidebar {...props} />);
+    fireEvent.click(getByRole("tab", { name: "Keys" }));
+    expect(queryByTestId("key-browser")).not.toBeNull();
+
+    // Keys stays the reader's choice across connections — somebody switching between two servers of
+    // the same engine meant to keep looking at keys — so the CAPABILITY is what has to keep the
+    // choice honest, and an engine without the walk renders the tree with no tabs beside it.
+    rerender(<Sidebar {...createDefaultProps({ activeConnection: mockPostgresConnection })} />);
+    expect(queryByTestId("key-browser")).toBeNull();
+    expect(queryByTestId("object-tree")).not.toBeNull();
   });
 });

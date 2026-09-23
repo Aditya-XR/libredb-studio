@@ -7,6 +7,7 @@ import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
 import { Plus, Zap, Layers, LoaderCircle, CircleAlert } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ObjectTree, type ObjectSource, type TreeRowActionHandlers } from "@/components/object-tree";
+import { KeyBrowser } from "@/components/key-browser";
 import { GitHubRepoLink } from "@/components/github-repo-link";
 import { getAppVersion } from "@/lib/app-version";
 import { cn } from "@/lib/utils";
@@ -108,6 +109,19 @@ export function Sidebar({
   objectRefreshToken,
 }: SidebarProps) {
   const appVersion = getAppVersion();
+  /**
+   * Which reading of the active connection the panel below shows.
+   *
+   * `objects` is the default and stays the default for every engine: the key browser is an ADDITION
+   * to the sidebar rather than a replacement for the object tree, so an engine that gains the
+   * capability gains a tab and the other sixteen shipped type ids are untouched by it.
+   *
+   * Deliberately not reset when the connection changes. A reader who chose Keys and then switched
+   * between two Redis servers meant to keep looking at keys, and the capability check below is what
+   * keeps the choice honest: on an engine without the walk, `keys` renders the object tree anyway
+   * and the tabs are not drawn at all.
+   */
+  const [view, setView] = React.useState<"objects" | "keys">("objects");
 
   return (
     <div className="flex w-full h-full border-r border-border flex-col bg-background select-none">
@@ -173,22 +187,59 @@ export function Sidebar({
         absent `containerLevels` reads as depth 0, which is a REAL answer for five engines,
         so a placeholder declaration would make a one-level engine read the counts of a
         container that does not exist instead of listing its schemas.
+
+        THE PANEL IS A COLUMN, AND THE TREE IS ONE FLEX CHILD OF IT. The key browser above the
+        tree takes a line of its own, and `ObjectTree` measures its own scroll box against
+        `h-full` — so a tree left as a direct child of this box would be as tall as the box
+        INCLUDING the toggle, and overflow by exactly the toggle's height. `flex-1 min-h-0`
+        on the wrapper is what keeps that measurement answering the height the tree actually
+        has, which is the same reason the sidebar's own comment above refuses to nest it in a
+        ScrollArea.
       */}
       {activeConnection && (
-        <div className="flex-1 min-h-0 px-2 pb-4">
+        <div className="flex-1 min-h-0 px-2 pb-4 flex flex-col">
           {metadata ? (
-            <ObjectTree
-              connection={activeConnection}
-              capabilities={metadata.capabilities}
-              labels={metadata.labels}
-              deferred={objectScanDeferred}
-              onLoad={onLoadObjects}
-              onObjectClick={onObjectClick}
-              actions={objectActions}
-              source={objectSource}
-              readsColumns={objectReadsColumns}
-              refreshToken={objectRefreshToken}
-            />
+            <>
+              {metadata.capabilities.keyScan !== undefined && (
+                <div className="flex items-center gap-1 pb-2" role="tablist" aria-label="Sidebar view">
+                  {(["objects", "keys"] as const).map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      role="tab"
+                      aria-selected={view === option}
+                      onClick={() => setView(option)}
+                      className={cn(
+                        "rounded px-2 py-0.5 text-[10px] font-medium transition-colors",
+                        view === option
+                          ? "bg-accent text-foreground"
+                          : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                      )}
+                    >
+                      {option === "objects" ? "Objects" : "Keys"}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="flex-1 min-h-0">
+                {view === "keys" && metadata.capabilities.keyScan !== undefined ? (
+                  <KeyBrowser connection={activeConnection} capability={metadata.capabilities.keyScan} />
+                ) : (
+                  <ObjectTree
+                    connection={activeConnection}
+                    capabilities={metadata.capabilities}
+                    labels={metadata.labels}
+                    deferred={objectScanDeferred}
+                    onLoad={onLoadObjects}
+                    onObjectClick={onObjectClick}
+                    actions={objectActions}
+                    source={objectSource}
+                    readsColumns={objectReadsColumns}
+                    refreshToken={objectRefreshToken}
+                  />
+                )}
+              </div>
+            </>
           ) : metadataError !== null ? (
             <div
               data-testid="sidebar-provider-failure"

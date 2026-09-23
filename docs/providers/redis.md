@@ -204,6 +204,12 @@ keys with `TYPE` until it has observed up to **3 distinct** value-types — it m
 3 keys when they share a type — to populate the synthetic column metadata. The resulting
 object list is sorted by descending key count so the busiest prefixes surface first.
 
+That read is BOUNDED and one-shot: it stops at 1,000 keys and discards its cursor, so what it
+answers is a floor rather than a total. The keyspace walk below
+([§6.2](#62-the-key-space-walk-panel)) is the same grouping problem asked a different way — one the
+caller drives, one batch at a time, with the cursor kept. Both are bounded alike, which is why the
+walk's `maxCount` is the same 1,000 that `KEY_SCAN_LIMIT` puts on this one.
+
 ### 3.3 Generic command dispatch via `call()`
 
 Rather than hand-coding a method per Redis command, `runCommand()`
@@ -1247,6 +1253,78 @@ ran against. Nothing in the object surface ever sends `SELECT`.
 
 ---
 
+### 6.2 The key-space walk (panel)
+
+The object surface above answers "what is here" in one bounded read, and a catalog-backed engine can
+answer that way because a stored definition is enumerable in full. A key space cannot be: there is no
+prefix index to enumerate from, so the only way to learn what exists is `SCAN`, and `SCAN` answers a
+cursor rather than a listing. That is a different contract, so it is a different surface — a
+capability, an optional provider method, one route and a panel — rather than a flag on the object
+routes. (Flag-shaped options on those routes are how a whole-database eager read got built once
+before; see the `includeColumns` history in [§6.1](#61-the-object-surface-789).)
+
+| Piece | Where |
+|-------|-------|
+| `keyScan` | the declaration; absent on the catalog-backed engines ([§9](#9-capabilities--labels)) |
+| `scanKeysPage()` | `DatabaseProvider`'s optional method, implemented by this provider ([`redis.ts`](../../src/lib/db/providers/keyvalue/redis.ts)) |
+| `POST /api/db/keys/scan` | the route, gated on the declaration |
+| `KeyBrowser` | the sidebar panel, offered only where the declaration is present |
+
+One page carries four fields in and three out:
+
+```jsonc
+// in
+{ "cursor": "0", "pattern": "app:cache:*", "count": 500, "database": 0 }
+// out
+{ "keys": ["app:cache:ttl", "app:cache:user:1"], "cursor": "17", "total": 31 }
+```
+
+- **The caller owns the cursor.** Nothing is held between two calls, so a page is a round trip rather
+  than a session — and a cursor that arrives after a reconnect is still valid, because it is a
+  position in a hash table and not a handle.
+- **`DBSIZE` travels with every page** as `total`. It is O(1) on the server, and it is the only
+  denominator a progress indicator can divide by: a `SCAN` cursor says nothing about how much is
+  left, so no total can be computed from the batches a caller has already seen.
+- **No deduplication and no ordering.** `SCAN` promises neither — a key present for the whole walk is
+  returned at least once and may be returned twice while the table rehashes, and the order is the
+  hash table's. The panel merges what it receives into a tree by key name, while `scanned` counts what
+  the walk was handed, repeats included, because that is the number the progress line measures.
+- **A failure does not advance the cursor.** The position already held is the last one the server
+  acknowledged, so a retry re-asks the batch that failed rather than silently skipping it.
+- **The separator is fixed at `:`**, in `keyGrouping()`'s own sense. A configurable one would be a
+  choice this provider made and then had to keep consistent across a tree, a `MATCH` pattern and this
+  document, for a setting nothing else in the product has a use for.
+
+#### What the panel does
+
+- `Scanned n/m` — the walk's own count against `total`.
+- **Scan more** — one more batch from wherever the walk stands, refused while a page is in flight so
+  that two answers cannot advance from the position only one of them earned.
+- **Scan all** — pages until the cursor comes back `"0"`, **capped at 10,000 keys** and cancellable
+  between pages. The cap is a client budget and the panel says so in its own words when it ends a
+  walk: `SCAN` is O(N) over the whole keyspace, so an unbounded "all" against a key space of millions
+  is a request that never returns and a server that is busy while it does not.
+- **Filter** — narrows the tree the walk has ALREADY collected, client-side and without a request. A
+  matching segment keeps its whole subtree, and the folders that lead to a match are opened, because
+  a match left collapsed looks like no match at all.
+- **Pattern** — forwarded as `MATCH`, and a new pattern starts a NEW walk rather than appending to
+  the old one, whose keys are not answers to the question now being asked.
+
+Every refusal is 400 and in the route's own words: a `count` outside `[1, keyScan.maxCount]`
+(refused rather than clamped, because a silent clamp answers a request for 10,000 with 1,000 and says
+nothing), a `count` that is not a positive integer, a non-decimal `cursor`, an empty `pattern`, a
+negative `database`, and any engine declaring no `keyScan` at all. A provider that declares the
+capability and implements no method is a distinct 500 — the state an external implementer of the
+published interface can genuinely be in — rather than a `TypeError` that reads as a crash.
+
+#### Known limitation: clustered deployments
+
+`SCAN` walks one node's slots and `DBSIZE` counts one node's keys, and neither has a cluster-wide
+form. On `--cluster-enabled yes` the panel therefore walks and reports **the node the connection
+reached**, which is also why its database selector offers only database `0` there — cluster mode has
+no others ([§4.1](#41-configuration-fields)). A cluster-wide walk would need a cursor per node, which
+is deliberately not attempted: a partial answer labelled as partial beats a total nobody can compute.
+
 ## 7. Monitoring & health
 
 All monitoring derives from Redis introspection commands. `parseRedisInfo()` turns the `INFO` bulk
@@ -1337,6 +1415,7 @@ no control offers it.
 | `tablesAreDerivedGroupings` | `true` — the object surface SCANs a bounded slice of the keyspace and groups the real key names it found by their prefix, so a `user:*` row is this server's own summary and not a key any command can be given. The agent layer states this to a plan run, in one sentence, so a grounded run does not draft a command against a grouping. In the object tree it is what withholds Profile from a `keyspace` row ([§6.1](#61-the-object-surface-789)) |
 | `containerLevels` | one level, `schema`, labelled Database ([§6.1](#61-the-object-surface-789)) |
 | `objectKinds` | `keyspace` (relation) and `function` (routine, `hasSource`, `sourceLanguage: "lua"`). `function` is the only kind in this engine with a definition text, read through `FUNCTION LIST ... WITHCODE` ([§6.1](#61-the-object-surface-789)). Three further candidates are absent rather than declared and zero |
+| `keyScan` | `{ defaultCount: 500, maxCount: 1000 }` — the batch sizes this provider forwards for a resumable walk of the keyspace, and the declaration that gates the Keys panel ([§6.2](#62-the-key-space-walk-panel)). Declared here rather than defaulted at the call site so a panel and its provider cannot disagree about what a batch is |
 | `supportsMaintenance` | `true` |
 | `maintenanceOperations` | `['analyze']` |
 | `supportsConnectionString` | `false` |
@@ -1527,6 +1606,22 @@ To measure a cluster-mode container, which is the only deployment where the data
 docker run --rm -d --name libredb-redis-cluster -p 6400:6379 redis:latest redis-server --cluster-enabled yes
 docker exec libredb-redis-cluster redis-cli CONFIG GET databases   # -> 1
 ```
+
+### 11.6 The key-space walk tests
+
+Four files, and each one covers a seam the others cannot:
+
+| File | Covers |
+|------|--------|
+| `tests/integration/db/redis-provider.test.ts` | `scanKeysPage()` against the driver double: the cursor it sends, `MATCH` forwarded and omitted, the database it opens, the refusal it passes through, and the pairing of the `keyScan` declaration with the method that implements it |
+| `tests/api/db-keys-scan.test.ts` | the route: the capability gate, the declaration-without-a-method 500, and every parameter refusal |
+| `tests/hooks/use-key-scan.test.ts` | the walk: paging, the in-flight guard, the cap, Stop, a failure that must not be re-asked forever, and a page landing after unmount |
+| `tests/unit/components/key-browser-tree.test.ts` + `tests/components/key-browser/KeyBrowser.test.tsx` | the tree (`buildKeyTree()`, `flattenKeyTree()`, `filterKeyTree()` and their edge cases) and the panel that draws it |
+
+The tree's own suite pins the cases a naive builder gets wrong: a key that is also a prefix of
+another (`app` beside `app:env`), a key returned twice across two batches, empty segments (`:foo`,
+`foo:` and `a::b` are three distinct keys), and the numeric collation that puts `user:2` before
+`user:10`.
 
 ---
 
