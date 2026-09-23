@@ -4,6 +4,7 @@ import "../../helpers/mock-navigation";
 
 import { describe, test, expect, afterEach } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { mockGlobalFetch, restoreGlobalFetch, type MockFetchResponse } from "../../helpers/mock-fetch";
 
 import { KeyBrowser, type KeyPatternRequest } from "@/components/key-browser";
@@ -221,6 +222,40 @@ describe("KeyBrowser", () => {
 
     fireEvent.change(screen.getByLabelText("Filter the keys found"), { target: { value: "nothing-here" } });
     expect(screen.getByText("No key matches the filter")).toBeDefined();
+  });
+
+  test("finds a key by the path in its own name, not only by one of its segments", async () => {
+    mockGlobalFetch({
+      "/api/db/keys/scan": page(["queue:jobs:failed:2026:09:23:abc", "queue:other"], "0", 2),
+    });
+    renderBrowser();
+    await waitFor(() => {
+      expect(rows()).toEqual(["queue:*@0"]);
+    });
+
+    // A term with a `:` in it names a PATH, and no single segment can contain one: a segment-only
+    // test answered "no match" for the most specific input there is. Every folder on the way down is
+    // drawn and open, and the leaf is the key itself.
+    fireEvent.change(screen.getByLabelText("Filter the keys found"), {
+      target: { value: "queue:jobs:failed:2026:09:23" },
+    });
+    expect(rows()).toEqual([
+      "queue:*@0",
+      "jobs:*@1",
+      "failed:*@2",
+      "2026:*@3",
+      "09:*@4",
+      "23:*@5",
+      "queue:jobs:failed:2026:09:23:abc@6",
+    ]);
+
+    // And a middle fragment works too, which is what a reader has when they know a number.
+    fireEvent.change(screen.getByLabelText("Filter the keys found"), { target: { value: "09:23" } });
+    expect(rows()).toContain("queue:jobs:failed:2026:09:23:abc@6");
+
+    // The box says what it matches, because it takes two kinds of answer and the reader cannot tell
+    // which one it wants.
+    expect(screen.getByLabelText("Filter the keys found").getAttribute("title")).toContain("full name");
   });
 
   test("restarts the walk when the pattern changes", async () => {
@@ -605,10 +640,64 @@ describe("KeyBrowser", () => {
       expect(screen.getByTestId("key-browser-load-more")).toBeDefined();
     });
 
-    test("counts a folder's CHILDREN, not the keys under it", async () => {
-      // `app` can be opened to two rows and holds three keys, which is the whole point: a reader
-      // compares the badge against the list below it, and reading the deeper number as "children" is
-      // how a folder comes to look like it is missing rows.
+    test("says what a press did, and counts the keys under the prefix", async () => {
+      let call = 0;
+      mockGlobalFetch({
+        "/api/db/keys/scan": () => {
+          call += 1;
+          // The global page holds two keys and a live cursor; the scoped page answers with a key the
+          // tree already has, which is the answer that used to look like a dead button.
+          return call === 1 ? page(["app:env", "app:cache:ttl"], "9", 2) : page(["app:env"], "5", 2);
+        },
+      });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+
+      // Before the press: the number of keys this prefix holds, which is what the press is measured
+      // against, in the same right-hand column every other row keeps its number in.
+      expect(screen.getByTestId("key-browser-load-more-count").textContent).toBe("2 keys");
+      expect(screen.getByTestId("key-browser-load-more").textContent).toContain("Click to load more");
+
+      fireEvent.click(screen.getByTestId("key-browser-load-more"));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("key-browser-load-more").textContent).toContain("nothing new in that page");
+      });
+      // Nothing new is a true answer and it is NOT the same as never asked: absent means one thing and
+      // a page that added nothing means another, and the two must not read alike.
+      expect(screen.getByTestId("key-browser-load-more-count").textContent).toBe("2 keys");
+    });
+
+    test("reports the keys a press added", async () => {
+      let call = 0;
+      mockGlobalFetch({
+        "/api/db/keys/scan": () => {
+          call += 1;
+          return call === 1 ? page(["app:env"], "9", 2) : page(["app:cache:ttl", "app:env"], "5", 2);
+        },
+      });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+
+      fireEvent.click(screen.getByTestId("key-browser-load-more"));
+
+      // One of the two keys in the page was new, and the count is what the tree now holds.
+      await waitFor(() => {
+        expect(screen.getByTestId("key-browser-load-more").textContent).toContain("+1 new");
+      });
+      expect(screen.getByTestId("key-browser-load-more-count").textContent).toBe("2 keys");
+    });
+
+    test("counts the KEYS under a prefix, and keeps the row count on the tooltip", async () => {
+      // `app` can be opened to two rows and holds three keys, and the badge is the NUMBER OF KEYS:
+      // that is the number which moves as pages arrive, and the one a reader in front of a folder is
+      // asking about. The row count is the other half of the fact, and it is on the tooltip.
       mockGlobalFetch({ "/api/db/keys/scan": page(["app:a:1", "app:a:2", "app:b"], "0", 3) });
       renderBrowser();
       await waitFor(() => {
@@ -620,12 +709,11 @@ describe("KeyBrowser", () => {
       const appRow = screen
         .queryAllByRole("treeitem")
         .find((row) => row.querySelector("span.truncate")?.textContent === "app:*");
-      const badge = appRow?.querySelector("span.ml-auto");
-      expect(badge?.textContent).toBe("2");
-      // The number that is NOT shown is still reachable, because it answers a different question and
-      // hiding it altogether would make the badge look like an error.
-      expect(badge?.getAttribute("title")).toContain("3");
-      expect(badge?.getAttribute("title")).toContain("scanned keys");
+      const badge = appRow?.querySelector('[data-testid="key-browser-folder-count"]');
+      expect(badge?.textContent).toBe("3");
+      // The number that is NOT the badge is still reachable, because it answers a different question
+      // and hiding it altogether would make a folder look like it opens on nothing.
+      expect(badge?.getAttribute("title")).toContain("3 keys loaded under this prefix so far, in 2 rows");
     });
   });
 
@@ -654,7 +742,9 @@ describe("KeyBrowser", () => {
       // it: a request carrying it would ask for what the engine defaulted to, and the walk would
       // restart the moment this list arrived.
       expect(walksOf(fetchMock)).toEqual([{ connection: WIRE_CONNECTION, cursor: "0", count: 500 }]);
-      expect((screen.getByLabelText("Database") as HTMLSelectElement).value).toBe("0");
+      // The picker shows the database the walk is READING, which before any choice is the one the
+      // engine named as the session's own.
+      expect(screen.getByLabelText("Database").textContent).toBe("0");
     });
 
     test("restarts the walk in the database the reader chose", async () => {
@@ -664,7 +754,11 @@ describe("KeyBrowser", () => {
         expect(rows()).toEqual(["0@0", "app:*@1"]);
       });
 
-      fireEvent.change(screen.getByLabelText("Database"), { target: { value: "1" } });
+      // The project's own `Select` rather than a native one: its popup is the themed surface every
+      // other picker in the product opens, where a native `<option>` list is painted by the browser.
+      const user = userEvent.setup();
+      await user.click(screen.getByLabelText("Database"));
+      await user.click(await screen.findByRole("option", { name: "1" }));
 
       await waitFor(() => {
         expect(walksOf(fetchMock).filter((body) => body.database === 1)).toHaveLength(1);
@@ -675,6 +769,32 @@ describe("KeyBrowser", () => {
       await waitFor(() => {
         expect(rows()).toEqual(["1@0", "app:*@1"]);
       });
+      expect(screen.getByLabelText("Database").textContent).toBe("1");
+    });
+
+    test("offers the session's own database as a choice, and going back to it sends no number", async () => {
+      const fetchMock = mockGlobalFetch(redisRoutes(page(["app:env"], "0", 1531)));
+      renderLevel();
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1"]);
+      });
+
+      const user = userEvent.setup();
+      await user.click(screen.getByLabelText("Database"));
+      await user.click(await screen.findByRole("option", { name: "1" }));
+      await waitFor(() => {
+        expect(walksOf(fetchMock).at(-1)).toMatchObject({ database: 1 });
+      });
+
+      await user.click(screen.getByLabelText("Database"));
+      await user.click(await screen.findByRole("option", { name: "session" }));
+
+      // Back to the engine's own answer: the field goes back to being ABSENT rather than becoming a
+      // number this panel picked, which is the difference between "the session's" and "database 0".
+      await waitFor(() => {
+        expect(walksOf(fetchMock).at(-1)).not.toHaveProperty("database");
+      });
+      expect(screen.getByLabelText("Database").textContent).toBe("0");
     });
 
     test("collapses the database row without asking the server for anything", async () => {
@@ -708,7 +828,7 @@ describe("KeyBrowser", () => {
       // The list is a convenience and the walk is the feature: the panel keeps the keys it read, and
       // the choice stands down rather than offering databases nobody listed.
       expect(rows()).toEqual(["app:*@0"]);
-      expect((screen.getByLabelText("Database") as HTMLSelectElement).disabled).toBe(true);
+      expect((screen.getByLabelText("Database") as HTMLButtonElement).disabled).toBe(true);
       expect(screen.queryByTestId("key-browser-database")).toBeNull();
     });
 
@@ -725,6 +845,7 @@ describe("KeyBrowser", () => {
         expect(screen.getByTestId("key-browser-database")).toBeDefined();
       });
       expect(screen.getByTestId("key-browser-database").querySelector("span.truncate")?.textContent).toBe("main");
+      expect(screen.getByLabelText("Database").textContent).toBe("main");
       expect(walksOf(fetchMock).filter((body) => "database" in body)).toEqual([]);
     });
 

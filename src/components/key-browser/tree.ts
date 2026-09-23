@@ -217,27 +217,55 @@ export function isUnderPrefix(key: string, prefix: readonly string[]): boolean {
 /**
  * The tree narrowed to what a term matches, keeping the ancestors that lead to a match.
  *
- * A MATCHING SEGMENT KEEPS ITS WHOLE SUBTREE. Somebody who typed `cache` is asking for everything
- * under `cache` and not for the rows literally named `cache`, and a filter that also pruned below a
- * match would answer a narrower question than the one that was asked.
+ * THE TERM IS TESTED AGAINST THE WHOLE KEY NAME AND AGAINST ONE SEGMENT, and the two are different
+ * questions a reader asks in the same box. A single word (`cache`) names a segment and means "the
+ * branch called that", which is why a matching segment keeps its WHOLE subtree: somebody who typed
+ * `cache` is asking for everything under `cache`, not for the rows literally named `cache`. A term
+ * with a `:` in it (`queue:jobs:failed:2026:09:23`) names a PATH, and no segment can ever contain it
+ * — so a segment-only test answers "no match" for the one input that most obviously identifies a key,
+ * which is the defect this rule exists to close.
  *
  * The counts are the FULL sample's, not the narrowed tree's. A folder saying `3` while two of its
- * keys are filtered out is the honest answer — three keys are under it — and a count that fell to
- * the size of the current view would make the same folder read differently on every keystroke.
+ * keys are filtered out is the honest answer — three keys are under it — and a count that fell to the
+ * size of the current view would make the same folder read differently on every keystroke.
  */
 export function filterKeyTree(root: KeyTreeNode, term: string): KeyTreeNode {
-  const needle = term.trim().toLowerCase();
+  const needle = searchTerm(term);
   if (needle === "") return root;
   // Nothing matched: the root survives with no children, so a caller has one shape to draw an empty
   // state over rather than a null to remember to check.
-  return pruneKeyTree(root, needle) ?? { ...root, children: [] };
+  return pruneKeyTree(root, needle, "") ?? { ...root, children: [] };
 }
 
-function pruneKeyTree(node: KeyTreeNode, needle: string): KeyTreeNode | null {
-  if (node.segment.toLowerCase().includes(needle)) return node;
+/**
+ * What the box's text asks for, once it is trimmed and taken out of the form the tree ADVERTISES.
+ *
+ * A FOLDER IS DRAWN AS `app:*`, so a reader who copies one has typed a name no key has: no key
+ * contains a `*` unless the key itself does, and `app:*` would answer "no match" for exactly the
+ * branch the row above the box is showing. The trailing `:*` is therefore dropped, and only that
+ * form — a `*` anywhere else stays literal, because a real key segment may contain one (#427).
+ *
+ * An empty result is NO FILTER rather than a term nothing matches, which is what `:*` alone and an
+ * all-whitespace box both mean.
+ */
+function searchTerm(term: string): string {
+  const trimmed = term.trim().toLowerCase();
+  return trimmed.endsWith(`${KEY_SEPARATOR}*`) ? trimmed.slice(0, -2) : trimmed;
+}
+
+/**
+ * The node and the ancestors that lead to a match, or null.
+ *
+ * `prefix` is the parent's own full name, passed down rather than rebuilt by joining the path at
+ * every node: the walk already knows it, and a join per node per keystroke is work a filter does not
+ * need to do over ten thousand keys.
+ */
+function pruneKeyTree(node: KeyTreeNode, needle: string, prefix: string): KeyTreeNode | null {
+  const name = prefix === "" ? node.segment : `${prefix}${KEY_SEPARATOR}${node.segment}`;
+  if (node.segment.toLowerCase().includes(needle) || name.toLowerCase().includes(needle)) return node;
 
   const children = node.children
-    .map((child) => pruneKeyTree(child, needle))
+    .map((child) => pruneKeyTree(child, needle, name))
     .filter((child): child is KeyTreeNode => child !== null);
 
   return children.length === 0 ? null : { ...node, children };

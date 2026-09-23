@@ -413,6 +413,13 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
             onChange={(event) => setTerm(event.target.value)}
             placeholder="Filter the keys found"
             aria-label="Filter the keys found"
+            /*
+              WHAT IT MATCHES, on the row itself, because the box takes two kinds of answer and the
+              reader cannot tell which one it wants: a word names a SEGMENT (`cache`), and the rest of
+              a path names a KEY (`queue:jobs:failed:2026:09:23`). Both are answered — see
+              `filterKeyTree` — and the tooltip is where that is stated rather than guessed at.
+            */
+            title="Narrows the keys already loaded, without asking the server. Matches any part of a key's full name, or one of its `:`-separated segments."
             className="h-7 text-xs"
           />
         </div>

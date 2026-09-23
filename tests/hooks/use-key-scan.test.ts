@@ -681,7 +681,10 @@ describe("useKeyScan", () => {
         await result.current.loadMoreUnder(APP);
       });
 
-      expect(bodyAt(fetchMock, 0)).toMatchObject({ cursor: "0", pattern: APP_PATTERN, count: 500 });
+      // The batch is the LARGEST the engine declares rather than the global walk's default: a scoped
+      // walk is asked in PRESSES, and `MATCH` is not indexed, so a smaller batch does not make one
+      // press cheaper — it makes more of them for the same answer.
+      expect(bodyAt(fetchMock, 0)).toMatchObject({ cursor: "0", pattern: APP_PATTERN, count: 1000 });
       expect(result.current.keys).toEqual(["app:cache:ttl"]);
       expect(result.current.nodeCursors.get(pathKey(APP))).toBe("17");
     });

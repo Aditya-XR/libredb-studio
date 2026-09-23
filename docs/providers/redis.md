@@ -1373,9 +1373,16 @@ One page carries four fields in and four out:
   that are prefixes rather than objects — and asks `role === "relation"` as well, so a routine row is
   never offered a walk of a prefix it does not name. The panel applies the pattern once and then owns
   it: the reader can edit or clear it, and the same row asked for twice is not re-imposed on the box.
-- **Filter** — narrows the tree the walk has ALREADY collected, client-side and without a request. A
-  matching segment keeps its whole subtree, and the folders that lead to a match are opened, because
-  a match left collapsed looks like no match at all.
+- **Filter** — narrows the tree the walk has ALREADY collected, client-side and without a request. The
+  box takes two kinds of answer, because a reader has two: a **word** (`cache`, `123`, `HEALTH`) names a
+  segment and keeps that segment's WHOLE subtree — somebody who typed a branch name is asking for
+  everything under it — and **the rest of a name** (`queue:jobs:failed:2026:09:23`, `123:k`) names a
+  path, matched anywhere inside the full key name. A segment-only test answered "no match" for the most
+  specific input there is, which is the one a person types when they already know what they are looking
+  for. The tree's own advertised form is accepted too: a folder is drawn `app:*`, so that one trailing
+  `:*` is dropped from the term (a `*` anywhere else stays literal, because a real key segment may
+  contain one), and the folders that lead to a match are opened, because a match left collapsed looks
+  like no match at all.
 - **Pattern** — forwarded as `MATCH`, and a new pattern starts a NEW walk rather than appending to
   the old one, whose keys are not answers to the question now being asked. The page in the air when
   the question changes is dropped with it, so a sample can never hold two questions' keys.

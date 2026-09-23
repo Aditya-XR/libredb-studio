@@ -315,4 +315,91 @@ describe("filterKeyTree()", () => {
     expect(at(filtered, "user").count).toBe(at(root, "user").count);
     expect(filtered.count).toBe(root.count);
   });
+
+  /**
+   * A TERM WITH A `:` IN IT NAMES A PATH, and no single segment can contain one.
+   *
+   * The box takes two kinds of answer and a reader cannot tell which it wants: a word narrows to a
+   * branch, and the rest of a key's own name finds that key. A segment-only test answered "no match"
+   * for the most specific input there is — the one a person types when they already know what they
+   * are looking for.
+   */
+  describe("a term that names a path rather than a segment", () => {
+    const NESTED = ["queue:jobs:failed:2026:09:23:abc", "queue:jobs:ok:2026:10:01:def", "queue:other"];
+
+    test("finds the key and keeps the path that leads to it", () => {
+      const filtered = filterKeyTree(buildKeyTree(NESTED), "queue:jobs:failed:2026:09:23");
+
+      expect(segments(filtered)).toEqual(["queue"]);
+      expect(segments(at(filtered, "queue"))).toEqual(["jobs"]);
+      expect(segments(at(filtered, "queue", "jobs"))).toEqual(["failed"]);
+      expect(at(filtered, "queue", "jobs", "failed", "2026", "09", "23", "abc").isKey).toBe(true);
+      // The sibling branch under the same parent is gone: a path is a narrower question than a word.
+      expect(segments(at(filtered, "queue", "jobs"))).not.toContain("ok");
+    });
+
+    test("answers a partial path, which is what a reader has when they are still looking", () => {
+      const filtered = filterKeyTree(buildKeyTree(NESTED), "failed:2026:09");
+
+      expect(at(filtered, "queue", "jobs", "failed", "2026", "09", "23", "abc").isKey).toBe(true);
+      expect(segments(at(filtered, "queue", "jobs"))).not.toContain("ok");
+    });
+
+    test("keeps the WHOLE subtree of a folder whose own name is the match", () => {
+      const filtered = filterKeyTree(buildKeyTree(NESTED), "queue:jobs");
+
+      // `queue:jobs` is a path AND a branch: everything under it is what was asked for, exactly as
+      // when a single segment matches.
+      expect(segments(at(filtered, "queue", "jobs")).sort()).toEqual(["failed", "ok"]);
+      expect(filtered.children.length).toBe(1);
+    });
+
+    test("matches the full name without regard to case too", () => {
+      const filtered = filterKeyTree(buildKeyTree(NESTED), "QUEUE:JOBS:FAILED");
+
+      expect(at(filtered, "queue", "jobs", "failed", "2026", "09", "23", "abc").isKey).toBe(true);
+    });
+
+    test("answers a middle fragment, which is what a reader has when they know a number", () => {
+      const keys = ["app:123:kkk", "app:456:kkk"];
+
+      // `includes` and not `startsWith`: the box takes ANY part of a name, at any depth.
+      expect(segments(at(filterKeyTree(buildKeyTree(keys), "123"), "app"))).toEqual(["123"]);
+      expect(at(filterKeyTree(buildKeyTree(keys), "123"), "app", "123", "kkk").isKey).toBe(true);
+      expect(filterKeyTree(buildKeyTree(keys), "123").count).toBe(2);
+    });
+
+    test("answers a partial path that crosses a segment boundary", () => {
+      const keys = ["app:123:kkk", "app:123:mmm"];
+
+      // `123:k` is not a segment and not a key: it is the middle of one name, which is the shape a
+      // reader produces by reading the tree from left to right.
+      const filtered = filterKeyTree(buildKeyTree(keys), "123:k");
+
+      expect(segments(at(filtered, "app", "123"))).toEqual(["kkk"]);
+      expect(at(filtered, "app", "123", "kkk").isKey).toBe(true);
+    });
+
+    test("accepts a folder's advertised `prefix:*` form, which is what the row shows", () => {
+      const filtered = filterKeyTree(buildKeyTree(NESTED), "queue:jobs:*");
+
+      // The tree DRAWS a folder as `queue:jobs:*`, so a reader copying one has typed a `*` no key
+      // contains. Dropping that one trailing form is the difference between "no match" and the
+      // branch they were pointing at.
+      expect(segments(filtered)).toEqual(["queue"]);
+      expect(segments(at(filtered, "queue", "jobs")).sort()).toEqual(["failed", "ok"]);
+    });
+
+    test("keeps a `*` anywhere else literal, because a key may really contain one", () => {
+      const keys = ["odd*key:1", "oddkey:1"];
+
+      expect(segments(filterKeyTree(buildKeyTree(keys), "odd*k"))).toEqual(["odd*key"]);
+    });
+
+    test("treats `:*` alone as no filter rather than as a term nothing matches", () => {
+      const root = buildKeyTree(NESTED);
+
+      expect(filterKeyTree(root, ":*")).toBe(root);
+    });
+  });
 });
