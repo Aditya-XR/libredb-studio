@@ -255,6 +255,25 @@ export interface KeyScanPage {
   /** The cursor for the next batch. `"0"` means this walk reached the end. */
   readonly cursor: string;
   /**
+   * Each key's value type, by key name.
+   *
+   * IT TRAVELS WITH THE PAGE RATHER THAN BEING ASKED FOR SEPARATELY, because the type is what makes
+   * a key row readable and a panel that fetched it afterwards would draw a list without it and then
+   * fill it in. `TYPE` is a single-key command — Redis publishes no batch form — so the provider
+   * pipelines one per key in the page: the cost is ONE extra round trip per page whatever the page
+   * holds, not one per key.
+   *
+   * A KEY ABSENT FROM THIS MAP IS ONE WHOSE TYPE COULD NOT BE READ, and the honest thing to draw is
+   * nothing. A key that vanished between the walk and this read is present, with the server's own
+   * answer for it (`"none"`): a row the sample says is there, beside a type that says it is not, is
+   * a true pair and a reader can act on it.
+   *
+   * WHAT IT DESCRIBES IS THE MOMENT IT WAS READ. The walk is a sample and so is this: a key whose
+   * type changed between two pages is described by the earlier page's answer for as long as that
+   * answer is what the caller holds.
+   */
+  readonly types: Readonly<Record<string, string>>;
+  /**
    * The engine's own count of the keys in the database being walked — what a progress
    * indicator divides by.
    *

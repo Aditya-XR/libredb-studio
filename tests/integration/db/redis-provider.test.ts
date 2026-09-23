@@ -422,6 +422,15 @@ const capturedRedisOptions: Record<string, unknown>[] = [];
 let infoRefusal: string | null = null;
 
 /**
+ * How the next pipelined `TYPE` batch answers.
+ *
+ * `error` is one command the connection could not complete and `null` is a pipeline that answered
+ * nothing at all — both are real ioredis outcomes, both leave the provider with nothing truthful to
+ * record, and neither is reachable through the per-key `type()` double the grouping tests use.
+ */
+let pipelineMode: "ok" | "error" | "null" = "ok";
+
+/**
  * When set, `info()` answers with this string instead of `MOCK_INFO_STRING` - lets a test
  * simulate a relative that publishes an extra field (e.g. `dragonfly_version`) without a
  * second mock module.
@@ -484,6 +493,37 @@ mock.module("ioredis", () => {
      */
     async type(key: string) {
       return MOCK_KEY_TYPES[key] ?? "string";
+    }
+
+    /**
+     * A pipelined batch, which is how a key-space page reads its keys' types in one round trip.
+     *
+     * ONLY `TYPE` IS ACCEPTED, and anything else THROWS. A pipeline that silently answered the wrong
+     * shape for a command this provider had started pipelining would look like a page whose keys
+     * simply had no types — the failure would arrive as absent data rather than as a test that went
+     * red.
+     */
+    pipeline() {
+      const keys: string[] = [];
+      const chain = {
+        call: (command: string, ...args: (string | number)[]) => {
+          if (String(command).toUpperCase() !== "TYPE") {
+            throw new Error(`unexpected pipelined command: ${command}`);
+          }
+          keys.push(String(args[0]));
+          return chain;
+        },
+        exec: async (): Promise<[Error | null, unknown][] | null> => {
+          if (pipelineMode === "null") return null;
+          return Promise.all(
+            keys.map(async (key): Promise<[Error | null, unknown]> => {
+              if (pipelineMode === "error") return [new Error("ERR pipeline command failed"), null];
+              return [null, await this.type(key)];
+            }),
+          );
+        },
+      };
+      return chain;
     }
 
     async client(subcommand: string) {
@@ -794,6 +834,7 @@ describe("RedisProvider", () => {
       scanArgv.length = 0;
       scanRefusal = null;
       scanOverflows = false;
+      pipelineMode = "ok";
       capturedRedisOptions.length = 0;
       await provider.connect();
     });
@@ -854,6 +895,51 @@ describe("RedisProvider", () => {
       scanRefusal = "NOPERM this user has no permissions to run the 'scan' command";
 
       await expect(provider.scanKeysPage({ cursor: "0", count: 10 })).rejects.toThrow(/NOPERM/);
+    });
+
+    test("answers each key's type, so a row can be read without a second request", async () => {
+      scanPages = ["session:abc", "app:env"];
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
+
+      // IT TRAVELS WITH THE PAGE. A panel that asked for types afterwards would draw a list without
+      // them and fill them in, and the reader would watch rows change under the pointer. The two
+      // replies come from the same per-key double the grouping tests use, which is the point: this is
+      // one reading of one server, batched, and not a second opinion about it.
+      expect(answered.types).toEqual({ "session:abc": "hash", "app:env": "string" });
+    });
+
+    test("omits the keys whose type the connection could not read", async () => {
+      pipelineMode = "error";
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
+
+      // An absent entry is what a panel draws nothing for. Recording a guess — or `"string"`, the
+      // commonest answer — would be a claim about a value that nothing made.
+      expect(answered.keys.length).toBeGreaterThan(0);
+      expect(answered.types).toEqual({});
+    });
+
+    test("answers no types when the pipeline itself answered nothing", async () => {
+      pipelineMode = "null";
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
+
+      // A null `exec()` is a pipeline that never reported, which is a different failure from a
+      // command inside it refusing: both leave nothing truthful to record, and neither may throw.
+      expect(answered.keys.length).toBeGreaterThan(0);
+      expect(answered.types).toEqual({});
+    });
+
+    test("asks the server for no types at all when the page holds no keys", async () => {
+      scanPages = [];
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
+
+      // Not an optimisation for its own sake: an empty pipeline is a round trip whose answer is
+      // known before it is sent, and `MATCH` answers empty batches routinely.
+      expect(answered.keys).toEqual([]);
+      expect(answered.types).toEqual({});
     });
   });
 

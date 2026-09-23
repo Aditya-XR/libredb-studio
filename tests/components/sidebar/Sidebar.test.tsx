@@ -75,6 +75,7 @@ mock.module("@/components/key-browser", () => ({
         "data-testid": "key-browser",
         "data-connection": String(connection?.id ?? "none"),
         "data-default-count": String(capability?.defaultCount ?? "none"),
+        "data-has-open-key": String(props.onOpenKey !== undefined),
       },
       "KeyBrowser Mock",
     );
@@ -529,6 +530,22 @@ describe("Sidebar", () => {
     fireEvent.click(getByRole("tab", { name: "Objects" }));
     expect(queryByTestId("object-tree")).not.toBeNull();
     expect(queryByTestId("key-browser")).toBeNull();
+  });
+
+  test("hands the key browser the activation handler it was given", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+      onOpenKey: () => {},
+    });
+    const { getByRole, queryByTestId } = render(<Sidebar {...props} />);
+
+    fireEvent.click(getByRole("tab", { name: "Keys" }));
+
+    // Handed through and not acted on: the sidebar mounts the panel and joins neither question — what
+    // to open, and what a key's type means — exactly as it joins neither for the object tree's own
+    // row handlers.
+    expect(queryByTestId("key-browser")?.getAttribute("data-has-open-key")).toBe("true");
   });
 
   test("falls back to the tree when the next connection declares no walk", () => {

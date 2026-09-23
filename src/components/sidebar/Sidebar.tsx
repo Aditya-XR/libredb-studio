@@ -82,6 +82,14 @@ interface SidebarProps {
    * inventory; the embedded workspace does not, because its host runs the statements.
    */
   objectRefreshToken?: number;
+  /**
+   * A key the reader activated in the key browser, with the type the panel already knows for it.
+   *
+   * Handed through rather than acted on here: the sidebar mounts the panel and joins neither
+   * question — what to open, and what a key's type means — exactly as it joins neither for the
+   * object tree's own row handlers.
+   */
+  onOpenKey?: (key: string, type: string | null) => void;
 }
 
 export function Sidebar({
@@ -107,6 +115,7 @@ export function Sidebar({
   objectSource,
   objectReadsColumns,
   objectRefreshToken,
+  onOpenKey,
 }: SidebarProps) {
   const appVersion = getAppVersion();
   /**
@@ -223,7 +232,11 @@ export function Sidebar({
               )}
               <div className="flex-1 min-h-0">
                 {view === "keys" && metadata.capabilities.keyScan !== undefined ? (
-                  <KeyBrowser connection={activeConnection} capability={metadata.capabilities.keyScan} />
+                  <KeyBrowser
+                    connection={activeConnection}
+                    capability={metadata.capabilities.keyScan}
+                    onOpenKey={onOpenKey}
+                  />
                 ) : (
                   <ObjectTree
                     connection={activeConnection}

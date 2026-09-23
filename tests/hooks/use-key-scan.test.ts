@@ -55,9 +55,14 @@ function bodiesOf(fetchMock: { mock: { calls: unknown[][] } }): Record<string, u
   );
 }
 
-/** A page, in the shape the route answers with. */
-function page(keys: string[], cursor: string, total = 31): MockFetchResponse {
-  return { json: { keys, cursor, total } };
+/**
+ * A page, in the shape the route answers with.
+ *
+ * `types` is optional here because most of these tests are about the WALK; the ones that are about
+ * types pass it, and an absent map is the honest default — a page that described none.
+ */
+function page(keys: string[], cursor: string, total = 31, types: Record<string, string> = {}): MockFetchResponse {
+  return { json: { keys, cursor, total, types } };
 }
 
 describe("useKeyScan", () => {
@@ -136,6 +141,51 @@ describe("useKeyScan", () => {
 
     expect(result.current.keys).toEqual(["a", "b", "c"]);
     expect(result.current.scanned).toBe(4);
+  });
+
+  test("records each key's type as the page describes it", async () => {
+    mockGlobalFetch({
+      "/api/db/keys/scan": page(["session:abc", "app:env"], "0", 31, { "session:abc": "hash", "app:env": "string" }),
+    });
+    const { result } = hook();
+
+    await act(async () => {
+      await result.current.scanMore();
+    });
+
+    // The type arrives WITH the key it describes, which is the reason it is on the page at all: a row
+    // drawn now can never be drawn beside a type that is still on its way.
+    expect(result.current.types.get("session:abc")).toBe("hash");
+    expect(result.current.types.get("app:env")).toBe("string");
+  });
+
+  test("accumulates types across pages, and throws them away with the walk", async () => {
+    let call = 0;
+    mockGlobalFetch({
+      "/api/db/keys/scan": () => {
+        call += 1;
+        return call === 1 ? page(["a"], "1", 31, { a: "string" }) : page(["b"], "0", 31, { b: "list" });
+      },
+    });
+    const { result } = hook();
+
+    await act(async () => {
+      await result.current.scanMore();
+    });
+    await act(async () => {
+      await result.current.scanMore();
+    });
+    // The second page described only `b`, and `a` keeps what the first page said: the map is the
+    // server's answers accumulated, not the newest answer alone.
+    expect(result.current.types.get("a")).toBe("string");
+    expect(result.current.types.get("b")).toBe("list");
+
+    act(() => {
+      result.current.reset();
+    });
+    // A discarded walk's types describe keys that are no longer in the tree, and a stale type beside a
+    // fresh key of the same name would be a claim about the wrong value.
+    expect(result.current.types.size).toBe(0);
   });
 
   test("advances the cursor between pages", async () => {

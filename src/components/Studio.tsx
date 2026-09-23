@@ -29,7 +29,7 @@ import {
   BottomPanel,
 } from "@/components/studio/index";
 import { AgentRail } from "@/components/agent/AgentRail";
-import { DatabaseConnection, SavedQuery } from "@/lib/types";
+import { DatabaseConnection, type ColumnSchema, SavedQuery } from "@/lib/types";
 import type { DatabaseObject } from "@/lib/db/types";
 import { findKind, kindHasSource, relationKindIds } from "@/lib/db/object-kinds";
 import { httpSourceApplier, ObjectSourceView, type ObjectSourcePatch } from "@/components/object-source";
@@ -743,7 +743,7 @@ export default function Studio() {
   };
 
   /**
-   * Open and run the statement for one object, addressed by its PATH (#789).
+   * Every tab-opening gesture, and the ONE refusal they share (D82).
    *
    * REFUSED while an object apply is in flight, on the same rule and with the same words as the
    * new-tab shortcut (D82). This is the second door into that window and the only palette entry
@@ -752,17 +752,42 @@ export default function Studio() {
    * on `document`, so a reader inside the apply dialog can press it, search, and take the pane and
    * the dialog down with the statement already sent. The reasoning is in `refuseWhileApplying`.
    *
-   * The object tree and the mobile explorer funnel through here too. Both are covered and
-   * aria-hidden by the modal, so the guard is unreachable through them, and they are the `+`
-   * button's case: one funnel, one rule, no drift.
+   * ONE FUNNEL IS THE POINT rather than tidiness. The guard's value is that nothing can reach the
+   * window around it, so a second copy of it is a second place for it to be forgotten. The object
+   * tree, the mobile explorer and the key browser all arrive here, and the two gestures that are
+   * covered and aria-hidden by the modal are that same case: one funnel, one rule, no drift.
    */
-  const onTableClick = (path: readonly string[]) => {
+  const openTabFor = (path: readonly string[], columns?: readonly ColumnSchema[]) => {
     if (applyInFlight) {
       refuseWhileApplying();
       return;
     }
-    tabMgr.handleTableClick(path, queryExec.executeQuery);
+    // The third argument is passed only when there is one, so an object activation stays the
+    // two-argument call its readers and its tests describe.
+    if (columns === undefined) tabMgr.handleTableClick(path, queryExec.executeQuery);
+    else tabMgr.handleTableClick(path, queryExec.executeQuery, columns);
   };
+
+  /** Open and run the statement for one object, addressed by its PATH (#789). See `openTabFor`. */
+  const onTableClick = (path: readonly string[]) => openTabFor(path);
+
+  /**
+   * A key activated in the key browser.
+   *
+   * THE TYPE IS THE PAGE'S, so this asks the server for nothing before it opens a tab. The panel drew
+   * the row from a batch that described it, and re-reading it here would be a second opinion about a
+   * value between two requests — the same reason the panel's rows carry types at all.
+   *
+   * A key is NOT A SCHEMA NODE: the cache `handleTableClick` looks objects up in holds prefix groups,
+   * so the type is handed to it instead of looked up. That is also why a key no page described is
+   * passed as no columns at all — the generator's own unknown branch then opens the editor on
+   * `TYPE <key>`, which reports what the key is rather than opening a read nobody chose.
+   *
+   * The same refusal as every other tab-opening gesture, because a key activation ends in
+   * `setActiveTabId` too — and it is `openTabFor`'s rather than a second copy of it.
+   */
+  const onOpenKey = (key: string, type: string | null) =>
+    openTabFor([key], type === null ? [] : [{ name: "type", type, nullable: false, isPrimary: false }]);
 
   /**
    * A row activated in the object tree (#789).
@@ -931,6 +956,7 @@ export default function Studio() {
                 onReorderConnections={setConnectionOrder}
                 onAddConnection={() => setIsConnectionModalOpen(true)}
                 onObjectClick={onObjectClick}
+                onOpenKey={onOpenKey}
                 objectActions={objectActions}
                 onShowDiagram={() => setShowDiagram(true)}
                 metadata={metadata}

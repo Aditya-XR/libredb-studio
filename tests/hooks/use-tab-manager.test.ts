@@ -60,6 +60,23 @@ const defaultMetadata: ProviderMetadata = {
   },
 };
 
+/**
+ * The same labels over a Redis-shaped declaration.
+ *
+ * `queryDialect: "redis"` is what routes generation to the command grammar (#427); the labels are the
+ * postgres ones because nothing under test reads them, and copying twenty strings would suggest it
+ * does.
+ */
+const redisMetadata = {
+  capabilities: {
+    ...defaultMetadata.capabilities,
+    queryLanguage: "json",
+    queryDialect: "redis",
+    defaultPort: 6379,
+  },
+  labels: defaultMetadata.labels,
+} as ProviderMetadata;
+
 // Helper schema
 const testSchema: DetailedObject[] = [
   {
@@ -921,6 +938,53 @@ describe("useTabManager", () => {
     // currentTab should fall back to tabs[0]
     expect(result.current.currentTab).toBeDefined();
     expect(result.current.currentTab.id).toBe("default");
+  });
+
+  /**
+   * A key activated in the key browser.
+   *
+   * A key is NOT a schema node — the cache this hook looks objects up in holds prefix groups — so its
+   * type is handed in. The two tests below are the pair that makes the parameter load-bearing: the
+   * same path, the same cache, and the only difference is whether the caller knew the type.
+   */
+  test("handleTableClick generates from columns the caller supplies", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ type: "redis", port: 6379 }),
+        metadata: redisMetadata,
+        schema: testSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["videobackend:login:refreshToken:1"], executeFn, [
+        { name: "type", type: "hash", nullable: false, isPrimary: false },
+      ]);
+    });
+
+    // A READ, because the type was known: `HGETALL` rather than a probe for what the value is.
+    expect(result.current.tabs[1].query).toBe("HGETALL videobackend:login:refreshToken:1");
+  });
+
+  test("handleTableClick falls back to the type probe for a key nobody described", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ type: "redis", port: 6379 }),
+        metadata: redisMetadata,
+        schema: testSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["videobackend:login:refreshToken:1"], executeFn);
+    });
+
+    // The generator's own unknown branch (#427), reached because no schema node holds this key: the
+    // editor opens on a command that FINDS OUT what the key is, which is the honest answer when
+    // nobody knows — and it is exactly what the shell avoids by passing the type the page carried.
+    expect(result.current.tabs[1].query).toBe("TYPE videobackend:login:refreshToken:1");
   });
 
   test("handleTableClick without metadata uses fallback query", () => {

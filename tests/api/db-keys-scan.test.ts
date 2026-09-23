@@ -96,7 +96,12 @@ const CONNECTION = { id: "conn-1", name: "Local Redis", type: "redis", host: "12
 /** The batch sizes a Redis-shaped provider declares, so a bound exists to be exceeded. */
 const DECLARED = { defaultCount: 500, maxCount: 1000 };
 
-const PAGE: KeyScanPage = { keys: ["app:env", "app:cache:ttl"], cursor: "2", total: 31 };
+const PAGE: KeyScanPage = {
+  keys: ["app:env", "app:cache:ttl"],
+  cursor: "2",
+  total: 31,
+  types: { "app:env": "string", "app:cache:ttl": "string" },
+};
 
 /**
  * A provider that declares the walk, with the walk itself supplied per test.

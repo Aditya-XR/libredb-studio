@@ -24,16 +24,28 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { DatabaseConnection } from "@/lib/types";
 import type { KeyScanCapability } from "@/lib/db/types";
-import { buildKeyTree, filterKeyTree, flattenKeyTree, KEY_SEPARATOR, pathKey } from "./tree";
+import { buildKeyTree, filterKeyTree, flattenKeyTree, KEY_SEPARATOR, pathKey, type KeyTreeNode } from "./tree";
 import { useKeyScan } from "./use-key-scan";
 
 export interface KeyBrowserProps {
   readonly connection: DatabaseConnection;
   /** What this provider declares a batch to be. Absent means no walk, and the shell draws nothing. */
   readonly capability: KeyScanCapability;
+  /**
+   * A key the reader activated, with the type this panel already knows about it.
+   *
+   * THE TYPE COMES FROM THE PAGE, so activating a key costs no request of its own: the server sends
+   * each key's type with the batch it arrived in. `null` is a key no page described, and the shell
+   * decides what to do with that — refusing is as reasonable as opening the editor on a command that
+   * finds out.
+   *
+   * Absent means nobody is listening, and the rows are then not clickable: a row that looks
+   * actionable and does nothing is worse than one that plainly is not.
+   */
+  readonly onOpenKey?: (key: string, type: string | null) => void;
 }
 
-export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
+export function KeyBrowser({ connection, capability, onOpenKey }: KeyBrowserProps) {
   const [pattern, setPattern] = useState("");
   const [term, setTerm] = useState("");
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
@@ -42,6 +54,7 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
     keys,
     scanned,
     total,
+    types,
     busy,
     scanningAll,
     exhausted,
@@ -67,6 +80,20 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
     reset();
     void scanMore();
   }, [reset, scanMore]);
+
+  /**
+   * Hand a leaf to the shell, with the type this panel already has for it.
+   *
+   * A FOLDER IS NOT HANDED OVER: it has no value, so there is nothing to read and the shell has no
+   * command to open. Activating one opens it, which is what a reader means by clicking a folder.
+   */
+  const openKey = useCallback(
+    (node: KeyTreeNode) => {
+      const name = node.path.join(KEY_SEPARATOR);
+      onOpenKey?.(name, types.get(name) ?? null);
+    },
+    [onOpenKey, types],
+  );
 
   const openPath = useCallback(
     (path: readonly string[]) => {
@@ -254,12 +281,13 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
                 title={folder ? `${node.path.join(KEY_SEPARATOR)}:*` : node.path.join(KEY_SEPARATOR)}
                 onClick={() => {
                   if (folder) openPath(node.path);
+                  else openKey(node);
                 }}
                 onKeyDown={(event) => {
-                  if (folder && (event.key === "Enter" || event.key === " ")) {
-                    event.preventDefault();
-                    openPath(node.path);
-                  }
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  if (folder) openPath(node.path);
+                  else openKey(node);
                 }}
                 // The project's own row recipe: `8 + depth * 12`, the same induction the object tree
                 // uses, so a key two levels down lines up with a table two levels down.
@@ -267,7 +295,9 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
                 className={cn(
                   "flex h-6 cursor-default select-none items-center gap-1 rounded pr-1 outline-none hover:bg-accent",
                   "focus-visible:ring-1 focus-visible:ring-brand",
-                  folder && "cursor-pointer",
+                  // A leaf is actionable only when somebody will act on it, so the pointer follows the
+                  // wiring rather than the row's kind.
+                  (folder || onOpenKey !== undefined) && "cursor-pointer",
                 )}
               >
                 {folder ? (
@@ -299,12 +329,28 @@ export function KeyBrowser({ connection, capability }: KeyBrowserProps) {
                   "children" is how a folder comes to look like it is missing rows. That number is on
                   the row's tooltip instead.
                 */}
-                {folder && (
+                {folder ? (
                   <span
                     className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground"
                     title={`${node.count.toLocaleString("en-US")} scanned key${node.count === 1 ? "" : "s"} under this prefix`}
                   >
                     {node.children.length}
+                  </span>
+                ) : (
+                  /*
+                    A LEAF'S TYPE, in the same right-hand column the folders use for their count, so
+                    one edge carries "what this row is" for every row.
+                    
+                    NOTHING IS DRAWN WHEN THE SERVER HAS NOT SAID. The type travels with the page the
+                    key arrived in, so this is empty only where a page could not describe its keys —
+                    and an empty cell is the honest drawing, since a guess here would be a claim about
+                    the value that nobody made.
+                  */
+                  <span
+                    data-testid="key-browser-type"
+                    className="ml-auto shrink-0 pl-2 font-mono text-[10px] text-muted-foreground"
+                  >
+                    {types.get(node.path.join(KEY_SEPARATOR)) ?? ""}
                   </span>
                 )}
               </div>

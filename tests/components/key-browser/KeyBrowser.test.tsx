@@ -29,8 +29,9 @@ const CONNECTION: DatabaseConnection = {
 
 const CAPABILITY = { defaultCount: 500, maxCount: 1000 };
 
-function page(keys: string[], cursor: string, total = 31): MockFetchResponse {
-  return { json: { keys, cursor, total } };
+/** A page, in the shape the route answers with. An absent type map is a page that described none. */
+function page(keys: string[], cursor: string, total = 31, types: Record<string, string> = {}): MockFetchResponse {
+  return { json: { keys, cursor, total, types } };
 }
 
 /** The cursor the request carried. The helper hands a real `Request`, so its body is read once. */
@@ -39,8 +40,8 @@ async function cursorOf(req: Request): Promise<string> {
   return body.cursor ?? "0";
 }
 
-function renderBrowser(capability = CAPABILITY) {
-  return render(<KeyBrowser connection={CONNECTION} capability={capability} />);
+function renderBrowser(capability = CAPABILITY, onOpenKey?: (key: string, type: string | null) => void) {
+  return render(<KeyBrowser connection={CONNECTION} capability={capability} onOpenKey={onOpenKey} />);
 }
 
 /** The progress line's text, which is the one number the panel promises to keep honest. */
@@ -55,6 +56,16 @@ function rows(): string[] {
     const depth = (Number.parseInt(row.style.paddingLeft, 10) - 8) / 12;
     return `${label}@${depth}`;
   });
+}
+
+/** Each row's type cell, by row label. A row with no type cell reads as the empty string. */
+function typesByRow(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const row of screen.queryAllByRole("treeitem")) {
+    const label = row.querySelector("span.truncate")?.textContent ?? "";
+    out[label] = row.querySelector('[data-testid="key-browser-type"]')?.textContent ?? "";
+  }
+  return out;
 }
 
 describe("KeyBrowser", () => {
@@ -342,6 +353,113 @@ describe("KeyBrowser", () => {
     });
     // Three keys with no separator are three leaves at the top level, each its own segment.
     expect(rows()).toEqual(["a@0", "b@0", "c-2@0"]);
+  });
+
+  test("shows each key's type beside its name, and nothing for a key no page described", async () => {
+    mockGlobalFetch({
+      "/api/db/keys/scan": page(["app:env", "session:abc", "app:secret"], "0", 3, {
+        "app:env": "string",
+        "session:abc": "hash",
+      }),
+    });
+    renderBrowser();
+    await waitFor(() => {
+      expect(rows()).toEqual(["app:*@0", "session:*@0"]);
+    });
+    fireEvent.click(screen.getByText("app:*"));
+
+    // A FOLDER CARRIES NO TYPE — it has no value — and its child count sits in the same right-hand
+    // column, which is what keeps one edge answering "what is this row" for every row. `app:secret`
+    // was in the batch and NOT in the page's type map, and the empty cell is the honest drawing of a
+    // key the server did not describe: a guess would be a claim about the value that nobody made.
+    expect(typesByRow()).toEqual({
+      "app:*": "",
+      "app:env": "string",
+      "app:secret": "",
+      "session:*": "",
+    });
+  });
+
+  /**
+   * Activating a key, which is what turns the panel from a list into a way in.
+   *
+   * THE TYPE IS ALREADY HERE, so none of these tests expects a request: the page described its keys
+   * when it brought them, and that is what makes an activation free.
+   */
+  describe("activating a key", () => {
+    test("hands over the key and the type the page described", async () => {
+      const opened: Array<[string, string | null]> = [];
+      mockGlobalFetch({
+        "/api/db/keys/scan": page(["app:env", "app:secret"], "0", 2, { "app:env": "string" }),
+      });
+      renderBrowser(CAPABILITY, (key, type) => opened.push([key, type]));
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+
+      fireEvent.click(screen.getByText("app:env"));
+      expect(opened).toEqual([["app:env", "string"]]);
+
+      fireEvent.click(screen.getByText("app:secret"));
+      // A key no page described is handed over as `null` rather than guessed at: what to do about a
+      // key nobody described is the shell's decision, and a type invented here would be this panel's.
+      expect(opened[1]).toEqual(["app:secret", null]);
+    });
+
+    test("opens a folder instead of activating it", async () => {
+      const opened: Array<[string, string | null]> = [];
+      mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "0", 1, { "app:env": "string" }) });
+      renderBrowser(CAPABILITY, (key, type) => opened.push([key, type]));
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+
+      fireEvent.click(screen.getByText("app:*"));
+
+      // A prefix has no value, so there is nothing to read and the press tells nobody: a reader who
+      // clicks a folder means "open it".
+      expect(opened).toEqual([]);
+      expect(rows()).toEqual(["app:*@0", "app:env@1"]);
+    });
+
+    test("activates from the keyboard as well as the pointer", async () => {
+      const opened: Array<[string, string | null]> = [];
+      mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "0", 1, { "app:env": "string" }) });
+      renderBrowser(CAPABILITY, (key, type) => opened.push([key, type]));
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+
+      fireEvent.keyDown(screen.getByText("app:env"), { key: "Enter" });
+      fireEvent.keyDown(screen.getByText("app:env"), { key: " " });
+      expect(opened).toEqual([
+        ["app:env", "string"],
+        ["app:env", "string"],
+      ]);
+
+      // Any other key is not an activation, so a stray press does not open a tab.
+      fireEvent.keyDown(screen.getByText("app:env"), { key: "Tab" });
+      expect(opened).toHaveLength(2);
+    });
+
+    test("is not actionable when nobody is listening", async () => {
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": page(["app:env"], "0", 1, { "app:env": "string" }),
+      });
+      renderBrowser();
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+
+      // A row that looks actionable and does nothing is worse than one that plainly is not, so the
+      // click is a no-op — nothing opens, nothing is fetched, and the tree does not move.
+      fireEvent.click(screen.getByText("app:env"));
+      expect(rows()).toEqual(["app:*@0", "app:env@1"]);
+      expect(fetchMock.mock.calls.length).toBe(1);
+    });
   });
 
   /**

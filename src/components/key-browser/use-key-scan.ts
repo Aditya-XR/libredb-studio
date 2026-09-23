@@ -50,6 +50,14 @@ export interface KeyScanResult {
   readonly scanned: number;
   /** The server's own key count for the database, or null before the first page answers. */
   readonly total: number | null;
+  /**
+   * Each key's value type, by key name, as last answered by the server.
+   *
+   * A KEY ABSENT FROM THIS MAP IS ONE NO PAGE HAS DESCRIBED, and a row draws nothing for it rather
+   * than guessing — see `KeyScanPage.types`. Types arrive WITH their page, so a row is never drawn
+   * beside a type that is still on its way.
+   */
+  readonly types: ReadonlyMap<string, string>;
   /** True while one page is in flight. */
   readonly busy: boolean;
   /** True while a `Scan all` is running, so the panel can offer `Stop` rather than a second press. */
@@ -109,6 +117,7 @@ export function useKeyScan(options: {
   const [error, setError] = useState<string | null>(null);
   const [nodeCursors, setNodeCursors] = useState<ReadonlyMap<string, string>>(new Map());
   const [nodeLoading, setNodeLoading] = useState<ReadonlySet<string>>(new Set());
+  const [types, setTypes] = useState<ReadonlyMap<string, string>>(new Map());
 
   /*
    * Refs, not state, and the reason is the loop rather than performance. `scanAll` takes several
@@ -141,6 +150,12 @@ export function useKeyScan(options: {
    */
   const nodeCursor = useRef(new Map<string, string>());
   const nodeInFlight = useRef(new Set<string>());
+  /*
+   * The types the server has answered with, accumulated across pages. In a ref beside its mirror for
+   * the same reason the cursors are: a page records what it learned before the next decision, and a
+   * row has to render it.
+   */
+  const knownTypes = useRef(new Map<string, string>());
 
   useEffect(() => {
     // Set on the way IN as well as cleared on the way out: React runs an effect twice on one mount
@@ -179,7 +194,7 @@ export function useKeyScan(options: {
       if (!response.ok) {
         throw new Error(body.error ?? `The key walk failed with HTTP ${response.status}`);
       }
-      return { keys: body.keys ?? [], cursor: body.cursor ?? "0", total: body.total ?? 0 };
+      return { keys: body.keys ?? [], cursor: body.cursor ?? "0", total: body.total ?? 0, types: body.types ?? {} };
     },
     [connection, capability],
   );
@@ -194,6 +209,19 @@ export function useKeyScan(options: {
     const fresh = names.filter((name) => !walked.current.has(name));
     for (const name of fresh) walked.current.add(name);
     return fresh;
+  }, []);
+
+  /**
+   * Record what a page said about its keys' types.
+   *
+   * ONE WRITE PER PAGE, and the mirror is REPLACED rather than mutated, because React compares the
+   * reference: a map mutated in place would render as unchanged and the type would never appear.
+   */
+  const absorbTypes = useCallback((page: KeyScanPage): void => {
+    const entries = Object.entries(page.types);
+    if (entries.length === 0) return;
+    for (const [name, type] of entries) knownTypes.current.set(name, type);
+    setTypes(new Map(knownTypes.current));
   }, []);
 
   const scanMore = useCallback(async (): Promise<void> => {
@@ -211,6 +239,7 @@ export function useKeyScan(options: {
       scannedKeys.current += page.keys.length;
       failure.current = null;
       const fresh = absorb(page.keys);
+      absorbTypes(page);
       setKeys((previous) => (fresh.length === 0 ? previous : [...previous, ...fresh]));
       setScanned(scannedKeys.current);
       setTotal(page.total);
@@ -233,7 +262,7 @@ export function useKeyScan(options: {
       running.current = false;
       if (alive.current) setBusy(false);
     }
-  }, [absorb, pattern, readPageAt]);
+  }, [absorb, absorbTypes, pattern, readPageAt]);
 
   const scanAll = useCallback(async (): Promise<void> => {
     if (running.current) return;
@@ -315,15 +344,13 @@ export function useKeyScan(options: {
          * REAL key names, so it must stay unescaped, and a caller that escaped those would corrupt
          * a literal key that genuinely contains `*`.
          */
-        const page = await readPageAt(
-          nodeCursor.current.get(key) ?? "0",
-          `${escapeGlob(path.join(KEY_SEPARATOR))}:*`,
-        );
+        const page = await readPageAt(nodeCursor.current.get(key) ?? "0", `${escapeGlob(path.join(KEY_SEPARATOR))}:*`);
         if (!alive.current) return;
         nodeCursor.current.set(key, page.cursor);
         setNodeCursors(new Map(nodeCursor.current));
 
         const fresh = absorb(page.keys.filter((name) => isUnderPrefix(name, path)));
+        absorbTypes(page);
         setKeys((previous) => (fresh.length === 0 ? previous : [...previous, ...fresh]));
         setError(null);
       } catch (thrown) {
@@ -343,7 +370,7 @@ export function useKeyScan(options: {
         }
       }
     },
-    [absorb, readPageAt],
+    [absorb, absorbTypes, readPageAt],
   );
 
   const stop = useCallback((): void => {
@@ -363,6 +390,7 @@ export function useKeyScan(options: {
     nodeCursor.current.clear();
     nodeInFlight.current.clear();
     walked.current.clear();
+    knownTypes.current.clear();
     setKeys([]);
     setScanned(0);
     setTotal(null);
@@ -371,12 +399,14 @@ export function useKeyScan(options: {
     setError(null);
     setNodeCursors(new Map());
     setNodeLoading(new Set());
+    setTypes(new Map());
   }, []);
 
   return {
     keys,
     scanned,
     total,
+    types,
     busy,
     scanningAll,
     exhausted,

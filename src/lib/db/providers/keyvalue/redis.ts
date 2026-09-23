@@ -348,6 +348,42 @@ function keyGrouping(key: string): string {
 }
 
 /**
+ * Every key's value type in ONE page, in ONE round trip.
+ *
+ * `TYPE` TAKES ONE KEY AND REDIS PUBLISHES NO BATCH FORM, so the alternative to this is one call per
+ * key: at the default batch of 500 that is five hundred round trips for a list somebody is waiting
+ * to look at, and the cost of the walk would stop being the walk. ioredis pipelines them instead, so
+ * the page costs one extra round trip whatever it holds.
+ *
+ * The repository already reads key types one at a time (`scanKeyGroups` probes `TYPE` until it has
+ * seen three distinct types under a prefix); this is the same reading, batched, and it is a
+ * DIFFERENT question from that one: a grouping's columns answer "what kinds live under this
+ * prefix", and this answers "what is this key", which is what a row beside a name needs.
+ *
+ * A KEY THAT VANISHED answers `"none"` — the server's own word for an absent key — and that word is
+ * KEPT rather than filtered out: a row the sample says is there, beside a type that says it is not,
+ * is a true pair, and dropping the entry would draw the key as merely unreadable. Only a transport
+ * failure omits an entry, because then there is genuinely nothing to show.
+ */
+async function readKeyTypes(client: Redis, keys: readonly string[]): Promise<Record<string, string>> {
+  if (keys.length === 0) return {};
+
+  const pipeline = client.pipeline();
+  for (const key of keys) pipeline.call("TYPE", key);
+  const replies = await pipeline.exec();
+  if (replies === null) return {};
+
+  const types: Record<string, string> = {};
+  replies.forEach(([error, reply], index) => {
+    const key = keys[index];
+    // `error === null` is a reply; anything else is a command this connection could not complete,
+    // and there is nothing truthful to record for that key.
+    if (error === null && typeof reply === "string") types[key] = reply;
+  });
+  return types;
+}
+
+/**
  * The three columns every row of a key grouping has, DERIVED rather than read from a
  * catalog: Redis publishes no schema for a key, so these are this provider's own statement
  * about the shape a `SCAN` row comes back in. `key` is the real key name and is the primary
@@ -1474,7 +1510,9 @@ export class RedisProvider extends BaseDatabaseProvider {
         ? await client.scan(options.cursor, "MATCH", options.pattern, "COUNT", options.count)
         : await client.scan(options.cursor, "COUNT", options.count);
       const total = await client.dbsize();
-      return { keys, cursor, total };
+      // ONE EXTRA ROUND TRIP FOR THE WHOLE PAGE, not one per key: see `readKeyTypes`.
+      const types = await readKeyTypes(client, keys);
+      return { keys, cursor, total, types };
     });
   }
 

@@ -924,6 +924,37 @@ describe("Studio", () => {
     expect(mockHandleTableClick).not.toHaveBeenCalled();
   });
 
+  /**
+   * A key activated in the key browser.
+   *
+   * The TYPE arrives with the key, from the page that described it, so what this opens is a READ —
+   * no probe, and no request of its own. The carrier column travels through `handleTableClick`'s
+   * override because a key is not a schema node: the cache that hook looks objects up in holds prefix
+   * groups, and there is no key in it to read a type off.
+   */
+  test("a key activated in the key browser opens the read its type calls for", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null) => void;
+
+    act(() => fn("videobackend:login:refreshToken:1", "hash"));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["videobackend:login:refreshToken:1"], mockExecuteQuery, [
+      { name: "type", type: "hash", nullable: false, isPrimary: false },
+    ]);
+  });
+
+  test("a key no page described is handed over with no type at all", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null) => void;
+
+    act(() => fn("videobackend:login:refreshToken:1", null));
+
+    // Not a guess and not the commonest type: NO columns is what sends the generator to its own
+    // unknown branch, and the editor opens on `TYPE <key>` — a command that reports what the key is
+    // rather than opening a read nobody chose.
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["videobackend:login:refreshToken:1"], mockExecuteQuery, []);
+  });
+
   // --- objectActions: the row menu's six, restored (U22, #789) ---
   //
   // WHICH of them a row is offered is the provider's declaration and is asserted against

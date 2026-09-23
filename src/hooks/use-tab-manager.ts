@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { toast } from "sonner";
-import type { DatabaseConnection, QueryTab } from "@/lib/types";
+import type { ColumnSchema, DatabaseConnection, QueryTab } from "@/lib/types";
 import type { DatabaseObject } from "@/lib/db/types";
 import type { DetailedObject } from "@/lib/db/detailed-object";
 import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
@@ -353,14 +353,28 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
    * Takes executeQuery as a callback param to avoid a circular dependency.
    */
   const handleTableClick = useCallback(
-    (path: readonly string[], executeQueryFn: RunTabStatement) => {
+    (
+      path: readonly string[],
+      executeQueryFn: RunTabStatement,
+      /**
+       * Columns to generate from, for an object the schema cache does NOT hold.
+       *
+       * The Redis generator is type-aware and reads a key's type off a `type` column (#427), which
+       * the schema carries for a prefix GROUP and cannot for one key: a key is not a schema node. The
+       * key browser knows the type already — the server sends each key's type with the page it
+       * arrived in — so it hands it over. The alternative is worse than one more parameter: the
+       * generator would fall back to asking `TYPE`, and the editor would open on a command that only
+       * reports the type of the value nobody has read yet.
+       */
+      columnsOverride?: readonly ColumnSchema[],
+    ) => {
       const capabilities = metadata?.capabilities;
       const tableName = objectSegment(path);
       // Look the object up exactly as handleGenerateSelect does: the Redis generator is
       // type-aware, and the sampled key type lives on the schema node's `type` column (#427).
       const key = pathKey(path);
       const table = schema.find((t) => pathKey(t.path) === key);
-      const columns = table?.columns || [];
+      const columns = columnsOverride ?? table?.columns ?? [];
       const newQuery = capabilities
         ? generateTableQuery(path, capabilities, columns)
         : `SELECT * FROM ${path.join(".")};`;
