@@ -489,8 +489,8 @@ export class LibSQLHranaTransport implements LibSQLTransport {
       throw new LibSQLTransportError(`libSQL request failed: ${reason}`, 0);
     }
 
-    rejectRedirect(response, url);
     const text = await response.text();
+    rejectRedirect(response, url);
     if (!response.ok) throw httpError(response.status, text);
     return text;
   }

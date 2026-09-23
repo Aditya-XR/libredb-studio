@@ -288,8 +288,9 @@ async function fetchJson(url: string, init: JsonRequestInit): Promise<JsonRespon
   } catch (error) {
     throw networkError(error);
   }
+  const text = await response.text();
   rejectRedirect(response, url);
-  return { httpCode: response.status, payload: parseJsonBody(await response.text()) };
+  return { httpCode: response.status, payload: parseJsonBody(text) };
 }
 
 /**

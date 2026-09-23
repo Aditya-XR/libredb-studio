@@ -563,6 +563,16 @@ describe("CouchbaseHttpTransport endpoint validation", () => {
 });
 
 describe("CouchbaseHttpTransport redirects", () => {
+  // Drained like any other answer, so the socket goes back to the pool instead of
+  // being held by a body nobody reads.
+  test("reads the redirect's body before refusing it", async () => {
+    const redirect = new Response("moved", { status: 302, headers: { location: "https://evil.example/" } });
+    handler = () => redirect;
+
+    await expect(makeTransport().manage("/pools/default")).rejects.toBeInstanceOf(ConnectionError);
+    expect(redirect.bodyUsed).toBe(true);
+  });
+
   test("asks fetch not to follow a redirect", async () => {
     await makeTransport().query("SELECT 1");
 

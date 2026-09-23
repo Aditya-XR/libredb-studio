@@ -186,6 +186,16 @@ describe("LibSQLHranaTransport endpoint", () => {
 });
 
 describe("LibSQLHranaTransport redirects", () => {
+  // Drained like any other answer, so the socket goes back to the pool instead of
+  // being held by a body nobody reads.
+  test("reads the redirect's body before refusing it", async () => {
+    const redirect = new Response("moved", { status: 302, headers: { location: "https://evil.example/" } });
+    handler = () => redirect;
+
+    await expect(transport().execute("SELECT 1")).rejects.toBeInstanceOf(ConnectionError);
+    expect(redirect.bodyUsed).toBe(true);
+  });
+
   test("asks fetch not to follow a redirect on a pipeline", async () => {
     await transport().execute("SELECT 1");
 
