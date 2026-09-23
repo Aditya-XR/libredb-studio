@@ -695,7 +695,11 @@ export class TrinoHttpTransport implements TrinoTransport {
     // `connectionFields`, and an explicit `disable` has to turn TLS OFF as well as
     // an explicit mode turns it on (the #264 lesson).
     const secure = config.ssl !== undefined && config.ssl.mode !== "disable";
-    this.origin = httpOrigin(secure ? "https" : "http", config.host ?? DEFAULT_HOST, config.port ?? dialect.defaultPort);
+    this.origin = httpOrigin(
+      secure ? "https" : "http",
+      config.host ?? DEFAULT_HOST,
+      config.port ?? dialect.defaultPort,
+    );
     this.user = config.user ?? DEFAULT_USER;
     // The connection's `database` holds the CATALOG, the way a PostgreSQL
     // connection pins one database. It is a default for unqualified names, not a
