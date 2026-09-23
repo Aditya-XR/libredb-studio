@@ -7,3 +7,4 @@
  * built from — the walk, the tree, the row — are this folder's own business.
  */
 export { KeyBrowser } from "./KeyBrowser";
+export type { KeyPatternRequest } from "./KeyBrowser";

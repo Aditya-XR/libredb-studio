@@ -49,7 +49,18 @@
  * objects. Standing ruling 4 against #789 Tasks 20 and 23.
  */
 
-import { ChartColumn, Code, FileCode, Funnel, Plus, Search, Trash2, WandSparkles, type LucideIcon } from "lucide-react";
+import {
+  ChartColumn,
+  Code,
+  FileCode,
+  Funnel,
+  KeyRound,
+  Plus,
+  Search,
+  Trash2,
+  WandSparkles,
+  type LucideIcon,
+} from "lucide-react";
 import { findKind, kindAcceptsRowWrites, kindHasSource } from "@/lib/db/object-kinds";
 import {
   maintenanceControl,
@@ -90,6 +101,14 @@ export interface TreeRowActionHandlers {
    * the maintenance and create handlers already follow.
    */
   readonly onViewSource?: (object: DatabaseObject) => void;
+  /**
+   * Show this row's key pattern in the surface built for walking it.
+   *
+   * A fifth thing a shell may or may not have, for the same reason as the four above: the key
+   * browser is one mount's business, and a shell that shows no keys panel simply does not pass
+   * this and no row offers the item.
+   */
+  readonly onBrowseKeys?: (object: DatabaseObject) => void;
 }
 
 /** One item of a row's menu. `id` is stable and is what a test asserts; `label` is read. */
@@ -233,6 +252,32 @@ function objectActions(
   const viewSource = handlers.onViewSource;
   if (viewSource !== undefined && kindHasSource(capabilities, kind.id)) {
     actions.push({ id: "view-source", label: "View Source", icon: FileCode, run: () => viewSource(object) });
+  }
+
+  /*
+   * Browse Keys: the one action that opens ANOTHER READING of the same row rather than acting on
+   * the object, and the one row it is for is a key prefix.
+   *
+   * TWO DECLARATIONS AND NO KIND ID, which is what makes this a gate rather than a special case.
+   * `keyScan` says this engine has a key space AND that the shell has a panel for it — the row menu
+   * never offers a destination that does not exist. `tablesAreDerivedGroupings` says the rows of its
+   * relation kinds are prefixes a server summarised from a bounded scan rather than objects anybody
+   * named, which is exactly the fact that makes a name like `user:*` a `MATCH` pattern and not a
+   * table name. Redis declares both; every catalog-backed engine declares neither, and its rows are
+   * offered nothing here.
+   *
+   * `role` is asked as well, because a routine row is not a prefix even on an engine whose relation
+   * rows are groupings. And the pattern is the object's own NAME, verbatim: `keyGrouping` already
+   * built it with its `*`, so a caller that appended or stripped one would address different keys.
+   */
+  const browseKeys = handlers.onBrowseKeys;
+  if (
+    isRelation &&
+    browseKeys !== undefined &&
+    capabilities.keyScan !== undefined &&
+    capabilities.tablesAreDerivedGroupings === true
+  ) {
+    actions.push({ id: "browse-keys", label: "Browse Keys", icon: KeyRound, run: () => browseKeys(object) });
   }
   return actions;
 }

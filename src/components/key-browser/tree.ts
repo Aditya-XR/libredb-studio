@@ -151,6 +151,17 @@ export type KeyTreeRow =
       /** The prefix this row would ask about. */
       readonly path: readonly string[];
       readonly depth: number;
+      /**
+       * How many keys the walk is HOLDING under this prefix — the same `count` the folder above this
+       * row draws.
+       *
+       * ON THE ROW BECAUSE THE PRESS IS ABOUT THAT NUMBER. A scoped page is filtered by the server and
+       * then deduplicated here, so a press can legitimately come back holding only keys already in the
+       * tree; a reader who cannot see the count the press is measured against reads that as a broken
+       * button. It is the node's own count rather than a second walk of the list: the tree already
+       * knows it.
+       */
+      readonly count: number;
     };
 
 /**
@@ -178,7 +189,9 @@ export function flattenKeyTree(
       rows.push({ kind: "node", node: child, depth, folder });
       if (!folder || !isExpanded(child.path)) continue;
       walk(child, depth + 1);
-      if (canLoadMore(child.path)) rows.push({ kind: "loadMore", path: child.path, depth: depth + 1 });
+      if (canLoadMore(child.path)) {
+        rows.push({ kind: "loadMore", path: child.path, depth: depth + 1, count: child.count });
+      }
     }
   };
 

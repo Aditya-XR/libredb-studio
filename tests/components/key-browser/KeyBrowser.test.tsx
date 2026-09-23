@@ -6,8 +6,9 @@ import { describe, test, expect, afterEach } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { mockGlobalFetch, restoreGlobalFetch, type MockFetchResponse } from "../../helpers/mock-fetch";
 
-import { KeyBrowser } from "@/components/key-browser";
+import { KeyBrowser, type KeyPatternRequest } from "@/components/key-browser";
 import { SCAN_ALL_MAX_KEYS } from "@/components/key-browser/use-key-scan";
+import type { ContainerLevelSpec } from "@/lib/db/types";
 import type { DatabaseConnection } from "@/lib/types";
 
 /**
@@ -29,9 +30,21 @@ const CONNECTION: DatabaseConnection = {
 
 const CAPABILITY = { defaultCount: 500, maxCount: 1000 };
 
+/** Redis's own word for its one container level, and the databases it answered for itself. */
+const LEVEL: ContainerLevelSpec = { id: "schema", label: "Database", labelPlural: "Databases" };
+const DATABASES = [
+  { path: ["0"], name: "0", level: 0, isSessionDefault: true },
+  { path: ["1"], name: "1", level: 0, isSessionDefault: false },
+];
+
 /** A page, in the shape the route answers with. An absent type map is a page that described none. */
 function page(keys: string[], cursor: string, total = 31, types: Record<string, string> = {}): MockFetchResponse {
   return { json: { keys, cursor, total, types } };
+}
+
+/** The walk and the container list together, which is what a Redis panel reads. */
+function redisRoutes(scan: MockFetchResponse | ((req: Request) => MockFetchResponse | Promise<MockFetchResponse>)) {
+  return { "/api/db/keys/scan": scan, "/api/db/objects/containers": { json: DATABASES } };
 }
 
 /** The cursor the request carried. The helper hands a real `Request`, so its body is read once. */
@@ -40,8 +53,28 @@ async function cursorOf(req: Request): Promise<string> {
   return body.cursor ?? "0";
 }
 
+/**
+ * The connection as it crosses the wire.
+ *
+ * `createdAt` is a `Date` in memory and a string once `JSON.stringify` has been through it, so an
+ * expectation built from the live object can never equal the body that was actually sent.
+ */
+const WIRE_CONNECTION = JSON.parse(JSON.stringify(CONNECTION)) as Record<string, unknown>;
+
+/** Every body the WALK was sent, in order: the container list is a different read, filtered out here. */
+function walksOf(fetchMock: { mock: { calls: unknown[][] } }): Record<string, unknown>[] {
+  return fetchMock.mock.calls
+    .map((call) => JSON.parse(String((call[1] as RequestInit).body)) as Record<string, unknown>)
+    .filter((body) => "cursor" in body);
+}
+
 function renderBrowser(capability = CAPABILITY, onOpenKey?: (key: string, type: string | null) => void) {
   return render(<KeyBrowser connection={CONNECTION} capability={capability} onOpenKey={onOpenKey} />);
+}
+
+/** The panel on an engine that declares a level to choose from, which is what Redis is. */
+function renderLevel(request?: KeyPatternRequest, level: ContainerLevelSpec = LEVEL) {
+  return render(<KeyBrowser connection={CONNECTION} capability={CAPABILITY} databaseLevel={level} request={request} />);
 }
 
 /** The progress line's text, which is the one number the panel promises to keep honest. */
@@ -593,6 +626,300 @@ describe("KeyBrowser", () => {
       // hiding it altogether would make the badge look like an error.
       expect(badge?.getAttribute("title")).toContain("3");
       expect(badge?.getAttribute("title")).toContain("scanned keys");
+    });
+  });
+
+  /**
+   * The database the keys are in, which is the one thing above a key that really exists.
+   *
+   * The walk names it, the engine lists it, and the tree hangs under it — so a reader can tell WHICH
+   * numbered database a prefix belongs to, and can reach the other fifteen rather than only ever
+   * seeing the one the session happened to be in.
+   */
+  describe("the database the walk is in", () => {
+    test("draws it as the tree's root, and walks the session's own until somebody chooses", async () => {
+      const fetchMock = mockGlobalFetch(redisRoutes(page(["app:env"], "0", 1531)));
+      renderLevel();
+
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1"]);
+      });
+      // The database row carries the SERVER's own count — `DBSIZE`, which travels with every page —
+      // rather than the sample's, so the one number above the tree is the size of the key space.
+      expect(screen.getByTestId("key-browser-database-total").textContent).toBe("1,531");
+      expect(screen.getByTestId("key-browser-database").getAttribute("title")).toBe("Database 0");
+      expect(screen.getByTestId("key-browser-database").getAttribute("aria-expanded")).toBe("true");
+
+      // The session's own database is what the engine already answers with, so NOTHING is sent for
+      // it: a request carrying it would ask for what the engine defaulted to, and the walk would
+      // restart the moment this list arrived.
+      expect(walksOf(fetchMock)).toEqual([{ connection: WIRE_CONNECTION, cursor: "0", count: 500 }]);
+      expect((screen.getByLabelText("Database") as HTMLSelectElement).value).toBe("0");
+    });
+
+    test("restarts the walk in the database the reader chose", async () => {
+      const fetchMock = mockGlobalFetch(redisRoutes(page(["app:env"], "0", 1531)));
+      renderLevel();
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1"]);
+      });
+
+      fireEvent.change(screen.getByLabelText("Database"), { target: { value: "1" } });
+
+      await waitFor(() => {
+        expect(walksOf(fetchMock).filter((body) => body.database === 1)).toHaveLength(1);
+      });
+      // A different database is a different key space: the walk starts at cursor `"0"` again rather
+      // than carrying the other database's position into it, and the tree is rebuilt from its pages.
+      expect(walksOf(fetchMock).at(-1)).toMatchObject({ database: 1, cursor: "0" });
+      await waitFor(() => {
+        expect(rows()).toEqual(["1@0", "app:*@1"]);
+      });
+    });
+
+    test("collapses the database row without asking the server for anything", async () => {
+      const fetchMock = mockGlobalFetch(redisRoutes(page(["app:env"], "0", 1531)));
+      renderLevel();
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1"]);
+      });
+      const before = fetchMock.mock.calls.length;
+
+      fireEvent.click(screen.getByTestId("key-browser-database"));
+      expect(rows()).toEqual(["0@0"]);
+      expect(screen.getByTestId("key-browser-database").getAttribute("aria-expanded")).toBe("false");
+
+      // The keys are already held, so folding the root is a local rearrangement like any other row's.
+      fireEvent.keyDown(screen.getByTestId("key-browser-database"), { key: "Enter" });
+      expect(rows()).toEqual(["0@0", "app:*@1"]);
+      expect(fetchMock.mock.calls.length).toBe(before);
+    });
+
+    test("says so and keeps walking when the database list cannot be read", async () => {
+      mockGlobalFetch({
+        "/api/db/keys/scan": page(["app:env"], "0", 31),
+        "/api/db/objects/containers": { status: 403, json: { error: "NOPERM no config for you" } },
+      });
+      renderLevel();
+
+      await waitFor(() => {
+        expect(screen.getByTestId("key-browser-databases-error").textContent).toContain("NOPERM no config for you");
+      });
+      // The list is a convenience and the walk is the feature: the panel keeps the keys it read, and
+      // the choice stands down rather than offering databases nobody listed.
+      expect(rows()).toEqual(["app:*@0"]);
+      expect((screen.getByLabelText("Database") as HTMLSelectElement).disabled).toBe(true);
+      expect(screen.queryByTestId("key-browser-database")).toBeNull();
+    });
+
+    test("leaves a container it cannot address to the engine", async () => {
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": page(["app:env"], "0", 31),
+        "/api/db/objects/containers": { json: [{ path: ["main"], name: "main", level: 0, isSessionDefault: true }] },
+      });
+      renderLevel();
+
+      // `main` is not a number, so the walk's `database` field cannot name it: nothing is sent and the
+      // engine answers with the session's database, which is the one the panel says it is reading.
+      await waitFor(() => {
+        expect(screen.getByTestId("key-browser-database")).toBeDefined();
+      });
+      expect(screen.getByTestId("key-browser-database").querySelector("span.truncate")?.textContent).toBe("main");
+      expect(walksOf(fetchMock).filter((body) => "database" in body)).toEqual([]);
+    });
+
+    test("walks as a whole on an engine with no level to choose from", async () => {
+      const fetchMock = mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "0", 31) });
+      render(
+        <KeyBrowser
+          connection={CONNECTION}
+          capability={CAPABILITY}
+          databaseLevel={undefined}
+          request={{ pattern: "app:*" }}
+        />,
+      );
+
+      // No level declared means no container list to read and no root row to draw: the walk is the
+      // whole key space, which is what this panel was before there was anything to choose.
+      await waitFor(() => {
+        expect(rows()).toEqual(["app:*@0"]);
+      });
+      expect(screen.queryByLabelText("Database")).toBeNull();
+      expect(screen.queryByTestId("key-browser-database")).toBeNull();
+      expect(fetchMock.mock.calls.length).toBe(1);
+    });
+  });
+
+  /**
+   * Refresh, which is the panel asking its own question again.
+   *
+   * A key space changes under a sample, so re-reading it is an ordinary thing to want rather than a
+   * recovery from a failure — and it is the only way to see a key somebody else wrote.
+   */
+  describe("refresh", () => {
+    test("takes the first page again when the reader asks", async () => {
+      const fetchMock = mockGlobalFetch(redisRoutes(page(["app:env"], "0", 31)));
+      renderLevel();
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1"]);
+      });
+      const before = walksOf(fetchMock).length;
+
+      fireEvent.click(screen.getByTestId("key-browser-refresh"));
+
+      await waitFor(() => {
+        expect(walksOf(fetchMock).length).toBe(before + 1);
+      });
+      // Cursor `"0"`: this is the same question asked again, not a continuation of the last walk.
+      expect(walksOf(fetchMock).at(-1)).toMatchObject({ cursor: "0", count: 500 });
+    });
+
+    test("drops the page that was in the air rather than mixing it into the new walk", async () => {
+      // A no-op default rather than `| null`: the executor below replaces it before anything waits,
+      // and a nullable declaration narrows to `null` at the call site, where `release?.()` then has
+      // type `never`.
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let call = 0;
+      mockGlobalFetch(
+        redisRoutes(async () => {
+          call += 1;
+          if (call === 1) {
+            await gate;
+            return page(["stale:key"], "5", 31);
+          }
+          return page(["fresh:key"], "0", 31);
+        }),
+      );
+      renderLevel();
+
+      // The first page is in the air when the reader refreshes. Its answer belongs to a walk that no
+      // longer exists, and mixing it in is how a sample comes to hold two databases' keys.
+      fireEvent.click(screen.getByTestId("key-browser-refresh"));
+      release();
+
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "fresh:*@1"]);
+      });
+      expect(progress()).toBe("Scanned 1/31");
+    });
+  });
+
+  /**
+   * A pattern the object tree's row menu asked for, which is how a `user:*` row reaches the surface
+   * built to walk it.
+   */
+  describe("a pattern the shell asked for", () => {
+    test("starts the walk on the pattern it was handed, glob and all", async () => {
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": page(["app:cache:ttl"], "0", 31),
+        "/api/db/objects/containers": { json: DATABASES },
+      });
+      renderLevel({ pattern: "app:*" });
+
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1"]);
+      });
+      expect((screen.getByLabelText("Match pattern") as HTMLInputElement).value).toBe("app:*");
+      // The name is the pattern AS IT STANDS: a key prefix already carries its `*`, and a caller that
+      // appended another would address a different set of keys.
+      expect(walksOf(fetchMock)[0]).toMatchObject({ pattern: "app:*" });
+    });
+
+    test("applies a new request to a panel already walking, and drops the stale filter", async () => {
+      const seen: string[] = [];
+      mockGlobalFetch({
+        "/api/db/keys/scan": async (req) => {
+          const body = (await req.json()) as { pattern?: string };
+          seen.push(body.pattern ?? "");
+          return body.pattern === undefined
+            ? page(["app:env", "user:1001:name"], "0", 2)
+            : page(["session:abc"], "0", 2);
+        },
+        "/api/db/objects/containers": { json: DATABASES },
+      });
+      const { rerender } = render(<KeyBrowser connection={CONNECTION} capability={CAPABILITY} databaseLevel={LEVEL} />);
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1", "user:*@1"]);
+      });
+      fireEvent.change(screen.getByLabelText("Filter the keys found"), { target: { value: "app" } });
+      // With a filter on, every surviving folder is open, so the match two levels down is drawn.
+      expect(rows()).toEqual(["0@0", "app:*@1", "app:env@2"]);
+
+      rerender(
+        <KeyBrowser
+          connection={CONNECTION}
+          capability={CAPABILITY}
+          databaseLevel={LEVEL}
+          request={{ pattern: "session:*" }}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "session:*@1"]);
+      });
+      // The filter belonged to the keys that were on screen: left on, it would hide the answer to the
+      // request that was just made.
+      expect((screen.getByLabelText("Filter the keys found") as HTMLInputElement).value).toBe("");
+      expect(seen).toEqual(["", "session:*"]);
+    });
+
+    test("does not re-impose a request the panel has already applied", async () => {
+      const request: KeyPatternRequest = { pattern: "app:*" };
+      const seen: string[] = [];
+      mockGlobalFetch({
+        "/api/db/keys/scan": async (req) => {
+          const body = (await req.json()) as { pattern?: string };
+          seen.push(body.pattern ?? "");
+          return body.pattern === "user:*" ? page(["user:1001:name"], "0", 2) : page(["app:env"], "0", 2);
+        },
+        "/api/db/objects/containers": { json: DATABASES },
+      });
+      const { rerender } = render(
+        <KeyBrowser connection={CONNECTION} capability={CAPABILITY} databaseLevel={LEVEL} request={request} />,
+      );
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1"]);
+      });
+
+      // The reader takes the wheel: the pattern is theirs from the moment they type in it.
+      fireEvent.change(screen.getByLabelText("Match pattern"), { target: { value: "user:*" } });
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "user:*@1"]);
+      });
+
+      // The SAME request object again is not a new one, so nothing is re-applied: identity is the
+      // question, and this one has already been answered.
+      rerender(<KeyBrowser connection={CONNECTION} capability={CAPABILITY} databaseLevel={LEVEL} request={request} />);
+      expect((screen.getByLabelText("Match pattern") as HTMLInputElement).value).toBe("user:*");
+      expect(seen).toEqual(["app:*", "user:*"]);
+    });
+
+    test("says Matched rather than Scanned once a pattern narrows what the walk is handed", async () => {
+      mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "0", 1531) });
+      const { rerender } = render(<KeyBrowser connection={CONNECTION} capability={CAPABILITY} />);
+      await waitFor(() => {
+        expect(progress()).toBe("Scanned 1/1531");
+      });
+
+      // `scanned` counts what the walk was HANDED and `total` is every key in the database, so with a
+      // pattern the pair is not a fraction of a walk: 137 of 1531 matching keys is a finished walk,
+      // and the word has to say so rather than invite a reader to wait for it.
+      rerender(<KeyBrowser connection={CONNECTION} capability={CAPABILITY} request={{ pattern: "app:*" }} />);
+      await waitFor(() => {
+        expect(progress()).toBe("Matched 1 of 1531");
+      });
+      expect(screen.getByTestId("key-browser-progress").getAttribute("title")).toContain(
+        "every key this database holds",
+      );
+
+      // And a request that clears the pattern goes back to a plain walk of the whole key space.
+      rerender(<KeyBrowser connection={CONNECTION} capability={CAPABILITY} request={{ pattern: "" }} />);
+      await waitFor(() => {
+        expect(progress()).toBe("Scanned 1/1531");
+      });
     });
   });
 });

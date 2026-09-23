@@ -7,7 +7,7 @@ import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
 import { Plus, Zap, Layers, LoaderCircle, CircleAlert } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ObjectTree, type ObjectSource, type TreeRowActionHandlers } from "@/components/object-tree";
-import { KeyBrowser } from "@/components/key-browser";
+import { KeyBrowser, type KeyPatternRequest } from "@/components/key-browser";
 import { GitHubRepoLink } from "@/components/github-repo-link";
 import { getAppVersion } from "@/lib/app-version";
 import { cn } from "@/lib/utils";
@@ -131,6 +131,66 @@ export function Sidebar({
    * and the tabs are not drawn at all.
    */
   const [view, setView] = React.useState<"objects" | "keys">("objects");
+  /**
+   * The connection whose key panel is being kept mounted, or null while none is.
+   *
+   * A WALK IS EXPENSIVE TO REPEAT, so the panel is HIDDEN rather than unmounted when the reader looks
+   * at the object tree: `SCAN` has no index and no natural end, so coming back to Keys would otherwise
+   * take the sample from cursor `"0"` again — the reader's place in a several-thousand-key walk lost
+   * to a glance at something else.
+   *
+   * It is dropped when the CONNECTION changes, and that is not tidiness: a hidden panel still walks,
+   * and the connection this id no longer matches is one nobody is looking at. The id is cleared on the
+   * render that sees the new connection rather than in an effect, for the reason `useProviderMetadata`
+   * gives about its own reset — an effect commits one render late, which is exactly one render of a
+   * walk of the new server that nobody asked for.
+   */
+  const [keysPanelFor, setKeysPanelFor] = React.useState<string | null>(null);
+  const connectionId = activeConnection?.id ?? null;
+  if (keysPanelFor !== null && keysPanelFor !== connectionId) setKeysPanelFor(null);
+
+  const keyScan = metadata?.capabilities.keyScan;
+  const showingKeys = keyScan !== undefined && view === "keys";
+  /**
+   * The container level the walk is pointed at, when the engine declares one.
+   *
+   * The FIRST declared level is the one a key space belongs to — on Redis that is its numbered
+   * database — and an engine with no level declares nothing here, so its keys are walked as a whole.
+   */
+  const databaseLevel = metadata?.capabilities.containerLevels?.[0];
+
+  /**
+   * A key pattern the reader asked to see, handed to the panel when it next renders.
+   *
+   * A REQUEST AND NOT A VALUE, which is why it is an object: the same pattern asked for twice is a
+   * second request, and a bare string would be indistinguishable from the one the panel already has.
+   * The panel applies it once and then owns the pattern — the reader can edit it, clear it, or walk
+   * something else — so nothing here re-imposes it on a later render.
+   */
+  const [keyPatternRequest, setKeyPatternRequest] = React.useState<KeyPatternRequest | undefined>(undefined);
+
+  /**
+   * Show one row's key pattern in the panel built to walk it.
+   *
+   * THE SIDEBAR OWNS THIS ONE because it owns both readings: the tree the row was clicked in and the
+   * key browser the pattern belongs to. Whether the row may offer the item at all is the declaration's
+   * answer, decided in `rowActions`; what the item DOES is this component's, so the shell above is
+   * handed back its own handlers untouched apart from this one.
+   */
+  const browseKeys = React.useCallback(
+    (object: DatabaseObject) => {
+      // The name VERBATIM: a key pattern already carries its `*` (`keyGrouping` built it), so it is
+      // the `MATCH` pattern as it stands.
+      setKeyPatternRequest({ pattern: object.name });
+      setView("keys");
+      setKeysPanelFor(connectionId);
+    },
+    [connectionId],
+  );
+  const actions = React.useMemo<TreeRowActionHandlers>(
+    () => ({ ...objectActions, onBrowseKeys: browseKeys }),
+    [objectActions, browseKeys],
+  );
 
   return (
     <div className="flex w-full h-full border-r border-border flex-col bg-background select-none">
@@ -197,19 +257,20 @@ export function Sidebar({
         so a placeholder declaration would make a one-level engine read the counts of a
         container that does not exist instead of listing its schemas.
 
-        THE PANEL IS A COLUMN, AND THE TREE IS ONE FLEX CHILD OF IT. The key browser above the
-        tree takes a line of its own, and `ObjectTree` measures its own scroll box against
-        `h-full` — so a tree left as a direct child of this box would be as tall as the box
-        INCLUDING the toggle, and overflow by exactly the toggle's height. `flex-1 min-h-0`
-        on the wrapper is what keeps that measurement answering the height the tree actually
-        has, which is the same reason the sidebar's own comment above refuses to nest it in a
-        ScrollArea.
+        THE PANEL IS A COLUMN, AND EACH READING OF IT IS ONE FLEX CHILD. Only one of them occupies
+        it: the key panel is `display:none` whenever the tree is the reading on screen, so the tree
+        still measures the whole box. `ObjectTree` measures its own scroll box against `h-full`, so a
+        tree left as a direct child of this box would be as tall as the box INCLUDING the toggle, and
+        overflow by exactly the toggle's height. `flex-1 min-h-0` on the wrapper is what keeps that
+        measurement answering the height the tree actually has, which is the same reason the
+        sidebar's own comment above refuses to nest it in a ScrollArea. The key panel keeps its
+        wrapper while it is hidden, so a walk it already took survives a look at the tree.
       */}
       {activeConnection && (
         <div className="flex-1 min-h-0 px-2 pb-4 flex flex-col">
           {metadata ? (
             <>
-              {metadata.capabilities.keyScan !== undefined && (
+              {keyScan !== undefined && (
                 <div className="flex items-center gap-1 pb-2" role="tablist" aria-label="Sidebar view">
                   {(["objects", "keys"] as const).map((option) => (
                     <button
@@ -217,7 +278,12 @@ export function Sidebar({
                       type="button"
                       role="tab"
                       aria-selected={view === option}
-                      onClick={() => setView(option)}
+                      onClick={() => {
+                        setView(option);
+                        // Choosing Keys is what mounts the panel; the id recorded here is what keeps its
+                        // walk alive while the reader looks at something else.
+                        if (option === "keys") setKeysPanelFor(connectionId);
+                      }}
                       className={cn(
                         "rounded px-2 py-0.5 text-[10px] font-medium transition-colors",
                         view === option
@@ -230,14 +296,26 @@ export function Sidebar({
                   ))}
                 </div>
               )}
-              <div className="flex-1 min-h-0">
-                {view === "keys" && metadata.capabilities.keyScan !== undefined ? (
+              {/*
+                THE KEY PANEL IS HIDDEN RATHER THAN UNMOUNTED, and the tree is drawn beside it while it
+                is: a sample that took a walk of the key space to build is not something to throw away
+                because somebody looked at the object tree for a moment.
+              */}
+              {keyScan !== undefined && (showingKeys || keysPanelFor === connectionId) && (
+                <div className={cn("flex-1 min-h-0", !showingKeys && "hidden")} data-testid="key-browser-panel">
                   <KeyBrowser
                     connection={activeConnection}
-                    capability={metadata.capabilities.keyScan}
+                    capability={keyScan}
+                    databaseLevel={databaseLevel}
+                    request={keyPatternRequest}
                     onOpenKey={onOpenKey}
                   />
-                ) : (
+                </div>
+              )}
+              {/* Anything other than "this engine declares a walk and the reader chose it" is the object
+                  tree: the panel is an addition to the sidebar and never a replacement for it. */}
+              {!showingKeys && (
+                <div className="flex-1 min-h-0">
                   <ObjectTree
                     connection={activeConnection}
                     capabilities={metadata.capabilities}
@@ -245,13 +323,13 @@ export function Sidebar({
                     deferred={objectScanDeferred}
                     onLoad={onLoadObjects}
                     onObjectClick={onObjectClick}
-                    actions={objectActions}
+                    actions={actions}
                     source={objectSource}
                     readsColumns={objectReadsColumns}
                     refreshToken={objectRefreshToken}
                   />
-                )}
-              </div>
+                </div>
+              )}
             </>
           ) : metadataError !== null ? (
             <div

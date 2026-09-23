@@ -78,6 +78,15 @@ export interface KeyScanResult {
   readonly nodeCursors: ReadonlyMap<string, string>;
   /** Prefixes whose scoped page is in flight, so a row can say so instead of taking a second press. */
   readonly nodeLoading: ReadonlySet<string>;
+  /**
+   * How many NEW keys the last scoped page added, by `pathKey`.
+   *
+   * THE ONE NUMBER THAT TELLS A READER THEIR PRESS DID SOMETHING. A scoped page is filtered by the
+   * server and then deduplicated here, so it can come back holding nothing this tree did not already
+   * have — a true answer that looks exactly like a dead button. `0` is recorded rather than left
+   * absent for that reason: absent means "never pressed", and the two must not read alike.
+   */
+  readonly nodeAdded: ReadonlyMap<string, number>;
 }
 
 export interface KeyScanControls {
@@ -104,8 +113,18 @@ export function useKeyScan(options: {
   readonly capability: KeyScanCapability;
   /** A `MATCH` pattern, or `""` for every key. */
   readonly pattern: string;
+  /**
+   * Which numbered database to walk, for an engine that has more than one.
+   *
+   * ABSENT IS NOT ZERO, and the difference is the whole point of the field being optional. Absent
+   * leaves the choice to the engine, which answers with the database the SESSION is already in;
+   * `0` is a specific database that a connection is not necessarily sitting in. A caller that
+   * defaulted this to `0` would move the walk off the session's database the moment somebody
+   * declared a level to choose from.
+   */
+  readonly database?: number;
 }): KeyScanResult & KeyScanControls {
-  const { connection, capability, pattern } = options;
+  const { connection, capability, pattern, database } = options;
 
   const [keys, setKeys] = useState<readonly string[]>([]);
   const [scanned, setScanned] = useState(0);
@@ -117,6 +136,7 @@ export function useKeyScan(options: {
   const [error, setError] = useState<string | null>(null);
   const [nodeCursors, setNodeCursors] = useState<ReadonlyMap<string, string>>(new Map());
   const [nodeLoading, setNodeLoading] = useState<ReadonlySet<string>>(new Set());
+  const [nodeAdded, setNodeAdded] = useState<ReadonlyMap<string, number>>(new Map());
   const [types, setTypes] = useState<ReadonlyMap<string, string>>(new Map());
 
   /*
@@ -127,7 +147,25 @@ export function useKeyScan(options: {
    * the last RENDER saw, which is the state before its own first request.
    */
   const cursor = useRef("0");
-  const running = useRef(false);
+  /*
+   * WHICH WALK EVERY ANSWER BELONGS TO.
+   *
+   * `walk` counts the walks this hook has started and `pageInFlight` names the one whose page is in
+   * the air, and the pair answers two questions one boolean used to get wrong.
+   *
+   * IS A PAGE IN THE AIR FOR THE WALK I AM ABOUT TO TAKE? `scanMore` refuses only when the page in
+   * flight belongs to the CURRENT walk, because two pages of one walk would both read the same
+   * cursor and both advance from it. A page from a walk somebody threw away is not in this one's
+   * way: it is about to be dropped on landing, and refusing to start would leave a freshly reset
+   * panel waiting for an answer it has already decided not to use.
+   *
+   * IS THIS ANSWER STILL MINE? A page lands after its walk was discarded and must not write
+   * anything — not the cursor, not the keys, not the progress, not a failure. This is what makes
+   * changing the pattern or the database mid-walk a clean restart rather than a sample mixed from
+   * two walks, which is the state the panel is least able to explain.
+   */
+  const walk = useRef(0);
+  const pageInFlight = useRef<number | null>(null);
   const stopped = useRef(false);
   const spent = useRef(false);
   const scannedKeys = useRef(0);
@@ -175,12 +213,16 @@ export function useKeyScan(options: {
    * Load more. They differ in exactly these two arguments and in nothing else.
    */
   const readPageAt = useCallback(
-    async (at: string, match: string): Promise<KeyScanPage> => {
+    async (at: string, match: string, count: number): Promise<KeyScanPage> => {
       const payload = buildConnectionPayload(connection);
-      const request: Omit<KeyScanOptions, "database"> = {
+      const request: KeyScanOptions = {
         cursor: at,
-        count: batchSize(capability),
+        count,
         ...(match === "" ? {} : { pattern: match }),
+        // Absent rather than `undefined`: the field is omitted from the body entirely, and the route
+        // reads an absent `database` as "the session's", which is exactly what a panel with no
+        // database chosen means.
+        ...(database === undefined ? {} : { database }),
       };
       const response = await appFetch("/api/db/keys/scan", {
         method: "POST",
@@ -196,7 +238,7 @@ export function useKeyScan(options: {
       }
       return { keys: body.keys ?? [], cursor: body.cursor ?? "0", total: body.total ?? 0, types: body.types ?? {} };
     },
-    [connection, capability],
+    [connection, database],
   );
 
   /**
@@ -225,16 +267,21 @@ export function useKeyScan(options: {
   }, []);
 
   const scanMore = useCallback(async (): Promise<void> => {
-    // One page at a time. Two in flight would both read the same cursor and both advance from it,
-    // so the second answer would overwrite the position the first one earned and the walk would
-    // skip whatever lay between them. A spent walk is refused for the same reason it is spent.
-    if (running.current || spent.current) return;
-    running.current = true;
+    // One page at a time PER WALK. Two in flight for the same walk would both read the same cursor
+    // and both advance from it, so the second answer would overwrite the position the first one
+    // earned and the walk would skip whatever lay between them. A spent walk is refused for the same
+    // reason it is spent. A page belonging to an ABANDONED walk is not in this one's way — see `walk`.
+    const mine = walk.current;
+    if (spent.current || pageInFlight.current === mine) return;
+    pageInFlight.current = mine;
     setBusy(true);
 
     try {
-      const page = await readPageAt(cursor.current, pattern);
-      if (!alive.current) return;
+      const page = await readPageAt(cursor.current, pattern, batchSize(capability));
+      // The walk this page belongs to may have been thrown away while it was in the air, and a
+      // discarded walk's answer is not an answer to the current one: it would land keys from a
+      // database or a pattern nobody is looking at any more, beside a cursor from that walk.
+      if (!alive.current || mine !== walk.current) return;
       cursor.current = page.cursor;
       scannedKeys.current += page.keys.length;
       failure.current = null;
@@ -251,7 +298,10 @@ export function useKeyScan(options: {
         setExhausted(true);
       }
     } catch (thrown) {
-      if (!alive.current) return;
+      // A failure from an abandoned walk is dropped for the reason its answer would be: it describes
+      // a read the panel has already replaced, and reporting it would put a sentence about the old
+      // walk on the new one.
+      if (!alive.current || mine !== walk.current) return;
       // The cursor is deliberately NOT advanced on a failure. The position already held is the
       // last one the server acknowledged, so retrying re-asks the batch that failed rather than
       // skipping it.
@@ -259,13 +309,19 @@ export function useKeyScan(options: {
       failure.current = message;
       setError(message);
     } finally {
-      running.current = false;
-      if (alive.current) setBusy(false);
+      // Only the walk that owns the slot may free it, and only the walk still current may say the
+      // panel is idle: an abandoned page landing after its successor started would otherwise clear
+      // the spinner the successor is showing.
+      if (pageInFlight.current === mine) pageInFlight.current = null;
+      if (alive.current && mine === walk.current) setBusy(false);
     }
-  }, [absorb, absorbTypes, pattern, readPageAt]);
+  }, [absorb, absorbTypes, capability, pattern, readPageAt]);
 
   const scanAll = useCallback(async (): Promise<void> => {
-    if (running.current) return;
+    // A page in flight for the CURRENT walk is one this loop is already waiting on, so a second press
+    // is refused. An abandoned walk's page is not: `reset` stopped that loop by flag, and this one is
+    // starting a walk of its own.
+    if (pageInFlight.current === walk.current) return;
     stopped.current = false;
     setScanningAll(true);
     setStoppedBy(null);
@@ -329,6 +385,10 @@ export function useKeyScan(options: {
       // One page per prefix at a time, for the reason `scanMore` gives about the global walk: two in
       // flight would both read this prefix's cursor and both advance from it.
       if (nodeInFlight.current.has(key)) return;
+      // Which walk this prefix's page belongs to. A scoped page is dropped when the walk it was asked
+      // for has been thrown away, exactly as a global page is: its keys are from the prefix of a walk
+      // nobody is holding any more.
+      const mine = walk.current;
       nodeInFlight.current.add(key);
       setNodeLoading((previous) => new Set(previous).add(key));
 
@@ -344,17 +404,33 @@ export function useKeyScan(options: {
          * REAL key names, so it must stay unescaped, and a caller that escaped those would corrupt
          * a literal key that genuinely contains `*`.
          */
-        const page = await readPageAt(nodeCursor.current.get(key) ?? "0", `${escapeGlob(path.join(KEY_SEPARATOR))}:*`);
-        if (!alive.current) return;
+        const page = await readPageAt(
+          nodeCursor.current.get(key) ?? "0",
+          `${escapeGlob(path.join(KEY_SEPARATOR))}:*`,
+          /*
+           * THE LARGEST BATCH THE ENGINE DECLARES, where the global walk takes the default.
+           *
+           * A scoped walk is asked in PRESSES, and every press is a batch of buckets the server has to
+           * filter one by one: `MATCH` is not indexed, so a smaller count does not make a press cheaper
+           * — it makes more presses for the same answer, which is the thing a reader is already
+           * impatient with. The global walk keeps `defaultCount` because Scan more there is a
+           * deliberate step a person is watching.
+           */
+          capability.maxCount,
+        );
+        if (!alive.current || mine !== walk.current) return;
         nodeCursor.current.set(key, page.cursor);
         setNodeCursors(new Map(nodeCursor.current));
 
         const fresh = absorb(page.keys.filter((name) => isUnderPrefix(name, path)));
         absorbTypes(page);
         setKeys((previous) => (fresh.length === 0 ? previous : [...previous, ...fresh]));
+        // Recorded whatever the answer: a page that added nothing is the case this number exists to
+        // report, and leaving it out would draw that press as one that never happened.
+        setNodeAdded((previous) => new Map(previous).set(key, fresh.length));
         setError(null);
       } catch (thrown) {
-        if (!alive.current) return;
+        if (!alive.current || mine !== walk.current) return;
         // NOT written to the loop's failure flag: see this callback's own note. The panel shows the
         // sentence and keeps the keys it already has, because a page that failed did not invalidate
         // the pages that did not.
@@ -370,7 +446,7 @@ export function useKeyScan(options: {
         }
       }
     },
-    [absorb, absorbTypes, readPageAt],
+    [absorb, absorbTypes, capability, readPageAt],
   );
 
   const stop = useCallback((): void => {
@@ -380,6 +456,10 @@ export function useKeyScan(options: {
   }, []);
 
   const reset = useCallback((): void => {
+    // THE WALK IS RENUMBERED FIRST, so every page still in the air belongs to a walk that is no
+    // longer this one and is dropped when it lands. Everything below assumes nothing older than this
+    // line can write again.
+    walk.current += 1;
     stopped.current = true;
     cursor.current = "0";
     spent.current = false;
@@ -399,6 +479,7 @@ export function useKeyScan(options: {
     setError(null);
     setNodeCursors(new Map());
     setNodeLoading(new Set());
+    setNodeAdded(new Map());
     setTypes(new Map());
   }, []);
 
@@ -414,6 +495,7 @@ export function useKeyScan(options: {
     error,
     nodeCursors,
     nodeLoading,
+    nodeAdded,
     scanMore,
     scanAll,
     loadMoreUnder,

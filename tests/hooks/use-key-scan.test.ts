@@ -116,6 +116,21 @@ describe("useKeyScan", () => {
     expect(bodiesOf(fetchMock)).toEqual([{ connection: WIRE_CONNECTION, cursor: "0", pattern: "app:*", count: 500 }]);
   });
 
+  test("walks the database it was pointed at, and leaves the choice to the engine when it is not", async () => {
+    const fetchMock = mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "0") });
+    const { result } = renderHook(() =>
+      useKeyScan({ connection: CONNECTION, capability: CAPABILITY, pattern: "", database: 3 }),
+    );
+
+    await act(async () => {
+      await result.current.scanMore();
+    });
+
+    // Absent `database` is a different request from `database: 0` — it is the engine's own session
+    // database, which a panel that has not been asked to move must not move off.
+    expect(bodiesOf(fetchMock)).toEqual([{ connection: WIRE_CONNECTION, cursor: "0", count: 500, database: 3 }]);
+  });
+
   test("counts a repeat the walk was handed but hands the tree one of it", async () => {
     // `SCAN` may return a key twice while the table rehashes, and the two answers are for two
     // readers. `scanned` is what the walk has been through — the number the progress line is measured
@@ -536,6 +551,106 @@ describe("useKeyScan", () => {
   });
 
   /**
+   * WHAT A WALK THAT WAS THROWN AWAY MAY STILL DO: nothing.
+   *
+   * `reset` is what a new pattern, a new database and the panel's refresh all run, and the page in
+   * the air at that moment belongs to the question that was just abandoned. Letting it land would
+   * append another database's keys to a fresh tree and move the cursor to a position in a walk nobody
+   * is taking — a sample mixed from two walks, which is the one state the panel cannot explain.
+   *
+   * The old code got this wrong in a way only a mid-walk reset could show, so each of the three places
+   * a late answer used to write is checked on its own: the page, its failure, and a scoped page.
+   */
+  describe("a page whose walk was discarded", () => {
+    /** A gate the test opens to decide when a held page lands. */
+    function gate() {
+      // A no-op default rather than `| null`: the executor below replaces it before anything waits,
+      // and a nullable declaration narrows to `null` at the call site, where `release?.()` then has
+      // type `never`.
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { held, release: () => release() };
+    }
+
+    test("does not land its keys, its cursor or its total", async () => {
+      const held = gate();
+      let call = 0;
+      mockGlobalFetch({
+        "/api/db/keys/scan": async () => {
+          call += 1;
+          if (call === 1) {
+            await held.held;
+            return page(["stale"], "5", 900);
+          }
+          return page(["fresh"], "0", 31);
+        },
+      });
+      const { result } = hook();
+
+      let stale: Promise<void> = Promise.resolve();
+      act(() => {
+        stale = result.current.scanMore();
+      });
+      act(() => {
+        result.current.reset();
+      });
+      // The new walk is not blocked by the abandoned page: it belongs to a walk that is gone, and
+      // waiting for it would leave a freshly reset panel showing nothing until an answer it has
+      // already decided not to use comes back.
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      held.release();
+      await act(async () => {
+        await stale;
+      });
+
+      expect(result.current.keys).toEqual(["fresh"]);
+      expect(result.current.scanned).toBe(1);
+      expect(result.current.total).toBe(31);
+      expect(result.current.busy).toBe(false);
+    });
+
+    test("does not report its failure against the walk that replaced it", async () => {
+      const held = gate();
+      let call = 0;
+      mockGlobalFetch({
+        "/api/db/keys/scan": async () => {
+          call += 1;
+          if (call === 1) {
+            await held.held;
+            return { status: 500, json: { error: "NOPERM no scan for you" } };
+          }
+          return page(["fresh"], "0");
+        },
+      });
+      const { result } = hook();
+
+      let stale: Promise<void> = Promise.resolve();
+      act(() => {
+        stale = result.current.scanMore();
+      });
+      act(() => {
+        result.current.reset();
+      });
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      held.release();
+      await act(async () => {
+        await stale;
+      });
+
+      // The refusal describes a read the panel has already replaced: shown against the new walk it
+      // would be a sentence about a question nobody is asking.
+      expect(result.current.error).toBeNull();
+      expect(result.current.keys).toEqual(["fresh"]);
+    });
+  });
+
+  /**
    * The walk scoped to ONE PREFIX, which is the only thing that can answer "is there more under
    * here" about a prefix the global sample happened to miss.
    *
@@ -852,6 +967,55 @@ describe("useKeyScan", () => {
         await bad;
       });
       expect(second.result.current.error).toBeNull();
+    });
+
+    test("drops a scoped page whose walk was thrown away, cursor and keys alike", async () => {
+      // A no-op default rather than `| null`: the executor below replaces it before anything waits,
+      // and a nullable declaration narrows to `null` at the call site, where `release?.()` then has
+      // type `never`.
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let call = 0;
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": async () => {
+          call += 1;
+          if (call === 1) return page(["app:env"], "9");
+          // The scoped page, held so the walk can be thrown away while it is in the air.
+          if (call === 2) {
+            await held;
+            return page(["app:late"], "0");
+          }
+          return page(["fresh:key"], "0");
+        },
+      });
+      const { result } = hook();
+
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      let scoped: Promise<void> = Promise.resolve();
+      act(() => {
+        scoped = result.current.loadMoreUnder(APP);
+      });
+      act(() => {
+        result.current.reset();
+      });
+      await act(async () => {
+        await result.current.scanMore();
+      });
+      release();
+      await act(async () => {
+        await scoped;
+      });
+
+      // A prefix's cursor belongs to the walk it was measured in: recorded against the new one it
+      // would answer a later Load more with keys from a key space nobody is looking at.
+      expect(result.current.keys).toEqual(["fresh:key"]);
+      expect(result.current.nodeCursors.size).toBe(0);
+      expect(result.current.scanned).toBe(1);
+      expect(bodyAt(fetchMock, 2)).toMatchObject({ cursor: "0" });
     });
   });
 });

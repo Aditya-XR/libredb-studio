@@ -654,6 +654,13 @@ be given.
 identifier that is legal in every target language (`user:*` → `User`), keeping Unicode letters
 intact so a non-ASCII key prefix does not collide with another one.
 
+`Browse Keys` is offered on the same rows, and it is the only menu item on this engine that opens a
+SURFACE rather than a statement: it switches the sidebar to the keys panel with the row's own name as
+the `MATCH` pattern ([§6.2](#62-the-key-space-walk-panel)). It is gated on `keyScan` beside the
+`tablesAreDerivedGroupings` the other items above read — a panel to show it in, and rows that are
+prefixes rather than objects — so it is offered here and nowhere else: a catalog-backed engine's
+`orders` row is an object, not a glob.
+
 ---
 
 ## 6. Schema introspection
@@ -1270,13 +1277,18 @@ before; see the `includeColumns` history in [§6.1](#61-the-object-surface-789).
 | `POST /api/db/keys/scan` | the route, gated on the declaration |
 | `KeyBrowser` | the sidebar panel, offered only where the declaration is present |
 
-One page carries four fields in and three out:
+One page carries four fields in and four out:
 
 ```jsonc
 // in
 { "cursor": "0", "pattern": "app:cache:*", "count": 500, "database": 0 }
 // out
-{ "keys": ["app:cache:ttl", "app:cache:user:1"], "cursor": "17", "total": 31 }
+{
+  "keys": ["app:cache:ttl", "app:cache:user:1"],
+  "cursor": "17",
+  "total": 31,
+  "types": { "app:cache:ttl": "string", "app:cache:user:1": "hash" }
+}
 ```
 
 - **The caller owns the cursor.** Nothing is held between two calls, so a page is a round trip rather
@@ -1284,7 +1296,17 @@ One page carries four fields in and three out:
   position in a hash table and not a handle.
 - **`DBSIZE` travels with every page** as `total`. It is O(1) on the server, and it is the only
   denominator a progress indicator can divide by: a `SCAN` cursor says nothing about how much is
-  left, so no total can be computed from the batches a caller has already seen.
+  left, so no total can be computed from the batches a caller has already seen. It counts **every key
+  in the database**, so with a `pattern` in hand it is a denominator for the database rather than for
+  the walk, and the panel's wording says which.
+- **Each key's type travels with the page** as `types`, keyed by name. `TYPE` takes one key and Redis
+  publishes no batch form, so the provider pipelines one call per key of the batch: a page costs one
+  extra round trip whatever it holds, never one per key. A key absent from the map is one no page
+  could describe, and the panel draws nothing for it rather than guessing; a key that vanished
+  between the walk and that read keeps the server's own `none`.
+- **`database` is the numbered database to walk, and absent means the session's own.** The field is
+  optional rather than defaulted to `0` for exactly that reason: the engine answers with the database
+  the connection is already in, which is a different fact from "database zero".
 - **No deduplication and no ordering.** `SCAN` promises neither — a key present for the whole walk is
   returned at least once and may be returned twice while the table rehashes, and the order is the
   hash table's. The panel merges what it receives into a tree by key name, while `scanned` counts what
@@ -1297,7 +1319,23 @@ One page carries four fields in and three out:
 
 #### What the panel does
 
-- `Scanned n/m` — the walk's own count against `total`.
+- `Database N` — the tree's ROOT ROW, carrying the server's own `DBSIZE` for the database the walk is
+  reading. A key space belongs to one numbered database, so the tree is drawn under it rather than
+  beginning at `app:*` and leaving the reader to guess which. Folding it hides the rows and asks the
+  server nothing.
+- A **database dropdown**, populated from `listContainers()` — the engine's own container level, the
+  same read the object tree's top level comes from, never a hardcoded 16 ([§6.1](#61-the-object-surface-789)).
+  Choosing one re-walks that database from cursor `"0"`; **nothing is sent while the session's own
+  database is the one being read**, because the engine already answers with it and a request naming it
+  would be a second question with the same answer. A refused list is a banner, not a dead panel: the
+  walk continues in the session's database.
+- `Scanned n/m`, or `Matched n of m` once a pattern is in hand. The two numbers are of different
+  kinds: `n` is what the walk was HANDED (with `MATCH`, only the keys that passed it) and `m` is every
+  key the database holds. A finished `user:*` walk reporting `137/1531` is not a stuck walk, so the
+  word follows the question rather than inviting the reader to wait for a walk that is already over.
+- **Rescan** — the same question asked again from cursor `"0"`. A key space changes under a sample, so
+  this is an ordinary gesture rather than a recovery: it is the only way to see a key somebody else
+  wrote. A page still in the air is dropped rather than mixed into the new walk.
 - **Scan more** — one more batch from wherever the walk stands, refused while a page is in flight so
   that two answers cannot advance from the position only one of them earned.
 - **Scan all** — pages until the cursor comes back `"0"`, **capped at 10,000 keys** and cancellable
@@ -1306,12 +1344,14 @@ One page carries four fields in and three out:
   is a request that never returns and a server that is busy while it does not.
 - **Click to load more**, under an open folder — one page of a walk **scoped to that prefix**
   ([§6.3](#63-the-prefix-scoped-walk-load-more)). It is the one control that can find keys the global
-  sample never happened to include.
+  sample never happened to include. The row carries **how many keys are loaded under that prefix** in
+  the same right-hand column every other row keeps its number in, and reports what the last press DID
+  (`+12 new`, or `nothing new in that page`) — because a scoped page is filtered by the server and
+  then deduplicated here, so it can legitimately add nothing, and that true answer is otherwise
+  indistinguishable from a dead button.
 - **A key's type, beside its name** — `string`, `hash`, `list`, `set` or `zset`, in the same
-  right-hand column a folder uses for its child count, so one edge answers "what is this row" for
-  every row. It arrives ON THE PAGE (see the contract above): `TYPE` takes one key and Redis
-  publishes no batch form, so the provider pipelines one call per key of the batch and a page costs
-  **one** extra round trip whatever it holds — never one per key. A key no page described draws an
+  right-hand column a folder uses for its key count, so one edge answers "what is this row" for
+  every row. It arrives ON THE PAGE (see the contract above). A key no page described draws an
   empty cell rather than a guess, and a key that vanished between the walk and that read draws the
   server's own `none`.
 - **Activating a key** opens the statement that reads it — `GET`, `HGETALL`, `LRANGE 0 -1`,
@@ -1325,17 +1365,33 @@ One page carries four fields in and three out:
   The type carrier is handed to the generator rather than looked up, because a KEY IS NOT A SCHEMA
   NODE — the cache the generator's other callers read types from holds prefix groups, and no key is
   in it.
+- **Browse Keys**, in the row menu of a key-pattern row in the OBJECT tree — the one action that
+  opens this panel instead of acting on the object. It switches the sidebar to Keys and hands the
+  row's name over as the `MATCH` pattern, verbatim: a grouping already carries its `*`, so `user:*`
+  arrives as `user:*` and finds exactly the keys the row summarised. The item is offered where the
+  engine declares BOTH `keyScan` and `tablesAreDerivedGroupings` — a surface to show it in, and rows
+  that are prefixes rather than objects — and asks `role === "relation"` as well, so a routine row is
+  never offered a walk of a prefix it does not name. The panel applies the pattern once and then owns
+  it: the reader can edit or clear it, and the same row asked for twice is not re-imposed on the box.
 - **Filter** — narrows the tree the walk has ALREADY collected, client-side and without a request. A
   matching segment keeps its whole subtree, and the folders that lead to a match are opened, because
   a match left collapsed looks like no match at all.
 - **Pattern** — forwarded as `MATCH`, and a new pattern starts a NEW walk rather than appending to
-  the old one, whose keys are not answers to the question now being asked.
+  the old one, whose keys are not answers to the question now being asked. The page in the air when
+  the question changes is dropped with it, so a sample can never hold two questions' keys.
 
-A FOLDER'S BADGE IS ITS CHILD COUNT, and a leaf carries none. The badge is the number of rows the
-folder can be opened to show, which is the number a reader compares against the list beneath it. The
-number of KEYS under the prefix is larger — it includes everything deeper, and everything the sample
-has seen there — and it is on the row's tooltip instead, because reading that number as "children" is
-exactly how a folder comes to look as though it is missing rows.
+The panel is MOUNTED FOR THE CONNECTION, not for the tab: switching the sidebar to Objects and back
+finds the walk where it was left, because a `SCAN` sample costs round trips over the whole key space
+and losing it to a glance at the tree is the difference between a panel and a toy. Changing the
+connection drops it, because a hidden panel still walks and that walk would be of a server nobody is
+looking at.
+
+A FOLDER'S BADGE IS THE KEYS LOADED UNDER IT, and a leaf carries no number at all. It is the number
+that MOVES as pages arrive — the global walk's and one press of that prefix's own Load more — which is
+why it is the number a reader in front of a folder is asking about: how much is in here. It is a
+SAMPLE's count and says so on its tooltip, which also carries the other half of the fact: the number of
+ROWS the folder opens to, which is smaller. That number used to be the badge, and reading it as the
+amount of data is how a prefix holding 670 keys came to wear a `2`.
 
 A LEAF DRAWS ITS FULL NAME. `app:env` rather than `env`, since the name is what a key is identified
 by and the depth already says where the tree put it. Folders keep the `prefix:*` form they are
@@ -1364,12 +1420,24 @@ more under here".
 
 - **It is the same route**, with `pattern` built from the prefix (`app:cache` → `app:cache:*`) and a
   cursor that belongs to that prefix. No second endpoint, no second contract.
+- **It asks for the largest batch the engine declares**, `maxCount` rather than the global walk's
+  `defaultCount`. `COUNT` is a hint about how many hash buckets the server visits, and `MATCH` is not
+  indexed, so a smaller batch does not make a press cheaper — it makes MORE presses for the same
+  answer, which is the thing a reader is already waiting on. The global walk keeps the default
+  because `Scan more` there is a deliberate step somebody is watching.
 - **Each prefix keeps its own cursor**, so pressing the row twice continues that prefix rather than
   restarting it, and `"0"` from a prefix proves there is nothing more under it — which is what
   retires the row.
-- **It costs what a global page costs.** `MATCH` is applied per batch server-side and is not indexed,
-  so this is a full pass over the keyspace per press, exactly like every page of the main walk. That
-  is why it is a row a person presses and not something the panel does for every open folder.
+- **It reports what the press did.** The row shows how many keys are loaded under that prefix, and
+  the last page's own contribution: deduplication happens on this side, so a page can come back
+  holding only keys the tree already had. `+12 new` and `nothing new in that page` are both answers,
+  and the second one is the reason this exists — without it a true answer reads as a dead button.
+- **It costs what a page of the main walk costs, and answering it completely costs a pass.** `MATCH`
+  is applied per batch server-side and is not indexed, so one press visits one batch of hash buckets
+  and returns the keys under the prefix that happened to fall in them — the same O(1)-per-page work
+  `Scan more` does, and a full pass over the keyspace only once the prefix's own cursor comes back
+  `"0"`. That is why it is a row a person presses and not something the panel does for every open
+  folder.
 - **Its keys do not touch the walk's progress.** `scanned` and `total` are the global walk's numbers;
   a scoped page hands back keys the global walk may already have counted, and adding them would push
   the progress line past its own denominator.
@@ -1674,14 +1742,16 @@ docker exec libredb-redis-cluster redis-cli CONFIG GET databases   # -> 1
 
 ### 11.6 The key-space walk tests
 
-Four files, and each one covers a seam the others cannot:
+Six files, and each one covers a seam the others cannot:
 
 | File | Covers |
 |------|--------|
 | `tests/integration/db/redis-provider.test.ts` | `scanKeysPage()` against the driver double: the cursor it sends, `MATCH` forwarded and omitted, the database it opens, the refusal it passes through, and the pairing of the `keyScan` declaration with the method that implements it |
 | `tests/api/db-keys-scan.test.ts` | the route: the capability gate, the declaration-without-a-method 500, and every parameter refusal |
-| `tests/hooks/use-key-scan.test.ts` | the walk: paging, the in-flight guard, the cap, Stop, a failure that must not be re-asked forever, and a page landing after unmount |
-| `tests/unit/components/key-browser-tree.test.ts` + `tests/components/key-browser/KeyBrowser.test.tsx` | the tree (`buildKeyTree()`, `flattenKeyTree()`, `filterKeyTree()` and their edge cases) and the panel that draws it |
+| `tests/hooks/use-key-scan.test.ts` | the walk: paging, the in-flight guard, the cap, Stop, a failure that must not be re-asked forever, a page landing after unmount, and a page whose walk was thrown away mid-flight |
+| `tests/hooks/use-key-databases.test.ts` | the container list the walk can be pointed at: the request, the session default, a refusal, a body that cannot be rendered, and an answer that lands after the connection moved |
+| `tests/unit/components/key-browser-tree.test.ts` + `tests/components/key-browser/KeyBrowser.test.tsx` | the tree (`buildKeyTree()`, `flattenKeyTree()`, `filterKeyTree()` and their edge cases) and the panel that draws it: the database root, the choice that restarts the walk, Rescan, Load more, the type column and the pattern a row menu hands over |
+| `tests/components/sidebar/Sidebar.test.tsx` + `tests/unit/components/object-tree-row-actions.test.ts` | the two halves of the handover: the sidebar keeps the panel mounted for the connection and owns the `Browse Keys` handler, and the row menu decides which rows may offer it |
 
 The tree's own suite pins the cases a naive builder gets wrong: a key that is also a prefix of
 another (`app` beside `app:env`), a key returned twice across two batches, empty segments (`:foo`,

@@ -8,6 +8,8 @@ let capturedFavoriteIds: unknown;
 let capturedToggleFavoriteHandler: unknown;
 let capturedConnectionOrder: unknown;
 let capturedReorderHandler: unknown;
+/** The row menu's Browse Keys item, as the tree received it from the sidebar. */
+let capturedBrowseKeys: ((object: { name: string }) => void) | undefined;
 
 // Mock child components to isolate Sidebar logic
 mock.module("@/components/sidebar/ConnectionsList", () => ({
@@ -42,6 +44,10 @@ mock.module("@/components/object-tree", () => ({
     const React = require("react");
     const connection = props.connection as Record<string, unknown> | undefined;
     const capabilities = props.capabilities as { containerLevels?: unknown[] } | undefined;
+    // The row menu's entry point into the keys panel, captured so a test can press it: the sidebar
+    // hands the tree this handler and nothing else about the panel.
+    capturedBrowseKeys = (props.actions as { onBrowseKeys?: (object: { name: string }) => void } | undefined)
+      ?.onBrowseKeys;
     return React.createElement(
       "div",
       {
@@ -69,6 +75,8 @@ mock.module("@/components/key-browser", () => ({
     const React = require("react");
     const connection = props.connection as Record<string, unknown> | undefined;
     const capability = props.capability as Record<string, unknown> | undefined;
+    const request = props.request as { pattern?: string } | undefined;
+    const level = props.databaseLevel as { label?: string } | undefined;
     return React.createElement(
       "div",
       {
@@ -76,6 +84,8 @@ mock.module("@/components/key-browser", () => ({
         "data-connection": String(connection?.id ?? "none"),
         "data-default-count": String(capability?.defaultCount ?? "none"),
         "data-has-open-key": String(props.onOpenKey !== undefined),
+        "data-request": String(request?.pattern ?? "none"),
+        "data-level": String(level?.label ?? "none"),
       },
       "KeyBrowser Mock",
     );
@@ -120,7 +130,7 @@ mock.module("@radix-ui/react-scroll-area", () => {
 });
 
 import { describe, test, expect, afterEach } from "bun:test";
-import { render, fireEvent, cleanup } from "@testing-library/react";
+import { render, fireEvent, cleanup, act } from "@testing-library/react";
 import React from "react";
 
 import { mockPostgresConnection, mockMySQLConnection } from "../../fixtures/connections";
@@ -320,8 +330,12 @@ describe("Sidebar", () => {
    * U22. The shell decides what it CAN do and the tree decides what the declaration
    * ALLOWS; the sidebar joins neither question and hands both straight through. The
    * engine's own wording goes with them, because the menu's maintenance items read it.
+   *
+   * The ONE item the sidebar adds is the one whose destination it owns — the keys panel — and
+   * `rowActions` is what decides whether any row may offer it, so this addition cannot put a
+   * destination the engine has no surface for into a menu.
    */
-  test("the shell's row actions and the engine's wording reach the tree unchanged", () => {
+  test("the shell's row actions and the engine's wording reach the tree, plus the panel's own", () => {
     const props = createDefaultProps({
       objectActions: { onProfileObject: mock(() => {}), onCreateObject: mock(() => {}) },
       // The wording travels with the declaration rather than beside it: both halves of
@@ -330,15 +344,15 @@ describe("Sidebar", () => {
     });
     const { getByTestId } = render(<Sidebar {...props} />);
 
-    expect(getByTestId("object-tree").getAttribute("data-actions")).toBe("onCreateObject,onProfileObject");
+    expect(getByTestId("object-tree").getAttribute("data-actions")).toBe("onBrowseKeys,onCreateObject,onProfileObject");
     expect(getByTestId("object-tree").getAttribute("data-has-labels")).toBe("true");
   });
 
-  test("control: a shell that offers no row actions hands the tree none", () => {
+  test("control: a shell that offers no row actions hands the tree only the sidebar's own", () => {
     const props = createDefaultProps();
     const { getByTestId } = render(<Sidebar {...props} />);
 
-    expect(getByTestId("object-tree").getAttribute("data-actions")).toBe("");
+    expect(getByTestId("object-tree").getAttribute("data-actions")).toBe("onBrowseKeys");
   });
 
   test("control: a connection that is not deferred hands the tree no deferral", () => {
@@ -529,7 +543,101 @@ describe("Sidebar", () => {
 
     fireEvent.click(getByRole("tab", { name: "Objects" }));
     expect(queryByTestId("object-tree")).not.toBeNull();
+    // HIDDEN rather than gone: a walk costs round trips over the whole key space, so the reader's
+    // sample survives a look at the object tree (#3).
+    expect(queryByTestId("key-browser-panel")?.className).toContain("hidden");
+  });
+
+  test("keeps the same panel mounted across a trip to the tree and back", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+    });
+    const { getByRole, queryByTestId } = render(<Sidebar {...props} />);
+    fireEvent.click(getByRole("tab", { name: "Keys" }));
+    const panel = queryByTestId("key-browser");
+
+    fireEvent.click(getByRole("tab", { name: "Objects" }));
+    fireEvent.click(getByRole("tab", { name: "Keys" }));
+
+    // The SAME element, not an equivalent one: a remount is what would take the walk back to cursor
+    // `"0"`, and it is the thing a reader notices as "it scans again every time".
+    expect(queryByTestId("key-browser")).toBe(panel);
+    expect(queryByTestId("key-browser-panel")?.className).not.toContain("hidden");
+  });
+
+  test("drops the hidden panel when the connection changes, so it cannot walk another server", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+    });
+    const { getByRole, queryByTestId, rerender } = render(<Sidebar {...props} />);
+    fireEvent.click(getByRole("tab", { name: "Keys" }));
+    fireEvent.click(getByRole("tab", { name: "Objects" }));
+    expect(queryByTestId("key-browser")).not.toBeNull();
+
+    rerender(<Sidebar {...createDefaultProps({ activeConnection: mockMySQLConnection, metadata: walkMetadata() })} />);
+
+    // A hidden panel still walks, and the connection it was walking is no longer the one on screen:
+    // keeping it would spend the server's `SCAN` on a key space nobody is looking at.
     expect(queryByTestId("key-browser")).toBeNull();
+    expect(queryByTestId("object-tree")).not.toBeNull();
+  });
+
+  test("hands a key pattern from the row menu to the panel, and switches to it", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+      objectActions: { onGenerateSelect: () => {} },
+    });
+    const { getByRole, queryByTestId } = render(<Sidebar {...props} />);
+    // The tree is drawn and was never switched away from; the row menu is the only gesture here.
+    expect(capturedBrowseKeys).toBeDefined();
+
+    act(() => {
+      capturedBrowseKeys?.({ name: "user:*" });
+    });
+
+    // The pattern the row named, handed over VERBATIM: its `*` is already the `MATCH` glob the panel
+    // needs, and the panel is what shows it.
+    expect(queryByTestId("key-browser")?.getAttribute("data-request")).toBe("user:*");
+    expect(getByRole("tab", { name: "Keys" }).getAttribute("aria-selected")).toBe("true");
+    expect(queryByTestId("object-tree")).toBeNull();
+  });
+
+  test("adds the one action it owns to the handlers the shell handed down, and no others", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+      objectActions: { onGenerateSelect: () => {}, onViewSource: () => {} },
+    });
+    const { queryByTestId } = render(<Sidebar {...props} />);
+
+    // The shell decides what it can do and the sidebar adds only what it can do ITSELF: the panel is
+    // this component's, so the item that opens it is too, and the rest passes through untouched.
+    expect(queryByTestId("object-tree")?.getAttribute("data-actions")).toBe(
+      "onBrowseKeys,onGenerateSelect,onViewSource",
+    );
+  });
+
+  test("hands the panel the engine's own container level, as the walk's database", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: {
+        capabilities: {
+          ...oneLevel,
+          keyScan: { defaultCount: 500, maxCount: 1000 },
+          containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
+        },
+      } as unknown as ProviderMetadata,
+    });
+    const { getByRole, queryByTestId } = render(<Sidebar {...props} />);
+
+    fireEvent.click(getByRole("tab", { name: "Keys" }));
+
+    // The label is the ENGINE's word for the level, handed over rather than written here: the panel
+    // labels its choice with it and never invents one.
+    expect(queryByTestId("key-browser")?.getAttribute("data-level")).toBe("Database");
   });
 
   test("hands the key browser the activation handler it was given", () => {
