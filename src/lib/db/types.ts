@@ -285,6 +285,14 @@ export interface KeyScanPage {
    * drawing 2000/6355 there is showing a fraction of one node and not of the cluster.
    */
   readonly total: number;
+  /**
+   * Whether this answer is about ONE NODE of a clustered deployment.
+   *
+   * `SCAN` and `DBSIZE` are per node and neither has a cluster-wide form, so on a cluster the keys
+   * and the count describe the node that answered and nothing else. Absent means the deployment
+   * does not say it is clustered, which is the ordinary server.
+   */
+  readonly clustered?: boolean;
 }
 
 export interface ProviderCapabilities {

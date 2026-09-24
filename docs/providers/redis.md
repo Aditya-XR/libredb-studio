@@ -1299,6 +1299,12 @@ One page carries four fields in and four out:
   left, so no total can be computed from the batches a caller has already seen. It counts **every key
   in the database**, so with a `pattern` in hand it is a denominator for the database rather than for
   the walk, and the panel's wording says which.
+- **The deployment's shape travels with that count** as `clustered`, read from the server's own
+  `INFO cluster` in the same pipeline round trip as `DBSIZE` rather than in a call of its own. It is
+  present and `true` only when the reply says `cluster_enabled:1`, which is what lets the panel say
+  the keys and the count are one node's; a plain server says `cluster_enabled:0`, and a reply that is
+  missing or cannot be read leaves the field absent rather than guessed
+  (see [the clustered-deployment limitation](#64-known-limitation-clustered-deployments)).
 - **Each key's type travels with the page** as `types`, keyed by name. `TYPE` takes one key and Redis
   publishes no batch form, so the provider pipelines one call per key of the batch: a page costs one
   extra round trip whatever it holds, never one per key. A key absent from the map is one no page

@@ -203,6 +203,39 @@ describe("useKeyScan", () => {
     expect(result.current.types.size).toBe(0);
   });
 
+  test("reports that the counts are one node's, and claims nothing when the server did not say", async () => {
+    // The cluster-shaped page: `SCAN` and `DBSIZE` answer for one node, so the panel's denominator is
+    // one node's and the reader has to be told that rather than discovering a third of the key space.
+    mockGlobalFetch({
+      "/api/db/keys/scan": { json: { keys: ["a"], cursor: "0", total: 333_249, types: {}, clustered: true } },
+    });
+    const { result } = hook();
+    await act(async () => {
+      await result.current.scanMore();
+    });
+    expect(result.current.clustered).toBe(true);
+
+    // A server that says `cluster_enabled:0` is an ordinary one: FALSE is an answer, and the panel
+    // draws no node warning for it. `undefined` is a reply that could not be read at all - covered by
+    // the provider suite - and it claims nothing either.
+    mockGlobalFetch({
+      "/api/db/keys/scan": { json: { keys: ["b"], cursor: "0", total: 42, types: {}, clustered: false } },
+    });
+    // Its OWN walk: the one above came back on cursor `0`, and a spent walk refuses a second page -
+    // the state would never be written and the assertion would be true for the wrong reason.
+    const plain = hook();
+    await act(async () => {
+      await plain.result.current.scanMore();
+    });
+    expect(plain.result.current.clustered).toBe(false);
+
+    // Thrown away with the walk: a fresh walk of an unknown server starts from not knowing.
+    act(() => {
+      result.current.reset();
+    });
+    expect(result.current.clustered).toBeUndefined();
+  });
+
   test("advances the cursor between pages", async () => {
     const fetchMock = mockGlobalFetch({
       "/api/db/keys/scan": async (req) => ((await cursorOf(req)) === "0" ? page(["a"], "7") : page(["b"], "0")),

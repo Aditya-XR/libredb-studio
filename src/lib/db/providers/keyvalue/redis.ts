@@ -348,6 +348,34 @@ function keyGrouping(key: string): string {
 }
 
 /**
+ * Whether an `INFO cluster` reply says this deployment is clustered.
+ *
+ * MEASURED, and it is the whole fact: a cluster node answers `cluster_enabled:1`, and a plain
+ * server answers `cluster_enabled:0`. Only the literal `1` may become `true`; `0` is a deployment
+ * that SAID it is not clustered, and everything else - a missing line, a value that is neither
+ * word, or a reply that is not text at all, which is how a refused `INFO cluster` arrives in a
+ * pipeline - is `undefined`, this contract's word for "the deployment did not say". A refusal is
+ * not evidence, so nothing is inferred from one: the one-node wording belongs on a page only when
+ * the server itself said the keys belong to one node.
+ *
+ * The field is looked up by NAME the way `parseDatabaseCount` looks up `databases`, never by
+ * position: `INFO` answers a section of pairs whose order the server owns, and `parseRedisInfo`
+ * reads every other `INFO` reply in this file the same way.
+ */
+function parseClusterEnabled(reply: unknown): boolean | undefined {
+  if (typeof reply !== "string") return undefined;
+  for (const line of reply.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("cluster_enabled:")) continue;
+    const value = trimmed.substring("cluster_enabled:".length).trim();
+    if (value === "1") return true;
+    if (value === "0") return false;
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
  * Every key's value type in ONE page, in ONE round trip.
  *
  * `TYPE` TAKES ONE KEY AND REDIS PUBLISHES NO BATCH FORM, so the alternative to this is one call per
@@ -1492,6 +1520,14 @@ export class RedisProvider extends BaseDatabaseProvider {
    * separately would have to keep two round trips in step, and the number would be stale
    * between them for no saving worth having.
    *
+   * THE DEPLOYMENT'S SHAPE TRAVELS WITH THAT COUNT, AND COSTS NO ROUND TRIP: `INFO cluster`
+   * depends on nothing `DBSIZE` answers, so both ride one pipeline - the round trip the count
+   * already paid - instead of adding a call of their own. It is NOT folded into the `TYPE` batch
+   * below, because that batch is skipped outright for a page holding no keys while the count on
+   * that same page still describes one node. What comes back is the server's own
+   * `cluster_enabled` (see `parseClusterEnabled`), so a page can say that its keys and its total
+   * describe the node that answered and nothing else.
+   *
    * NO DEDUPLICATION AND NO ORDERING, because `SCAN` promises neither: a key present for the
    * whole walk is returned at least once and may be returned twice, and the order is the hash
    * table's rather than the caller's. A caller building a tree from successive pages is
@@ -1509,10 +1545,19 @@ export class RedisProvider extends BaseDatabaseProvider {
       const [cursor, keys] = options.pattern
         ? await client.scan(options.cursor, "MATCH", options.pattern, "COUNT", options.count)
         : await client.scan(options.cursor, "COUNT", options.count);
-      const total = await client.dbsize();
+      // ONE ROUND TRIP FOR BOTH READS, and therefore none for the fact. A count the pipeline did
+      // not bring back is the refusal `client.dbsize()` used to raise, kept as a refusal rather
+      // than papered over: `total` is what a progress bar divides by, and a stand-in number
+      // would be one nobody measured.
+      const replies = await client.pipeline().dbsize().info("cluster").exec();
+      const total = replies?.[0]?.[1];
+      if (typeof total !== "number") {
+        throw replies?.[0]?.[0] ?? new QueryError("Redis answered no key count for this page of the walk", "redis");
+      }
+      const clustered = parseClusterEnabled(replies?.[1]?.[1]);
       // ONE EXTRA ROUND TRIP FOR THE WHOLE PAGE, not one per key: see `readKeyTypes`.
       const types = await readKeyTypes(client, keys);
-      return { keys, cursor, total, types };
+      return { keys, cursor, total, types, ...(clustered === undefined ? {} : { clustered }) };
     });
   }
 

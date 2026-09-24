@@ -42,6 +42,27 @@ const MOCK_INFO_STRING = [
   "",
 ].join("\n");
 
+/**
+ * The `INFO cluster` section a CLUSTER node answers.
+ *
+ * The fact this provider reads is the server's own line: measured, a node of a clustered
+ * deployment answers `cluster_enabled:1` while an ordinary server answers `cluster_enabled:0`.
+ * The other pairs are carried along so the parse is pinned on a real section rather than on a
+ * one-line string, which is the trap it guards against.
+ */
+const MOCK_CLUSTER_INFO = [
+  "# Cluster",
+  "cluster_enabled:1",
+  "cluster_state:ok",
+  "cluster_slots_assigned:16384",
+  "cluster_known_nodes:3",
+  "cluster_size:3",
+  "",
+].join("\n");
+
+/** The same section on the ordinary server: the one field read here says `0`. */
+const MOCK_PLAIN_CLUSTER_INFO = ["# Cluster", "cluster_enabled:0", "cluster_state:ok", ""].join("\n");
+
 // `name=` is the connection name (empty until a client calls CLIENT SETNAME) and is
 // deliberately left blank here, distinct from `user=` (the authenticated ACL user) - the
 // two used to be conflated in getActiveSessions(), which read `name` for the user column.
@@ -437,6 +458,21 @@ let pipelineMode: "ok" | "error" | "null" = "ok";
  */
 let infoOverride: string | null = null;
 
+/**
+ * What the page pipeline's `INFO cluster` answers, and whether that pipeline answers at all.
+ *
+ * The key-space page reads the deployment's shape in the SAME batch as its `DBSIZE`, so these are
+ * separate from `pipelineMode` above: that flag governs the `TYPE` batch, which a page sends on its
+ * own and skips entirely when it holds no keys, while the count is read on every page. The reply is
+ * `unknown` because a refused `INFO` arrives as a non-text reply, which is the absent case the
+ * contract names rather than a shape to answer with a guess.
+ */
+let clusterInfoReply: unknown = MOCK_PLAIN_CLUSTER_INFO;
+let pagePipelineMode: "ok" | "error" | "null" = "ok";
+
+/** Every pipelined batch the provider sent, by command name, in the order it sent it. */
+const pipelineBatches: string[][] = [];
+
 mock.module("ioredis", () => {
   class MockRedis {
     private _config: unknown;
@@ -496,29 +532,48 @@ mock.module("ioredis", () => {
     }
 
     /**
-     * A pipelined batch, which is how a key-space page reads its keys' types in one round trip.
+     * A pipelined batch. Two of them reach this double: the key-space page's `DBSIZE` +
+     * `INFO cluster` read, and the `TYPE` batch that answers the page's keys.
      *
-     * ONLY `TYPE` IS ACCEPTED, and anything else THROWS. A pipeline that silently answered the wrong
-     * shape for a command this provider had started pipelining would look like a page whose keys
-     * simply had no types — the failure would arrive as absent data rather than as a test that went
-     * red.
+     * ONLY THOSE COMMANDS ARE ACCEPTED, and anything else THROWS. A pipeline that silently answered
+     * the wrong shape for a command this provider had started pipelining would look like a page
+     * whose keys simply had no types - the failure would arrive as absent data rather than as a
+     * test that went red.
      */
     pipeline() {
-      const keys: string[] = [];
+      const commands: Array<{ name: string; args: (string | number)[] }> = [];
       const chain = {
         call: (command: string, ...args: (string | number)[]) => {
           if (String(command).toUpperCase() !== "TYPE") {
             throw new Error(`unexpected pipelined command: ${command}`);
           }
-          keys.push(String(args[0]));
+          commands.push({ name: "TYPE", args });
+          return chain;
+        },
+        dbsize: () => {
+          commands.push({ name: "DBSIZE", args: [] });
+          return chain;
+        },
+        info: (section?: string) => {
+          if (section !== "cluster") {
+            throw new Error(`unexpected pipelined INFO section: ${section}`);
+          }
+          commands.push({ name: "INFO", args: ["cluster"] });
           return chain;
         },
         exec: async (): Promise<[Error | null, unknown][] | null> => {
-          if (pipelineMode === "null") return null;
+          pipelineBatches.push(commands.map((command) => command.name));
+          // A batch carrying `DBSIZE` is the page's count-and-shape read and obeys its own fault
+          // mode; the rest is the `TYPE` batch, whose flags say what a page with unreadable types
+          // looks like.
+          const mode = commands.some((command) => command.name === "DBSIZE") ? pagePipelineMode : pipelineMode;
+          if (mode === "null") return null;
           return Promise.all(
-            keys.map(async (key): Promise<[Error | null, unknown]> => {
-              if (pipelineMode === "error") return [new Error("ERR pipeline command failed"), null];
-              return [null, await this.type(key)];
+            commands.map(async ({ name, args }): Promise<[Error | null, unknown]> => {
+              if (mode === "error") return [new Error("ERR pipeline command failed"), null];
+              if (name === "DBSIZE") return [null, 42];
+              if (name === "INFO") return [null, clusterInfoReply];
+              return [null, await this.type(String(args[0]))];
             }),
           );
         },
@@ -835,6 +890,9 @@ describe("RedisProvider", () => {
       scanRefusal = null;
       scanOverflows = false;
       pipelineMode = "ok";
+      clusterInfoReply = MOCK_PLAIN_CLUSTER_INFO;
+      pagePipelineMode = "ok";
+      pipelineBatches.length = 0;
       capturedRedisOptions.length = 0;
       await provider.connect();
     });
@@ -936,10 +994,95 @@ describe("RedisProvider", () => {
 
       const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
 
-      // Not an optimisation for its own sake: an empty pipeline is a round trip whose answer is
-      // known before it is sent, and `MATCH` answers empty batches routinely.
+      // Not an optimisation for its own sake: a `TYPE` batch for an empty key list is a round trip
+      // whose answer is known before it is sent, and `MATCH` answers empty batches routinely. The
+      // count and the deployment's shape are read on this page all the same, because they describe
+      // the database and not the batch.
       expect(answered.keys).toEqual([]);
       expect(answered.types).toEqual({});
+    });
+
+    test("reads the deployment's shape in the round trip the count already pays", async () => {
+      await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // ONE BATCH FOR BOTH READS is the whole claim that the fact costs this page no round trip: a
+      // separate `INFO cluster` after the count would be a second wait for something the same batch
+      // could carry. The `TYPE` batch is the other one and is separate on purpose - a page holding
+      // no keys sends none of it while the count is read every time.
+      expect(pipelineBatches[0]).toEqual(["DBSIZE", "INFO"]);
+      expect(pipelineBatches[1]).toEqual(["TYPE", "TYPE"]);
+    });
+
+    test("says the page is one node's when the server says it is a cluster", async () => {
+      clusterInfoReply = MOCK_CLUSTER_INFO;
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // The server's own `cluster_enabled:1`, and nothing inferred from anything else. This is what
+      // lets the panel say that the keys and the count beside them describe the node that answered.
+      expect(answered.clustered).toBe(true);
+      expect(answered.total).toBe(42);
+    });
+
+    test("says the page is not a cluster when the server says cluster_enabled is 0", async () => {
+      clusterInfoReply = MOCK_PLAIN_CLUSTER_INFO;
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // A deployment that SAID it is not clustered is a present `false`, which is a different
+      // answer from the absent one below: the panel's one-node wording is about an absent fact, and
+      // this is the fact, read from the server.
+      expect(answered.clustered).toBe(false);
+    });
+
+    test("leaves the deployment's shape absent when the section does not name it", async () => {
+      clusterInfoReply = "# Cluster\ncluster_state:ok\n";
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // A section without the line is a server that did not answer the question. Absent is the
+      // contract's word for that, and the one thing that must never be invented from a silence is
+      // the claim the field exists to qualify.
+      expect("clustered" in answered).toBe(false);
+    });
+
+    test("leaves the deployment's shape absent when the reply is not text", async () => {
+      // A refused `INFO cluster` reaches the pipeline as a non-text reply, which is the shape an ACL
+      // user without `+info` produces. A refusal is not evidence of clustering or of its absence, so
+      // nothing is recorded.
+      clusterInfoReply = null;
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      expect("clustered" in answered).toBe(false);
+      // `DBSIZE` is a different command under a different ACL grant, so refusing the section does
+      // not cost the page its denominator as well.
+      expect(answered.total).toBe(42);
+    });
+
+    test("leaves the deployment's shape absent when the field says neither word", async () => {
+      clusterInfoReply = "# Cluster\ncluster_enabled:maybe\n";
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // Only `1` and `0` are read. A value a future server might mean some other way is not rounded
+      // to either, because rounding it to `true` is the direction that draws a wrong claim.
+      expect("clustered" in answered).toBe(false);
+    });
+
+    test("refuses a page whose count the pipeline could not answer", async () => {
+      pagePipelineMode = "error";
+
+      // `total` is what a progress indicator divides by, and a count the connection could not read
+      // used to reach the caller as the server's own refusal. It still does: an answer with no count
+      // is not a page, and a stand-in number would be one nobody measured.
+      await expect(provider.scanKeysPage({ cursor: "0", count: 2 })).rejects.toThrow(/pipeline command failed/);
+    });
+
+    test("refuses a page whose count pipeline answered nothing", async () => {
+      pagePipelineMode = "null";
+
+      await expect(provider.scanKeysPage({ cursor: "0", count: 2 })).rejects.toThrow(/no key count/);
     });
   });
 

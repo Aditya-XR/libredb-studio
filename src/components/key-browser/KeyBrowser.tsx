@@ -220,6 +220,7 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
     keys,
     scanned,
     total,
+    clustered,
     types,
     busy,
     scanningAll,
@@ -352,6 +353,19 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
    */
   const progressPrefix = pattern === "" ? "Scanned" : "Matched";
   const progressSuffix = total === null ? "" : pattern === "" ? `/${total}` : ` of ${total}`;
+  /*
+   * WHAT A CLUSTERED SERVER'S COUNTS ARE: one node's, and the panel says so in words rather than in
+   * a footnote. `SCAN` and `DBSIZE` are per node and neither has a cluster-wide form, so on a
+   * three-master deployment the number this panel divides by is a third of the key space at most -
+   * a figure reported as "every key this database holds" is the claim the review caught (#1094).
+   *
+   * `true` only: a server that did not read its own `INFO cluster` says nothing about itself here,
+   * and "not clustered" would be a claim from a refusal.
+   */
+  const nodeScoped = clustered === true;
+  const countScope = nodeScoped
+    ? "out of every key this NODE holds (this server is clustered: SCAN and DBSIZE are per node)"
+    : "out of every key this database holds";
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="key-browser">
@@ -426,7 +440,7 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
         <span
           className="text-[10px] tabular-nums text-muted-foreground"
           data-testid="key-browser-progress"
-          title="Keys the walk has been handed, out of every key this database holds"
+          title={countScope}
         >
           {progressPrefix} {scanned}
           {progressSuffix}
@@ -504,6 +518,16 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
         </div>
       )}
 
+      {/* VISIBLE, NOT ONLY IN A TOOLTIP: the counts are what the whole panel divides by, and a reader
+          who cannot see that they are one node's will take them for the key space (#1094). Drawn only
+          where the server's own `INFO cluster` said so - a reply the provider could not read claims
+          nothing. */}
+      {nodeScoped && (
+        <p className="px-1 pb-2 text-[10px] leading-relaxed text-warning" data-testid="key-browser-clustered">
+          Clustered server: SCAN and DBSIZE answer for one node at a time, so these counts are this node&apos;s.
+        </p>
+      )}
+
       {stoppedBy !== null && (
         <p className="px-1 pb-2 text-[10px] leading-relaxed text-warning" data-testid="key-browser-stopped">
           {stoppedBy}
@@ -568,7 +592,11 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
               <span className="truncate font-mono text-xs">{databaseRow.name}</span>
               <span
                 data-testid="key-browser-database-total"
-                title="Keys in this database, as the server counts them"
+                title={
+                  nodeScoped
+                    ? "Keys in this database as THIS NODE counts them: the server is clustered, and SCAN and DBSIZE have no cluster-wide form"
+                    : "Keys in this database, as the server counts them"
+                }
                 className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground"
               >
                 {total === null ? "" : total.toLocaleString("en-US")}

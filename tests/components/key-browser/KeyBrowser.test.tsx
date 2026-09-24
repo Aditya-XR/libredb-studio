@@ -805,6 +805,42 @@ describe("KeyBrowser", () => {
    * numbered database a prefix belongs to, and can reach the other fifteen rather than only ever
    * seeing the one the session happened to be in.
    */
+  test("says the counts are one node's when the server is clustered, and stays silent otherwise", async () => {
+    mockGlobalFetch({
+      "/api/db/keys/scan": { json: { keys: ["app:env"], cursor: "0", total: 333_249, types: {}, clustered: true } },
+      "/api/db/objects/containers": { json: DATABASES },
+    });
+    renderLevel();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("key-browser-clustered")).toBeDefined();
+    });
+    // VISIBLE, because the count is what the panel divides by everywhere: a reader who has to hover to
+    // learn that two thirds of the key space is missing from the denominator is a reader who will not
+    // learn it (#1094). The two tooltips agree with the sentence.
+    expect(screen.getByTestId("key-browser-clustered").textContent).toContain("one node at a time");
+    expect(screen.getByTestId("key-browser-progress").getAttribute("title")).toContain("this NODE holds");
+    expect(screen.getByTestId("key-browser-database-total").getAttribute("title")).toContain("THIS NODE counts");
+  });
+
+  test("draws no node warning for a server that answered that it is not clustered", async () => {
+    mockGlobalFetch({
+      "/api/db/keys/scan": { json: { keys: ["app:env"], cursor: "0", total: 31, types: {}, clustered: false } },
+      "/api/db/objects/containers": { json: DATABASES },
+    });
+    renderLevel();
+
+    await waitFor(() => {
+      expect(rows()).toEqual(["0@0", "app:*@1"]);
+    });
+    // FALSE is an ordinary answer and absent is a reply that could not be read: neither claims a
+    // cluster, so neither draws the sentence.
+    expect(screen.queryByTestId("key-browser-clustered")).toBeNull();
+    expect(screen.getByTestId("key-browser-progress").getAttribute("title")).toBe(
+      "out of every key this database holds",
+    );
+  });
+
   describe("the database the walk is in", () => {
     test("draws it as the tree's root, and walks the session's own until somebody chooses", async () => {
       const fetchMock = mockGlobalFetch(redisRoutes(page(["app:env"], "0", 1531)));

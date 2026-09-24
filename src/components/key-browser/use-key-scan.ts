@@ -50,6 +50,15 @@ export interface KeyScanResult {
   /** The server's own key count for the database, or null before the first page answers. */
   readonly total: number | null;
   /**
+   * Whether the answers describe ONE NODE of a clustered deployment.
+   *
+   * `SCAN` and `DBSIZE` are per node and neither has a cluster-wide form, so on a cluster every count
+   * on this panel is one node's and nothing else. `undefined` is a server that did not say either way,
+   * which is what a refused `INFO cluster` leaves behind: a panel that called a node's count "every
+   * key this database holds" is the defect this exists to prevent.
+   */
+  readonly clustered: boolean | undefined;
+  /**
    * Each key's value type, by key name, as last answered by the server.
    *
    * A KEY ABSENT FROM THIS MAP IS ONE NO PAGE HAS DESCRIBED, and a row draws nothing for it rather
@@ -128,6 +137,7 @@ export function useKeyScan(options: {
   const [keys, setKeys] = useState<readonly string[]>([]);
   const [scanned, setScanned] = useState(0);
   const [total, setTotal] = useState<number | null>(null);
+  const [clustered, setClustered] = useState<boolean | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [scanningAll, setScanningAll] = useState(false);
   const [exhausted, setExhausted] = useState(false);
@@ -235,7 +245,16 @@ export function useKeyScan(options: {
       if (!response.ok) {
         throw new Error(body.error ?? `The key walk failed with HTTP ${response.status}`);
       }
-      return { keys: body.keys ?? [], cursor: body.cursor ?? "0", total: body.total ?? 0, types: body.types ?? {} };
+      return {
+        keys: body.keys ?? [],
+        cursor: body.cursor ?? "0",
+        total: body.total ?? 0,
+        types: body.types ?? {},
+        // Absent stays absent: a provider that could not read `INFO cluster` says nothing about the
+        // deployment's shape, and a panel that drew "clustered: false" there would be claiming a
+        // plain server from a refusal.
+        clustered: body.clustered,
+      };
     },
     [connection, database],
   );
@@ -289,6 +308,7 @@ export function useKeyScan(options: {
       setKeys((previous) => (fresh.length === 0 ? previous : [...previous, ...fresh]));
       setScanned(scannedKeys.current);
       setTotal(page.total);
+      setClustered(page.clustered);
       setError(null);
       // Cursor `"0"` is the only end-of-walk signal Redis publishes, so it is the only one this
       // can set: there is no total to compare against that a concurrent write would not move.
@@ -470,6 +490,7 @@ export function useKeyScan(options: {
     setKeys([]);
     setScanned(0);
     setTotal(null);
+    setClustered(undefined);
     setExhausted(false);
     setStoppedBy(null);
     setError(null);
@@ -483,6 +504,7 @@ export function useKeyScan(options: {
     keys,
     scanned,
     total,
+    clustered,
     types,
     busy,
     scanningAll,
