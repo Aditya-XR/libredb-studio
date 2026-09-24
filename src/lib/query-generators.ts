@@ -1,3 +1,4 @@
+import { declaredLevels } from "@/lib/db/object-kinds";
 import type { ProviderCapabilities } from "@/lib/db/types";
 import type { ColumnSchema } from "@/lib/types";
 
@@ -160,6 +161,42 @@ export function objectSegment(path: readonly string[]): string {
   const segment = path[path.length - 1];
   if (segment === undefined) throw new Error("Cannot generate a query: the object address has no segments.");
   return segment;
+}
+
+/**
+ * The address a JSON command carries: the collection's own segment, and the database that
+ * holds it as a key of its own (#843). `db.collection("sample_shop.users")` would name a
+ * collection literally called that, so the database cannot ride inside `collection`.
+ *
+ * The database is the segment the declaration assigns to its `schema` level, never
+ * `path[0]` (standing ruling 5g), and it is emitted unconditionally, including for the
+ * connected database, for the reason `quoteObjectPath` qualifies unconditionally. A path
+ * whose length does not match the declared levels is refused: a collection that lost its
+ * database would otherwise read the connected database's same-named collection, which is
+ * the wrong answer #843 was.
+ *
+ * The one reader for every statement the product writes for MongoDB: the two generators
+ * below, the profiler route and the test data generator.
+ */
+export function jsonCommandAddress(
+  path: readonly string[],
+  capabilities: ProviderCapabilities,
+): { database?: string; collection: string } {
+  const levels = declaredLevels(capabilities);
+  if (path.length !== levels.length + 1) {
+    const shape = [...levels.map((level) => level.id), "name"].join(", ");
+    throw new Error(`Cannot generate a query: the object path is [${shape}], received ${JSON.stringify(path)}.`);
+  }
+  const collection = objectSegment(path);
+  if (levels.length === 0) return { collection };
+  const index = levels.findIndex((level) => level.id === "schema");
+  if (index < 0) {
+    throw new Error(
+      `Cannot generate a query: a JSON command needs a "schema" container level for its database; ` +
+        `the declaration is [${levels.map((level) => level.id).join(", ")}].`,
+    );
+  }
+  return { database: path[index], collection };
 }
 
 /**
@@ -434,12 +471,8 @@ export function generateTableQuery(
     return renderRedisCommand(keyType ? REDIS_COMMANDS[keyType].read(base) : ["TYPE", base]);
   }
   if (capabilities.queryLanguage === "json") {
-    // `database` carries the path's container segment, so the statement reads the
-    // collection's own database rather than the connected one (#843). Dropped when
-    // the path names no database, keeping a bare `collection` runnable as before.
-    const database = path.length > 1 ? path[0] : undefined;
     return JSON.stringify(
-      { database, collection: tableName, operation: "find", filter: {}, options: { limit: 50 } },
+      { ...jsonCommandAddress(path, capabilities), operation: "find", filter: {}, options: { limit: 50 } },
       null,
       2,
     );
@@ -591,8 +624,7 @@ export function generateSelectQuery(
     });
     return JSON.stringify(
       {
-        database: path.length > 1 ? path[0] : undefined,
-        collection: tableName,
+        ...jsonCommandAddress(path, capabilities),
         operation: "find",
         filter: {},
         options: {

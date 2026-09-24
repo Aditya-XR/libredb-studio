@@ -1148,6 +1148,13 @@ describe("the generated statement addresses an object by its path", () => {
   });
 });
 
+// The MongoDB declaration, as `MONGODB_CONTAINER_LEVELS` states it: one level, the database.
+const mongoCaps = makeCaps({
+  queryLanguage: "json",
+  defaultPort: null,
+  containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
+});
+
 // ============================================================================
 // The four branches that must NOT be qualified, one test each (#789, Task 30)
 // ============================================================================
@@ -1159,17 +1166,47 @@ describe("the dialects that address one key or collection, not a qualified name"
     // create a collection literally called that. The database rides as the `database`
     // key instead (#843), which is what makes the statement read the collection's own
     // database rather than the connected one.
-    const out = generateTableQuery(["sample_shop", "users"], makeCaps({ queryLanguage: "json", defaultPort: null }));
-    const parsed = JSON.parse(out);
+    const parsed = JSON.parse(generateTableQuery(["sample_shop", "users"], mongoCaps));
     expect(parsed.collection).toBe("users");
     expect(parsed.database).toBe("sample_shop");
   });
 
   test("MongoDB's Generate Query names the collection and its database too", () => {
-    const caps = makeCaps({ queryLanguage: "json", defaultPort: null });
-    const parsed = JSON.parse(generateSelectQuery(["sample_shop", "users"], sampleColumns, caps));
+    const parsed = JSON.parse(generateSelectQuery(["sample_shop", "users"], sampleColumns, mongoCaps));
     expect(parsed.collection).toBe("users");
     expect(parsed.database).toBe("sample_shop");
+  });
+
+  test("the database is the segment the declaration assigns to its level, never path[0]", () => {
+    // Standing ruling 5g. MongoDB declares one level, so `path[0]` would pass every other
+    // test in this file; a second level in front of it is what tells the two apart.
+    const caps = makeCaps({
+      queryLanguage: "json",
+      defaultPort: null,
+      containerLevels: [
+        { id: "catalog", label: "Catalog", labelPlural: "Catalogs" },
+        { id: "schema", label: "Database", labelPlural: "Databases" },
+      ],
+    });
+    expect(JSON.parse(generateTableQuery(["outer", "sample_shop", "users"], caps)).database).toBe("sample_shop");
+    expect(JSON.parse(generateSelectQuery(["outer", "sample_shop", "users"], sampleColumns, caps)).database).toBe(
+      "sample_shop",
+    );
+  });
+
+  test("a path that does not match the declared levels is refused, not addressed by guess", () => {
+    // One segment on an engine that declares a database level has lost its database:
+    // emitting no key would read the connected database's same-named collection, which is
+    // the #843 wrong answer again.
+    expect(() => generateTableQuery(["users"], mongoCaps)).toThrow("[schema, name]");
+    expect(() => generateTableQuery(["a", "b", "users"], mongoCaps)).toThrow("[schema, name]");
+    // A declared level that is not the database level cannot be read as one.
+    const noDatabaseLevel = makeCaps({
+      queryLanguage: "json",
+      defaultPort: null,
+      containerLevels: [{ id: "catalog", label: "Catalog", labelPlural: "Catalogs" }],
+    });
+    expect(() => generateTableQuery(["outer", "users"], noDatabaseLevel)).toThrow('"schema" container level');
   });
 
   test("Redis takes the bare key, never the database segment with it", () => {

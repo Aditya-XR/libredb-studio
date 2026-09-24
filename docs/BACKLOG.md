@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1–D103, U17 · 48
+- [Drivers and connections](#drivers-and-connections) — D1–D104, U17 · 49
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U35 · 23
@@ -1540,6 +1540,19 @@ the probe ran, or the expectation says why it could not.
 `listings`, an expectation that omits a declared abstaining kind is refused by name instead of by the
 flag's message, a flag set against declarations that contradict it is refused, and the negative
 direction of invariant 8 reports whether it ran rather than only whether it could have.
+
+### D104. MongoDB maintenance and monitoring read only the connected database, so a deep link from another one lands on the wrong collection
+
+Found 2026-09-24 in the browser while verifying #843 (PR #1106), on a connection opened with `appdata` whose tree also lists `analytics`.
+Both hold a collection called `events`.
+The tree's **Validate Collection** on `analytics > events` opens `/admin/operations?path=analytics&path=events`, and that page lists the connected database's collections, `appdata . events` among them: `getTableStats()`, `getIndexStats()` and `runMaintenance()` in `src/lib/db/providers/document/mongodb.ts` all read `this.db`, the connected database, and `runMaintenance(type, target)` takes a bare collection name.
+So the row a person presses for the collection they chose is the connected database's same-named collection, which is the shape #843 removed from the query path.
+
+Not fixed in #1106, which is scoped to the statement grammar.
+The target is a bare string in `runMaintenance(type, target)`'s contract for every provider, so passing a path is the D49 change, and the monitoring tabs are session-scoped on every engine.
+
+**Done when:** a MongoDB maintenance target names its database, the deep link either opens the collection's own database or refuses a path outside the connected one, and a test pins that `Validate` on `analytics.events` reaches `analytics`.
+
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound

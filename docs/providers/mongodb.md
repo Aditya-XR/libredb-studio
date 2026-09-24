@@ -87,10 +87,14 @@ requires `collection` and `operation`:
 { "collection": "users", "operation": "insertOne", "documents": [{"name": "John"}] }
 ```
 
-`database` is optional: absent means the connected database. When it names another
-database, the command runs there — `{ "database": "analytics", "collection": "events",
-"operation": "find" }` reads `analytics.events`, not the connected database's `events`
-(#843). It must be a string; anything else is a `QueryError`.
+`database` names the database the command runs in, so `{ "database": "analytics", "collection": "events", "operation": "find" }` reads `analytics.events` and not the connected database's `events` (#843).
+It is optional: absent means the connected database, which is what every statement written before the key existed means, the editor's snippets included.
+A non-string or empty value is a `QueryError`, raised before any database is opened: `MongoClient.db()` opens any string it is given, and a database that does not exist answers every read with 0 rows.
+A database the credentials cannot read raises the server's own sentence (`not authorized on analytics to execute command ...`), never an empty result.
+
+Every statement the product writes for a collection carries the key: the tree click and Generate Query (`generateTableQuery`, `generateSelectQuery`), the profiler (`/api/db/profile`) and the test data generator.
+All four read it through `jsonCommandAddress()` in [`query-generators.ts`](../../src/lib/query-generators.ts), which takes the segment the declaration assigns to the `schema` level rather than `path[0]` (standing ruling 5g) and refuses a path that does not match the declared levels.
+Before #843 all four named the collection alone, so a collection outside the connected database read, profiled and was written as the connected database's same-named collection.
 
 `distinct` is the one operation with a key of its own: `field`, the driver's own parameter name, and
 it is **required**. The example above answers one row per category, shaped `{ "category": <value> }`.
@@ -167,6 +171,7 @@ returns `config.connectionString` if present, else assembles
 `mongodb://<user>:<password>@<host>:<port>/<database>[?authSource=<authSource>]` (credentials and
 the auth database are URL-encoded; the `<user>:<password>@` segment is omitted when no credentials
 are set, and the query string when no `authSource` is).
+With no `database` the path is empty, `mongodb://<host>:<port>/`, and not a stand-in such as `/test`: the path database is also the driver's default auth database, so a stand-in would authenticate an `admin` user against it and fail as bad credentials.
 
 **`authSource` is the database the credentials live in, and it is not always the one being opened.**
 MongoDB creates users inside a database, and the driver checks them against whichever database the
@@ -193,7 +198,9 @@ const c = { id: 'mg-1', name: 'App', type: 'mongodb',
 ```
 
 `validate()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)) requires either a
-`connectionString` or both `host` and `database`. `connect()` builds a `MongoClient` whose built-in
+`connectionString` or a `host`.
+`database` is optional in both modes (#843): it is only the default for a statement that names no database, and every statement the product writes names its own.
+`connect()` builds a `MongoClient` whose built-in
 pool is configured from `ProviderOptions.pool`:
 
 | `MongoClient` option | Source |
@@ -204,8 +211,9 @@ pool is configured from `ProviderOptions.pool`:
 | `connectTimeoutMS` | `pool.acquireTimeout` |
 | `serverSelectionTimeoutMS` | `pool.acquireTimeout` |
 
-The database name comes from `config.database`, else it is parsed out of the connection string, else
-defaults to `test`. After connecting, a `{ ping: 1 }` command validates the connection.
+The database name comes from `config.database`, else from the connection string's path (after the authority, so `mongodb://host:27017` names none), else
+defaults to `test`, the driver's own default; it is the database a statement with no `database` key reads.
+After connecting, a `{ ping: 1 }` command validates the connection.
 
 ### 4.1 SSL / TLS
 

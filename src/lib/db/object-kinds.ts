@@ -58,9 +58,10 @@ export type ObjectPathShapeEngine = {
 /**
  * The container levels this engine declares, sliced to the depth `containerDepth()`
  * reports. The same derivation every provider kept locally; hoisted with the assert so
- * the depth rule and the level list cannot be taken by two different rules.
+ * the depth rule and the level list cannot be taken by two different rules. Exported for
+ * `jsonCommandAddress`, which reads a MongoDB statement's database the same way.
  */
-function declaredLevels(capabilities: ProviderCapabilities): readonly ContainerLevelSpec[] {
+export function declaredLevels(capabilities: ProviderCapabilities): readonly ContainerLevelSpec[] {
   return (capabilities.containerLevels ?? []).slice(0, containerDepth(capabilities));
 }
 

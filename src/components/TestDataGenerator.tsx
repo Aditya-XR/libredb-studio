@@ -9,7 +9,7 @@ import type { DetailedObject } from "@/lib/db/detailed-object";
 import { quoteLiteral } from "@/lib/sql/values";
 import type { ProviderCapabilities } from "@/lib/db/types";
 import { objectPathLabel, pathKey } from "@/lib/db/object-path";
-import { objectSegment, quoteIdentifier, quoteObjectPath } from "@/lib/query-generators";
+import { jsonCommandAddress, quoteIdentifier, quoteObjectPath } from "@/lib/query-generators";
 
 interface TestDataGeneratorProps {
   isOpen: boolean;
@@ -212,7 +212,9 @@ export function TestDataGenerator({
     // Filter out auto-increment columns
     const cols = columnConfigs.filter((c) => c.faker.generator !== "autoIncrement");
 
-    if (queryLanguage === "json") {
+    // Read through `capabilities` rather than `queryLanguage` so the declaration is in hand
+    // for the address below; `queryLanguage` is the same field and stays in the deps.
+    if (capabilities?.queryLanguage === "json") {
       // MongoDB insertMany
       const docs = Array.from({ length: rowCount }, (_, i) => {
         const doc: Record<string, string> = {};
@@ -222,10 +224,10 @@ export function TestDataGenerator({
         }
         return doc;
       });
-      // The collection's own segment: its path is [database, collection] and the driver is
-      // connected to the database already (standing ruling 2).
+      // The database rides as its own key: without it the insert landed in the connected
+      // database's same-named collection, a write to the wrong place (#843).
       return JSON.stringify(
-        { collection: objectSegment(tablePath), operation: "insertMany", documents: docs },
+        { ...jsonCommandAddress(tablePath, capabilities), operation: "insertMany", documents: docs },
         null,
         2,
       );
