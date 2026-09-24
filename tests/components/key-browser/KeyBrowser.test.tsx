@@ -3,7 +3,7 @@ import "../../helpers/mock-sonner";
 import "../../helpers/mock-navigation";
 
 import { describe, test, expect, afterEach } from "bun:test";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { mockGlobalFetch, restoreGlobalFetch, type MockFetchResponse } from "../../helpers/mock-fetch";
 
@@ -512,6 +512,50 @@ describe("KeyBrowser", () => {
       expect(opened.at(-1)).toEqual(["app:env", "string", 1]);
     });
 
+    test("opens a row that is BOTH a key and a prefix, and keeps its twisty for the children", async () => {
+      const opened: Array<[string, string | null]> = [];
+      mockGlobalFetch({
+        "/api/db/keys/scan": page(["user:42", "user:42:profile"], "0", 2, {
+          "user:42": "string",
+          "user:42:profile": "hash",
+        }),
+      });
+      renderBrowser(CAPABILITY, (key, type) => opened.push([key, type]));
+      await waitFor(() => {
+        expect(rows()).toEqual(["user:*@0"]);
+      });
+      fireEvent.click(screen.getByText("user:*"));
+
+      // `user:42` is a key of this database AND the prefix of `user:42:profile`. The row says the KEY's
+      // name, because that is what activating it addresses, and carries BOTH numbers: what it is worth
+      // reading as, and how much sits under it.
+      expect(rows()).toEqual(["user:*@0", "user:42@1"]);
+      const rowFor = (label: string): HTMLElement =>
+        screen
+          .queryAllByRole("treeitem")
+          .find((element) => element.querySelector("span.truncate")?.textContent === label) as HTMLElement;
+      expect(within(rowFor("user:42")).getByTestId("key-browser-type").textContent).toBe("string");
+      expect(within(rowFor("user:42")).getByTestId("key-browser-folder-count").textContent).toBe("2");
+      expect(rowFor("user:42").getAttribute("title")).toContain("is a key of this database and a prefix");
+
+      // THE TWISTY IS THE FOLDER, and it must not also open the key: one press cannot mean "read this
+      // value" and "open these children" at once. It opens the child the row could not reach before.
+      fireEvent.click(within(rowFor("user:42")).getByTestId("key-browser-twisty"));
+      expect(opened).toEqual([]);
+      expect(rows()).toEqual(["user:*@0", "user:42@1", "user:42:profile@2"]);
+
+      // THE ROW IS THE KEY, folded or not: what the twisty hides is the children, never the value.
+      fireEvent.click(within(rowFor("user:42")).getByTestId("key-browser-twisty"));
+      expect(rows()).toEqual(["user:*@0", "user:42@1"]);
+      fireEvent.click(screen.getByText("user:42"));
+      expect(opened).toEqual([["user:42", "string"]]);
+
+      // And the keyboard reaches the same two things, because the row and the twisty are separate
+      // controls: Enter on the row opens the key.
+      fireEvent.keyDown(screen.getByText("user:42"), { key: "Enter" });
+      expect(opened).toHaveLength(2);
+    });
+
     test("opens a folder instead of activating it", async () => {
       const opened: Array<[string, string | null]> = [];
       mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "0", 1, { "app:env": "string" }) });
@@ -1007,14 +1051,16 @@ describe("KeyBrowser", () => {
       expect(walksOf(fetchMock)).toEqual([]);
 
       release();
+      // Waited on the TREE rather than on the request count: the request is issued a moment before its
+      // page is absorbed, and a count says nothing about whether the walk landed.
       await waitFor(() => {
-        expect(walksOf(fetchMock)).toHaveLength(1);
+        expect(rows()).toEqual(["1@0", "app:*@1"]);
       });
       // ONE page, and it is the database the row named: a row under `Database 1` walks database 1, not
       // whichever one the panel happened to be in.
+      expect(walksOf(fetchMock)).toHaveLength(1);
       expect(walksOf(fetchMock)[0]).toMatchObject({ pattern: "app:*", cursor: "0", database: 1 });
       expect(screen.getByLabelText("Database").textContent).toBe("1");
-      expect(rows()).toEqual(["1@0", "app:*@1"]);
     });
 
     test("applies a new request to a panel already walking, and drops the stale filter", async () => {

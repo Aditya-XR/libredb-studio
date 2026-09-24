@@ -633,25 +633,43 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
               const { node, depth, folder } = row;
               const key = pathKey(node.path);
               const isOpen = filtering || open.has(key);
+              const name = node.path.join(KEY_SEPARATOR);
+              /*
+               * A NODE CAN BE TWO THINGS AT ONCE, and this is the row where that shows: `user:42` is
+               * a key AND a prefix of `user:42:profile`, so it has a value to read and children to
+               * open. The row is the KEY and the twisty is the FOLDER, which is the split the object
+               * tree already makes between activating a table and expanding its columns - and it is
+               * what makes a row that was drawn only as a folder reachable as a key.
+               *
+               * A node that is only a folder keeps the whole row as its toggle, because there is
+               * nothing else for a click to mean there.
+               */
+              const readable = node.isKey && onOpenKey !== undefined;
+              const activate = (): void => {
+                if (readable) openKey(node);
+                else if (folder) openPath(node.path);
+              };
               return (
                 <div
                   key={key}
                   role="treeitem"
                   aria-expanded={folder ? isOpen : undefined}
                   tabIndex={0}
-                  // The FULL name, which is what a key is identified by. A folder's own row is its
-                  // prefix and says so with `:*`; a leaf's identity is the whole path, and the depth it
-                  // is drawn at only says where the tree put it.
-                  title={folder ? `${node.path.join(KEY_SEPARATOR)}:*` : node.path.join(KEY_SEPARATOR)}
-                  onClick={() => {
-                    if (folder) openPath(node.path);
-                    else openKey(node);
-                  }}
+                  // The FULL name, which is what a key is identified by, and the `:*` form beside it
+                  // when the row is a prefix too - because a reader needs to know both, and the label
+                  // can only say one.
+                  title={
+                    folder && node.isKey
+                      ? `${name} is a key of this database and a prefix: ${name}:*`
+                      : folder
+                        ? `${name}:*`
+                        : name
+                  }
+                  onClick={activate}
                   onKeyDown={(event) => {
                     if (event.key !== "Enter" && event.key !== " ") return;
                     event.preventDefault();
-                    if (folder) openPath(node.path);
-                    else openKey(node);
+                    activate();
                   }}
                   // The project's own row recipe, plus the database row above this one, so a key two
                   // levels down lines up with a table two levels down in the object tree.
@@ -661,17 +679,37 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
                     "focus-visible:ring-1 focus-visible:ring-brand",
                     // A leaf is actionable only when somebody will act on it, so the pointer follows the
                     // wiring rather than the row's kind.
-                    (folder || onOpenKey !== undefined) && "cursor-pointer",
+                    (readable || folder) && "cursor-pointer",
                   )}
                 >
                   {folder ? (
-                    <ChevronRight
-                      strokeWidth={1.5}
-                      className={cn(
-                        "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform",
-                        isOpen && "rotate-90",
-                      )}
-                    />
+                    /*
+                     * THE TWISTY IS ITS OWN CONTROL, and it has to be now that a row can be a key as
+                     * well as a folder: one press cannot mean both "read this value" and "open these
+                     * children". `stopPropagation` keeps the press off the row, and `tabIndex={-1}` is
+                     * the object tree's own choice - arrow keys are what a tree gives a keyboard for
+                     * this, so a second tab stop per row would be noise rather than access.
+                     *
+                     * `-m-1.5 p-1.5` grows the target to 26 by 26 around the 14px glyph without moving
+                     * anything, which is the measurement `TreeRow` records for its own twisty.
+                     */
+                    <button
+                      type="button"
+                      data-testid="key-browser-twisty"
+                      aria-label={`${isOpen ? "Collapse" : "Expand"} ${name}`}
+                      tabIndex={-1}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openPath(node.path);
+                      }}
+                      onKeyDown={(event) => event.stopPropagation()}
+                      className="-m-1.5 flex h-3.5 w-3.5 box-content shrink-0 items-center justify-center rounded-sm p-1.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-brand"
+                    >
+                      <ChevronRight
+                        strokeWidth={1.5}
+                        className={cn("h-3.5 w-3.5 transition-transform", isOpen && "rotate-90")}
+                      />
+                    </button>
                   ) : (
                     // A leaf keeps the column so labels line up down a level, the way the object tree
                     // pads a row with no twisty.
@@ -682,8 +720,10 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
                   ) : (
                     <KeyRound strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   )}
+                  {/* A row that is a key says the KEY's name, because that is what activating it
+                      addresses; a row that is only a prefix says the prefix it stands for. */}
                   <span className="truncate font-mono text-xs">
-                    {folder ? `${node.segment}:*` : node.path.join(KEY_SEPARATOR)}
+                    {folder && !node.isKey ? `${node.segment}:*` : name}
                   </span>
                   {/*
                     A FOLDER COUNTS THE KEYS THE WALK HOLDS UNDER IT, and a leaf carries no number.
@@ -697,10 +737,28 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
                     tooltip is the sample's own admission: keys a page has not reached are not counted,
                     and a count that pretended otherwise would be a total nobody read.
                   */}
+                  {/*
+                    A ROW THAT IS BOTH carries BOTH numbers, which is the whole reason this column is
+                    two cells rather than one: the type says what the row itself is worth reading as,
+                    and the count says how much sits under it. A row that is only one of the two shows
+                    only its own, and the type leads so that the count keeps the outer edge every
+                    folder's number has.
+                  */}
+                  {folder && node.isKey && (
+                    <span
+                      data-testid="key-browser-type"
+                      className="ml-auto shrink-0 pl-2 font-mono text-[10px] text-muted-foreground"
+                    >
+                      {types.get(name) ?? ""}
+                    </span>
+                  )}
                   {folder ? (
                     <span
                       data-testid="key-browser-folder-count"
-                      className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground"
+                      className={cn(
+                        "shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground",
+                        !node.isKey && "ml-auto",
+                      )}
                       title={`${node.count.toLocaleString("en-US")} key${node.count === 1 ? "" : "s"} loaded under this prefix so far, in ${node.children.length} row${node.children.length === 1 ? "" : "s"}`}
                     >
                       {node.count.toLocaleString("en-US")}
@@ -719,7 +777,7 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
                       data-testid="key-browser-type"
                       className="ml-auto shrink-0 pl-2 font-mono text-[10px] text-muted-foreground"
                     >
-                      {types.get(node.path.join(KEY_SEPARATOR)) ?? ""}
+                      {types.get(name) ?? ""}
                     </span>
                   )}
                 </div>
