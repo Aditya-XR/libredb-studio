@@ -403,8 +403,8 @@ describe("wire-compatibility registry", () => {
   });
 
   test("a query-only engine always carries a caveat saying so", () => {
-    // The live probes forced this distinction: Materialize and RisingWave answer
-    // SQL and nothing else, while Citus matches PostgreSQL surface for surface.
+    // The live probes forced this distinction: Databend answers SQL and nothing else
+    // through the provider, while Citus matches PostgreSQL surface for surface.
     // Publishing both as "compatible" is exactly the overclaim #424 forbids, so a
     // query-only tier is not allowed to be silent about it.
     for (const engine of WIRE_COMPATIBLE_ENGINES.filter((e) => e.tier === "query-only")) {

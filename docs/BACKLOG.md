@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1–D118, U17 · 63
+- [Drivers and connections](#drivers-and-connections) — D1–D119, U17 · 64
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2–X19, U2–U47 · 35
@@ -1819,6 +1819,20 @@ Not fixed in #1106, which is scoped to the statement grammar.
 The target is a bare string in `runMaintenance(type, target)`'s contract for every provider, so passing a path is the D49 change, and the monitoring tabs are session-scoped on every engine.
 
 **Done when:** a MongoDB maintenance target names its database, the deep link either opens the collection's own database or refuses a path outside the connected one, and a test pins that `Validate` on `analytics.events` reaches `analytics`.
+
+### D119. On RisingWave every column reads nullable, a `NOT NULL` column and a primary key included
+
+Found 2026-09-24 while measuring #1075, which made RisingWave's column reads answer at all.
+`CTE_OBJECT_COLUMNS` and `bulkDetailSql()` in `src/lib/db/providers/sql/postgres.ts` read nullability as `NOT a.attnotnull`, and RisingWave 3.0.4's `pg_attribute` answers `attnotnull = false` for every column.
+Measured on `CREATE TABLE probe.customers (zeta_id int PRIMARY KEY, name varchar NOT NULL, ...)`: both `zeta_id` and `name` read nullable.
+The engine does know one of the two facts: `information_schema.columns.is_nullable` answers `NO` for `name`, though `YES` for `zeta_id`, the key.
+The limitation is recorded in the RisingWave caveat in `src/lib/db/compatibility.ts` and its row in `docs/providers/README.md`, which cite this entry.
+
+Not fixed in #1075, which is scoped to making the reads answer.
+Changing the nullability source changes the column read on every PostgreSQL wire-compatible engine, so it owes the same live before-and-after run #1075 made on PostgreSQL and every relative in the registry.
+A primary key column is not nullable by definition, so that half needs no catalog at all.
+
+**Done when:** on RisingWave a `NOT NULL` column and a primary key column both read as not nullable, every other engine reads the same nullability as before, measured live, and a test pins both halves.
 
 ## Value interpolation
 

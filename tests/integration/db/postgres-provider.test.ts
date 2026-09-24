@@ -1466,10 +1466,9 @@ describe("PostgresProvider", () => {
   describe("the repair chain around an engine that rejects part of a catalog statement (#38680)", () => {
     /*
       Every object read goes through `queryWithMaterializedFallback()`, which recovers real
-      catalog data on four independent gaps rather than failing outright. The chain used to be
+      catalog data on independent gaps rather than failing outright. The chain used to be
       driven here through the flat schema reading; that reading is deleted (#789), so it is
-      driven through `describeObjects()`, which composes the same `json_agg` /
-      `json_build_object` CTEs.
+      driven through `describeObjects()`, which composes the same CTEs.
 
       Each repair is used AT MOST ONCE per statement, and a message no remaining repair
       recognises is mapped and rethrown rather than retried forever. That is the property
@@ -1500,19 +1499,153 @@ describe("PostgresProvider", () => {
     const detailStatements = (sent: readonly string[]): string[] =>
       sent.filter((sql) => sql.includes("described_columns"));
 
-    test("json_agg is swapped for jsonb_agg, which returns the same shape over the wire", async () => {
-      // Materialize has only the jsonb_ equivalents, and node-postgres parses both the json
-      // and the jsonb OID into the same plain JS value, so the swap is enough.
-      const sent = rejectFirst('function "json_agg" does not exist');
+    /*
+      RisingWave 3.0.4, measured live on 2026-09-24 (#1075). Each refusal below is the engine's
+      own text, and the double keys each one on the construct it refuses rather than on an
+      attempt count, so it answers the way the engine does whatever the chain rewrites first.
+      The first statement the engine can bind is the one it answers.
+    */
+    const RISINGWAVE_JSON_REFUSAL =
+      "Failed to prepare the statement Caused by these errors (recent errors listed first): " +
+      "1: Failed to bind expression: CAST(NULL AS json) 2: Feature is not yet implemented: unsupported data type: json";
+    const RISINGWAVE_CONSTRAINT_COLUMN_USAGE_REFUSAL =
+      "Failed to prepare the statement Caused by: Feature is not yet implemented: " +
+      "information_schema.constraint_column_usage is not supported, please use `SHOW` commands for now. " +
+      "`SHOW TABLES`, `SHOW MATERIALIZED VIEWS`, `DESCRIBE <table>`, `SHOW COLUMNS FROM [table]`";
+    const RISINGWAVE_AGGREGATE_REFUSAL =
+      "Failed to execute the statement Caused by: Feature is not yet implemented: subquery inside aggregation calls";
 
-      await describeTables();
+    /** True when some `<name>_agg(...)` call carries a SELECT among its arguments. */
+    function hasSubqueryInsideAggregate(sql: string): boolean {
+      for (const call of sql.matchAll(/\b\w+_agg\(/g)) {
+        const start = (call.index ?? 0) + call[0].length;
+        let depth = 1;
+        let cursor = start;
+        while (cursor < sql.length && depth > 0) {
+          if (sql[cursor] === "(") depth++;
+          else if (sql[cursor] === ")") depth--;
+          cursor++;
+        }
+        if (/\bSELECT\b/i.test(sql.slice(start, cursor))) return true;
+      }
+      return false;
+    }
 
-      const attempts = detailStatements(sent);
-      expect(attempts.length).toBe(2);
-      expect(attempts[0]).toContain("json_agg(");
-      expect(attempts[1]).toContain("jsonb_agg(");
-      expect(attempts[1]).toContain("jsonb_build_object(");
-      expect(attempts[1]).not.toContain(" json_agg(");
+    const RISINGWAVE_COLUMNS = [
+      { name: "zeta_id", type: "integer", nullable: false },
+      { name: "name", type: "character varying", nullable: false },
+    ];
+
+    function risingWave(sent: string[]): void {
+      mockQueryFn = (sql: string) => {
+        sent.push(sql);
+        if (/\bjson_agg\(|\bjson_build_object\(|::json\b/.test(sql)) {
+          return Promise.reject(new Error(RISINGWAVE_JSON_REFUSAL));
+        }
+        if (sql.includes("constraint_column_usage")) {
+          return Promise.reject(new Error(RISINGWAVE_CONSTRAINT_COLUMN_USAGE_REFUSAL));
+        }
+        if (hasSubqueryInsideAggregate(sql)) return Promise.reject(new Error(RISINGWAVE_AGGREGATE_REFUSAL));
+        // RisingWave publishes no column default: its pg_attrdef is empty, so the LEFT JOIN
+        // hands pg_get_expr() a NULL expression. PostgreSQL answers NULL for that and
+        // RisingWave answers '', so a call left unguarded reads as an empty default.
+        const defaultValue = /(?<!IS NOT NULL THEN )pg_get_expr\(ad\.adbin/.test(sql) ? "" : null;
+        const columns = RISINGWAVE_COLUMNS.map((column) => ({ ...column, defaultValue }));
+        const row = { pk_columns: ["zeta_id"], columns, foreign_keys: [], indexes: [] };
+        if (sql.includes("object_columns")) return Promise.resolve({ rows: [row] });
+        if (sql.includes("described_columns")) return Promise.resolve({ rows: [{ name: "customers", ...row }] });
+        return defaultMockQuery(sql);
+      };
+    }
+
+    test("RisingWave answers describeObject() with the table's columns (#1075)", async () => {
+      const sent: string[] = [];
+      risingWave(sent);
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      const detail = await provider.describeObject(["probe", "customers"], "table");
+
+      expect(detail.columns.map((column) => [column.name, column.type])).toEqual([
+        ["zeta_id", "integer"],
+        ["name", "character varying"],
+      ]);
+    });
+
+    test("RisingWave answers describeObjects() with each table's columns, bounded or not (#1075)", async () => {
+      const sent: string[] = [];
+      risingWave(sent);
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      for (const batch of [
+        await provider.describeObjects(["probe"], "table"),
+        await provider.describeObjects(["probe"], "table", 1),
+      ]) {
+        expect(batch.details.map((detail) => detail.columns.map((column) => column.name))).toEqual([
+          ["zeta_id", "name"],
+        ]);
+      }
+    });
+
+    test("a RisingWave column reads with no default rather than an empty one (#1075)", async () => {
+      // An empty string is a claim: the schema diagram shows it as "Default: '' (empty
+      // string)". RisingWave publishes no default at all, so the honest answer is none.
+      const sent: string[] = [];
+      risingWave(sent);
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      const detail = await provider.describeObject(["probe", "customers"], "table");
+      const batch = await provider.describeObjects(["probe"], "table");
+
+      for (const columns of [detail.columns, ...batch.details.map((entry) => entry.columns)]) {
+        expect(columns.map((column) => column.defaultValue)).toEqual([undefined, undefined]);
+      }
+    });
+
+    test("RisingWave's constraint_column_usage refusal is repaired on the first retry (#1075)", async () => {
+      // The refusal suggests `SHOW MATERIALIZED VIEWS`, which once read as the MATERIALIZED
+      // keyword collision and spent a retry resending an identical statement.
+      const sent: string[] = [];
+      risingWave(sent);
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      await provider.describeObject(["probe", "customers"], "table");
+      await provider.describeObjects(["probe"], "table");
+
+      for (const marker of ["object_columns", "described_columns"]) {
+        const attempts = sent.filter((sql) => sql.includes(marker));
+        expect(attempts).toHaveLength(2);
+        expect(attempts[0]).toContain("constraint_column_usage");
+        expect(attempts[1]).not.toContain("constraint_column_usage");
+      }
+    });
+
+    test("the object reads build their rows with jsonb and keep the column order (#1075)", async () => {
+      // jsonb because RisingWave has no json type at all, while every other engine measured
+      // has both. jsonb reorders an object's keys and drops duplicate ones, which is harmless
+      // here: each object has a fixed set of distinct keys and is read parsed, never as text.
+      // It keeps an array's order, and ORDER BY a.attnum is what makes that the table's order.
+      const sent: string[] = [];
+      mockQueryFn = (sql: string) => {
+        sent.push(sql);
+        return defaultMockQuery(sql);
+      };
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      await provider.describeObject(["public", "users"], "table");
+      await provider.describeObjects(["public"], "table");
+      await provider.describeObjects(["public"], "table", 1);
+
+      const reads = sent.filter((sql) => sql.includes("object_columns") || sql.includes("described_columns"));
+      expect(reads).toHaveLength(3);
+      for (const sql of reads) {
+        expect(sql).not.toMatch(/\bjson_agg\(|\bjson_build_object\(|::json\b/);
+        expect(sql).toMatch(/jsonb_agg\(\s*jsonb_build_object\([^;]*?\)\s*ORDER BY a\.attnum\s*\)/);
+      }
     });
 
     test("a missing pg_total_relation_size() is recognised and the statement retried", async () => {
@@ -1553,7 +1686,8 @@ describe("PostgresProvider", () => {
       const sent: string[] = [];
       mockQueryFn = (sql: string) => {
         sent.push(sql);
-        if (sql.includes("described_columns")) return Promise.reject(new Error('function "json_agg" does not exist'));
+        if (sql.includes("described_columns"))
+          return Promise.reject(new Error('function "to_regclass" does not exist'));
         return defaultMockQuery(sql);
       };
       provider = new PostgresProvider(makePgConfig());

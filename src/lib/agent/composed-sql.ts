@@ -301,12 +301,13 @@ export function withoutExtensionOwnershipTest(sql: string): string {
  *
  * MEASURED ON, and only on, the three servers B52 named plus stock PostgreSQL: the
  * aggregate runs on Cloudberry's MPP planner, which is the one that refuses other
- * reads with `multiple segworker groups is not supported`. NOT measured on the
- * jsonb-only relatives in `WIRE_COMPATIBLE_ENGINES` — Materialize and RisingWave
- * have no `json` type and may not carry `json_agg`/`json_build_object` at all. Both
- * are `query-only` there and claim no grounding, so nothing regressed that was
- * promised; a run that ever claims grounding on either has to measure this read
- * first.
+ * reads with `multiple segworker groups is not supported`. It FAILS on RisingWave
+ * 3.0.4, measured 2026-09-24: `json_build_object()` does not exist there, and with the
+ * jsonb forms the read fails next on the relation exclusion's two-column
+ * `ROW(...) NOT IN (SELECT ...)`, "Subquery must return only one column". NOT measured
+ * on Materialize, which has no `json_agg()` either. Neither engine's registry caveats
+ * promise agent grounding, so nothing regressed that was promised; a run that ever
+ * claims grounding on either has to make this read answer first.
  *
  * The row budget now counts TABLES rather than columns, which is what a wide
  * catalog needs; two bounds still stand and are worth naming. A schema with more

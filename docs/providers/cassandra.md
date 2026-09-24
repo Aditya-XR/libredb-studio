@@ -1431,8 +1431,7 @@ The tier stays `partial`, and the reason has moved rather than gone. Not `full`,
 thirteen surfaces answer with nothing: the monitoring dashboard here carries a version, an uptime and
 two counts against Cassandra's full set, and `full` in this table means every surface *answered*, not
 every surface returned. Not `query-only` either, because the object browser, the column metadata and
-the index metadata all work — which is what separates this from Materialize and RisingWave, which have
-none of it.
+the index metadata all work.
 
 ---
 

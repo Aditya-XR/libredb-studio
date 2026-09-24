@@ -131,19 +131,12 @@ If you edit these queries, keep `MATERIALIZED` or you reintroduce the timeout.
 
 **Fallback chain for engines that reject part of this query (#38680).** The object surface's
 container and detail reads all route their query through `queryWithMaterializedFallback()` ([postgres.ts](../../src/lib/db/providers/sql/postgres.ts)), which
-recovers real object-browser data on four independent gaps instead of failing outright:
+recovers real object-browser data on independent gaps instead of failing outright:
 
-1. **The `MATERIALIZED` keyword itself.** Materialize and RisingWave reserve it for their own
-   `CREATE MATERIALIZED VIEW` grammar and reject the CTE modifier, even though the underlying
-   `information_schema` views are otherwise readable there. `withoutMaterializedHint()` strips it.
-2. **`pg_total_relation_size()`.** CockroachDB has no such builtin at all — this is why its object
-   browser used to read empty even though it happily accepts the `MATERIALIZED` hint — and
-   Materialize reaches the same gap once past #1. `withoutTotalRelationSizeFn()` replaces the call
-   with a literal `0`, trading per-table size for real column/PK data instead of nothing.
-3. **`json_agg()` / `json_build_object()`.** Materialize has neither, only the `jsonb_` forms
-   (verified: they return the identical shape over the wire — `pg` parses both OIDs into plain JS
-   values). `withoutJsonAggFunctions()` swaps the function names.
-4. **`information_schema.constraint_column_usage`.** Materialize answers `table_constraints` and
+1. **`pg_total_relation_size()`.** CockroachDB has no such builtin at all, and neither has
+   Materialize. `withoutTotalRelationSizeFn()` replaces the call with a literal `0`, trading
+   per-table size for real column/PK data instead of nothing.
+2. **`information_schema.constraint_column_usage`.** Materialize answers `table_constraints` and
    `key_column_usage` but does not implement this one: its catalog ships fourteen
    `information_schema` views and that is not among them, at HEAD as well as at the probed release,
    so it is not a version gap that will close. Worth knowing what the fallback is and is not buying:
@@ -151,17 +144,30 @@ recovers real object-browser data on four independent gaps instead of failing ou
    columns would come back empty even with the view present. The fallback exists because the query
    *fails* without it, not because it recovers data. `withoutForeignKeyCatalog()` empties the `fk_info` CTE rather
    than dropping it, which keeps the outer `LEFT JOIN`/`FULL OUTER JOIN` valid and leaves
-   `foreignKeys` as `[]`. It matches the closing parenthesis by depth, not by text, because the
-   three fallbacks above have already rewritten parts of the statement by the time it runs.
+   `foreignKeys` as `[]`. It matches the closing parenthesis by depth, not by text, because another
+   fallback may already have rewritten part of the statement by the time it runs.
+   RisingWave refuses the view too, and names its own `SHOW` commands instead.
 
-Each fallback is matched against whichever error actually comes back, not tried in a fixed order —
-CockroachDB hits #2 as its *first* error with #1 never in play, Materialize hits all three in
-sequence. Real PostgreSQL never takes any retry path; it accepts every construct above and the first
-attempt succeeds. An error no fallback recognizes, or one that survives every applicable fallback, is
-mapped through `mapDatabaseError()` and rethrown rather than left raw.
+Two gaps that used to be repaired here no longer reach the chain at all (#1075).
 
-**What still doesn't work.** On Materialize, foreign keys and indexes come back empty (see gap #4);
-sizes are unmeasured (gap #2).
+The `MATERIALIZED` keyword: Materialize and RisingWave reserve it for their own `CREATE MATERIALIZED VIEW` grammar and refuse the CTE modifier, Materialize with *Expected left parenthesis, found MATERIALIZED* and RisingWave 3.0.4 with *Expected 'changelog' but found 'MATERIALIZED'*.
+Both object reads strip the hints where they are defined, for the measured reason under [§3.1.4](#314-what-the-object-surface-declares-and-which-catalog-answers-for-it), so no statement that reaches the chain carries one.
+The matcher that sat first in the chain was therefore dead, and worse than dead: it accepted any message that named the word, and RisingWave's `constraint_column_usage` refusal recommends `SHOW MATERIALIZED VIEWS`, so it spent a retry resending an identical statement.
+It is removed.
+
+`json_agg()` / `json_build_object()` and the `json` type: the rows are built with `jsonb_agg()`, `jsonb_build_object()` and `'[]'::jsonb` from the start.
+RisingWave 3.0.4 has no `json` type at all and refuses `json_agg()`, `json_build_object()`, `'[]'::json` and `CAST(NULL AS json)` alike, while it answers every `jsonb` form; Materialize 26.40.0 has no `json_agg()` either.
+A swap applied after the first refusal could not work on RisingWave: the `constraint_column_usage` repair inserts a `NULL::json` of its own after the swap has already been spent, and the read failed on that.
+PostgreSQL and every relative in the registry answer both forms, and `pg` parses the two OIDs into the same plain value.
+`jsonb` reorders an object's keys and drops duplicate ones, which changes nothing here: every object these statements build has a fixed set of distinct keys, and every consumer reads it parsed, never as text.
+It keeps an array's order, and `ORDER BY a.attnum` inside the aggregate is what hands back the table's own column order.
+
+Each fallback is matched against whichever error actually comes back, not tried in a fixed order.
+Real PostgreSQL never takes any retry path; it accepts every construct above and the first attempt succeeds.
+An error no fallback recognizes, or one that survives every applicable fallback, is mapped through `mapDatabaseError()` and rethrown rather than left raw.
+
+**What still doesn't work.** On Materialize, foreign keys come back empty (see gap #2), because
+the engine has none; sizes are unmeasured (gap #1).
 
 RisingWave's object browser was unavailable until 2026-09-19 and this paragraph named the wrong
 cause, which is worth keeping rather than quietly replacing. It said the binder fails on the
@@ -177,7 +183,7 @@ produced the wrong diagnosis. The repair is in the object listing rather than in
 
 A statement that never joined the catalog a fallback repairs is *not* retried blind:
 `withoutForeignKeyCatalog()` returns the SQL untouched when there is no `fk_info` CTE to empty
-(`SCHEMA_LIST_SQL` has none), so the rejection is mapped and rethrown on the next attempt instead of
+(`CONTAINERS_SQL` has none), so the rejection is mapped and rethrown on the next attempt instead of
 looping on a statement nothing changed.
 
 ### 3.0.1 Resolving a name that may vanish mid-read
@@ -194,12 +200,11 @@ Materialize has no `to_regclass`, so it retries with the cast through
 `withoutToRegclass()` and behaves as it did before. PostgreSQL, TimescaleDB, YugabyteDB,
 Cloudberry, AlloyDB Omni and CockroachDB were each asked on a live instance and all have it.
 
-**What this costs, measured:** a PostgreSQL schema read is still **one** round trip.
-A Materialize one is **six** — it walks the whole chain (`MATERIALIZED` hint,
-`pg_total_relation_size`, `json_agg`, `constraint_column_usage`, `to_regclass`) before it
-lands on a statement that runs. Each failed attempt is a parse or plan error rather than
-work, and the chain is error-driven so it cannot be pre-sorted, but on a remote instance
-those round trips are latency the object browser pays on every refresh.
+**What this costs, measured** on 2026-09-24 through `describeObject()` and `describeObjects()` (#1075):
+a PostgreSQL object read is **one** round trip, and so is a CockroachDB one.
+A Materialize one is **two**, and so is a RisingWave one: each refuses `constraint_column_usage` once and the retry runs.
+Materialize took three before the rows were built with `jsonb`, the extra one for `json_agg()`; RisingWave took four and still failed.
+Each failed attempt is a parse or plan error rather than work, and the chain is error-driven so it cannot be pre-sorted, but on a remote instance those round trips are latency the object browser pays on every refresh.
 
 ### 3.1.0 A row count nobody counted
 
@@ -385,8 +390,19 @@ no row at all for a materialized view or a sequence. On the seeded `postgres:18`
 **0 columns** for `app.revenue_by_month` (relkind `'m'`) and **0** for `app.invoice_number_seq`
 (`'S'`), while `pg_attribute` answered 2 and 3. Reusing it would have shipped the browser's headline
 new folder, the materialized view #710 is about, with an empty column list. The primary key, foreign
-key and index CTEs *are* reused, so a fork that needs `withoutForeignKeyCatalog()` or
-`withoutJsonAggFunctions()` gets the same repair here that the container read gets.
+key and index CTEs *are* reused, so a fork that needs `withoutForeignKeyCatalog()` gets the same
+repair here that the container read gets.
+
+**A column's default is read only where `pg_attrdef` has one.** The column read hands
+`pg_get_expr()` an expression only through `CASE WHEN ad.adbin IS NOT NULL`. PostgreSQL answers NULL
+for a NULL expression anyway, but RisingWave 3.0.4 answers `''`, and its `pg_attrdef` is always empty,
+so an unguarded call gave every column there an empty default, which the schema diagram prints as
+*Default: '' (empty string)* (#1075).
+
+**An index's column list is a `LATERAL` join, not a subquery inside the aggregate.** RisingWave 3.0.4
+refuses any subquery among an aggregate call's arguments, *subquery inside aggregation calls*, and the
+index CTE used to build each index's column list that way. The `LATERAL` form is the same per-index
+read, and an index over expressions alone still answers NULL, which the provider reads as `[]` (#1075).
 
 The type text matches on every column but one shape. `format_type(a.atttypid, NULL)` is passed NULL
 rather than `a.atttypmod` because that is what `information_schema.columns.data_type` says:
@@ -416,8 +432,8 @@ size column REMOVED: the row then carries no `size_bytes` and `DatabaseObject.si
 which draws no badge. The shared `withoutTotalRelationSizeFn()` would have answered a literal `0`
 instead, and "0 bytes" is a claim about every relation on those servers that nobody measured, which
 is the distinction [§3.1.0](#310-a-row-count-nobody-counted) draws for row counts. Nothing else in
-the listing statement is repairable by that chain anyway: it has no `AS MATERIALIZED`, no
-`json_agg`, no `to_regclass` and no `pg_depend`. `listContainers()` does go through the chain,
+the listing statement is repairable by that chain anyway: it has no `to_regclass` and no
+`pg_depend`. `listContainers()` does go through the chain,
 because `schemaExclusion()` carries the `pg_depend` ownership test and
 `withoutExtensionOwnershipTest()` drops only a filter.
 
@@ -591,15 +607,16 @@ parameterised `LIMIT` is why the slow-query and active-session panels stay empty
 What is spelled in is the caller's `limit + 1`, which `describeObjects()` has already rejected unless it is a
 positive whole number, so the rendered statement can carry nothing but digits.
 
-That change does not make RisingWave's object browser work, and the reason is worth writing down rather
-than discovering twice.
-Measured against RisingWave 3.0.4 on 2026-09-22, through this provider and with a real table present:
-`listObjects(["public"], "table")` answers, and `describeObject()`, `describeObjects()` and
-`describeObjects(..., 1)` all fail alike with *Failed to bind expression: CAST(NULL AS json)* /
-*Feature is not yet implemented: unsupported data type: json*.
-So the tree lists this engine's objects and no column read of any shape succeeds, the bound is not what
-decides it, and the gap is the engine's missing `json` type rather than anything this statement chose.
-Two independent constraints sit on one statement here and only the first of them was ours.
+That change did not make RisingWave's object browser work on its own, and this paragraph used to name the wrong reason, which is worth keeping rather than quietly replacing.
+Measured against RisingWave 3.0.4 on 2026-09-22, `describeObject()`, `describeObjects()` and `describeObjects(..., 1)` all failed alike with *Failed to bind expression: CAST(NULL AS json)* / *Feature is not yet implemented: unsupported data type: json*, and the paragraph concluded that the gap was the engine's missing `json` type rather than anything this statement chose.
+That was wrong: the engine has every form the statement needs under the `jsonb` name, and the statement chose `json`.
+Two more constraints of the statement's own sat behind it: an index's column list built by a subquery inside an aggregate, which RisingWave refuses, and a default read through `pg_get_expr()` over a missing `pg_attrdef` row, which RisingWave answers with `''`.
+All three are repaired (#1075), and measured again on 2026-09-24 against a live 3.0.4 with tables, a secondary index, a view and a materialized view present: all four reads answer, each with the object's columns and types in the table's own order.
+The bound was never what decided it.
+
+The same four reads were run on the same day against PostgreSQL and every relative in the registry, before and after the change, over one fixture of two tables with a primary key, a foreign key, a unique index, a two-column index, an expression index, a view and a materialized view.
+Each engine answered byte-identically before and after, with key order set aside: PostgreSQL 18.4, TimescaleDB 2.30.1 on PostgreSQL 17.11, OrioleDB beta 16 on PostgreSQL 18.4 (nightly of 2026-08-24), CockroachDB v26.2.5, YugabyteDB 2.25.2.0-b0, Citus 14.1-1 on PostgreSQL 18.4, Apache Cloudberry 2.1.0-incubating, AlloyDB Omni 17.9.0, ParadeDB 0.25.4, Percona Server for PostgreSQL 18.6.1 and Materialize 26.40.0.
+Foreign keys and indexes read as they did wherever the engine has them, and nowhere lost one.
 
 ### 3.1.5 Object source (#789)
 
