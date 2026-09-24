@@ -39,6 +39,7 @@ None of it is a GitHub issue.
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H12 · 3
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 7
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
+- [Security scanner triage](#security-scanner-triage) — SCAN1 · 1
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
 - [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2–B83 · 24
 
@@ -2805,6 +2806,41 @@ user deliberately cleared. A worse bug than the one it fixes.
 
 **Done when:** a design distinguishes "the client never had this value" from "the client cleared this
 value" without adding a field to the stored shape.
+
+---
+
+## Security scanner triage
+
+A scanner finding that is open, is not failing a required check, and needs a written ruling before it can be dismissed or fixed.
+CodeQL alerts anchor to a source location, so moving the code re-reports them and a dismissal made against the wrong location does not hold.
+
+### SCAN1. CodeQL alert 536, polynomial ReDoS in the MCP error redactor, needs a ruling
+
+`js/polynomial-redos`, security severity high, open against `refs/pull/1070/merge` at `src/lib/mcp/serializer.ts:94`.
+CodeQL's text: "This regular expression that depends on a user-provided value may run slow on strings starting with 'A' and with many repetitions of 'A'."
+
+The rule redacts credentials out of driver error messages before they reach an MCP client:
+
+```js
+out = out.replace(/\b([a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\/)[^/\s]+@/g, "$1[REDACTED]@")
+```
+
+The input is a driver error message, so a caller who can get a chosen string into one (a long nonexistent table name, for instance) feeds the regex.
+That is the uncontrolled-data path CodeQL names.
+
+Measured on bun 1.4.2 on 2026-09-24: the shipped rule is linear, 0.09 ms on a scheme plus 50 KB and 0.40 ms on a scheme plus 240 KB.
+`[^/\s]+` excludes `/` and whitespace, which is narrower than the shape analysis sees, so it reads as a false positive.
+That measurement is one runtime and is not a ruling.
+
+Two things keep it open rather than settled.
+The CodeQL check reports SUCCESS because alerts do not fail the job, so a green rollup hides this.
+And the code does not exist on `main`: it arrives only if #1070 merges, and a dismissal must be made against the merged location.
+
+Related and separate: the test that claims to cover this (`tests/unit/mcp/serializer.test.ts:104`) cannot fail for the flagged branch, because its payload has no `://` and so never reaches the `[^/\s]+@` quantifier.
+A catastrophic variant of the same rule measured 0.06 ms on that payload, inside its 100 ms budget, and 653 ms on `"http://"` plus 37 characters.
+That one is the contributor's to fix and was raised on #1070.
+
+**Done when:** alert 536 carries a written ruling, either dismissed as a false positive with the reason recorded, or the expression narrowed so the alert closes on its own.
 
 ---
 
