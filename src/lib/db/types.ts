@@ -169,6 +169,45 @@ export function maintenanceControl(
   return { offered: spec[placement], label: spec.label };
 }
 
+/**
+ * Whether column profiling may be offered for this engine: the one gate both row menus
+ * (`src/components/object-tree/row-actions.ts` and the mobile
+ * `src/components/schema-explorer/TableItem.tsx`) and `POST /api/db/profile` ask, so that no
+ * menu offers an action the route refuses.
+ *
+ * The route writes exactly two statement shapes: SQL aggregates, and a MongoDB `aggregate`
+ * document with a `$sample` stage. So profiling is offered for `"sql"`, and for `"json"` only
+ * when no `queryDialect` says the JSON is some other grammar. Redis and LibreDB declare
+ * `"json"` with a dialect of their own, and `"promql"` is not JSON at all; before this gate the
+ * route sent every one of them the MongoDB document, which only MongoDB reads (#1085).
+ *
+ * Unknown capabilities are not a permission, for the reason `maintenanceControl` gives:
+ * `/api/db/provider-meta` answers with nothing both while it is in flight and when it failed.
+ */
+export function offersColumnProfiling(capabilities: ProviderCapabilities | undefined): boolean {
+  if (capabilities === undefined) return false;
+  if (capabilities.queryLanguage === "sql") return true;
+  return capabilities.queryLanguage === "json" && capabilities.queryDialect === undefined;
+}
+
+/**
+ * Whether the code generator may be offered for this engine, asked by both row menus.
+ *
+ * `src/components/CodeGenerator.tsx` maps an object's columns onto a TypeScript interface, a Zod
+ * schema, a Prisma model, a Go struct, a Python dataclass and a Java POJO: the models an
+ * application writes over a table or a document collection. It is offered for `"sql"` and
+ * `"json"`, dialects included, because it names the row rather than addressing it, which is why
+ * Redis and LibreDB keep it (#427). A PromQL metric's columns are its label names, and a record
+ * type over them models nothing an application stores, so `"promql"` is not offered it (#1085).
+ * The two languages are named rather than `"promql"` excluded, so a language added later is not
+ * offered the generator until somebody decides that it should be.
+ *
+ * Unknown capabilities are not a permission, as for `offersColumnProfiling`.
+ */
+export function offersCodeGeneration(capabilities: ProviderCapabilities | undefined): boolean {
+  return capabilities?.queryLanguage === "sql" || capabilities?.queryLanguage === "json";
+}
+
 // ============================================================================
 // Provider Capabilities & Labels
 // ============================================================================
@@ -208,10 +247,25 @@ export type ContainerLevels =
   | readonly [ContainerLevelSpec, ContainerLevelSpec];
 
 export interface ProviderCapabilities {
-  queryLanguage: "sql" | "json";
   /**
-   * Optional client-side query dialect. `queryLanguage` only says SQL vs JSON;
-   * for non-SQL providers the query generators otherwise assume MongoDB syntax.
+   * The language this engine's statements are written in: what its editor tabs are typed and
+   * highlighted as (`src/lib/editor/tab-language.ts`), and the arm the query generators take for a
+   * tree click and for "Generate Query" (`src/lib/query-generators.ts`).
+   *
+   * A CLOSED union, and a member added to it is not neutral: a reader written `=== "json"` sends
+   * the new member into its SQL branch, and one written `!== "sql"` sends it into its JSON
+   * (MongoDB) branch. So a new member lands with an explicit arm in every reader, or with a test
+   * pinning that the branch it falls into is right for it. `"promql"` is the Prometheus provider's
+   * (#1085), and it declares no `queryDialect`, because PromQL is not a kind of JSON.
+   *
+   * Published through `src/exports/types.ts`, so widening it breaks a consumer's exhaustive
+   * switch over it; that ships with a release note, not a compatibility layer.
+   */
+  queryLanguage: "sql" | "json" | "promql";
+  /**
+   * Optional client-side query dialect, and only ever a kind of JSON. `queryLanguage`
+   * says SQL, JSON or PromQL; for a `"json"` provider the query generators otherwise
+   * assume MongoDB syntax.
    * A provider sets `queryDialect` to opt its tables into a custom client-side
    * generator (see `query-generators.ts`), and it is checked BEFORE
    * `queryLanguage` everywhere. Left undefined by SQL and MongoDB, so their
@@ -484,7 +538,7 @@ export interface ProviderCapabilities {
    * "the provider declares no object kinds, so there is nothing to list" as a
    * `CATALOG_READ_REFUSED` capture - so a run is never handed an empty inventory as
    * though it were an empty database. It is deliberately not a construction-time throw:
-   * every one of the seventeen shipped type ids declares kinds, so the shape is
+   * every shipped type id declares kinds, so the shape is
    * unreachable here, and refusing to CONNECT over it would take a connection away from
    * an implementer whose query editor works perfectly well while their catalog reading is
    * still being written (#789).
@@ -610,6 +664,27 @@ export interface ProviderLabels {
    * `errors`), and an absence is not an error.
    */
   sessionsEmptyState?: string;
+
+  /**
+   * What the rows `getTableStats()` answers ARE, declared only by an engine whose list is a
+   * ranked subset of what the database holds rather than every table in it.
+   *
+   * Three readers. The monitoring `TablesTab` renders it above its cards and then counts the rows
+   * as listed rather than as the database's tables. The admin Operations list renders it above its
+   * rows, titles them "Listed (N)" rather than "Tables (N)", and answers a filter that matches none
+   * of them with "No listed table matches the filter.", because a table outside the list may match.
+   * The agent's table-stats reading puts it in the header a model reads the rows under. Neither list
+   * shows it where the read was refused or published no statistics: there is no list to scope.
+   * Without it both lists titled a cut list "Tables" and the tab summed it as the database:
+   * measured 2026-09-23 on the compose Prometheus, the 50 metrics with the most head series read
+   * "Tables 50, 858 rows" beside an Overview of 344 metrics and a head of 1,237 series (#1085 6.2
+   * frames the list as the top N).
+   *
+   * Every engine whose list is whole leaves this absent, and both lists then render as they always
+   * have. Optional, like every field added to this published interface after the fact, so an
+   * external implementer keeps compiling.
+   */
+  tableStatsCaption?: string;
 }
 
 /**
@@ -1437,8 +1512,9 @@ export interface ObjectKindSpec {
    * only the provider knows which.
    *
    * The engine-wide `supportsInlineRowEdit` stays, and it is a SEPARATE fact rather than
-   * the other half of a conjunction. It has one reader, `src/components/Studio.tsx:144`,
-   * where it gates the results grid's inline row editor and nothing else. MongoDB,
+   * the other half of a conjunction. It gates the results grid's inline row editor
+   * (`canEditRows` in `src/components/Studio.tsx`), and the two row menus, which need both
+   * facts for Generate Test Data, conjoin it with this field at the call site. MongoDB,
    * Couchbase and Cassandra declare it false, and #789 declares a kind that accepts row
    * writes on each of those three, so requiring both would refuse an import all three
    * engines do support.
@@ -1604,7 +1680,7 @@ export interface ObjectDetail {
  * cap somebody set: `reason` is the field that says WHICH bound bit, and it is the one to
  * show a person. Making the field optional was considered and refused: it is published
  * through `src/exports/types.ts`, every consumer compares against it, and an absent number
- * would buy accuracy on two engines by making the comparison conditional on all seventeen.
+ * would buy accuracy on two engines by making the comparison conditional on every engine.
  *
  * `reason` is ONE SENTENCE for one event across every engine, and that is a rule rather
  * than a convention: build the caller's half with `callerBoundTruncationReason()` in

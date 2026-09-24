@@ -1038,14 +1038,14 @@ const PLAN_DELIVERABLES: Readonly<Record<AgentRunWorkflowType, PlanDeliverable>>
  * `language` arrived with #414 and every sentence that assumed SQL is now written
  * twice. The tag does NOT vary with it and that is the point of taking the language
  * separately: the tag is the canonical type-id in both arms, because it is what
- * `isQueryFenceTag` accepts (a total record over `DatabaseType`, so all seventeen pass)
+ * `isQueryFenceTag` accepts (a total record over `DatabaseType`, so every type-id passes)
  * and what `rich-text.tsx` and `readPlanStatement` key the editor hand-off on. A draft
  * a model fenced as ```` ```javascript ```` produces no `plan-statement-drafted` event
  * at all — the run would be scored as having drafted nothing while the user is looking
  * at a statement — so the one thing this contract cannot afford to leave to the model
  * is what the tag says.
  *
- * What the json arm has to say instead is that SQL is the wrong language, and it has
+ * What the arm for every other language has to say instead is that SQL is the wrong language, and it has
  * to say it: the objective is prose, the words "statement", "table" and "column" are
  * all over the conversation, and a model handed a MongoDB inventory under those words
  * will write SQL against it unless told not to. The second clause is about the same

@@ -300,6 +300,14 @@ export function OperationsTab() {
     filteredTables.length === 0;
   const tableStatsAbsent =
     tablesUnavailable !== undefined || (tables.length === 0 && (data?.overview?.tableCount ?? 0) > 0);
+
+  // What the rows are, when the provider says they are only part of the database (#1085 6.2), read
+  // the way the monitoring `TablesTab` reads it. The Prometheus list is the metrics with the most head
+  // series, so "Tables (50)" read as the database's own count, and a filter for a metric outside the
+  // list said no table was found. Only over a list that is there: a refused read, or an empty list
+  // beside a counted overview, has nothing to scope and keeps the rendering below.
+  const listScope = tableStatsAbsent ? undefined : labels?.tableStatsCaption;
+  const listNoun = listScope === undefined ? "Tables" : "Listed";
   const maintenanceUnreachable =
     tableActions.length > 0 && filteredTables.length === 0 && (deepLinkRowMissing || tableStatsAbsent);
 
@@ -512,7 +520,7 @@ export function OperationsTab() {
               <div className="flex items-center gap-2">
                 <Table2 className="w-4 h-4 text-brand" />
                 <span className="text-xs font-bold text-fg-secondary">
-                  {tablesUnavailable ? "Tables" : `Tables (${tables.length})`}
+                  {tablesUnavailable ? "Tables" : `${listNoun} (${tables.length})`}
                 </span>
               </div>
               <Input
@@ -522,6 +530,15 @@ export function OperationsTab() {
                 className="w-[140px] h-7 text-xs bg-raised border-hairline-strong"
               />
             </div>
+            {/* Outside the scrolling list, so it heads every row however far the list is scrolled. */}
+            {listScope !== undefined && (
+              <p
+                className="px-4 py-2 border-b border-hairline text-xs text-fg-muted"
+                data-testid="operations-tables-list-scope"
+              >
+                {listScope}
+              </p>
+            )}
             <div className="max-h-[350px] overflow-y-auto">
               {loading && tables.length === 0 ? (
                 <div className="p-4 space-y-2">
@@ -531,7 +548,12 @@ export function OperationsTab() {
                 </div>
               ) : filteredTables.length === 0 ? (
                 <div className="p-8 text-center text-fg-subtle text-sm" data-testid="operations-tables-empty">
-                  {tablesUnavailable ?? "No tables found."}
+                  {/* A filter that matched none of a partial list saw only the listed rows, and a
+                      table outside them may match, so it must not say no table was found. */}
+                  {tablesUnavailable ??
+                    (listScope !== undefined && tables.length > 0
+                      ? "No listed table matches the filter."
+                      : "No tables found.")}
                 </div>
               ) : (
                 <div className="divide-y divide-hairline">
@@ -545,8 +567,13 @@ export function OperationsTab() {
                     >
                       <div className="min-w-0">
                         <div className="flex items-baseline min-w-0 text-sm font-medium text-fg-secondary">
-                          <span className="shrink-0 text-fg-muted">{table.schemaName}</span>
-                          <span className="shrink-0 text-fg-subtle">.</span>
+                          {/* A row with no schema (a Prometheus metric, a search index) prints its bare name. */}
+                          {table.schemaName !== "" && (
+                            <>
+                              <span className="shrink-0 text-fg-muted">{table.schemaName}</span>
+                              <span className="shrink-0 text-fg-subtle">.</span>
+                            </>
+                          )}
                           <span className="truncate max-w-[160px]">{table.tableName}</span>
                         </div>
                         <div className="flex items-center gap-2 text-xs text-fg-muted">
