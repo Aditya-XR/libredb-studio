@@ -986,6 +986,37 @@ describe("KeyBrowser", () => {
       expect(walksOf(fetchMock)[0]).toMatchObject({ pattern: "app:*" });
     });
 
+    test("selects the database the request named, and does not walk the wrong one first", async () => {
+      // The container list is HELD so the wait is observable: a panel that started its walk before the
+      // list answered would take a page of the session's database and throw it away, which is the
+      // flash of one database's keys under another database's name.
+      // A no-op default rather than `| null`: the executor below replaces it before anything waits.
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const fetchMock = mockGlobalFetch({
+        "/api/db/keys/scan": page(["app:env"], "0", 2),
+        "/api/db/objects/containers": async () => {
+          await gate;
+          return { json: DATABASES };
+        },
+      });
+      renderLevel({ pattern: "app:*", database: "1" });
+
+      expect(walksOf(fetchMock)).toEqual([]);
+
+      release();
+      await waitFor(() => {
+        expect(walksOf(fetchMock)).toHaveLength(1);
+      });
+      // ONE page, and it is the database the row named: a row under `Database 1` walks database 1, not
+      // whichever one the panel happened to be in.
+      expect(walksOf(fetchMock)[0]).toMatchObject({ pattern: "app:*", cursor: "0", database: 1 });
+      expect(screen.getByLabelText("Database").textContent).toBe("1");
+      expect(rows()).toEqual(["1@0", "app:*@1"]);
+    });
+
     test("applies a new request to a panel already walking, and drops the stale filter", async () => {
       const seen: string[] = [];
       mockGlobalFetch({

@@ -92,8 +92,18 @@ export interface KeyBrowserProps {
  * so a caller could never ask again, and the panel could never tell an ask from its own state.
  */
 export interface KeyPatternRequest {
-  /** The `MATCH` pattern the row named. It already carries its `*`; nothing is appended here. */
+  /** The `MATCH` pattern the row named, ready to send. */
   readonly pattern: string;
+  /**
+   * The container the row lives in, when the row names one.
+   *
+   * A KEY PATTERN ROW BELONGS TO A DATABASE, and the row menu's item is offered on the rows of every
+   * database the object tree lists - so a request that carried the pattern alone would walk whichever
+   * database the panel happened to be in, and answer about a key space the reader never pointed at.
+   * The NAME rather than a number because that is what the engine listed and what this panel's own
+   * choice is made of; an engine whose containers are not numbers cannot be walked by number at all.
+   */
+  readonly database?: string;
 }
 
 /**
@@ -132,7 +142,10 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
   const [pattern, setPattern] = useState(request?.pattern ?? "");
   const [term, setTerm] = useState("");
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
-  const [chosen, setChosen] = useState<string | null>(null);
+  // A request's database is the panel's INITIAL choice, exactly as its pattern is the initial
+  // pattern: on mount the sync below has nothing to compare against, so a row's own database would
+  // otherwise be dropped on the very first handover - the case the item exists for.
+  const [chosen, setChosen] = useState<string | null>(request?.database ?? null);
   const [databaseOpen, setDatabaseOpen] = useState(true);
   const [answered, setAnswered] = useState<KeyPatternRequest | undefined>(request);
 
@@ -149,13 +162,21 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
     setAnswered(request);
     if (request !== undefined) {
       setPattern(request.pattern);
+      // The row's own database travels with it: a request that changed the pattern but not the
+      // database would answer about the key space the panel was already in.
+      if (request.database !== undefined) setChosen(request.database);
       // The filter belongs to the keys that were on screen, and those are about to be replaced: left
       // on, it would hide the answer to the request that was just made.
       setTerm("");
     }
   }
 
-  const { names, sessionDefault, error: databasesError } = useKeyDatabases(connection, databaseLevel);
+  const {
+    names,
+    answered: databasesAnswered,
+    sessionDefault,
+    error: databasesError,
+  } = useKeyDatabases(connection, databaseLevel);
 
   /*
    * THE DATABASE THE WALK READS, which is a name until the last moment because that is what the
@@ -172,6 +193,17 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
    * server never offered.
    */
   const listed = chosen !== null && names.includes(chosen) && addressable(chosen) !== null ? chosen : null;
+  /**
+   * Whether the panel is waiting for the container list before it can walk the database it was asked
+   * for.
+   *
+   * A REQUEST THAT NAMES A DATABASE IS NOT AN ANSWER ABOUT ONE. The panel cannot point the walk at a
+   * container it has not been told exists, so starting one anyway would take a page of the session's
+   * database and replace it a moment later - the visible flash of one database's keys under another
+   * database's name, for no answer. The wait ends when the list answers, whatever it answers: a
+   * refused list is a real answer about the list, and the walk then goes where the panel says it does.
+   */
+  const waitingForChosenDatabase = chosen !== null && !databasesAnswered && databasesError === null;
   /** What the panel says the walk is reading: the choice, or the engine's own session database. */
   const walked = listed ?? sessionDefault;
   const database = listed === null ? undefined : Number(listed);
@@ -226,10 +258,15 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
    * changes — a different question, so a different walk — and it is stable for a given question, so a
    * re-render of the same one does not restart anything. A walk restarted on every render would
    * request its first page for ever.
+   *
+   * `waitingForChosenDatabase` is the one case where the walk does NOT start yet, and it is read here
+   * rather than left to the restart above: the database a row asked for is only usable once the
+   * engine has confirmed it exists, and a page taken before that is a page thrown away.
    */
   useEffect(() => {
+    if (waitingForChosenDatabase) return;
     restart();
-  }, [restart]);
+  }, [restart, waitingForChosenDatabase]);
 
   /**
    * Hand a leaf to the shell, with the type this panel already has for it.

@@ -1367,12 +1367,18 @@ One page carries four fields in and four out:
   in it.
 - **Browse Keys**, in the row menu of a key-pattern row in the OBJECT tree — the one action that
   opens this panel instead of acting on the object. It switches the sidebar to Keys and hands the
-  row's name over as the `MATCH` pattern, verbatim: a grouping already carries its `*`, so `user:*`
-  arrives as `user:*` and finds exactly the keys the row summarised. The item is offered where the
-  engine declares BOTH `keyScan` and `tablesAreDerivedGroupings` — a surface to show it in, and rows
-  that are prefixes rather than objects — and asks `role === "relation"` as well, so a routine row is
-  never offered a walk of a prefix it does not name. The panel applies the pattern once and then owns
-  it: the reader can edit or clear it, and the same row asked for twice is not re-imposed on the box.
+  row's name over as the `MATCH` pattern, escaped in its prefix half by the same helper the Load more
+  row uses: `a[b:*` arrives as `a\[b:*`, because a key prefix is data that may contain a glob
+  metacharacter while the `*` the row is advertised with is the one the pattern exists for. The item
+  is offered where the engine declares BOTH `keyScan` and `tablesAreDerivedGroupings` — a surface to
+  show it in, and rows that are prefixes rather than objects — and asks `role === "relation"` as
+  well, so a routine row is never offered a walk of a prefix it does not name. **The row's own
+  DATABASE travels with it**: the item is offered on the key-pattern rows of every database the object
+  tree lists, and an object's path starts with its container's path, so the panel is pointed at the
+  database the row was under rather than whichever one it happened to be in — and it waits for the
+  container list before walking, because a page taken before the list answered is a page thrown away.
+  The panel applies the pattern once and then owns it: the reader can edit or clear it, and the same
+  row asked for twice is not re-imposed on the box.
 - **Filter** — narrows the tree the walk has ALREADY collected, client-side and without a request. The
   box takes two kinds of answer, because a reader has two: a **word** (`cache`, `123`, `HEALTH`) names a
   segment and keeps that segment's WHOLE subtree — somebody who typed a branch name is asking for

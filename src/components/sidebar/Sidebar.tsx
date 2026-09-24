@@ -9,6 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ObjectTree, type ObjectSource, type TreeRowActionHandlers } from "@/components/object-tree";
 import { KeyBrowser, type KeyPatternRequest } from "@/components/key-browser";
 import { prefixPattern } from "@/components/key-browser/tree";
+import { containerDepth } from "@/lib/db/object-kinds";
 import { GitHubRepoLink } from "@/components/github-repo-link";
 import { getAppVersion } from "@/lib/app-version";
 import { cn } from "@/lib/utils";
@@ -189,15 +190,30 @@ export function Sidebar({
    */
   const browseKeys = React.useCallback(
     (object: DatabaseObject) => {
-      // ESCAPED, and only in its prefix half: a key prefix is data that may itself contain a glob
-      // metacharacter, while the `*` the row is advertised with is the one the pattern exists for.
-      // `prefixPattern` is the same helper the scoped walk builds its pattern with, so the two
-      // cannot drift (#427).
-      setKeyPatternRequest({ pattern: prefixPattern(object.name) });
+      /*
+       * THE ROW'S OWN DATABASE TRAVELS WITH IT. This item is offered on the key-pattern rows of EVERY
+       * database the object tree lists, so a request carrying the pattern alone would walk whichever
+       * database the panel happened to be in and answer about a key space nobody pointed at - the
+       * reader clicked a row under `Database 2` and got the session's keys.
+       *
+       * An object's path STARTS with its container's path, so the outermost segment names the
+       * container the panel's own choice is made of. Read only where the engine declares a level to
+       * name - an engine with none has no container to point at, and its keys are walked as a whole.
+       */
+      const capabilities = metadata?.capabilities;
+      const database = capabilities !== undefined && containerDepth(capabilities) > 0 ? object.path[0] : undefined;
+      setKeyPatternRequest({
+        // ESCAPED, and only in its prefix half: a key prefix is data that may itself contain a glob
+        // metacharacter, while the `*` the row is advertised with is the one the pattern exists for.
+        // `prefixPattern` is the same helper the scoped walk builds its pattern with, so the two
+        // cannot drift (#427).
+        pattern: prefixPattern(object.name),
+        ...(database === undefined ? {} : { database }),
+      });
       setView("keys");
       setKeysPanelFor(connectionId);
     },
-    [connectionId],
+    [connectionId, metadata],
   );
   const actions = React.useMemo<TreeRowActionHandlers>(
     // The panel's own item is offered only where the panel exists: the row menu's gate asks the

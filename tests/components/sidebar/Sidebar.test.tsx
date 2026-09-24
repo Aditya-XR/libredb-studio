@@ -9,7 +9,7 @@ let capturedToggleFavoriteHandler: unknown;
 let capturedConnectionOrder: unknown;
 let capturedReorderHandler: unknown;
 /** The row menu's Browse Keys item, as the tree received it from the sidebar. */
-let capturedBrowseKeys: ((object: { name: string }) => void) | undefined;
+let capturedBrowseKeys: ((object: { name: string; path: readonly string[] }) => void) | undefined;
 
 // Mock child components to isolate Sidebar logic
 mock.module("@/components/sidebar/ConnectionsList", () => ({
@@ -46,8 +46,9 @@ mock.module("@/components/object-tree", () => ({
     const capabilities = props.capabilities as { containerLevels?: unknown[] } | undefined;
     // The row menu's entry point into the keys panel, captured so a test can press it: the sidebar
     // hands the tree this handler and nothing else about the panel.
-    capturedBrowseKeys = (props.actions as { onBrowseKeys?: (object: { name: string }) => void } | undefined)
-      ?.onBrowseKeys;
+    capturedBrowseKeys = (
+      props.actions as { onBrowseKeys?: (object: { name: string; path: readonly string[] }) => void } | undefined
+    )?.onBrowseKeys;
     return React.createElement(
       "div",
       {
@@ -75,7 +76,7 @@ mock.module("@/components/key-browser", () => ({
     const React = require("react");
     const connection = props.connection as Record<string, unknown> | undefined;
     const capability = props.capability as Record<string, unknown> | undefined;
-    const request = props.request as { pattern?: string } | undefined;
+    const request = props.request as { pattern?: string; database?: string } | undefined;
     const level = props.databaseLevel as { label?: string } | undefined;
     return React.createElement(
       "div",
@@ -85,6 +86,7 @@ mock.module("@/components/key-browser", () => ({
         "data-default-count": String(capability?.defaultCount ?? "none"),
         "data-has-open-key": String(props.onOpenKey !== undefined),
         "data-request": String(request?.pattern ?? "none"),
+        "data-request-database": String(request?.database ?? "none"),
         "data-level": String(level?.label ?? "none"),
       },
       "KeyBrowser Mock",
@@ -607,7 +609,7 @@ describe("Sidebar", () => {
     expect(capturedBrowseKeys).toBeDefined();
 
     act(() => {
-      capturedBrowseKeys?.({ name: "user:*" });
+      capturedBrowseKeys?.({ name: "user:*", path: ["0", "user:*"] });
     });
 
     // The pattern the row named, ready to send: its `*` is the `MATCH` glob the panel needs, and the
@@ -615,6 +617,50 @@ describe("Sidebar", () => {
     expect(queryByTestId("key-browser")?.getAttribute("data-request")).toBe("user:*");
     expect(getByRole("tab", { name: "Keys" }).getAttribute("aria-selected")).toBe("true");
     expect(queryByTestId("object-tree")).toBeNull();
+  });
+
+  test("hands the row's OWN database over with its pattern", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: {
+        capabilities: {
+          ...oneLevel,
+          keyScan: { defaultCount: 500, maxCount: 1000 },
+          containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
+        },
+      } as unknown as ProviderMetadata,
+      objectActions: { onGenerateSelect: () => {} },
+    });
+    const { queryByTestId } = render(<Sidebar {...props} />);
+
+    // The tree lists `Key Patterns` under EVERY database, so the item is reachable from a row that
+    // does not belong to the session's database. An object's path starts with its container's path,
+    // and that first segment is what the panel's own choice is made of.
+    act(() => {
+      capturedBrowseKeys?.({ name: "user:*", path: ["2", "user:*"] });
+    });
+
+    expect(queryByTestId("key-browser")?.getAttribute("data-request-database")).toBe("2");
+  });
+
+  test("hands no database over when the engine declares no level to name", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      // The walk declared and NO container level: the key space is walked as a whole, so the row's
+      // first segment is part of the key and not the name of a container.
+      metadata: {
+        capabilities: { queryLanguage: "sql", keyScan: { defaultCount: 500, maxCount: 1000 } },
+      } as unknown as ProviderMetadata,
+      objectActions: { onGenerateSelect: () => {} },
+    });
+    const { queryByTestId } = render(<Sidebar {...props} />);
+
+    act(() => {
+      capturedBrowseKeys?.({ name: "user:*", path: ["user:*"] });
+    });
+
+    // Nothing to point at: the walk is the whole key space, and the panel's own picker is not drawn.
+    expect(queryByTestId("key-browser")?.getAttribute("data-request-database")).toBe("none");
   });
 
   test("escapes the PREFIX half of the row name it hands over, and only that half", () => {
@@ -630,7 +676,7 @@ describe("Sidebar", () => {
     // keys nobody asked for. The one `*` the row is ADVERTISED with stays a glob, because that is
     // what it is for.
     act(() => {
-      capturedBrowseKeys?.({ name: "a[b:*" });
+      capturedBrowseKeys?.({ name: "a[b:*", path: ["0", "a[b:*"] });
     });
 
     expect(queryByTestId("key-browser")?.getAttribute("data-request")).toBe("a\\[b:*");

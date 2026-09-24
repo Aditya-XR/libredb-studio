@@ -27,6 +27,14 @@ import { appFetch } from "@/lib/config/base-path";
 export interface KeyDatabaseList {
   /** The containers the engine listed, in its own order. Empty until the read answers. */
   readonly names: readonly string[];
+  /**
+   * Whether the read has answered at all.
+   *
+   * NOT THE SAME QUESTION AS "ARE THERE ANY", and the caller that needs the difference is the one
+   * holding a database somebody asked for: until this is true, a walk cannot be pointed at it, and
+   * starting one anyway would take a page of the session's database and throw it away.
+   */
+  readonly answered: boolean;
   /** The container the session is already in, when the engine publishes that. */
   readonly sessionDefault: string | null;
   /** Why the read failed, in the route's own words where it gave one, or null. */
@@ -38,11 +46,12 @@ interface DatabasesRead {
   readonly names: readonly string[];
   readonly sessionDefault: string | null;
   readonly error: string | null;
+  readonly answered: boolean;
 }
 
 /** Nothing read yet for this connection: not an answer, and drawn as one. */
 function unread(connectionId: string): DatabasesRead {
-  return { connectionId, names: [], sessionDefault: null, error: null };
+  return { connectionId, names: [], sessionDefault: null, error: null, answered: false };
 }
 
 /** One entry of the container list, as far as this panel is about to dereference it. */
@@ -108,6 +117,7 @@ export function useKeyDatabases(
           names: body.map((entry) => entry.name),
           sessionDefault: session?.name ?? null,
           error: null,
+          answered: true,
         });
       } catch (thrown) {
         if (!live) return;
@@ -116,6 +126,9 @@ export function useKeyDatabases(
           names: [],
           sessionDefault: null,
           error: thrown instanceof Error ? thrown.message : String(thrown),
+          // A refusal IS an answer about the list, and the caller waiting for one must stop waiting:
+          // the walk then goes to the session's database, which is what the panel says it is doing.
+          answered: true,
         });
       }
     })();
@@ -127,5 +140,5 @@ export function useKeyDatabases(
     };
   }, [connection, level]);
 
-  return { names: read.names, sessionDefault: read.sessionDefault, error: read.error };
+  return { names: read.names, answered: read.answered, sessionDefault: read.sessionDefault, error: read.error };
 }
