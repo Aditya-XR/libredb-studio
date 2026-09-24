@@ -1362,12 +1362,17 @@ describe("PromQL Generate Query (#1085)", () => {
  * tests/components/schema-explorer/TableItem.test.tsx), and the import dialog offers no metric as
  * a target: it offers only objects whose kind declares row writes
  * (tests/components/DataImportModal.test.tsx), and no Prometheus kind declares them
- * (tests/unit/db/prometheus/objects.test.ts). An export added later has no classification, so this
- * list fails until somebody writes one for it.
+ * (tests/unit/db/prometheus/objects.test.ts). `escapeGlob` escapes a Redis `MATCH` glob, and its
+ * only callers outside the Redis generator arm are the key browser's patterns, a surface offered only
+ * where the provider declares `keyScan` (tests/components/sidebar/Sidebar.test.tsx, and Browse Keys in
+ * tests/unit/components/object-tree-row-actions.test.ts), which Prometheus does not: its whole
+ * capability object is pinned in tests/unit/db/prometheus/provider.test.ts. An export added later has
+ * no classification, so this list fails until somebody writes one for it.
  */
 describe("the module's exports, for a PromQL connection (#1085)", () => {
   test("every export is one this file has classified", () => {
     expect(Object.keys(generators).sort()).toEqual([
+      "escapeGlob",
       "generateCountQuery",
       "generateSelectQuery",
       "generateTableQuery",

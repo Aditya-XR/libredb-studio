@@ -1261,7 +1261,8 @@ describe("acquireExecutionProfileProvider", () => {
     // one, while `agent-operations` sends none and calls the curated reporting methods
     // every provider implements. Asserting them together is what keeps a later
     // simplification from collapsing the two.
-    const connection = makeConnection("redis", { id: "redis-operations" });
+    // A Redis database is a number: the shared fixture's "testdb" is refused at connect.
+    const connection = makeConnection("redis", { id: "redis-operations", database: "0" });
 
     const refused: unknown = await acquireExecutionProfileProvider(connection, "agent-read-only").catch(
       (e: unknown) => e,

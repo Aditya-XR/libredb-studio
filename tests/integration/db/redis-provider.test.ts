@@ -42,6 +42,27 @@ const MOCK_INFO_STRING = [
   "",
 ].join("\n");
 
+/**
+ * The `INFO cluster` section a CLUSTER node answers.
+ *
+ * The fact this provider reads is the server's own line: measured, a node of a clustered
+ * deployment answers `cluster_enabled:1` while an ordinary server answers `cluster_enabled:0`.
+ * The other pairs are carried along so the parse is pinned on a real section rather than on a
+ * one-line string, which is the trap it guards against.
+ */
+const MOCK_CLUSTER_INFO = [
+  "# Cluster",
+  "cluster_enabled:1",
+  "cluster_state:ok",
+  "cluster_slots_assigned:16384",
+  "cluster_known_nodes:3",
+  "cluster_size:3",
+  "",
+].join("\n");
+
+/** The same section on the ordinary server: the one field read here says `0`. */
+const MOCK_PLAIN_CLUSTER_INFO = ["# Cluster", "cluster_enabled:0", "cluster_state:ok", ""].join("\n");
+
 // `name=` is the connection name (empty until a client calls CLIENT SETNAME) and is
 // deliberately left blank here, distinct from `user=` (the authenticated ACL user) - the
 // two used to be conflated in getActiveSessions(), which read `name` for the user column.
@@ -348,11 +369,79 @@ let scanOverflows = false;
 const OVERFLOW_KEYS: string[] = Array.from({ length: 1000 }, (_, index) => `bulk:${index}`);
 
 /**
+ * When set, `SCAN` answers like a cursor walk instead of handing back the whole keyspace in one
+ * page: `COUNT` bounds the page, `MATCH` filters, and a non-zero cursor comes back until the walk
+ * is spent.
+ *
+ * The other arms answer everything at once, which is all the object surface needs — it wants one
+ * walk and one grouping. A walk DRIVEN BY A CALLER needs this shape, because the two facts it is
+ * built on are unobservable when every call answers cursor `"0"`: that a page is bounded, and that
+ * the cursor is the thing which says there is more.
+ */
+let scanPages: string[] | null = null;
+
+/**
+ * Every `(cursor, args)` the provider handed `SCAN` since a test reset it.
+ *
+ * An assertion about the CURSOR is an assertion about the wire, and the return value cannot carry
+ * it: a walk that ignored the cursor it was given and restarted from zero would answer a plausible
+ * first page. Only the argv shows which cursor left, and only the argv shows whether `MATCH` was
+ * omitted rather than forwarded as an empty string.
+ */
+const scanArgv: Array<{ cursor: string | number; args: (string | number)[] }> = [];
+
+/**
+ * The keys the walk tests page through, in the order the mock's scan answers them.
+ *
+ * Mixed in prefix DEPTH on purpose: a walk whose pages were cut from a list sorted by grouping
+ * would look identical whether it paged correctly or re-grouped what it had, and the depth is the
+ * one property the consumer of these pages actually reads a key for.
+ */
+const KEYS_FOR_THE_WALK = ["app:env", "app:region", "app:cache:ttl", "app:config:limits", "user:1001:name"];
+
+/**
+ * One page of a cursor walk over `keys`.
+ *
+ * AN OFFSET INTO A LIST STANDS IN FOR THE HASH-TABLE CURSOR, and `MATCH` is applied to the whole
+ * fixture before the page is cut rather than inside a server-side batch. That difference is real
+ * and deliberate: a real `SCAN MATCH` walks the WHOLE keyspace and filters what each batch happens
+ * to contain, so the same pattern can answer an empty page and a non-zero cursor at once. Nothing
+ * in this provider depends on where the filter runs — it forwards `MATCH` verbatim and never reads
+ * the keys it is handing back — so a faithful emulation of that ordering would buy the assertions
+ * here nothing and cost the reader a paragraph like this one.
+ */
+function scanPage(keys: string[], cursor: string | number, args: (string | number)[]): [string, string[]] {
+  const countIndex = args.indexOf("COUNT");
+  const count = countIndex >= 0 ? Number(args[countIndex + 1]) : 10;
+  const matchIndex = args.indexOf("MATCH");
+  const pattern = matchIndex >= 0 ? String(args[matchIndex + 1]) : null;
+  // `*` is the only metacharacter these tests use, so this is a pattern filter and not a Redis
+  // glob implementation: every other metacharacter is escaped rather than honoured.
+  const matching =
+    pattern === null
+      ? keys
+      : keys.filter((key) =>
+          new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(key),
+        );
+  const start = Number(cursor);
+  const next = start + count >= matching.length ? "0" : String(start + count);
+  return [next, matching.slice(start, start + count)];
+}
+
+/**
  * Every options object the provider handed the `Redis` constructor. The TLS
  * selection is observable nowhere else: ioredis takes it at construction time and
  * never exposes it again.
  */
 const capturedRedisOptions: Record<string, unknown>[] = [];
+
+/**
+ * The database each connection the provider opened is IN, in the order it opened them, and whether
+ * it was closed. Read from the double's own state rather than from the options: a server decides
+ * which database a connection is in, and an option it refused leaves the connection in database 0.
+ */
+const openedClients: Array<{ database: number; disconnected: boolean }> = [];
+const openedDatabases = (): number[] => openedClients.map((client) => client.database);
 
 /**
  * When set, `info()` rejects with this message instead of answering. A Redis 6 ACL
@@ -362,11 +451,35 @@ const capturedRedisOptions: Record<string, unknown>[] = [];
 let infoRefusal: string | null = null;
 
 /**
+ * How the next pipelined `TYPE` batch answers.
+ *
+ * `error` is one command the connection could not complete and `null` is a pipeline that answered
+ * nothing at all — both are real ioredis outcomes, both leave the provider with nothing truthful to
+ * record, and neither is reachable through the per-key `type()` double the grouping tests use.
+ */
+let pipelineMode: "ok" | "error" | "null" = "ok";
+
+/**
  * When set, `info()` answers with this string instead of `MOCK_INFO_STRING` - lets a test
  * simulate a relative that publishes an extra field (e.g. `dragonfly_version`) without a
  * second mock module.
  */
 let infoOverride: string | null = null;
+
+/**
+ * What the page pipeline's `INFO cluster` answers, and whether that pipeline answers at all.
+ *
+ * The key-space page reads the deployment's shape in the SAME batch as its `DBSIZE`, so these are
+ * separate from `pipelineMode` above: that flag governs the `TYPE` batch, which a page sends on its
+ * own and skips entirely when it holds no keys, while the count is read on every page. The reply is
+ * `unknown` because a refused `INFO` arrives as a non-text reply, which is the absent case the
+ * contract names rather than a shape to answer with a guess.
+ */
+let clusterInfoReply: unknown = MOCK_PLAIN_CLUSTER_INFO;
+let pagePipelineMode: "ok" | "error" | "null" = "ok";
+
+/** Every pipelined batch the provider sent, by command name, in the order it sent it. */
+const pipelineBatches: string[][] = [];
 
 mock.module("ioredis", () => {
   class MockRedis {
@@ -385,14 +498,29 @@ mock.module("ioredis", () => {
       const options = (config ?? {}) as Record<string, unknown>;
       capturedRedisOptions.push(options);
       this._db = typeof options.db === "number" ? options.db : 0;
+      openedClients.push(this._state);
     }
 
+    /** This connection's entry in `openedClients`, kept current as it moves and closes. */
+    private readonly _state = { database: 0, disconnected: false };
+
     async connect() {
-      // noop — connection established
+      this._state.database = this._db;
     }
 
     disconnect() {
-      // noop — connection closed
+      this._state.disconnected = true;
+    }
+
+    /**
+     * A server's `SELECT`: refused past the count `CONFIG GET databases` answers, in the words
+     * redis 8.10.0 refuses `SELECT 99` with on a stock 16-database server.
+     */
+    async select(db: number) {
+      if (db >= Number(databasesReply[1])) throw new Error("ERR DB index is out of range");
+      this._db = db;
+      this._state.database = db;
+      return "OK";
     }
 
     async info() {
@@ -404,9 +532,11 @@ mock.module("ioredis", () => {
       return 42;
     }
 
-    async scan(): Promise<[string, string[]]> {
+    async scan(cursor: string | number, ...args: (string | number)[]): Promise<[string, string[]]> {
       scanCalls += 1;
+      scanArgv.push({ cursor, args });
       if (scanRefusal !== null) throw new Error(scanRefusal);
+      if (scanPages !== null) return scanPage(scanPages, cursor, args);
       if (scanOverflows) return ["42", [...(MOCK_KEYS_BY_DB[this._db] ?? []), ...OVERFLOW_KEYS]];
       return ["0", MOCK_KEYS_BY_DB[this._db] ?? []];
     }
@@ -422,6 +552,56 @@ mock.module("ioredis", () => {
      */
     async type(key: string) {
       return MOCK_KEY_TYPES[key] ?? "string";
+    }
+
+    /**
+     * A pipelined batch. Two of them reach this double: the key-space page's `DBSIZE` +
+     * `INFO cluster` read, and the `TYPE` batch that answers the page's keys.
+     *
+     * ONLY THOSE COMMANDS ARE ACCEPTED, and anything else THROWS. A pipeline that silently answered
+     * the wrong shape for a command this provider had started pipelining would look like a page
+     * whose keys simply had no types - the failure would arrive as absent data rather than as a
+     * test that went red.
+     */
+    pipeline() {
+      const commands: Array<{ name: string; args: (string | number)[] }> = [];
+      const chain = {
+        call: (command: string, ...args: (string | number)[]) => {
+          if (String(command).toUpperCase() !== "TYPE") {
+            throw new Error(`unexpected pipelined command: ${command}`);
+          }
+          commands.push({ name: "TYPE", args });
+          return chain;
+        },
+        dbsize: () => {
+          commands.push({ name: "DBSIZE", args: [] });
+          return chain;
+        },
+        info: (section?: string) => {
+          if (section !== "cluster") {
+            throw new Error(`unexpected pipelined INFO section: ${section}`);
+          }
+          commands.push({ name: "INFO", args: ["cluster"] });
+          return chain;
+        },
+        exec: async (): Promise<[Error | null, unknown][] | null> => {
+          pipelineBatches.push(commands.map((command) => command.name));
+          // A batch carrying `DBSIZE` is the page's count-and-shape read and obeys its own fault
+          // mode; the rest is the `TYPE` batch, whose flags say what a page with unreadable types
+          // looks like.
+          const mode = commands.some((command) => command.name === "DBSIZE") ? pagePipelineMode : pipelineMode;
+          if (mode === "null") return null;
+          return Promise.all(
+            commands.map(async ({ name, args }): Promise<[Error | null, unknown]> => {
+              if (mode === "error") return [new Error("ERR pipeline command failed"), null];
+              if (name === "DBSIZE") return [null, 42];
+              if (name === "INFO") return [null, clusterInfoReply];
+              return [null, await this.type(String(args[0]))];
+            }),
+          );
+        },
+      };
+      return chain;
     }
 
     async client(subcommand: string) {
@@ -482,7 +662,7 @@ mock.module("ioredis", () => {
 // ============================================================================
 
 const { RedisProvider } = await import("@/lib/db/providers/keyvalue/redis");
-const { DatabaseConfigError } = await import("@/lib/db/errors");
+const { DatabaseConfigError, QueryError } = await import("@/lib/db/errors");
 
 // ============================================================================
 // Test Config
@@ -546,6 +726,44 @@ describe("RedisProvider", () => {
       await provider.connect();
       await provider.disconnect();
       expect(provider.isConnected()).toBe(false);
+    });
+
+    /*
+     * A DATABASE THE SERVER DOES NOT HAVE IS REFUSED, NOT READ AS 0 (#1095).
+     *
+     * Measured 2026-09-24 on redis 8.10.0 through ioredis 5.11.1 with the database handed over as
+     * the `db` option: `connect()` resolved, "ERR DB index is out of range" arrived only as an
+     * unhandled `error` event, and every later command ran in database 0, so `POST /api/db/query`
+     * and `POST /api/db/keys/scan` both answered 200 with database 0's keys for `database: 99`.
+     */
+    test("a session database the server does not have fails the connect in the server's words", async () => {
+      provider = new RedisProvider({ ...baseConfig, database: "99" });
+      openedClients.length = 0;
+
+      await expect(provider.connect()).rejects.toThrow("Redis refused database 99: ERR DB index is out of range");
+      await expect(provider.connect()).rejects.toBeInstanceOf(QueryError);
+      expect(provider.isConnected()).toBe(false);
+      // Nothing was left open in database 0 to be read from by accident.
+      expect(openedClients.every((client) => client.disconnected)).toBe(true);
+    });
+
+    test("a session database that is not a number is refused before anything is opened", async () => {
+      // The form's Database field is free text. `parseInt("testdb")` is NaN, and ioredis reads a NaN
+      // `db` as no database at all, so this connected to database 0 without a word.
+      provider = new RedisProvider({ ...baseConfig, database: "testdb" });
+      openedClients.length = 0;
+
+      await expect(provider.connect()).rejects.toThrow('A Redis database is a number, received "testdb"');
+      await expect(provider.connect()).rejects.toBeInstanceOf(DatabaseConfigError);
+      expect(openedClients).toEqual([]);
+    });
+
+    test("a session database the server has is the one the connection is in", async () => {
+      provider = new RedisProvider({ ...baseConfig, database: "2" });
+      openedClients.length = 0;
+
+      await provider.connect();
+      expect(openedDatabases()).toEqual([2]);
     });
   });
 
@@ -697,6 +915,248 @@ describe("RedisProvider", () => {
       // branch on `queryLanguage === "json"` and every schema-explorer action
       // emits JSON this provider rejects.
       expect(provider.getCapabilities().queryDialect).toBe("redis");
+    });
+
+    test("declares the key-space walk, and the declaration and the method agree", () => {
+      const caps = provider.getCapabilities();
+
+      // A batch size is a DECLARATION rather than a default invented two layers up, so that a
+      // panel and its provider cannot come to disagree about what a batch is.
+      expect(caps.keyScan).toEqual({ defaultCount: 500, maxCount: 1000 });
+
+      // The pair, checked where this file checks its other declaration pairs
+      // (`supportsExplain` against `explainFormat`): a `keyScan` with no walk behind it would
+      // draw a control whose every gesture fails, and a walk with no declaration is a feature
+      // nothing can find.
+      expect(typeof provider.scanKeysPage).toBe(caps.keyScan === undefined ? "undefined" : "function");
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // scanKeysPage()
+  // --------------------------------------------------------------------------
+
+  /**
+   * The key-space walk a caller drives, one page at a time.
+   *
+   * THE CURSOR IS THE CONTRACT, so these assertions are about the WIRE and not only about the
+   * answers. A walk that ignored the cursor it was handed and restarted from zero would answer a
+   * perfectly plausible first page, and a suite that read only the returned keys would pass against
+   * it — which is why `scanArgv` is read below and the cursor is asserted where it is sent.
+   */
+  describe("scanKeysPage()", () => {
+    beforeEach(async () => {
+      scanPages = [...KEYS_FOR_THE_WALK];
+      scanArgv.length = 0;
+      scanRefusal = null;
+      scanOverflows = false;
+      pipelineMode = "ok";
+      clusterInfoReply = MOCK_PLAIN_CLUSTER_INFO;
+      pagePipelineMode = "ok";
+      pipelineBatches.length = 0;
+      capturedRedisOptions.length = 0;
+      openedClients.length = 0;
+      await provider.connect();
+    });
+
+    afterEach(() => {
+      // Left set, this would change what `SCAN` answers for every later describe in this file.
+      scanPages = null;
+    });
+
+    test("walks in bounded pages and answers the cursor for the next one", async () => {
+      const first = await provider.scanKeysPage({ cursor: "0", count: 2 });
+      expect(first.keys).toEqual(["app:env", "app:region"]);
+      expect(first.cursor).toBe("2");
+
+      const second = await provider.scanKeysPage({ cursor: first.cursor, count: 2 });
+      expect(second.keys).toEqual(["app:cache:ttl", "app:config:limits"]);
+      expect(second.cursor).toBe("4");
+
+      // The spent cursor is the ONLY signal a caller gets that a walk is over: `SCAN` publishes no
+      // total, and `total` below is the database's count rather than the walk's.
+      const third = await provider.scanKeysPage({ cursor: second.cursor, count: 2 });
+      expect(third.keys).toEqual(["user:1001:name"]);
+      expect(third.cursor).toBe("0");
+    });
+
+    test("forwards the pattern as MATCH, and omits MATCH when the caller names none", async () => {
+      const filtered = await provider.scanKeysPage({ cursor: "0", pattern: "app:*", count: 2 });
+      expect(filtered.keys).toEqual(["app:env", "app:region"]);
+      expect(scanArgv.at(-1)).toEqual({ cursor: "0", args: ["MATCH", "app:*", "COUNT", 2] });
+
+      await provider.scanKeysPage({ cursor: "0", count: 2 });
+      // ABSENT, not an empty string: `MATCH ""` is a pattern no key satisfies, so forwarding a
+      // missing pattern as one would turn "every key" into "no key".
+      expect(scanArgv.at(-1)).toEqual({ cursor: "0", args: ["COUNT", 2] });
+    });
+
+    test("answers the database's own key count, not the length of the page", async () => {
+      const page = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // The page holds two keys and this mock's `DBSIZE` answers 42. A total taken from the page
+      // would read 2, which is the defect being asserted against: it is the denominator a progress
+      // indicator divides by, and a walk's own length is not knowable from where in it you stand.
+      expect(page.keys).toHaveLength(2);
+      expect(page.total).toBe(42);
+    });
+
+    test("walks the database the caller names rather than the one the session is in", async () => {
+      await provider.scanKeysPage({ cursor: "0", count: 10, database: 3 });
+      expect(openedDatabases().at(-1)).toBe(3);
+
+      await provider.scanKeysPage({ cursor: "0", count: 10 });
+      // No `database` names the session's own, which is the connection's configured database
+      // (`baseConfig` declares none) and not a constant this provider keeps.
+      expect(openedDatabases().at(-1)).toBe(0);
+    });
+
+    test("a database the server does not have is refused rather than walked as database 0", async () => {
+      openedClients.length = 0;
+      scanCalls = 0;
+
+      await expect(provider.scanKeysPage({ cursor: "0", count: 10, database: 99 })).rejects.toThrow(
+        "Redis refused database 99: ERR DB index is out of range",
+      );
+      // The walk's own connection is closed, and no key of database 0 was read through it.
+      expect(openedClients).toEqual([{ database: 0, disconnected: true }]);
+      expect(scanCalls).toBe(0);
+    });
+
+    test("passes a refusal through with the server's own sentence", async () => {
+      scanRefusal = "NOPERM this user has no permissions to run the 'scan' command";
+
+      await expect(provider.scanKeysPage({ cursor: "0", count: 10 })).rejects.toThrow(/NOPERM/);
+    });
+
+    test("answers each key's type, so a row can be read without a second request", async () => {
+      scanPages = ["session:abc", "app:env"];
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
+
+      // IT TRAVELS WITH THE PAGE. A panel that asked for types afterwards would draw a list without
+      // them and fill them in, and the reader would watch rows change under the pointer. The two
+      // replies come from the same per-key double the grouping tests use, which is the point: this is
+      // one reading of one server, batched, and not a second opinion about it.
+      expect(answered.types).toEqual({ "session:abc": "hash", "app:env": "string" });
+    });
+
+    test("omits the keys whose type the connection could not read", async () => {
+      pipelineMode = "error";
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
+
+      // An absent entry is what a panel draws nothing for. Recording a guess — or `"string"`, the
+      // commonest answer — would be a claim about a value that nothing made.
+      expect(answered.keys.length).toBeGreaterThan(0);
+      expect(answered.types).toEqual({});
+    });
+
+    test("answers no types when the pipeline itself answered nothing", async () => {
+      pipelineMode = "null";
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
+
+      // A null `exec()` is a pipeline that never reported, which is a different failure from a
+      // command inside it refusing: both leave nothing truthful to record, and neither may throw.
+      expect(answered.keys.length).toBeGreaterThan(0);
+      expect(answered.types).toEqual({});
+    });
+
+    test("asks the server for no types at all when the page holds no keys", async () => {
+      scanPages = [];
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 10 });
+
+      // Not an optimisation for its own sake: a `TYPE` batch for an empty key list is a round trip
+      // whose answer is known before it is sent, and `MATCH` answers empty batches routinely. The
+      // count and the deployment's shape are read on this page all the same, because they describe
+      // the database and not the batch.
+      expect(answered.keys).toEqual([]);
+      expect(answered.types).toEqual({});
+    });
+
+    test("reads the deployment's shape in the round trip the count already pays", async () => {
+      await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // ONE BATCH FOR BOTH READS is the whole claim that the fact costs this page no round trip: a
+      // separate `INFO cluster` after the count would be a second wait for something the same batch
+      // could carry. The `TYPE` batch is the other one and is separate on purpose - a page holding
+      // no keys sends none of it while the count is read every time.
+      expect(pipelineBatches[0]).toEqual(["DBSIZE", "INFO"]);
+      expect(pipelineBatches[1]).toEqual(["TYPE", "TYPE"]);
+    });
+
+    test("says the page is one node's when the server says it is a cluster", async () => {
+      clusterInfoReply = MOCK_CLUSTER_INFO;
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // The server's own `cluster_enabled:1`, and nothing inferred from anything else. This is what
+      // lets the panel say that the keys and the count beside them describe the node that answered.
+      expect(answered.clustered).toBe(true);
+      expect(answered.total).toBe(42);
+    });
+
+    test("says the page is not a cluster when the server says cluster_enabled is 0", async () => {
+      clusterInfoReply = MOCK_PLAIN_CLUSTER_INFO;
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // A deployment that SAID it is not clustered is a present `false`, which is a different
+      // answer from the absent one below: the panel's one-node wording is about an absent fact, and
+      // this is the fact, read from the server.
+      expect(answered.clustered).toBe(false);
+    });
+
+    test("leaves the deployment's shape absent when the section does not name it", async () => {
+      clusterInfoReply = "# Cluster\ncluster_state:ok\n";
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // A section without the line is a server that did not answer the question. Absent is the
+      // contract's word for that, and the one thing that must never be invented from a silence is
+      // the claim the field exists to qualify.
+      expect("clustered" in answered).toBe(false);
+    });
+
+    test("leaves the deployment's shape absent when the reply is not text", async () => {
+      // A refused `INFO cluster` reaches the pipeline as a non-text reply, which is the shape an ACL
+      // user without `+info` produces. A refusal is not evidence of clustering or of its absence, so
+      // nothing is recorded.
+      clusterInfoReply = null;
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      expect("clustered" in answered).toBe(false);
+      // `DBSIZE` is a different command under a different ACL grant, so refusing the section does
+      // not cost the page its denominator as well.
+      expect(answered.total).toBe(42);
+    });
+
+    test("leaves the deployment's shape absent when the field says neither word", async () => {
+      clusterInfoReply = "# Cluster\ncluster_enabled:maybe\n";
+
+      const answered = await provider.scanKeysPage({ cursor: "0", count: 2 });
+
+      // Only `1` and `0` are read. A value a future server might mean some other way is not rounded
+      // to either, because rounding it to `true` is the direction that draws a wrong claim.
+      expect("clustered" in answered).toBe(false);
+    });
+
+    test("refuses a page whose count the pipeline could not answer", async () => {
+      pagePipelineMode = "error";
+
+      // `total` is what a progress indicator divides by, and a count the connection could not read
+      // used to reach the caller as the server's own refusal. It still does: an answer with no count
+      // is not a page, and a stand-in number would be one nobody measured.
+      await expect(provider.scanKeysPage({ cursor: "0", count: 2 })).rejects.toThrow(/pipeline command failed/);
+    });
+
+    test("refuses a page whose count pipeline answered nothing", async () => {
+      pagePipelineMode = "null";
+
+      await expect(provider.scanKeysPage({ cursor: "0", count: 2 })).rejects.toThrow(/no key count/);
     });
   });
 
@@ -1578,6 +2038,7 @@ describe("RedisProvider", () => {
       scanCalls = 0;
       capturedCalls.length = 0;
       capturedRedisOptions.length = 0;
+      openedClients.length = 0;
       await provider.connect();
     });
 
@@ -2012,7 +2473,7 @@ describe("RedisProvider", () => {
 
       expect(objects.map((object) => object.path)).toEqual([["3", "report:*"]]);
       // The session connection is db 0 and stays on it: nothing SELECTs underneath it.
-      expect(capturedRedisOptions.map((options) => options.db)).toEqual([0, 3]);
+      expect(openedDatabases()).toEqual([0, 3]);
       expect(commandsSent().filter((command) => command.startsWith("SELECT"))).toEqual([]);
     });
 
@@ -2139,7 +2600,7 @@ describe("RedisProvider", () => {
       const objects = await provider.listObjects(["main", "3"], "keyspace");
 
       expect(objects.map((object) => object.path)).toEqual([["main", "3", "report:*"]]);
-      expect(capturedRedisOptions[capturedRedisOptions.length - 1].db).toBe(3);
+      expect(openedDatabases().at(-1)).toBe(3);
       const detail = await provider.describeObject(["main", "3", "report:*"], "keyspace");
       expect(detail.path).toEqual(["main", "3", "report:*"]);
     });
@@ -2336,7 +2797,7 @@ describe("RedisProvider", () => {
 
       expect(batch.details.map((detail) => detail.path)).toEqual([["main", "3", "report:*"]]);
       expect(batch.details[0].columns.map((column) => column.name)).toEqual(["key", "value", "type"]);
-      expect(capturedRedisOptions[capturedRedisOptions.length - 1].db).toBe(3);
+      expect(openedDatabases().at(-1)).toBe(3);
     });
 
     // ------------------------------------------------------------------------

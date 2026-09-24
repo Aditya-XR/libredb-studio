@@ -313,7 +313,7 @@ function renderRedisCommand(parts: string[]): string {
  * unescaped `[` opens a glob class that matches the wrong set. Escaping a key
  * argument would instead corrupt a literal key that genuinely contains `*` (#427).
  */
-function escapeGlob(value: string): string {
+export function escapeGlob(value: string): string {
   return value.replace(/[\\*?[\]^]/g, String.raw`\$&`);
 }
 

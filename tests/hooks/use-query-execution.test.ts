@@ -189,6 +189,73 @@ describe("useQueryExecution", () => {
     expect(body.connection.id).toBe("qe-pg-1");
   });
 
+  // ── the tab's own numbered database (the #1095 review) ─────────────────────
+
+  /**
+   * A key browser activation opens its tab against ONE numbered database, and Redis has no
+   * database-qualified key syntax: `GET report:daily` cannot name it, so the number travels with the
+   * run and this is where the tab's own fact becomes a request field.
+   *
+   * A FIELD BESIDE THE CONNECTION, NOT INSIDE IT, and that is the whole of this case: a managed
+   * connection travels as an id and the server discards any connection field the caller attached
+   * (GHSA-3wh2-8x78), so a database merged into the connection object is silently dropped for every
+   * zero-config deployment - and the read runs in the SESSION's database while the tab claims it read
+   * another. Beside the connection, `POST /api/db/query` applies it after resolving the id.
+   */
+  test("a run on a tab opened against a numbered database sends that database", async () => {
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const tab = createTab({ databaseOverride: 3 });
+    const params = createDefaultParams({ tabs: [tab], currentTab: tab });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("GET report:daily");
+    });
+
+    const mainCall = fetchMock.mock.calls.find((call) => {
+      const body = JSON.parse(call[1]!.body as string);
+      // The background EXPLAIN of the same statement is a second request to the same route; the
+      // run itself is the one without a plan asked of it.
+      return body.sql === "GET report:daily" && body.explain === undefined;
+    });
+    expect(mainCall).toBeDefined();
+    const body = JSON.parse(mainCall![1]!.body as string);
+    expect(body.database).toBe(3);
+    // The control: the CONNECTION does not move at all - its saved database is still its saved one,
+    // so nothing a stored connection pins is rewritten by a tab's own walk. Only the field beside it
+    // names the run's database.
+    expect(body.connection.id).toBe("qe-pg-1");
+    expect(body.connection.host).toBe("localhost");
+    expect(body.connection.database).toBe(mockConnection.database);
+  });
+
+  test("a run on an ordinary tab keeps the connection's own database", async () => {
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const params = createDefaultParams();
+    expect("databaseOverride" in params.currentTab).toBe(false);
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users");
+    });
+
+    const mainCall = fetchMock.mock.calls.find((call) => {
+      const body = JSON.parse(call[1]!.body as string);
+      return body.sql === "SELECT * FROM users" && body.explain === undefined;
+    });
+    const body = JSON.parse(mainCall![1]!.body as string);
+    expect(body.connection.database).toBe("testdb");
+    // ABSENT is not 0 and not "the session's number": a tab with no override sends no field, so the
+    // body is byte for byte what it was before this existed.
+    expect("database" in body).toBe(false);
+  });
+
   // ── executeQuery updates tab result on success ─────────────────────────────
 
   test("executeQuery updates tab result on success", async () => {
@@ -516,6 +583,47 @@ describe("useQueryExecution", () => {
       expect(queryCall).toBeDefined();
       const body = JSON.parse(queryCall![1]!.body as string);
       expect(body.options.offset).toBe(500);
+    });
+  });
+
+  /**
+   * The next page of a key's tab is still that key's database.
+   *
+   * Pagination is a SECOND run of the same tab, and the tab is what carries the numbered database
+   * (`QueryTab.databaseOverride`) - so a page reached with Next has to be sent on a connection naming
+   * it, exactly as the first one was. Everything else about the page is unchanged: it is the same
+   * statement, at the offset the grid asked for.
+   */
+  test("handleLoadMore keeps the tab's own database", async () => {
+    const tabWithResults = createTab({
+      databaseOverride: 3,
+      result: {
+        ...mockQueryResult,
+        pagination: { limit: 500, offset: 0, hasMore: true, totalReturned: 500, wasLimited: true },
+      },
+      currentOffset: 500,
+    });
+
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: { ...mockQueryResult, rows: [{ id: 3, name: "Charlie" }], rowCount: 1 } },
+    });
+
+    const params = createDefaultParams({ tabs: [tabWithResults], currentTab: tabWithResults });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    await waitFor(() => {
+      const queryCall = fetchMock.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
+      );
+      expect(queryCall).toBeDefined();
+      const body = JSON.parse(queryCall![1]!.body as string);
+      expect(body.options.offset).toBe(500);
+      expect(body.database).toBe(3);
     });
   });
 

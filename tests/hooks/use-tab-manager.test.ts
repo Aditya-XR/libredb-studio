@@ -60,6 +60,23 @@ const defaultMetadata: ProviderMetadata = {
   },
 };
 
+/**
+ * The same labels over a Redis-shaped declaration.
+ *
+ * `queryDialect: "redis"` is what routes generation to the command grammar (#427); the labels are the
+ * postgres ones because nothing under test reads them, and copying twenty strings would suggest it
+ * does.
+ */
+const redisMetadata = {
+  capabilities: {
+    ...defaultMetadata.capabilities,
+    queryLanguage: "json",
+    queryDialect: "redis",
+    defaultPort: 6379,
+  },
+  labels: defaultMetadata.labels,
+} as ProviderMetadata;
+
 // Helper schema
 const testSchema: DetailedObject[] = [
   {
@@ -960,6 +977,53 @@ describe("useTabManager", () => {
     expect(result.current.currentTab.id).toBe("default");
   });
 
+  /**
+   * A key activated in the key browser.
+   *
+   * A key is NOT a schema node — the cache this hook looks objects up in holds prefix groups — so its
+   * type is handed in. The two tests below are the pair that makes the parameter load-bearing: the
+   * same path, the same cache, and the only difference is whether the caller knew the type.
+   */
+  test("handleTableClick generates from columns the caller supplies", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ type: "redis", port: 6379 }),
+        metadata: redisMetadata,
+        schema: testSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["videobackend:login:refreshToken:1"], executeFn, [
+        { name: "type", type: "hash", nullable: false, isPrimary: false },
+      ]);
+    });
+
+    // A READ, because the type was known: `HGETALL` rather than a probe for what the value is.
+    expect(result.current.tabs[1].query).toBe("HGETALL videobackend:login:refreshToken:1");
+  });
+
+  test("handleTableClick falls back to the type probe for a key nobody described", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ type: "redis", port: 6379 }),
+        metadata: redisMetadata,
+        schema: testSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["videobackend:login:refreshToken:1"], executeFn);
+    });
+
+    // The generator's own unknown branch (#427), reached because no schema node holds this key: the
+    // editor opens on a command that FINDS OUT what the key is, which is the honest answer when
+    // nobody knows — and it is exactly what the shell avoids by passing the type the page carried.
+    expect(result.current.tabs[1].query).toBe("TYPE videobackend:login:refreshToken:1");
+  });
+
   test("handleTableClick without metadata uses fallback query", () => {
     const executeFn = mock(() => {});
     const { result } = renderHook(() =>
@@ -1852,5 +1916,143 @@ describe("useTabManager opens a Source tab", () => {
 
     await waitFor(() => expect(result.current.currentTab.id).toBe("t"));
     expect(result.current.currentTab.source).toEqual({ path: ["app", "f"], kind: "function" });
+  });
+});
+
+/**
+ * The walked database, carried onto the tab (the #1095 review).
+ *
+ * A key activation happens in ONE numbered database, and the statement that reads the key cannot
+ * name it: Redis has no database-qualified key syntax, so the database is a property of the
+ * connection and `GET report:daily` reads whichever one the connection sits in. The number
+ * therefore has to outlive the call that opened the tab - the Run after this one, a selection, an
+ * inline edit and the next page are all about the same key - so it goes ON the tab. These tests pin
+ * the fact landing there and the control that an ordinary activation carries nothing at all.
+ */
+describe("useTabManager carries the walked database", () => {
+  /** A key activation: the key, its known type, and the database the panel walked. */
+  const openKey = (handleTableClick: ReturnType<typeof useTabManager>["handleTableClick"], database?: number): void => {
+    handleTableClick(
+      ["report:daily"],
+      () => {},
+      [{ name: "type", type: "string", nullable: false, isPrimary: false }],
+      database,
+    );
+  };
+
+  test("puts the walked database on the tab it opens", () => {
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection(), metadata: redisMetadata, schema: [] }),
+    );
+
+    act(() => openKey(result.current.handleTableClick, 3));
+
+    expect(result.current.tabs).toHaveLength(2);
+    expect(result.current.tabs[1].databaseOverride).toBe(3);
+    // The statement itself is untouched: the database is not something Redis lets it say, which is
+    // the whole reason the tab has to carry the fact.
+    expect(result.current.tabs[1].query).toBe("GET report:daily");
+  });
+
+  test("an ordinary activation carries no override at all", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection(), metadata: defaultMetadata, schema: testSchema }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["users"], executeFn);
+    });
+
+    // Absent, not `undefined`: an ordinary tab is the record it has always been, so nothing
+    // downstream can read a number nobody walked.
+    expect("databaseOverride" in result.current.tabs[1]).toBe(false);
+  });
+
+  test("a key tab's override survives the persisted record, so a reload still reads its own database", async () => {
+    /*
+     * The gap the review left: the field landed on the tab, but a tab is restored from
+     * `localStorage`, and this record did not carry the number. A reload therefore restored a
+     * key tab with no override, and every run after it read the session's database - the
+     * reviewer's `(nil)`, back in a form nobody would notice, because the tab looks and reads
+     * exactly like the one that was working before the reload.
+     *
+     * The whole record is asserted rather than the one field, so the field's presence in
+     * storage is pinned as an exact shape: it rides beside the four fields `PersistedTabState`
+     * has always written and adds nothing else.
+     */
+    const storageKey = "libredb_workspace_tabs_v1:override-persist";
+    const connection = makeConnection({ id: "override-persist" });
+    const first = renderHook(() =>
+      useTabManager({ activeConnection: connection, metadata: redisMetadata, schema: [], persistWorkspace: true }),
+    );
+
+    act(() => openKey(first.result.current.handleTableClick, 3));
+    await waitFor(
+      () => {
+        expect(localStorage.getItem(storageKey)).toBeTruthy();
+      },
+      { timeout: 2000 },
+    );
+
+    const persisted = JSON.parse(localStorage.getItem(storageKey) ?? "{}") as {
+      tabs: Array<Record<string, unknown>>;
+    };
+    expect(persisted.tabs[1]).toEqual({
+      id: first.result.current.tabs[1].id,
+      name: "report:daily",
+      query: "GET report:daily",
+      type: "redis",
+      databaseOverride: 3,
+    });
+
+    // The reload itself: the same stored record read by a fresh hook, which is what a page
+    // reload is to this hook.
+    first.unmount();
+    const second = renderHook(() =>
+      useTabManager({ activeConnection: connection, metadata: redisMetadata, schema: [], persistWorkspace: true }),
+    );
+
+    await waitFor(() => expect(second.result.current.tabs).toHaveLength(2));
+    expect(second.result.current.tabs[1].databaseOverride).toBe(3);
+  });
+
+  test("a tab with no stored override restores with no key, which is not `null` and not `0`", async () => {
+    /*
+     * The absence half, and it is the one that costs a wrong ANSWER rather than an error:
+     * `0` and `null` are both databases a restored tab would select, and the ordinary tab
+     * beside the key tab is the case that makes the assertion non-vacuous - a restore that
+     * invented a default would have to invent it here too.
+     *
+     * Both tabs in the record are key-looking (names and database-less statements) and both
+     * carry no override, because the record a version before this field wrote is exactly this
+     * shape and has to keep meaning "the connection's own database".
+     */
+    localStorage.setItem(
+      "libredb_workspace_tabs_v1:override-absent",
+      JSON.stringify({
+        activeTabId: "key",
+        tabs: [
+          { id: "ordinary", name: "Query 1", query: "SELECT 1;", type: "sql" },
+          { id: "key", name: "report:daily", query: "GET report:daily", type: "redis" },
+        ],
+      }),
+    );
+
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ id: "override-absent" }),
+        metadata: redisMetadata,
+        schema: [],
+        persistWorkspace: true,
+      }),
+    );
+
+    await waitFor(() => expect(result.current.tabs).toHaveLength(2));
+    expect(result.current.tabs[1].databaseOverride).toBeUndefined();
+    // Absent, not present-but-undefined: `"databaseOverride" in tab` is what the rest of the
+    // shell would branch on, and a key holding `undefined` is a field somebody has to remember
+    // to test for. The control is the tab beside it, which never had one either.
+    expect(result.current.tabs.some((tab) => "databaseOverride" in tab)).toBe(false);
   });
 });

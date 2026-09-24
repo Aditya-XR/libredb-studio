@@ -25,6 +25,7 @@ type Model = Partial<
     | "maintenanceOperations"
     | "maintenanceOperationSpecs"
     | "tablesAreDerivedGroupings"
+    | "keyScan"
   >
 >;
 
@@ -54,6 +55,7 @@ function allHandlers(record: string[] = []): TreeRowActionHandlers {
     onOpenMaintenance: () => record.push("maintenance"),
     onCreateObject: () => record.push("create"),
     onViewSource: () => record.push("view-source"),
+    onBrowseKeys: () => record.push("browse-keys"),
   };
 }
 
@@ -457,6 +459,92 @@ describe("a kind whose rows are derived groupings", () => {
 
   test("the same kind without the flag IS offered Profile", () => {
     expect(idsFor(ordinary)).toContain("profile");
+  });
+});
+
+/**
+ * Browse Keys, the ONE action that opens another READING of the row rather than acting on it.
+ *
+ * TWO declarations and no kind id, which is what makes this a gate rather than a special case:
+ * `keyScan` says the engine has a key space AND that the shell mounts a panel for it, and
+ * `tablesAreDerivedGroupings` says the relation rows are prefixes a server summarised rather than
+ * objects anybody named. Either fact alone is not enough, and every direction is pinned below.
+ */
+describe("Browse Keys is gated on the walk and on the rows being key patterns", () => {
+  const keyspace = { id: "keyspace", role: "relation", label: "Key Pattern", labelPlural: "Key Patterns" } as const;
+  const walk = { defaultCount: 500, maxCount: 1000 } as const;
+  /** Redis: it walks a key space, and its relation rows ARE the prefixes of one. */
+  const redis = capabilitiesOf({ objectKinds: [keyspace], tablesAreDerivedGroupings: true, keyScan: walk });
+  const grouping: DatabaseObject = { path: ["0", "user:*"], name: "user:*", kind: "keyspace" };
+  const groupingRow: TreeRowModel = { ...objectRow("keyspace"), path: ["0", "user:*"] };
+
+  const idsFor = (
+    capabilities: ProviderCapabilities,
+    object: DatabaseObject = grouping,
+    handlers: TreeRowActionHandlers = allHandlers(),
+    row: TreeRowModel = groupingRow,
+  ): readonly string[] => rowActions({ row, object, capabilities, handlers }).map((action) => action.id);
+
+  test("is offered on a key pattern of an engine that declares the walk", () => {
+    expect(idsFor(redis)).toEqual(["generate-select", "generate-code", "browse-keys"]);
+  });
+
+  test("is withheld from the same rows when the engine declares no key-space walk", () => {
+    // LibreDB-shaped: relation rows that are derived groupings, and no panel to show them in. The
+    // item would name a destination that does not exist.
+    const noWalk = capabilitiesOf({ objectKinds: [keyspace], tablesAreDerivedGroupings: true });
+    expect(idsFor(noWalk)).not.toContain("browse-keys");
+  });
+
+  test("is withheld from ordinary objects even on an engine that DOES declare the walk", () => {
+    // A table name is not a `MATCH` pattern: `orders` would be handed to the panel as a glob that
+    // matches one key nobody meant.
+    //
+    // The row has to be the kind the declaration actually names. This case used to pass
+    // `objectRow("keyspace")` against a declaration of `table`, so the kind lookup missed, no
+    // action was ever considered, and the empty list was true for a reason that had nothing to
+    // do with the gate. Resolving the row is what leaves `tablesAreDerivedGroupings` as the only
+    // thing standing between a table row and Browse Keys.
+    const tables = capabilitiesOf({ objectKinds: [table], keyScan: walk });
+    // Asserted whole rather than with `not.toContain`, so a gate that stopped asking whether the
+    // rows are derived groupings would offer a fourth item here and fail on it: a `not.toContain`
+    // on an empty list is the vacuous shape this case used to have.
+    expect(
+      idsFor(tables, { path: ["app", "orders"], name: "orders", kind: "table" }, allHandlers(), objectRow("table")),
+    ).toEqual(["generate-select", "profile", "generate-code"]);
+  });
+
+  test("is withheld from a routine row, because a routine is not a prefix", () => {
+    const functions = capabilitiesOf({
+      objectKinds: [keyspace, routine],
+      tablesAreDerivedGroupings: true,
+      keyScan: walk,
+    });
+    expect(
+      idsFor(functions, { path: ["0", "lib"], name: "lib", kind: "function" }, allHandlers(), objectRow("function")),
+    ).not.toContain("browse-keys");
+  });
+
+  test("is withheld when the shell passes no handler, which is how a shell says it cannot", () => {
+    expect(idsFor(redis, grouping, {})).toEqual([]);
+  });
+
+  test("hands the handler the object the row was built from, so the pattern is the row's own name", () => {
+    const seen: DatabaseObject[] = [];
+    const actions = rowActions({
+      row: groupingRow,
+      object: grouping,
+      capabilities: redis,
+      handlers: { onBrowseKeys: (target) => seen.push(target) },
+    });
+
+    expect(actions.map((action) => action.id)).toEqual(["browse-keys"]);
+    expect(actions[0].label).toBe("Browse Keys");
+    actions[0].run();
+    // The name VERBATIM, `*` and all: a key grouping already carries its glob, and a caller that
+    // appended another would address a different set of keys.
+    expect(seen).toEqual([grouping]);
+    expect(seen[0].name).toBe("user:*");
   });
 });
 

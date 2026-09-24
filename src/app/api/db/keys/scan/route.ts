@@ -1,0 +1,119 @@
+import { NextRequest } from "next/server";
+import { handleObjectRequest, ObjectRouteError, optionalDatabase, requireString } from "@/lib/api/object-route";
+import type { KeyScanCapability } from "@/lib/db/types";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * One page of a resumable walk of an engine's own key space.
+ *
+ * WHY THIS IS NOT AN OBJECT ROUTE. `listObjects` answers a whole folder in one call and is
+ * finite by definition, which is true of every catalog-backed engine and false of a Redis key
+ * space: there is no prefix index to list from, only `SCAN`, and `SCAN` answers a cursor
+ * rather than a listing. A caller that stops at one page holds a SAMPLE, and the only way to
+ * hold more is to come back with the cursor it was given. That is a different contract, so it
+ * is a different route rather than a flag on an existing one — `includeColumns`-style options
+ * on the object routes are exactly how a whole-database eager read got built once before.
+ *
+ * THE CALLER OWNS THE CURSOR, so this route holds no session and a page costs one round trip.
+ * Nothing is cached between two calls, which is what makes `Scan more` a button rather than a
+ * state machine, and what lets a cursor survive a reload: a Redis cursor is a position in a
+ * hash table, not a handle on this process.
+ *
+ * THE GATE IS THE DECLARATION, NOT THE METHOD. `getCapabilities().keyScan` is what says this
+ * engine has a key space to walk, and it is checked first so a Postgres connection is refused
+ * in the route's own words rather than by a provider error from somewhere further down.
+ *
+ * THE PAIR IS CHECKED TOO, AND IT IS NOT DEAD CODE HERE. `ProviderCapabilities` and
+ * `DatabaseProvider` are both published (`src/exports/types.ts`), so an external implementer
+ * can declare `keyScan` before writing `scanKeysPage`; that is a real intermediate state, and
+ * without this branch it would arrive as a TypeError reading like a crash instead of as the
+ * named defect it is. A first-party provider cannot reach it, and a provider test keeps that
+ * true.
+ *
+ * NO DEFAULTS ARE INVENTED FOR A BAD BATCH SIZE. `count` above `maxCount` is refused rather
+ * than clamped: clamping would answer a request for 10,000 with 1,000 and say nothing, and the
+ * caller can always ask again. `count` is optional, and its default comes from the provider's
+ * own declaration rather than from a number written here — two defaults for one engine is how
+ * a panel and its provider come to disagree about what a batch is.
+ *
+ * THE CURSOR IS SHAPE-CHECKED AND NOT PARSED. Redis cursors are opaque, and their decimal
+ * spelling is an implementation detail (`SCAN` also accepts `MATCH`-independent reverse-binary
+ * forms on a rehashing table). The check is only that it is a run of digits, because that
+ * refuses an obviously malformed one in this route's own words while leaving the value itself
+ * untouched on the way through.
+ *
+ * Budget: shared, through `handleObjectRequest`, with the object routes and `POST /api/db/query`
+ * (`src/lib/api/object-route.ts`). A walk a person drives with a progress bar spends the same
+ * allowance their statements do, which is why `Scan all` loops client-side on this route rather
+ * than asking the server for one unbounded walk.
+ */
+export async function POST(req: NextRequest) {
+  return handleObjectRequest(req, "api/db/keys/scan", async (provider, body) => {
+    const capability = provider.getCapabilities().keyScan;
+    if (capability === undefined) {
+      throw new ObjectRouteError(
+        `${provider.type} declares no key-space walk: its objects are enumerated from a catalog, so there is nothing to page`,
+        400,
+      );
+    }
+
+    const walk = provider.scanKeysPage;
+    if (walk === undefined) {
+      throw new ObjectRouteError(`${provider.type} declares keyScan but implements no scanKeysPage`, 500);
+    }
+
+    return walk.call(provider, {
+      cursor: readCursor(body),
+      pattern: readPattern(body),
+      count: readCount(body, capability),
+      // Absent means the provider's own session database, which is the provider's answer to give:
+      // `SELECT` state lives on the connection and not in this route.
+      database: optionalDatabase(body, "database"),
+    });
+  });
+}
+
+/**
+ * The cursor the previous page answered with; `"0"` starts a walk.
+ *
+ * Absent means start, because that is what a caller with no cursor has: a `Scan` button and a
+ * `Scan more` button differ in whether they pass one, and requiring the caller to spell `"0"`
+ * would make the first press of the first button an error to be fixed rather than a walk to be
+ * started.
+ */
+function readCursor(body: Record<string, unknown>): string {
+  if (body.cursor === undefined) return "0";
+  const cursor = requireString(body, "cursor");
+  if (!/^\d+$/.test(cursor)) {
+    throw new ObjectRouteError('"cursor" must be a decimal cursor the previous page answered with', 400);
+  }
+  return cursor;
+}
+
+/** A `MATCH` pattern, or absent for every key. An empty string is refused rather than passed. */
+function readPattern(body: Record<string, unknown>): string | undefined {
+  return body.pattern === undefined ? undefined : requireString(body, "pattern");
+}
+
+/**
+ * The batch size, defaulted from the provider's declaration and bounded by it.
+ *
+ * `Number.isSafeInteger` rather than a truthiness test: `0`, `-1`, `1.5` and `NaN` are all
+ * real values a caller can send, and a fractional `COUNT` is not something Redis accepts
+ * meaningfully even though its parser would take it.
+ */
+function readCount(body: Record<string, unknown>, capability: KeyScanCapability): number {
+  if (body.count === undefined) return capability.defaultCount;
+  const count = body.count;
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
+    throw new ObjectRouteError('"count" must be a positive integer', 400);
+  }
+  if (count > capability.maxCount) {
+    throw new ObjectRouteError(
+      `"count" must be at most ${capability.maxCount}, which is the batch size this engine declares`,
+      400,
+    );
+  }
+  return count;
+}
