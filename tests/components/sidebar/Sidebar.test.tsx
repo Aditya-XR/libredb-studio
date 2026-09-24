@@ -340,7 +340,10 @@ describe("Sidebar", () => {
       objectActions: { onProfileObject: mock(() => {}), onCreateObject: mock(() => {}) },
       // The wording travels with the declaration rather than beside it: both halves of
       // `metadata` reach the tree, since the menu's maintenance items need the second.
-      metadata: { capabilities: oneLevel, labels: { vacuumActionOperation: "optimize" } } as ProviderMetadata,
+      metadata: {
+        capabilities: { ...oneLevel, keyScan: { defaultCount: 500, maxCount: 1000 } },
+        labels: { vacuumActionOperation: "optimize" },
+      } as unknown as ProviderMetadata,
     });
     const { getByTestId } = render(<Sidebar {...props} />);
 
@@ -349,10 +352,19 @@ describe("Sidebar", () => {
   });
 
   test("control: a shell that offers no row actions hands the tree only the sidebar's own", () => {
-    const props = createDefaultProps();
+    const props = createDefaultProps({ metadata: walkMetadata() });
     const { getByTestId } = render(<Sidebar {...props} />);
 
     expect(getByTestId("object-tree").getAttribute("data-actions")).toBe("onBrowseKeys");
+  });
+
+  test("control: an engine that declares no walk is handed none of them", () => {
+    const props = createDefaultProps();
+    const { getByTestId } = render(<Sidebar {...props} />);
+
+    // The panel's item is offered where the panel is, and nowhere else: this engine has no key-space
+    // walk, so `rowActions` would refuse the item on every row and the handler would be dead weight.
+    expect(getByTestId("object-tree").getAttribute("data-actions")).toBe("");
   });
 
   test("control: a connection that is not deferred hands the tree no deferral", () => {
@@ -598,11 +610,65 @@ describe("Sidebar", () => {
       capturedBrowseKeys?.({ name: "user:*" });
     });
 
-    // The pattern the row named, handed over VERBATIM: its `*` is already the `MATCH` glob the panel
-    // needs, and the panel is what shows it.
+    // The pattern the row named, ready to send: its `*` is the `MATCH` glob the panel needs, and the
+    // panel is what shows it.
     expect(queryByTestId("key-browser")?.getAttribute("data-request")).toBe("user:*");
     expect(getByRole("tab", { name: "Keys" }).getAttribute("aria-selected")).toBe("true");
     expect(queryByTestId("object-tree")).toBeNull();
+  });
+
+  test("escapes the PREFIX half of the row name it hands over, and only that half", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+      objectActions: { onGenerateSelect: () => {} },
+    });
+    const { queryByTestId } = render(<Sidebar {...props} />);
+
+    // A real key segment can contain a glob metacharacter, and the pattern this hands over is what
+    // the server matches with: unescaped, `a[b:*` opens a character class and the walk answers about
+    // keys nobody asked for. The one `*` the row is ADVERTISED with stays a glob, because that is
+    // what it is for.
+    act(() => {
+      capturedBrowseKeys?.({ name: "a[b:*" });
+    });
+
+    expect(queryByTestId("key-browser")?.getAttribute("data-request")).toBe("a\\[b:*");
+  });
+
+  /**
+   * The panel is not offered to a shell that answers the reads itself.
+   *
+   * `keyScan` is a declaration about the ENGINE, and the embedded workspace's host declares it for
+   * whatever server it mounted - but the published package ships no API routes, so
+   * `/api/db/keys/scan` would answer HTTP 404 to the tab's own first page. `objectSource` is the
+   * shell-level fact: a shell that answers the tree's reads itself has no routes of its own.
+   */
+  test("offers no Keys tab, and no Browse Keys, to a shell that owns the reads", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+      objectSource: async () => ({}),
+    });
+    const { queryByRole, queryByTestId, getByTestId } = render(<Sidebar {...props} />);
+
+    expect(queryByRole("tab", { name: "Keys" })).toBeNull();
+    expect(queryByRole("tab", { name: "Objects" })).toBeNull();
+    expect(queryByTestId("key-browser")).toBeNull();
+    // The row menu loses the item too, because the item's destination does not exist here.
+    expect(getByTestId("object-tree").getAttribute("data-actions")).toBe("");
+  });
+
+  test("control: the same declaration DOES offer it to the standalone shell", () => {
+    const props = createDefaultProps({
+      activeConnection: mockPostgresConnection,
+      metadata: walkMetadata(),
+    });
+    const { getByRole, getByTestId } = render(<Sidebar {...props} />);
+
+    // The control that makes the assertion above non-vacuous: same metadata, no `objectSource`.
+    expect(getByRole("tab", { name: "Keys" })).toBeDefined();
+    expect(getByTestId("object-tree").getAttribute("data-actions")).toBe("onBrowseKeys");
   });
 
   test("adds the one action it owns to the handlers the shell handed down, and no others", () => {

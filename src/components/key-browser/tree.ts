@@ -18,6 +18,7 @@
  * a caller feeding successive pages in has to be able to, and a count that double-counted a repeat
  * would make the tree disagree with the progress bar beside it.
  */
+import { escapeGlob } from "@/lib/query-generators";
 
 /**
  * What separates one segment from the next. Fixed, and declared here rather than threaded through
@@ -212,6 +213,20 @@ export function flattenKeyTree(
 export function isUnderPrefix(key: string, prefix: readonly string[]): boolean {
   const segments = splitKey(key);
   return prefix.length < segments.length && prefix.every((segment, index) => segments[index] === segment);
+}
+
+/**
+ * The `MATCH` pattern for everything under a prefix.
+ *
+ * ONE PLACE, because the two halves are not interchangeable (#427) and two callers build this string:
+ * the PREFIX is data that may contain glob metacharacters and is escaped, while the trailing `:*` is
+ * the glob the pattern exists for and never is. It also accepts the form the tree ADVERTISES — a
+ * folder is drawn `user:*` — so a caller holding a row's own name need not know that the trailing `*`
+ * is not part of the prefix that name stands for.
+ */
+export function prefixPattern(prefix: string): string {
+  const bare = prefix.endsWith(`${KEY_SEPARATOR}*`) ? prefix.slice(0, -2) : prefix;
+  return `${escapeGlob(bare)}${KEY_SEPARATOR}*`;
 }
 
 /**

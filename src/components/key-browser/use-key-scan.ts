@@ -26,8 +26,7 @@ import type { DatabaseConnection } from "@/lib/types";
 import type { KeyScanCapability, KeyScanOptions, KeyScanPage } from "@/lib/db/types";
 import { buildConnectionPayload } from "@/hooks/use-connection-payload";
 import { appFetch } from "@/lib/config/base-path";
-import { escapeGlob } from "@/lib/query-generators";
-import { isUnderPrefix, KEY_SEPARATOR, pathKey } from "./tree";
+import { isUnderPrefix, KEY_SEPARATOR, pathKey, prefixPattern } from "./tree";
 
 /**
  * How many keys one `Scan all` may walk before it stops and says it did.
@@ -394,19 +393,16 @@ export function useKeyScan(options: {
 
       try {
         /*
-         * THE PREFIX HALF OF THE PATTERN IS ESCAPED, and the key half never is (#427).
-         *
-         * A real key segment can contain a glob metacharacter: `a[b:1` groups to a prefix holding
-         * `[`, and an unescaped one opens a character class that matches a different set of keys
-         * entirely. The escaping comes from `escapeGlob` rather than a local copy so that this walk
-         * and the object surface's "list keys under this prefix" cannot drift — the same rule, in
-         * one place. Note the asymmetry the other way: the `isUnderPrefix` filter below compares
-         * REAL key names, so it must stay unescaped, and a caller that escaped those would corrupt
-         * a literal key that genuinely contains `*`.
+         * THE PATTERN COMES FROM `prefixPattern`, so the prefix half is escaped and the glob is
+         * not — and so that this walk and the row menu's handover cannot drift: a real key segment
+         * can contain a glob metacharacter (`a[b:1` groups to a prefix holding `[`), and an
+         * unescaped one opens a character class matching a different set of keys entirely. The
+         * asymmetry runs the other way in the filter below: `isUnderPrefix` compares REAL key names,
+         * so it stays unescaped, because a key that genuinely contains `*` would be corrupted by it.
          */
         const page = await readPageAt(
           nodeCursor.current.get(key) ?? "0",
-          `${escapeGlob(path.join(KEY_SEPARATOR))}:*`,
+          prefixPattern(path.join(KEY_SEPARATOR)),
           /*
            * THE LARGEST BATCH THE ENGINE DECLARES, where the global walk takes the default.
            *

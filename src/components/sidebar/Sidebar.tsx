@@ -8,6 +8,7 @@ import { Plus, Zap, Layers, LoaderCircle, CircleAlert } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ObjectTree, type ObjectSource, type TreeRowActionHandlers } from "@/components/object-tree";
 import { KeyBrowser, type KeyPatternRequest } from "@/components/key-browser";
+import { prefixPattern } from "@/components/key-browser/tree";
 import { GitHubRepoLink } from "@/components/github-repo-link";
 import { getAppVersion } from "@/lib/app-version";
 import { cn } from "@/lib/utils";
@@ -149,7 +150,16 @@ export function Sidebar({
   const connectionId = activeConnection?.id ?? null;
   if (keysPanelFor !== null && keysPanelFor !== connectionId) setKeysPanelFor(null);
 
-  const keyScan = metadata?.capabilities.keyScan;
+  /**
+   * Whether THIS shell can show a key walk, which is a question about the shell and not the engine.
+   *
+   * THE EMBEDDED WORKSPACE CANNOT, and this is the one place that knows it. The published package
+   * ships no API routes at all, so `/api/db/keys/scan` belongs to whatever server mounted the
+   * workspace - and a host that declares `keyScan` (which is about the ENGINE) would be handed a tab
+   * whose first page answers HTTP 404. `objectSource` is the same fact `ObjectTree` reads for
+   * `readsColumns`: a shell that answers the tree's reads itself is a shell with no routes of its own.
+   */
+  const keyScan = objectSource === undefined ? metadata?.capabilities.keyScan : undefined;
   const showingKeys = keyScan !== undefined && view === "keys";
   /**
    * The container level the walk is pointed at, when the engine declares one.
@@ -179,17 +189,21 @@ export function Sidebar({
    */
   const browseKeys = React.useCallback(
     (object: DatabaseObject) => {
-      // The name VERBATIM: a key pattern already carries its `*` (`keyGrouping` built it), so it is
-      // the `MATCH` pattern as it stands.
-      setKeyPatternRequest({ pattern: object.name });
+      // ESCAPED, and only in its prefix half: a key prefix is data that may itself contain a glob
+      // metacharacter, while the `*` the row is advertised with is the one the pattern exists for.
+      // `prefixPattern` is the same helper the scoped walk builds its pattern with, so the two
+      // cannot drift (#427).
+      setKeyPatternRequest({ pattern: prefixPattern(object.name) });
       setView("keys");
       setKeysPanelFor(connectionId);
     },
     [connectionId],
   );
   const actions = React.useMemo<TreeRowActionHandlers>(
-    () => ({ ...objectActions, onBrowseKeys: browseKeys }),
-    [objectActions, browseKeys],
+    // The panel's own item is offered only where the panel exists: the row menu's gate asks the
+    // DECLARATION whether a row may be walked, and this asks whether this shell can show the walk.
+    () => (keyScan === undefined ? { ...objectActions } : { ...objectActions, onBrowseKeys: browseKeys }),
+    [objectActions, browseKeys, keyScan],
   );
 
   return (
