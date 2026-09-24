@@ -17,6 +17,7 @@ import {
   CassandraIcon,
   LibSQLIcon,
   DuckDBIcon,
+  PrometheusIcon,
 } from "@/components/icons/db-icons";
 import type { DatabaseType } from "@/lib/types";
 
@@ -50,6 +51,19 @@ export interface DatabaseUIConfig {
     | "apiKeyId"
     | "apiKeySecret"
   )[];
+  /**
+   * The connection dialog's label for a field, where this engine names the field differently from
+   * the dialog's own word (#1085). Read through `connectionFieldLabel`, so an engine relabels a
+   * field by declaring it here rather than by another per-type branch in `ConnectionModal.tsx`.
+   * The branches that name Couchbase's bucket, Trino's catalog, Cassandra's keyspace and libSQL's
+   * token predate this and stay where they are; moving them onto this declaration is a backlog item.
+   */
+  fieldLabels?: Partial<Record<ConnectionField, string>>;
+  /**
+   * A sentence the connection dialog draws under a field, where this engine needs one said before
+   * the user reaches an error (#1085). Read through `connectionFieldHint`.
+   */
+  fieldHints?: Partial<Record<ConnectionField, string>>;
 }
 
 /** One addressing field, named by the same list that decides whether a save writes it. */
@@ -291,6 +305,32 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     // "Keyspace" - see ConnectionModal.tsx.
     connectionFields: ["host", "port", "user", "password", "database", "localDataCenter"],
   },
+  prometheus: {
+    icon: PrometheusIcon,
+    // Prometheus's own mark is a flame orange (#E6522C), and `hue-orange` is Couchbase's. The
+    // theme has no second orange identity step, and adding one would be a palette change with a
+    // separation test of its own (tests/unit/theme-accent-contrast.test.ts); `hue-fuchsia` is a
+    // declared identity hue no engine here carries, and the distinct-colour assertion in
+    // tests/unit/lib/db-ui-config.test.ts rules a duplicate out.
+    color: "text-hue-fuchsia",
+    label: "Prometheus",
+    // The port the HTTP API and the web UI share. The same number under TLS: a secured server
+    // serves on whatever port its operator chose, so inventing an HTTPS alternative would point
+    // credentials at a port nothing is listening on.
+    defaultPort: "9090",
+    // No URI convention to paste, and http:// / https:// already resolve to ClickHouse in
+    // connection-string-parser.ts. Two engines cannot own one scheme.
+    showConnectionStringToggle: false,
+    // Deliberately no "database": the server holds one TSDB and every API read is addressed to
+    // it, so a selector would be a control with no effect (#1085 6.1), the Druid shape. `user` and
+    // `password` are HTTP Basic; a password with no user is sent as a bearer token.
+    connectionFields: ["host", "port", "user", "password"],
+    // Declared here rather than as one more boolean in ConnectionModal.tsx (#1085 3.3): the
+    // password box is the one field whose meaning depends on another field being empty. The user
+    // box is "User" because the hint and the provider's credential refusal both name it so.
+    fieldLabels: { user: "User", password: "Password or token" },
+    fieldHints: { password: "Leave User empty to send this as a bearer token." },
+  },
   libredb: {
     icon: LibreDBIcon,
     color: "text-hue-violet",
@@ -334,4 +374,27 @@ export function isFileBased(type: DatabaseType): boolean {
  */
 export function takesConnectionField(type: DatabaseType, field: ConnectionField): boolean {
   return DB_UI_CONFIG[type].connectionFields.includes(field);
+}
+
+/**
+ * The connection dialog's label for one field: the engine's declared `fieldLabels` entry, or the
+ * dialog's own word when the engine declares none (#1085).
+ *
+ * The fallback is the caller's because the dialog's own words are not one table: the `database`
+ * field alone reads "Database Name", "Database File Path" or "Database Name (optional override)"
+ * by the mode the form is in, and the per-type branches still choose several. `port` shares the
+ * host row's label and draws none of its own, so a label declared for it has nowhere to appear;
+ * a hint declared for it does.
+ */
+export function connectionFieldLabel(config: DatabaseUIConfig, field: ConnectionField, fallback: string): string {
+  return config.fieldLabels?.[field] ?? fallback;
+}
+
+/**
+ * The sentence the connection dialog draws under one field, or `undefined` where the engine
+ * declares none (#1085). There is no fallback: a field with no declared hint draws nothing new,
+ * and the per-type hints `ConnectionModal.tsx` already writes stay beside it.
+ */
+export function connectionFieldHint(config: DatabaseUIConfig, field: ConnectionField): string | undefined {
+  return config.fieldHints?.[field];
 }

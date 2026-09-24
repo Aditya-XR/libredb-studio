@@ -866,6 +866,7 @@ export default function Studio() {
    */
   const objectActions: TreeRowActionHandlers = {
     onGenerateSelect: (object) => tabMgr.handleGenerateSelect(object.path),
+    onGenerateCount: (object) => tabMgr.handleGenerateCount(object.path),
     onProfileObject: (object) => setProfilerPath(object.path),
     onGenerateCode: (object) => setCodeGenPath(object.path),
     onGenerateTestData: (object) => setTestDataPath(object.path),
@@ -1122,6 +1123,10 @@ export default function Studio() {
                       }}
                       onGenerateSelect={(path) => {
                         tabMgr.handleGenerateSelect(path);
+                        setActiveMobileTab("editor");
+                      }}
+                      onGenerateCount={(path) => {
+                        tabMgr.handleGenerateCount(path);
                         setActiveMobileTab("editor");
                       }}
                       onCreateTableClick={() => setIsCreateTableModalOpen(true)}

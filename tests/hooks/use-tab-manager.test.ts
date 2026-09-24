@@ -105,6 +105,43 @@ describe("useTabManager", () => {
     mockToastDismiss.mockClear();
   });
 
+  test("a count query opens and activates an editable tab without executing it", () => {
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection(), metadata: defaultMetadata, schema: [] }),
+    );
+    act(() => result.current.handleGenerateCount(["app", "Order.Items"]));
+    const tab = result.current.tabs[1];
+    expect(tab.name).toBe("Count: Order.Items");
+    expect(tab.query).toBe('SELECT COUNT(*) AS row_count\nFROM app."Order.Items";');
+    expect(tab.type).toBe("sql");
+    expect(tab.isExecuting).toBe(false);
+    expect(tab.result).toBeNull();
+    expect(result.current.activeTabId).toBe(tab.id);
+  });
+
+  test("a MongoDB count opens in the correct editor language", () => {
+    const metadata = {
+      ...defaultMetadata,
+      capabilities: { ...defaultMetadata.capabilities, queryLanguage: "json" as const },
+    };
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection({ type: "mongodb" }), metadata, schema: [] }),
+    );
+    act(() => result.current.handleGenerateCount(["database", "orders"]));
+    expect(result.current.tabs[1].type).toBe("mongodb");
+    expect(JSON.parse(result.current.tabs[1].query)).toEqual({ collection: "orders", operation: "count", filter: {} });
+  });
+
+  test.each([
+    null,
+    { ...defaultMetadata, capabilities: { ...defaultMetadata.capabilities, queryDialect: "redis" as const } },
+  ])("unresolved or unsupported metadata never creates a count tab (%#)", (metadata) => {
+    const { result } = renderHook(() => useTabManager({ activeConnection: makeConnection(), metadata, schema: [] }));
+    act(() => result.current.handleGenerateCount(["user:*"]));
+    expect(result.current.tabs).toHaveLength(1);
+    expect(result.current.activeTabId).toBe("default");
+  });
+
   test("starts with one default tab", () => {
     const { result } = renderHook(() =>
       useTabManager({
@@ -1216,6 +1253,116 @@ describe("useTabManager — Redis dialect", () => {
     expect(newTab.type).toBe("redis");
     expect(newTab.query).toContain("SCAN 0 MATCH session:* COUNT 50");
     expect(newTab.query).not.toContain('"collection"');
+  });
+});
+
+// ============================================================================
+// PromQL: a metric opens by its selector (#1085)
+// ============================================================================
+
+describe("useTabManager on a PromQL connection (#1085)", () => {
+  // The capabilities #1085 section 6.3 gives Prometheus, where they differ from the SQL default above.
+  // The connection keeps the helper's own type: nothing on this path reads the type id, which is
+  // the rule the generators keep.
+  const promqlMetadata: ProviderMetadata = {
+    capabilities: {
+      ...defaultMetadata.capabilities,
+      queryLanguage: "promql" as const,
+      defaultPort: 9090,
+      statementTerminator: "none" as const,
+      supportsExplain: false,
+      supportsExternalQueryLimiting: false,
+      supportsCreateTable: false,
+      supportsInlineRowEdit: false,
+      supportsMaintenance: false,
+      supportsConnectionString: false,
+    },
+    // The SQL labels as they are: nothing here reads them, and `ProviderMetadata.labels` is
+    // optional, so spreading it would type every label optional.
+    labels: defaultMetadata.labels,
+  };
+
+  // A metric as the inventory lists it: its label names, then timestamp and value (#1085, section 4.2).
+  const metricSchema: DetailedObject[] = [
+    {
+      name: "http_requests_total",
+      kind: "metric",
+      path: ["http_requests_total"],
+      columns: [
+        { name: "job", type: "string", nullable: true, isPrimary: false },
+        { name: "timestamp", type: "timestamp", nullable: false, isPrimary: false },
+        { name: "value", type: "float", nullable: false, isPrimary: false },
+      ],
+      indexes: [],
+    },
+  ];
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  test("a new tab on a PromQL connection is a promql tab", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ port: 9090 }),
+        metadata: promqlMetadata,
+        schema: metricSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+    });
+
+    expect(result.current.tabs[1].type).toBe("promql");
+  });
+
+  test("a tree click on a metric opens a promql tab and runs its selector with the preview option", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ port: 9090 }),
+        metadata: promqlMetadata,
+        schema: metricSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["http_requests_total"], executeFn);
+    });
+
+    const newTab = result.current.tabs[1];
+    expect(newTab.name).toBe("http_requests_total");
+    expect(newTab.type).toBe("promql");
+    expect(newTab.query).toBe("http_requests_total");
+
+    // The hook runs a click's statement on a 100 ms timer, as the SQL test above measures.
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        expect(executeFn).toHaveBeenCalledWith("http_requests_total", newTab.id, false, { limit: PREVIEW_PAGE_SIZE });
+        resolve();
+      }, 150);
+    });
+  });
+
+  test("Generate Query on a metric opens a promql tab whose one runnable line is its selector", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ port: 9090 }),
+        metadata: promqlMetadata,
+        schema: metricSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleGenerateSelect(["http_requests_total"]);
+    });
+
+    const newTab = result.current.tabs[1];
+    expect(newTab.name).toBe("Query: http_requests_total");
+    expect(newTab.type).toBe("promql");
+    expect(newTab.query.split("\n").at(-1)).toBe("http_requests_total");
+    expect(newTab.query).not.toContain("SELECT");
   });
 });
 

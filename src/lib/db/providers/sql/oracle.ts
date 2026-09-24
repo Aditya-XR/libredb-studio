@@ -1612,6 +1612,21 @@ export class OracleProvider extends SQLBaseProvider {
       this.setConnected(true);
     } catch (error) {
       this.setError(error instanceof Error ? error : new Error(String(error)));
+      // A failed connect orphans its pool, and oracledb's background creator keeps
+      // reaching for `poolMin` connections with no delay between attempts (#1102):
+      // measured at ~14,000 TCP connects and one full CPU core per second, forever.
+      // `factory.getOrCreateProvider()` never caches a provider whose `connect()`
+      // threw, so no later `disconnect()` can reach it - the provider has to clean
+      // up after itself, the contract PostgreSQL and SQL Server already follow.
+      // `close(0)` is oracledb's equivalent of `end()`: force close, do not wait.
+      // The clearing matters as much as the close. Left set, `this.pool` makes the
+      // guard at the top of connect() return on a retry without dialling and
+      // without an error, so the caller reads a silent success.
+      const failedPool = this.pool;
+      this.pool = null;
+      // A close failure is cleanup noise. Awaiting it with `.catch(() => {})` keeps
+      // it from becoming the reason a connect was refused.
+      await failedPool?.close(0).catch(() => {});
       // NJS-138 (server predates Oracle 12.1, incompatible with Thin mode) is a permanent
       // configuration problem, not a transient connection failure — map it through
       // mapDatabaseError() so it surfaces as a non-retryable DatabaseConfigError instead of

@@ -7,6 +7,7 @@ import {
   Play,
   ChevronRight,
   Funnel,
+  Hash,
   EllipsisVertical,
   Copy,
   Trash2,
@@ -15,7 +16,9 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { maintenanceControl } from "@/lib/db/types";
+import { kindAcceptsRowWrites } from "@/lib/db/object-kinds";
+import { maintenanceControl, offersCodeGeneration, offersColumnProfiling, offersCountQuery } from "@/lib/db/types";
+import { formatRowCount, formatRowCountTitle } from "@/lib/db/utils/pool-manager";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -47,6 +50,7 @@ interface TableItemProps {
   isAdmin: boolean;
   onTableClick?: (path: readonly string[]) => void;
   onGenerateSelect?: (path: readonly string[]) => void;
+  onGenerateCount?: (path: readonly string[]) => void;
   // ADDRESSES, one element per segment, the same shape `onTableClick` above already takes:
   // the shell resolves the object by path, because a label is not unique (#789, Task 35).
   onProfileTable?: (path: readonly string[]) => void;
@@ -57,7 +61,13 @@ interface TableItemProps {
 
 type TableItemCallbacks = Pick<
   TableItemProps,
-  "onTableClick" | "onGenerateSelect" | "onProfileTable" | "onGenerateCode" | "onGenerateTestData" | "onOpenMaintenance"
+  | "onTableClick"
+  | "onGenerateSelect"
+  | "onGenerateCount"
+  | "onProfileTable"
+  | "onGenerateCode"
+  | "onGenerateTestData"
+  | "onOpenMaintenance"
 >;
 
 /**
@@ -87,11 +97,28 @@ function renderMenuItems({
   Separator,
 }: MenuItemsContext): React.ReactNode {
   // Rows that are derived groupings are not addressable objects: a Redis `user:*`
-  // row is this server's summary of a key prefix, so profiling it and inserting
-  // rows into it have no target and the provider answers 400 (#427). Gate on the
-  // declared capability, never on connection.type. Absent capabilities read as
-  // "ordinary objects", matching the flag's own docblock.
+  // row is this server's summary of a key prefix, so profiling it has no target and
+  // the provider answers 400 (#427). Gate on the declared capability, never on
+  // connection.type. Absent capabilities read as "ordinary objects", matching the
+  // flag's own docblock; the gates below are what refuse capabilities that are unknown.
   const rowsAreAddressable = capabilities?.tablesAreDerivedGroupings !== true;
+
+  // The three row actions ask exactly what the desktop tree asks in
+  // `src/components/object-tree/row-actions.ts`, so the two menus cannot disagree about
+  // what a provider declared (#1085, decision D-M). Profile needs a language
+  // `POST /api/db/profile` can profile as well as an addressable row. Generate Code needs a
+  // language whose columns model a stored record. Generate Test Data writes rows, so it needs
+  // both row-write facts: the row's KIND accepts row writes, and the engine takes the grid's
+  // row edit. This menu used to ask only the grouping flag for it, which offered the
+  // generator on every view and on every engine the tree withholds it from. Unknown
+  // capabilities offer none of the three: `/api/db/provider-meta` answers with nothing both
+  // while it is in flight and when it failed.
+  const offersProfile = rowsAreAddressable && offersColumnProfiling(capabilities);
+  const offersCode = offersCodeGeneration(capabilities);
+  const offersTestData =
+    capabilities !== undefined &&
+    kindAcceptsRowWrites(capabilities, table.kind) &&
+    capabilities.supportsInlineRowEdit === true;
 
   // The SAME question the monitoring Tables tab and the admin Operations tab ask, so
   // that three surfaces cannot disagree about what a provider declared (#496). Gating
@@ -117,24 +144,33 @@ function renderMenuItems({
         <Funnel strokeWidth={1.5} className="w-3.5 h-3.5 mr-2 text-hue-blue" />
         {labels?.generateAction || "Generate Query"}
       </Item>
+      {callbacks.onGenerateCount !== undefined && offersCountQuery(capabilities) && (
+        <Item onClick={() => callbacks.onGenerateCount?.(table.path)}>
+          <Hash strokeWidth={1.5} className="w-3.5 h-3.5 mr-2 text-hue-blue" />
+          {"Generate Count Query"}
+        </Item>
+      )}
       <Item onClick={() => copyToClipboard(table.name, `${labels?.entityName || "Table"} name`)}>
         <Copy strokeWidth={1.5} className="w-3.5 h-3.5 mr-2 text-muted-foreground" />
         {"Copy Name"}
       </Item>
-      {/* Generate Code stays visible everywhere — it names the row, it does not
-          address it — so this separator is unconditional (#427). */}
-      <Separator />
-      {rowsAreAddressable && (
+      {/* One rule heads the three row actions below, so it is drawn only when one of them is:
+          a PromQL row, or a menu whose capabilities are still unknown, offers none, and a rule
+          with nothing after it would end the menu on a line (#1085). */}
+      {(offersProfile || offersCode || offersTestData) && <Separator />}
+      {offersProfile && (
         <Item onClick={() => callbacks.onProfileTable?.(table.path)}>
           <ChartColumn strokeWidth={1.5} className="w-3.5 h-3.5 mr-2 text-hue-cyan" />
           {"Profile Table"}
         </Item>
       )}
-      <Item onClick={() => callbacks.onGenerateCode?.(table.path)}>
-        <Code strokeWidth={1.5} className="w-3.5 h-3.5 mr-2 text-hue-purple" />
-        {"Generate Code"}
-      </Item>
-      {rowsAreAddressable && (
+      {offersCode && (
+        <Item onClick={() => callbacks.onGenerateCode?.(table.path)}>
+          <Code strokeWidth={1.5} className="w-3.5 h-3.5 mr-2 text-hue-purple" />
+          {"Generate Code"}
+        </Item>
+      )}
+      {offersTestData && (
         <Item onClick={() => callbacks.onGenerateTestData?.(table.path)}>
           <WandSparkles strokeWidth={1.5} className="w-3.5 h-3.5 mr-2 text-hue-amber" />
           {"Generate Test Data"}
@@ -200,6 +236,7 @@ export const TableItem = React.memo(function TableItem({
   isAdmin,
   onTableClick,
   onGenerateSelect,
+  onGenerateCount,
   onProfileTable,
   onGenerateCode,
   onGenerateTestData,
@@ -219,6 +256,7 @@ export const TableItem = React.memo(function TableItem({
   const callbacks = {
     onTableClick,
     onGenerateSelect,
+    onGenerateCount,
     onProfileTable,
     onGenerateCode,
     onGenerateTestData,
@@ -263,10 +301,16 @@ export const TableItem = React.memo(function TableItem({
               </span>
             </button>
 
-            <div className="shrink-0 relative w-8 h-6 flex items-center justify-center">
+            <div
+              title={table.rowCount === undefined ? undefined : formatRowCountTitle(table.rowCount)}
+              className="shrink-0 relative w-8 h-6 flex items-center justify-center"
+            >
               {table.rowCount !== undefined && (
-                <span className="absolute inset-0 flex items-center justify-center text-[0.625rem] font-mono text-muted-foreground/70 whitespace-nowrap opacity-100 group-hover:opacity-0 transition-opacity pointer-events-none">
-                  {table.rowCount >= 1000 ? `${(table.rowCount / 1000).toFixed(1)}k` : table.rowCount}
+                <span
+                  title={formatRowCountTitle(table.rowCount)}
+                  className="absolute inset-0 flex items-center justify-center text-[0.625rem] font-mono text-muted-foreground/70 whitespace-nowrap opacity-100 group-hover:opacity-0 transition-opacity pointer-events-none"
+                >
+                  {formatRowCount(table.rowCount)}
                 </span>
               )}
               <DropdownMenu>
