@@ -310,7 +310,7 @@ Redis uses the discrete-field form of `DatabaseConnection` (not `connectionStrin
 | `port` | — | Defaults to `6379` |
 | `user` | — | The **Redis 6 ACL user**, sent as ioredis's `username`; empty means `default` ([§4.1a](#41a-acl-users-d29)) |
 | `password` | — | Sent as `password`; omit for unauthenticated instances |
-| `database` | — | Logical DB index, parsed as int; defaults to `0` |
+| `database` | — | Logical DB index, a run of digits; defaults to `0` when empty. Anything else is refused at connect with `A Redis database is a number, received "<value>"` rather than read as `0` |
 | `ssl` | — | `SSLConfig`; becomes the ioredis `tls` option ([§4.3](#43-ssl--tls)) |
 
 ```ts
@@ -1254,9 +1254,16 @@ A sentinel planted in the submitted Lua appears in neither event and nowhere in 
 
 #### Reads go to the CONTAINER's database, never the session's
 
-Every object read opens its own short-lived connection with `db` set, rather than issuing `SELECT` on
-the shared client: a `SELECT` there would decide which database a concurrent query in the same session
-ran against. Nothing in the object surface ever sends `SELECT`.
+Every object read opens its own short-lived connection and selects the database on it, rather than
+issuing `SELECT` on the shared client: a `SELECT` there would decide which database a concurrent query
+in the same session ran against. Nothing in the object surface ever sends `SELECT` on the shared client.
+
+A DATABASE THE SERVER DOES NOT HAVE IS REFUSED, NOT READ AS 0. The `SELECT` is sent by the provider
+rather than handed to ioredis as its `db` option, because ioredis does not fail a connect on that option.
+Measured 2026-09-24 on redis 8.10.0 through ioredis 5.11.1 with `db: 99`: `connect()` resolved,
+"ERR DB index is out of range" arrived only as an unhandled `error` event, and every later command ran
+in database 0. Now the session connection, each object read, the key walk and a run carrying
+`database` all fail with `Redis refused database 99: ERR DB index is out of range`, a 400.
 
 ---
 
@@ -1445,7 +1452,8 @@ advertised under, because a prefix is not a key and has no name of its own.
 Every refusal is 400 and in the route's own words: a `count` outside `[1, keyScan.maxCount]`
 (refused rather than clamped, because a silent clamp answers a request for 10,000 with 1,000 and says
 nothing), a `count` that is not a positive integer, a non-decimal `cursor`, an empty `pattern`, a
-negative `database`, and any engine declaring no `keyScan` at all. A provider that declares the
+negative `database`, a `database` the server does not have (the server's own sentence, see above), and
+any engine declaring no `keyScan` at all. A provider that declares the
 capability and implements no method is a distinct 500 — the state an external implementer of the
 published interface can genuinely be in — rather than a `TypeError` that reads as a crash.
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getOrCreateProvider } from "@/lib/db";
+import { createDatabaseProvider, getOrCreateProvider } from "@/lib/db";
 import { createErrorResponse } from "@/lib/api/errors";
 import { resolveConnection } from "@/lib/seed/resolve-connection";
 import { guardRoute } from "@/lib/api/require-session";
@@ -89,8 +89,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(objectRouteErrorBody(error), { status: error.status });
     }
 
-    let provider = await getOrCreateProvider(connection);
-
     if (database !== undefined) {
       /*
        * APPLIED AFTER THE SEED IS RESOLVED, and gated on the walk being declared.
@@ -107,8 +105,14 @@ export async function POST(req: NextRequest) {
        * can name their own database the same field would be a per-run override of an
        * operator-pinned `database` with no walk to justify it, so it is refused here in words rather
        * than quietly honoured or quietly ignored.
+       *
+       * READ FROM THE DECLARATION, BEFORE ANY SOCKET. Capabilities are type-driven, so the
+       * unconnected provider `POST /api/db/provider-meta` reads them from (#457) answers the same
+       * question. Checked after `getOrCreateProvider`, an unreachable Postgres answered 503 for a
+       * request that was never valid, and a reachable one was connected only to be refused.
        */
-      if (provider.getCapabilities().keyScan === undefined) {
+      const declared = await createDatabaseProvider(connection);
+      if (declared.getCapabilities().keyScan === undefined) {
         return NextResponse.json(
           {
             error:
@@ -119,8 +123,9 @@ export async function POST(req: NextRequest) {
         );
       }
       connection = { ...connection, database: String(database) };
-      provider = await getOrCreateProvider(connection);
     }
+
+    const provider = await getOrCreateProvider(connection);
 
     // The statement that actually runs. For an explain request it is the one the
     // CONNECTED provider's strategy builds, never the caller's own SQL: falling

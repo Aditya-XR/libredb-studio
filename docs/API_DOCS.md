@@ -356,12 +356,15 @@ ordinary case and the one every statement other than a key read sends.
 
 The field is accepted only where the provider declares `keyScan`, because that is the engine for which
 a run cannot name a database in its statement; on any other engine it would be a per-run override of an
-operator-pinned `database` with no walk to justify it, so it is refused rather than quietly honoured:
+operator-pinned `database` with no walk to justify it, so it is refused rather than quietly honoured.
+The declaration is read without connecting, so the refusal costs no socket and an unreachable host of
+another engine still answers 400:
 
 | Condition | Status | Body |
 |-----------|--------|------|
 | `database` present and not a non-negative integer | `400` | `{ "error": "\"database\" must be a non-negative integer" }` — the same sentence `POST /api/db/keys/scan` refuses with, shared in `optionalDatabase` |
 | The provider declares no `keyScan` | `400` | `{ "error": "<type> declares no key-space walk: \"database\" names the database a key was walked in, and only an engine that needs such a name accepts it" }` |
+| The server has no such database | `400` | `{ "error": "Redis refused database <n>: ERR DB index is out of range", "code": "QUERY_ERROR", "statusCode": 400 }`, never a read of database 0 |
 
 **Bound parameters (optional):**
 ```json
@@ -1118,6 +1121,7 @@ hash table, not a handle.
 | `pattern` is present but blank | `400` | `{ "error": "\"pattern\" must be a non-empty string" }` |
 | `count` is present and not a positive integer | `400` | `{ "error": "\"count\" must be a positive integer" }` |
 | `count` exceeds the declared `maxCount` | `400` | `{ "error": "\"count\" must be at most <maxCount>, which is the batch size this engine declares" }` |
+| The server has no such database | `400` | `{ "error": "Redis refused database <n>: ERR DB index is out of range", "code": "QUERY_ERROR", "statusCode": 400 }`, never a read of database 0 |
 | `database` is negative or not an integer | `400` | `{ "error": "\"database\" must be a non-negative integer" }` |
 | The engine declares `keyScan` and implements no walk | `500` | `{ "error": "<type> declares keyScan but implements no scanKeysPage" }` |
 | Rate limited | `429` | `{ "error": "...", "code": "RATE_LIMITED" }` |

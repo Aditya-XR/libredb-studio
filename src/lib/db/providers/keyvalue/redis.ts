@@ -985,13 +985,38 @@ export class RedisProvider extends BaseDatabaseProvider {
   /**
    * The numbered database this connection's SESSION is in. Absent means 0, which is what
    * ioredis does with no `db` option and what a bare `redis-cli` connects to.
+   *
+   * Anything else that is not a number is refused, as `containerDatabase` refuses a path segment:
+   * the form's Database field is free text, and `parseInt("testdb")` is NaN, which ioredis read as
+   * no database at all and connected to database 0 without a word.
    */
   private sessionDatabase(): number {
-    return this.config.database ? parseInt(this.config.database, 10) : 0;
+    const database = this.config.database;
+    if (!database) return 0;
+    if (!/^\d+$/.test(database)) {
+      throw new DatabaseConfigError(`A Redis database is a number, received ${JSON.stringify(database)}`, "redis");
+    }
+    return Number(database);
   }
 
   /**
-   * Every option ioredis needs, for ONE numbered database.
+   * Every option ioredis needs, for any numbered database: `openClient` selects the database.
+   */
+  private redisOptions(): RedisOptions {
+    const tls = this.buildTLSOptions();
+    return {
+      host: this.config.host,
+      port: this.config.port || 6379,
+      username: this.config.user || undefined,
+      password: this.config.password || undefined,
+      connectTimeout: this.queryTimeout,
+      lazyConnect: true,
+      ...(tls ? { tls } : {}),
+    };
+  }
+
+  /**
+   * A connection IN numbered database `db`, or a refusal in the server's words.
    *
    * Parameterised by `db` rather than reading `this.config.database` directly, because the
    * object surface reads a database the session is not in: `countObjects(["3"])` has to
@@ -999,19 +1024,31 @@ export class RedisProvider extends BaseDatabaseProvider {
    * `SELECT`-ing on the shared client and selecting back, is a race rather than a shortcut
    * - this provider instance serves concurrent requests, so a query running alongside the
    * tree would execute against whichever database the object read had left selected.
+   *
+   * The `SELECT` is sent here rather than handed to ioredis as its `db` option, because ioredis
+   * does not fail a connect on it. Measured 2026-09-24 on redis 8.10.0 through ioredis 5.11.1
+   * with `db: 99`: `connect()` resolved, "ERR DB index is out of range" arrived only as an
+   * unhandled `error` event, and every later command ran in database 0. A `SELECT` ioredis saw
+   * answered is also the one it re-sends after a reconnect, so the connection stays where it was
+   * put.
    */
-  private redisOptions(db: number): RedisOptions {
-    const tls = this.buildTLSOptions();
-    return {
-      host: this.config.host,
-      port: this.config.port || 6379,
-      username: this.config.user || undefined,
-      password: this.config.password || undefined,
-      db,
-      connectTimeout: this.queryTimeout,
-      lazyConnect: true,
-      ...(tls ? { tls } : {}),
-    };
+  private async openClient(db: number): Promise<Redis> {
+    const client = new Redis(this.redisOptions());
+    try {
+      await client.connect();
+      if (db !== 0) {
+        await client.select(db).catch((error: unknown) => {
+          throw new QueryError(
+            `Redis refused database ${db}: ${error instanceof Error ? error.message : String(error)}`,
+            "redis",
+          );
+        });
+      }
+      return client;
+    } catch (error) {
+      client.disconnect();
+      throw error;
+    }
   }
 
   /**
@@ -1032,12 +1069,13 @@ export class RedisProvider extends BaseDatabaseProvider {
    */
   public async connect(): Promise<void> {
     try {
-      this.client = new Redis(this.redisOptions(this.sessionDatabase()));
-
-      await this.client.connect();
+      this.client = await this.openClient(this.sessionDatabase());
       this.setConnected(true);
     } catch (error) {
       this.setError(error instanceof Error ? error : new Error(String(error)));
+      // A database the config cannot name or the server does not have is a request fault, not an
+      // unreachable host.
+      if (error instanceof QueryError || error instanceof DatabaseConfigError) throw error;
       throw new ConnectionError(
         `Failed to connect to Redis: ${error instanceof Error ? error.message : String(error)}`,
         "redis",
@@ -1466,9 +1504,8 @@ export class RedisProvider extends BaseDatabaseProvider {
    * it - `quit()` waits for a reply this caller has no use for.
    */
   private async withDatabase<T>(db: number, read: (client: Redis) => Promise<T>): Promise<T> {
-    const client = new Redis(this.redisOptions(db));
+    const client = await this.openClient(db);
     try {
-      await client.connect();
       return await read(client);
     } finally {
       client.disconnect();

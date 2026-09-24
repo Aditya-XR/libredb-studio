@@ -436,6 +436,14 @@ function scanPage(keys: string[], cursor: string | number, args: (string | numbe
 const capturedRedisOptions: Record<string, unknown>[] = [];
 
 /**
+ * The database each connection the provider opened is IN, in the order it opened them, and whether
+ * it was closed. Read from the double's own state rather than from the options: a server decides
+ * which database a connection is in, and an option it refused leaves the connection in database 0.
+ */
+const openedClients: Array<{ database: number; disconnected: boolean }> = [];
+const openedDatabases = (): number[] => openedClients.map((client) => client.database);
+
+/**
  * When set, `info()` rejects with this message instead of answering. A Redis 6 ACL
  * user without `+info` is refused exactly this way, and it is the one shape where
  * the server is reachable but every INFO-derived surface is not (D29).
@@ -490,14 +498,29 @@ mock.module("ioredis", () => {
       const options = (config ?? {}) as Record<string, unknown>;
       capturedRedisOptions.push(options);
       this._db = typeof options.db === "number" ? options.db : 0;
+      openedClients.push(this._state);
     }
 
+    /** This connection's entry in `openedClients`, kept current as it moves and closes. */
+    private readonly _state = { database: 0, disconnected: false };
+
     async connect() {
-      // noop — connection established
+      this._state.database = this._db;
     }
 
     disconnect() {
-      // noop — connection closed
+      this._state.disconnected = true;
+    }
+
+    /**
+     * A server's `SELECT`: refused past the count `CONFIG GET databases` answers, in the words
+     * redis 8.10.0 refuses `SELECT 99` with on a stock 16-database server.
+     */
+    async select(db: number) {
+      if (db >= Number(databasesReply[1])) throw new Error("ERR DB index is out of range");
+      this._db = db;
+      this._state.database = db;
+      return "OK";
     }
 
     async info() {
@@ -639,7 +662,7 @@ mock.module("ioredis", () => {
 // ============================================================================
 
 const { RedisProvider } = await import("@/lib/db/providers/keyvalue/redis");
-const { DatabaseConfigError } = await import("@/lib/db/errors");
+const { DatabaseConfigError, QueryError } = await import("@/lib/db/errors");
 
 // ============================================================================
 // Test Config
@@ -703,6 +726,44 @@ describe("RedisProvider", () => {
       await provider.connect();
       await provider.disconnect();
       expect(provider.isConnected()).toBe(false);
+    });
+
+    /*
+     * A DATABASE THE SERVER DOES NOT HAVE IS REFUSED, NOT READ AS 0 (#1095).
+     *
+     * Measured 2026-09-24 on redis 8.10.0 through ioredis 5.11.1 with the database handed over as
+     * the `db` option: `connect()` resolved, "ERR DB index is out of range" arrived only as an
+     * unhandled `error` event, and every later command ran in database 0, so `POST /api/db/query`
+     * and `POST /api/db/keys/scan` both answered 200 with database 0's keys for `database: 99`.
+     */
+    test("a session database the server does not have fails the connect in the server's words", async () => {
+      provider = new RedisProvider({ ...baseConfig, database: "99" });
+      openedClients.length = 0;
+
+      await expect(provider.connect()).rejects.toThrow("Redis refused database 99: ERR DB index is out of range");
+      await expect(provider.connect()).rejects.toBeInstanceOf(QueryError);
+      expect(provider.isConnected()).toBe(false);
+      // Nothing was left open in database 0 to be read from by accident.
+      expect(openedClients.every((client) => client.disconnected)).toBe(true);
+    });
+
+    test("a session database that is not a number is refused before anything is opened", async () => {
+      // The form's Database field is free text. `parseInt("testdb")` is NaN, and ioredis reads a NaN
+      // `db` as no database at all, so this connected to database 0 without a word.
+      provider = new RedisProvider({ ...baseConfig, database: "testdb" });
+      openedClients.length = 0;
+
+      await expect(provider.connect()).rejects.toThrow('A Redis database is a number, received "testdb"');
+      await expect(provider.connect()).rejects.toBeInstanceOf(DatabaseConfigError);
+      expect(openedClients).toEqual([]);
+    });
+
+    test("a session database the server has is the one the connection is in", async () => {
+      provider = new RedisProvider({ ...baseConfig, database: "2" });
+      openedClients.length = 0;
+
+      await provider.connect();
+      expect(openedDatabases()).toEqual([2]);
     });
   });
 
@@ -894,6 +955,7 @@ describe("RedisProvider", () => {
       pagePipelineMode = "ok";
       pipelineBatches.length = 0;
       capturedRedisOptions.length = 0;
+      openedClients.length = 0;
       await provider.connect();
     });
 
@@ -941,12 +1003,24 @@ describe("RedisProvider", () => {
 
     test("walks the database the caller names rather than the one the session is in", async () => {
       await provider.scanKeysPage({ cursor: "0", count: 10, database: 3 });
-      expect(capturedRedisOptions.at(-1)?.db).toBe(3);
+      expect(openedDatabases().at(-1)).toBe(3);
 
       await provider.scanKeysPage({ cursor: "0", count: 10 });
-      // No `database` names the session's own, which is the connection's `db` option (`baseConfig`
-      // declares none) and not a constant this provider keeps.
-      expect(capturedRedisOptions.at(-1)?.db).toBe(0);
+      // No `database` names the session's own, which is the connection's configured database
+      // (`baseConfig` declares none) and not a constant this provider keeps.
+      expect(openedDatabases().at(-1)).toBe(0);
+    });
+
+    test("a database the server does not have is refused rather than walked as database 0", async () => {
+      openedClients.length = 0;
+      scanCalls = 0;
+
+      await expect(provider.scanKeysPage({ cursor: "0", count: 10, database: 99 })).rejects.toThrow(
+        "Redis refused database 99: ERR DB index is out of range",
+      );
+      // The walk's own connection is closed, and no key of database 0 was read through it.
+      expect(openedClients).toEqual([{ database: 0, disconnected: true }]);
+      expect(scanCalls).toBe(0);
     });
 
     test("passes a refusal through with the server's own sentence", async () => {
@@ -1964,6 +2038,7 @@ describe("RedisProvider", () => {
       scanCalls = 0;
       capturedCalls.length = 0;
       capturedRedisOptions.length = 0;
+      openedClients.length = 0;
       await provider.connect();
     });
 
@@ -2398,7 +2473,7 @@ describe("RedisProvider", () => {
 
       expect(objects.map((object) => object.path)).toEqual([["3", "report:*"]]);
       // The session connection is db 0 and stays on it: nothing SELECTs underneath it.
-      expect(capturedRedisOptions.map((options) => options.db)).toEqual([0, 3]);
+      expect(openedDatabases()).toEqual([0, 3]);
       expect(commandsSent().filter((command) => command.startsWith("SELECT"))).toEqual([]);
     });
 
@@ -2525,7 +2600,7 @@ describe("RedisProvider", () => {
       const objects = await provider.listObjects(["main", "3"], "keyspace");
 
       expect(objects.map((object) => object.path)).toEqual([["main", "3", "report:*"]]);
-      expect(capturedRedisOptions[capturedRedisOptions.length - 1].db).toBe(3);
+      expect(openedDatabases().at(-1)).toBe(3);
       const detail = await provider.describeObject(["main", "3", "report:*"], "keyspace");
       expect(detail.path).toEqual(["main", "3", "report:*"]);
     });
@@ -2722,7 +2797,7 @@ describe("RedisProvider", () => {
 
       expect(batch.details.map((detail) => detail.path)).toEqual([["main", "3", "report:*"]]);
       expect(batch.details[0].columns.map((column) => column.name)).toEqual(["key", "value", "type"]);
-      expect(capturedRedisOptions[capturedRedisOptions.length - 1].db).toBe(3);
+      expect(openedDatabases().at(-1)).toBe(3);
     });
 
     // ------------------------------------------------------------------------

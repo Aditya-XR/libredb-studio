@@ -27,6 +27,8 @@ import {
 // ─── Mock provider ──────────────────────────────────────────────────────────
 const mockProvider = createMockProvider();
 const mockGetOrCreateProvider = mock(async () => mockProvider);
+/** The unconnected provider a route reads a declaration from, `provider-meta`'s way (#457). */
+const mockCreateDatabaseProvider = mock(async (_connection: unknown) => mockProvider);
 
 const mockGetSession = mock(
   async (): Promise<{ role: string; username: string } | null> => ({ role: "admin", username: "admin" }),
@@ -79,7 +81,7 @@ mock.module("@/lib/seed/resolve-connection", () => {
 // ─── Mock @/lib/db BEFORE importing the route ───────────────────────────────
 mock.module("@/lib/db", () => ({
   getOrCreateProvider: mockGetOrCreateProvider,
-  createDatabaseProvider: mock(),
+  createDatabaseProvider: mockCreateDatabaseProvider,
   removeProvider: mock(),
   clearProviderCache: mock(),
   getProviderCacheStats: mock(),
@@ -966,6 +968,7 @@ describe("POST /api/db/query — the database a run reads", () => {
   beforeEach(() => {
     clearRateLimitState();
     mockGetOrCreateProvider.mockClear();
+    mockCreateDatabaseProvider.mockClear();
     (mockProvider.query as ReturnType<typeof mock>).mockClear();
     (mockProvider.prepareQuery as ReturnType<typeof mock>).mockClear();
     (mockProvider.getCapabilities as ReturnType<typeof mock>).mockClear();
@@ -991,17 +994,17 @@ describe("POST /api/db/query — the database a run reads", () => {
     );
 
     expect(res.status).toBe(200);
-    // Opened TWICE: once as the operator's config produced it, once with this run's database applied
-    // to THAT object. The second lookup is the whole fix — before this field a caller had no way to
-    // produce it at all, so the read fell back to the session's database while the key tab claimed it
-    // had read another.
+    // The declaration is read from the operator's config without a socket, and only the connection
+    // with this run's database applied is opened. Before this field a caller had no way to produce
+    // that connection at all, so the read fell back to the session's database while the key tab
+    // claimed it had read another.
+    expect(mockCreateDatabaseProvider.mock.calls[0]?.[0]).toMatchObject({ host: "seed-host", database: "0" });
     const opened = openedConnections();
-    expect(opened).toHaveLength(2);
-    expect(opened[0]).toMatchObject({ host: "seed-host", database: "0" });
-    expect(opened[1]).toMatchObject({ host: "seed-host", database: "3" });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ host: "seed-host", database: "3" });
   });
 
-  test("refuses a database on an engine that declares no key-space walk", async () => {
+  test("refuses a database on an engine that declares no key-space walk, without connecting", async () => {
     (mockProvider.getCapabilities as ReturnType<typeof mock>).mockReturnValueOnce({});
 
     const res = await POST(
@@ -1014,9 +1017,10 @@ describe("POST /api/db/query — the database a run reads", () => {
 
     expect(res.status).toBe(400);
     expect(data.error).toContain("declares no key-space walk");
-    // Refused after the connection's own provider and before a second one: an unsupported run costs
-    // nothing but the sentence.
-    expect(openedConnections()).toHaveLength(1);
+    // Refused from the declaration alone: an unreachable Postgres answered 503 here while the gate
+    // ran after the connect, which reported a network fault for a request that was never valid.
+    expect(mockCreateDatabaseProvider).toHaveBeenCalledTimes(1);
+    expect(openedConnections()).toHaveLength(0);
   });
 
   test("refuses an invalid database with the sentence the walk route refuses with", async () => {
@@ -1045,7 +1049,9 @@ describe("POST /api/db/query — the database a run reads", () => {
     );
 
     expect(res.status).toBe(200);
-    // Absent is not zero: one lookup, with the connection exactly as configured.
+    // Absent is not zero: one lookup, with the connection exactly as configured, and no
+    // declaration to read.
+    expect(mockCreateDatabaseProvider).not.toHaveBeenCalled();
     expect(openedConnections()).toHaveLength(1);
     expect(openedConnections()[0]).toMatchObject({ database: "testdb" });
   });
