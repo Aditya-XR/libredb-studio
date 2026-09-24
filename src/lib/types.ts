@@ -549,6 +549,24 @@ export interface QueryTab {
   isLoadingMore?: boolean;
   allRows?: Record<string, unknown>[];
   /**
+   * The numbered database this tab's statements belong to, when the tab was opened against one
+   * that is NOT the connection's own session database.
+   *
+   * WHY THE TAB CARRIES IT. A key lives in exactly one numbered database, and Redis has no
+   * database-qualified key syntax: the database is a property of the CONNECTION (`SELECT n`) and
+   * never of the statement. `GET report:daily` therefore names the key and cannot name the database
+   * it is in, so the same statement sent on a connection sitting in another database reads a
+   * different key space and answers `(nil)` for a key that is right there. The panel that opened
+   * this tab walked one database, and every run of the tab - the initial read, the next Run, a
+   * selection, an inline edit, the next page - is about the same key, so the one fact travels with
+   * the tab rather than with the call that opened it.
+   *
+   * ABSENT MEANS NO OVERRIDE, and is not database `0` or "the session's number": it is the ordinary
+   * tab saying nothing, whose run reaches whatever database its connection names. Only this number
+   * is overridden; the connection is otherwise the active one, whole.
+   */
+  databaseOverride?: number;
+  /**
    * Present exactly on a Source tab (#789 Phase 2).
    *
    * An optional FIELD and deliberately not a fifth member of `type`. Every member of that

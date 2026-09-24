@@ -90,7 +90,7 @@ interface SidebarProps {
    * question — what to open, and what a key's type means — exactly as it joins neither for the
    * object tree's own row handlers.
    */
-  onOpenKey?: (key: string, type: string | null) => void;
+  onOpenKey?: (key: string, type: string | null, database: number | null) => void;
 }
 
 export function Sidebar({

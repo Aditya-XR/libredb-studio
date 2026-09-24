@@ -934,20 +934,59 @@ describe("Studio", () => {
    */
   test("a key activated in the key browser opens the read its type calls for", () => {
     render(<Studio />);
-    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null) => void;
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
 
-    act(() => fn("videobackend:login:refreshToken:1", "hash"));
+    act(() => fn("videobackend:login:refreshToken:1", "hash", null));
 
     expect(mockHandleTableClick).toHaveBeenCalledWith(["videobackend:login:refreshToken:1"], mockExecuteQuery, [
       { name: "type", type: "hash", nullable: false, isPrimary: false },
     ]);
   });
 
+  /**
+   * The walked database, handed over with the key (the #1095 review).
+   *
+   * The panel walked ONE numbered database, and the statement that reads the key cannot say which:
+   * Redis has no database-qualified key syntax, so `GET report:daily` run on the session's database
+   * answers `(nil)` for a key that was just on screen. The number must therefore reach the TAB, and
+   * the fourth argument is where this shell hands it over - the third stays the type carrier, so an
+   * activation that walked nothing is the call it has always been.
+   */
+  test("a key from a walked database opens its tab in that database", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("report:daily", "string", 3));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(
+      ["report:daily"],
+      mockExecuteQuery,
+      [{ name: "type", type: "string", nullable: false, isPrimary: false }],
+      3,
+    );
+  });
+
+  /**
+   * `null` is the panel saying "the engine's own session database", which is not a database to
+   * override: that activation stays the three-argument call it was before the number existed.
+   */
+  test("a key from the session's own database carries no override", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("report:daily", "string", null));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["report:daily"], mockExecuteQuery, [
+      { name: "type", type: "string", nullable: false, isPrimary: false },
+    ]);
+    expect((mockHandleTableClick.mock.calls.at(-1) as unknown[]).length).toBe(3);
+  });
+
   test("a key no page described is handed over with no type at all", () => {
     render(<Studio />);
-    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null) => void;
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
 
-    act(() => fn("videobackend:login:refreshToken:1", null));
+    act(() => fn("videobackend:login:refreshToken:1", null, null));
 
     // Not a guess and not the commonest type: NO columns is what sends the generator to its own
     // unknown branch, and the editor opens on `TYPE <key>` — a command that reports what the key is

@@ -97,6 +97,32 @@ interface PersistedTabState {
    * to make it happen.
    */
   source?: { path: readonly string[]; kind: string };
+  /**
+   * The numbered database a key tab belongs to, and the one extra field here that costs
+   * nothing to keep (the #1095 review).
+   *
+   * It is one small INTEGER that only the engine's own database list can produce and nothing
+   * in the shell can grow, so it is not the unbounded payload the `source` docblock above
+   * refuses: that refusal exists so a large object cannot exhaust the origin quota this record
+   * shares, and no input makes this number large. Dropping the field, on the other hand, puts
+   * the reviewer's `(nil)` back in a form nobody would notice: the statement that reads the key
+   * cannot name its database, so a restored key tab with no override silently runs against the
+   * session's database and answers the same `(nil)` a fresh activation used to.
+   *
+   * ABSENT AND ABSENT ALONE, which is why this key is written only for a tab that has one and
+   * restored only when the stored value is a number. `0` is a database somebody walked and is
+   * persisted as one; an ordinary tab's record is the record it has always been, so nothing
+   * downstream can read a `0`, a `null` or a string as an override that was never there.
+   *
+   * THE EMBEDDED SHELL CANNOT MINT ONE, and that is why nothing in `use-query-adapter` reads
+   * this field. Its host callback is keyed by connection id and takes no per-run database, and
+   * the key panel, the only surface that walks one database, is withheld from that shell by
+   * `Sidebar`'s `objectSource` gate, added by the same commit that added
+   * `QueryTab.databaseOverride`. A tab in the embedded shell therefore never carries an
+   * override to honour, and persisting this field does not hand the embedded path a value it
+   * must act on.
+   */
+  databaseOverride?: number;
 }
 
 /**
@@ -198,6 +224,13 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
         // (#789). See `isStoredSourceAddress` for why this one field is checked and the other
         // four are not.
         ...(isStoredSourceAddress(tab.source) ? { source: { path: tab.source.path, kind: tab.source.kind } } : {}),
+        // The same spread-not-write rule as the factory that mints a key tab, and the same
+        // reason: `undefined` is not database `0`, it is the absence of an override, so a
+        // restored ordinary tab comes back without the key at all. The check is a `typeof`
+        // against `"number"` and deliberately no heavier: a stored `true` is a hand-edited
+        // record rather than the record this hook writes, and refusing it costs that tab an
+        // override instead of sending a database nobody walked. See `PersistedTabState`.
+        ...(typeof tab.databaseOverride === "number" ? { databaseOverride: tab.databaseOverride } : {}),
       }));
 
       const hasActiveTab = restoredTabs.some((tab) => tab.id === parsed.activeTabId);
@@ -243,6 +276,10 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
           type: tab.type,
           // Two fields of `SourceTabState` and never the other four: see `PersistedTabState`.
           ...(tab.source === undefined ? {} : { source: { path: tab.source.path, kind: tab.source.kind } }),
+          // Spread for the same reason the restore effect spreads: an ordinary tab's record must
+          // not grow a `databaseOverride` key, because a stored `undefined` reads back as
+          // "the connection's own database" by accident rather than by the type saying so.
+          ...(tab.databaseOverride === undefined ? {} : { databaseOverride: tab.databaseOverride }),
         })),
       };
       storage.setItem(workspaceKey, JSON.stringify(serialized));
@@ -367,6 +404,16 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
        * reports the type of the value nobody has read yet.
        */
       columnsOverride?: readonly ColumnSchema[],
+      /**
+       * The numbered database this tab belongs to, for a caller that knows the object came from one
+       * that is not the connection's own.
+       *
+       * The key browser is the only such caller: it walks ONE numbered database and every key is a
+       * key OF that one, which is a fact the statement reading it cannot carry (Redis has no
+       * database-qualified key syntax) and the schema cache cannot answer (see `QueryTab`). Absent
+       * means the ordinary activation, whose tab reaches whatever database the connection names.
+       */
+      databaseOverride?: number,
     ) => {
       const capabilities = metadata?.capabilities;
       const tableName = objectSegment(path);
@@ -387,6 +434,9 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
         result: null,
         isExecuting: false,
         type: resolveTabType(capabilities),
+        // Spread rather than written, so an ordinary activation's tab is the record it has always
+        // been: absent means "the connection's own database" and a key of `undefined` is not that.
+        ...(databaseOverride === undefined ? {} : { databaseOverride }),
       };
       setTabs((prev) => [...prev, newTab]);
       setActiveTabId(newId);

@@ -111,6 +111,26 @@ function retryAfterSeconds(response: Response): number | null {
   return Number.isInteger(seconds) && seconds > 0 ? seconds : null;
 }
 
+/**
+ * The connection ONE RUN must reach, when its tab belongs to a numbered database of its own.
+ *
+ * The whole body of a run is built from a connection, and the database is a field of THAT
+ * connection rather than anything the statement can say (`QueryTab.databaseOverride`): Redis has no
+ * database-qualified key syntax, so `GET report:daily` reaches whichever database the connection it
+ * travels with names. The tab is where "this key is in database 3" lives, and this is the one place
+ * a run turns that fact back into the field the wire carries. `String` because
+ * `DatabaseConnection.database` is the string the driver parses, and the override is the number the
+ * panel walked.
+ *
+ * `undefined` is NOT database 0 and NOT "the session's number": it is the absence of an override, so
+ * the connection is handed back as the very object it came in as, and an ordinary tab's request body
+ * is byte for byte what it was before this existed.
+ */
+function connectionForDatabase(connection: DatabaseConnection, database: number | undefined): DatabaseConnection {
+  if (database === undefined) return connection;
+  return { ...connection, database: String(database) };
+}
+
 export function useQueryExecution({
   activeConnection,
   metadata,
@@ -252,6 +272,11 @@ export function useQueryExecution({
         return false;
       }
 
+      // The connection this run reaches. A tab opened from a key browser walked ONE numbered
+      // database, so every run of that tab - the initial read, a re-run, a selection, an inline
+      // edit, the next page - is sent on a connection naming it. See `connectionForDatabase`.
+      const runConnection = connectionForDatabase(activeConnection, tabToExec.databaseOverride);
+
       // Safety check for dangerous queries (skip for explain, load-more, playground, and force-execute)
       const skipSafety = executionOptions?.skipSafety ?? false;
       if (
@@ -347,7 +372,7 @@ export function useQueryExecution({
           const beginRes = await appFetch("/api/db/transaction", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...buildConnectionPayload(activeConnection), action: "begin" }),
+            body: JSON.stringify({ ...buildConnectionPayload(runConnection), action: "begin" }),
           });
           if (!beginRes.ok) {
             logger.warn("Playground transaction BEGIN failed", { route: "use-query-execution" });
@@ -396,7 +421,7 @@ export function useQueryExecution({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            ...buildConnectionPayload(activeConnection),
+            ...buildConnectionPayload(runConnection),
             // The parameter array travels beside the SQL on whichever endpoint the
             // statement takes, and only when the caller supplied one: a request
             // without values must stay a request without a `params` key (#290).
@@ -433,7 +458,7 @@ export function useQueryExecution({
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                ...buildConnectionPayload(activeConnection),
+                ...buildConnectionPayload(runConnection),
                 sql: queryToExecute,
                 options: {},
                 explain: { mode: "estimate" },
@@ -656,7 +681,7 @@ export function useQueryExecution({
             await appFetch("/api/db/transaction", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ...buildConnectionPayload(activeConnection), action: "rollback" }),
+              body: JSON.stringify({ ...buildConnectionPayload(runConnection), action: "rollback" }),
             });
           } catch {
             logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });
@@ -703,7 +728,7 @@ export function useQueryExecution({
             await appFetch("/api/db/transaction", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ...buildConnectionPayload(activeConnection), action: "rollback" }),
+              body: JSON.stringify({ ...buildConnectionPayload(runConnection), action: "rollback" }),
             });
           } catch {
             logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });

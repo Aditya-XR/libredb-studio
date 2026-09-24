@@ -71,10 +71,16 @@ export interface KeyBrowserProps {
    * decides what to do with that — refusing is as reasonable as opening the editor on a command that
    * finds out.
    *
+   * THE DATABASE COMES WITH IT for the same reason and one more: this panel WALKS one numbered
+   * database, a key lives in exactly one of them, and Redis has no database-qualified key syntax — so
+   * a generated `GET <key>` cannot name the database it belongs to. The number is what lets the shell
+   * run the read where the key actually is; `null` is the engine's own session database, which is
+   * nothing to override and the call the shell has always taken.
+   *
    * Absent means nobody is listening, and the rows are then not clickable: a row that looks
    * actionable and does nothing is worse than one that plainly is not.
    */
-  readonly onOpenKey?: (key: string, type: string | null) => void;
+  readonly onOpenKey?: (key: string, type: string | null, database: number | null) => void;
 }
 
 /**
@@ -234,9 +240,11 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
   const openKey = useCallback(
     (node: KeyTreeNode) => {
       const name = node.path.join(KEY_SEPARATOR);
-      onOpenKey?.(name, types.get(name) ?? null);
+      // `database` is the walked database as a number, or undefined while nothing was chosen — which
+      // the shell reads as "the engine's own", exactly as an absent `database` does on the wire.
+      onOpenKey?.(name, types.get(name) ?? null, database ?? null);
     },
-    [onOpenKey, types],
+    [database, onOpenKey, types],
   );
 
   const openPath = useCallback(

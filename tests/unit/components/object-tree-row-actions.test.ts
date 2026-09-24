@@ -477,10 +477,19 @@ describe("Browse Keys is gated on the walk and on the rows being key patterns", 
   test("is withheld from ordinary objects even on an engine that DOES declare the walk", () => {
     // A table name is not a `MATCH` pattern: `orders` would be handed to the panel as a glob that
     // matches one key nobody meant.
+    //
+    // The row has to be the kind the declaration actually names. This case used to pass
+    // `objectRow("keyspace")` against a declaration of `table`, so the kind lookup missed, no
+    // action was ever considered, and the empty list was true for a reason that had nothing to
+    // do with the gate. Resolving the row is what leaves `tablesAreDerivedGroupings` as the only
+    // thing standing between a table row and Browse Keys.
     const tables = capabilitiesOf({ objectKinds: [table], keyScan: walk });
-    expect(idsFor(tables, { path: ["app", "orders"], name: "orders", kind: "table" }, allHandlers())).not.toContain(
-      "browse-keys",
-    );
+    // Asserted whole rather than with `not.toContain`, so a gate that stopped asking whether the
+    // rows are derived groupings would offer a fourth item here and fail on it: a `not.toContain`
+    // on an empty list is the vacuous shape this case used to have.
+    expect(
+      idsFor(tables, { path: ["app", "orders"], name: "orders", kind: "table" }, allHandlers(), objectRow("table")),
+    ).toEqual(["generate-select", "profile", "generate-code"]);
   });
 
   test("is withheld from a routine row, because a routine is not a prefix", () => {

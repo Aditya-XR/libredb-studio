@@ -756,16 +756,30 @@ export default function Studio() {
    * window around it, so a second copy of it is a second place for it to be forgotten. The object
    * tree, the mobile explorer and the key browser all arrive here, and the two gestures that are
    * covered and aria-hidden by the modal are that same case: one funnel, one rule, no drift.
+   *
+   * The DATABASE is the one gesture-specific fact that outlives this call. A key belongs to the
+   * numbered database its panel walked, and the runs that come after this one - the next Run, a
+   * selection, an inline edit, the next page - are all about that same key, so the number goes onto
+   * the TAB rather than into this request. `undefined`/`null` is the panel saying "the engine's own
+   * session database", which is not an override at all: that activation opens the tab it always did.
    */
-  const openTabFor = (path: readonly string[], columns?: readonly ColumnSchema[]) => {
+  const openTabFor = (path: readonly string[], columns?: readonly ColumnSchema[], database?: number | null) => {
     if (applyInFlight) {
       refuseWhileApplying();
       return;
     }
-    // The third argument is passed only when there is one, so an object activation stays the
-    // two-argument call its readers and its tests describe.
-    if (columns === undefined) tabMgr.handleTableClick(path, queryExec.executeQuery);
-    else tabMgr.handleTableClick(path, queryExec.executeQuery, columns);
+    const databaseOverride = database ?? undefined;
+    if (databaseOverride === undefined) {
+      // The third argument is passed only when there is one, so an object activation stays the
+      // two-argument call its readers and its tests describe.
+      if (columns === undefined) tabMgr.handleTableClick(path, queryExec.executeQuery);
+      else tabMgr.handleTableClick(path, queryExec.executeQuery, columns);
+      return;
+    }
+    // A caller that knows a database knows the object's columns too, so `?? []` is only what keeps
+    // the call below total: an absent set is the "nobody described this object" the key browser
+    // already sends for a key no page carried.
+    tabMgr.handleTableClick(path, queryExec.executeQuery, columns ?? [], databaseOverride);
   };
 
   /** Open and run the statement for one object, addressed by its PATH (#789). See `openTabFor`. */
@@ -785,9 +799,16 @@ export default function Studio() {
    *
    * The same refusal as every other tab-opening gesture, because a key activation ends in
    * `setActiveTabId` too — and it is `openTabFor`'s rather than a second copy of it.
+   *
+   * THE WALKED DATABASE TRAVELS WITH THE TAB. The panel walked ONE numbered database, and Redis has
+   * no database-qualified key syntax: the database is a property of the connection (`SELECT n`), so
+   * `GET report:daily` cannot name the one it means. Running this statement on the session's
+   * database is what answered `(nil)` for a key that had just been listed, which is why the number
+   * is handed over. `null` is the panel saying "the engine's own session database" - nothing to
+   * override - so that activation is the call it has always been.
    */
-  const onOpenKey = (key: string, type: string | null) =>
-    openTabFor([key], type === null ? [] : [{ name: "type", type, nullable: false, isPrimary: false }]);
+  const onOpenKey = (key: string, type: string | null, database?: number | null) =>
+    openTabFor([key], type === null ? [] : [{ name: "type", type, nullable: false, isPrimary: false }], database);
 
   /**
    * A row activated in the object tree (#789).

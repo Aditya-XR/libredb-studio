@@ -189,6 +189,63 @@ describe("useQueryExecution", () => {
     expect(body.connection.id).toBe("qe-pg-1");
   });
 
+  // ── the tab's own numbered database (the #1095 review) ─────────────────────
+
+  /**
+   * A key browser activation opens its tab against ONE numbered database, and Redis has no
+   * database-qualified key syntax: the database is a field of the CONNECTION, so `GET report:daily`
+   * reaches whichever one the connection it travels with names. The tab carries the number and this
+   * is where it becomes the field the request body carries.
+   */
+  test("a run on a tab opened against a numbered database sends that database", async () => {
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const tab = createTab({ databaseOverride: 3 });
+    const params = createDefaultParams({ tabs: [tab], currentTab: tab });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("GET report:daily");
+    });
+
+    const mainCall = fetchMock.mock.calls.find((call) => {
+      const body = JSON.parse(call[1]!.body as string);
+      // The background EXPLAIN of the same statement is a second request to the same route; the
+      // run itself is the one without a plan asked of it.
+      return body.sql === "GET report:daily" && body.explain === undefined;
+    });
+    expect(mainCall).toBeDefined();
+    const body = JSON.parse(mainCall![1]!.body as string);
+    expect(body.connection.database).toBe("3");
+    // The control: only the database moved. The rest of the connection is the active one, whole.
+    expect(body.connection.id).toBe("qe-pg-1");
+    expect(body.connection.host).toBe("localhost");
+    expect(body.connection.database).not.toBe(mockConnection.database);
+  });
+
+  test("a run on an ordinary tab keeps the connection's own database", async () => {
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const params = createDefaultParams();
+    expect("databaseOverride" in params.currentTab).toBe(false);
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users");
+    });
+
+    const mainCall = fetchMock.mock.calls.find((call) => {
+      const body = JSON.parse(call[1]!.body as string);
+      return body.sql === "SELECT * FROM users" && body.explain === undefined;
+    });
+    const body = JSON.parse(mainCall![1]!.body as string);
+    expect(body.connection.database).toBe("testdb");
+  });
+
   // ── executeQuery updates tab result on success ─────────────────────────────
 
   test("executeQuery updates tab result on success", async () => {
@@ -516,6 +573,47 @@ describe("useQueryExecution", () => {
       expect(queryCall).toBeDefined();
       const body = JSON.parse(queryCall![1]!.body as string);
       expect(body.options.offset).toBe(500);
+    });
+  });
+
+  /**
+   * The next page of a key's tab is still that key's database.
+   *
+   * Pagination is a SECOND run of the same tab, and the tab is what carries the numbered database
+   * (`QueryTab.databaseOverride`) - so a page reached with Next has to be sent on a connection naming
+   * it, exactly as the first one was. Everything else about the page is unchanged: it is the same
+   * statement, at the offset the grid asked for.
+   */
+  test("handleLoadMore keeps the tab's own database", async () => {
+    const tabWithResults = createTab({
+      databaseOverride: 3,
+      result: {
+        ...mockQueryResult,
+        pagination: { limit: 500, offset: 0, hasMore: true, totalReturned: 500, wasLimited: true },
+      },
+      currentOffset: 500,
+    });
+
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: { ...mockQueryResult, rows: [{ id: 3, name: "Charlie" }], rowCount: 1 } },
+    });
+
+    const params = createDefaultParams({ tabs: [tabWithResults], currentTab: tabWithResults });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    await waitFor(() => {
+      const queryCall = fetchMock.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
+      );
+      expect(queryCall).toBeDefined();
+      const body = JSON.parse(queryCall![1]!.body as string);
+      expect(body.options.offset).toBe(500);
+      expect(body.connection.database).toBe("3");
     });
   });
 

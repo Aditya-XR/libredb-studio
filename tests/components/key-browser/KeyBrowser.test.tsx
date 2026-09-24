@@ -475,6 +475,43 @@ describe("KeyBrowser", () => {
       expect(opened[1]).toEqual(["app:secret", null]);
     });
 
+    test("hands over the database the walk is reading, so the read runs where the key is", async () => {
+      const opened: Array<[string, string | null, number | null]> = [];
+      mockGlobalFetch(redisRoutes(page(["app:env"], "0", 2, { "app:env": "string" })));
+      render(
+        <KeyBrowser
+          connection={CONNECTION}
+          capability={CAPABILITY}
+          databaseLevel={LEVEL}
+          onOpenKey={(key, type, database) => opened.push([key, type, database])}
+        />,
+      );
+      await waitFor(() => {
+        expect(rows()).toEqual(["0@0", "app:*@1"]);
+      });
+      fireEvent.click(screen.getByText("app:*"));
+
+      fireEvent.click(screen.getByText("app:env"));
+      // The session's own database hands over NOTHING to override: absent means the engine's own on
+      // both sides of the wire, which is what keeps an ordinary activation the call it always was.
+      expect(opened).toEqual([["app:env", "string", null]]);
+
+      // A database the reader chose travels WITH the key, because Redis has no database-qualified key
+      // syntax: the generated `GET <key>` cannot name the database its key belongs to, so the tab has
+      // to be told which one it was opened against.
+      const user = userEvent.setup();
+      await user.click(screen.getByLabelText("Database"));
+      await user.click(await screen.findByRole("option", { name: "1" }));
+      // The folder stays open across the restart — expansion is state of THIS panel, not of the walk —
+      // so the leaf is drawn again as soon as the new database's page answers.
+      await waitFor(() => {
+        expect(rows()).toEqual(["1@0", "app:*@1", "app:env@2"]);
+      });
+      fireEvent.click(screen.getByText("app:env"));
+
+      expect(opened.at(-1)).toEqual(["app:env", "string", 1]);
+    });
+
     test("opens a folder instead of activating it", async () => {
       const opened: Array<[string, string | null]> = [];
       mockGlobalFetch({ "/api/db/keys/scan": page(["app:env"], "0", 1, { "app:env": "string" }) });

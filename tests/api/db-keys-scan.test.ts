@@ -249,6 +249,20 @@ describe("POST /api/db/keys/scan", () => {
     expect(body.error).toContain('"count" must be at most 1000');
   });
 
+  test("accepts the declared maximum itself, which is a bound and not a wall", async () => {
+    const walk = mock(async () => PAGE);
+    activeProvider = declaringProvider(walk);
+
+    const { status, body } = await post<KeyScanPage>({ count: 1000 });
+
+    expect(status).toBe(200);
+    expect(body).toEqual(PAGE);
+    // Forwarded as the caller's own number and not clamped down to the DEFAULT, so the bound
+    // above is the only thing a legal batch can hit: a route that capped at `maxCount - 1` would
+    // answer a 1000-key page with half of it and the refusal above would never be reached.
+    expect(walk).toHaveBeenLastCalledWith({ cursor: "0", pattern: undefined, count: 1000, database: undefined });
+  });
+
   test("forwards the database the caller names and leaves it absent otherwise", async () => {
     const walk = mock(async () => PAGE);
     activeProvider = declaringProvider(walk);
@@ -261,6 +275,23 @@ describe("POST /api/db/keys/scan", () => {
     // route does not hold it. Answering 0 here would silently walk database 0 for a session
     // sitting in another one.
     expect(walk).toHaveBeenLastCalledWith({ cursor: "0", pattern: undefined, count: 500, database: undefined });
+  });
+
+  test("forwards database 0 as a database, and does not read it back as absent", async () => {
+    const walk = mock(async () => PAGE);
+    activeProvider = declaringProvider(walk);
+
+    const { status, body } = await post<KeyScanPage>({ database: 0 });
+
+    expect(status).toBe(200);
+    expect(body).toEqual(PAGE);
+    // 0 is a REAL Redis database, and the test above is what makes this non-vacuous: absent
+    // forwards `undefined`, so a truthiness check anywhere along this line - `database ||
+    // undefined`, an `if (database)` - would walk the session's database instead of database 0
+    // and answer about keys the caller did not ask for. Every other value the route refuses is
+    // refused for the opposite reason (a negative index or a non-integer), so 0 is the one legal
+    // number a coercion loses while the refusal list stays green.
+    expect(walk).toHaveBeenLastCalledWith({ cursor: "0", pattern: undefined, count: 500, database: 0 });
   });
 
   test("refuses a database index that is not a non-negative integer", async () => {
