@@ -503,7 +503,7 @@ function installFetch(): void {
         JSON.stringify({
           id,
           infoUri: `${ORIGIN}/ui/query.html?${id}`,
-          nextUri: `${ORIGIN}/v1/statement/executing/${id}/token/1`,
+          nextUri: `${new URL(url).origin}/v1/statement/executing/${id}/token/1`,
           stats: QUEUED_STATS,
           warnings: [],
         }),

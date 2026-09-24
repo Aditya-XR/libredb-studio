@@ -161,6 +161,41 @@ export function endpointUrl(origin: HttpOrigin, pathname: string, params?: URLSe
   return url.toString();
 }
 
+/** The origin as a URL serializes it: scheme and host, with the port only when it is not the scheme's default. */
+function originString(origin: HttpOrigin): string {
+  const url = new URL(`${origin.scheme}://${origin.host}`);
+  url.port = String(origin.port);
+  return url.origin;
+}
+
+/**
+ * Refuse a link the server handed back unless it sits on the configured origin.
+ *
+ * A transport that follows links from a response body (a `nextUri` chain) would
+ * otherwise send the connection's credential wherever the body points. The
+ * refusal names only the two origins: a link's path and query can identify a
+ * running query or carry a token.
+ */
+export function rejectForeignLink(link: string, origin: HttpOrigin): void {
+  let target: URL;
+  try {
+    target = new URL(link);
+  } catch {
+    throw new ConnectionError("The server advertised a link that is not a URL, so it was not followed");
+  }
+
+  if (target.protocol !== "http:" && target.protocol !== "https:") {
+    throw new ConnectionError("The server advertised a link that is not an http or https URL, so it was not followed");
+  }
+
+  const port = Number(target.port || DEFAULT_PORTS[target.protocol === "https:" ? "https" : "http"]);
+  if (target.protocol === `${origin.scheme}:` && sameHost(target.hostname, origin.host) && port === origin.port) return;
+
+  throw new ConnectionError(
+    `The server advertised a link on ${target.origin}, not on ${originString(origin)}, the address the connection uses, so it was not followed. A proxy that rewrites the Host header can cause this`,
+  );
+}
+
 /** Where a redirect points, reduced to its origin, or null when that is no http(s) URL. */
 function redirectOrigin(location: string, requestUrl: string): string | null {
   try {

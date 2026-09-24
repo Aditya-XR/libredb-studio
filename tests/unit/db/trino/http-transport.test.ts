@@ -132,11 +132,13 @@ const INFO_URI = `http://localhost:8080/ui/query.html?${QUERY_ID}`;
 // generic API key, and a permanent scanner exception is a worse thing to carry than a
 // shorter token. Nothing under test reads the slug: what the transport owes these links
 // is to follow the absolute URI the coordinator hands back rather than rebuild one from
-// its own origin, and the path shape below is what proves that.
-const QUEUED_LINK_1 = `http://localhost:8080/v1/statement/queued/${QUERY_ID}/yqueued1/1`;
-const QUEUED_LINK_2 = `http://localhost:8080/v1/statement/queued/${QUERY_ID}/yqueued2/2`;
-const RUNNING_LINK = `http://localhost:8080/v1/statement/executing/${QUERY_ID}/yexecuting1/1`;
-const PARTIAL_CANCEL_LINK = `http://localhost:8080/v1/statement/executing/partialCancel/${QUERY_ID}/0/yexecuting1/1`;
+// its own origin, and the path shape below is what proves that. The links were
+// captured against `localhost`; they are spelled with the `127.0.0.1` that
+// `makeConnection()` names, because a link on any other origin is refused.
+const QUEUED_LINK_1 = `http://127.0.0.1:8080/v1/statement/queued/${QUERY_ID}/yqueued1/1`;
+const QUEUED_LINK_2 = `http://127.0.0.1:8080/v1/statement/queued/${QUERY_ID}/yqueued2/2`;
+const RUNNING_LINK = `http://127.0.0.1:8080/v1/statement/executing/${QUERY_ID}/yexecuting1/1`;
+const PARTIAL_CANCEL_LINK = `http://127.0.0.1:8080/v1/statement/executing/partialCancel/${QUERY_ID}/0/yexecuting1/1`;
 
 const QUEUED_STATS =
   '{"state":"QUEUED","queued":true,"scheduled":false,"cpuTimeMillis":0,"queuedTimeMillis":0,' +
@@ -589,6 +591,101 @@ describe("TrinoHttpTransport redirects", () => {
 });
 
 // ============================================================================
+// nextUri origin (#1087)
+// ============================================================================
+
+describe("TrinoHttpTransport nextUri origin", () => {
+  const pageLinking = (link: string) =>
+    `{"id":"${QUERY_ID}","nextUri":"${link}","stats":${RUNNING_STATS},"warnings":[]}`;
+
+  /** Serve a first page pointing at `link`, answer a cancel, and record where the transport went. */
+  async function followFrom(link: string, overrides: Partial<DatabaseConnection> = {}): Promise<unknown> {
+    let served = 0;
+    handler = (url) => {
+      served += 1;
+      if (served === 1) return respond(pageLinking(link));
+      return url.includes("/v1/query/") ? respond("") : respond(SINGLE_PAGE);
+    };
+
+    return await makeTransport(overrides)
+      .query("SELECT 1")
+      .catch((caught: unknown) => caught);
+  }
+
+  const foreign = "evil.example";
+
+  test.each([
+    ["host", `http://${foreign}:8080/v1/statement/executing/${QUERY_ID}/yexecuting1/1`],
+    ["port", `http://127.0.0.1:9080/v1/statement/executing/${QUERY_ID}/yexecuting1/1`],
+    ["scheme", `https://127.0.0.1:8080/v1/statement/executing/${QUERY_ID}/yexecuting1/1`],
+  ])(
+    "refuses a nextUri on another %s before sending anything to it, and cancels the statement",
+    async (_what, link) => {
+      const error = await followFrom(link);
+
+      expect(error).toBeInstanceOf(ConnectionError);
+      expect((error as Error).message).toContain("http://127.0.0.1:8080");
+      expect((error as Error).message).not.toContain(QUERY_ID);
+      expect((error as Error).message).not.toContain("yexecuting1");
+      expect(calls.map((call) => call.url)).not.toContain(link);
+      expect(calls.map((call) => new URL(call.url).origin)).toEqual(["http://127.0.0.1:8080", "http://127.0.0.1:8080"]);
+      expect(lastCall().method).toBe("DELETE");
+      expect(lastCall().url).toBe(`http://127.0.0.1:8080/v1/query/${QUERY_ID}`);
+    },
+  );
+
+  test("names both origins and never the link's path", async () => {
+    const error = await followFrom(`http://${foreign}:9443/v1/statement/executing/${QUERY_ID}/ysecret/1`);
+
+    expect((error as Error).message).toContain(`http://${foreign}:9443`);
+    expect((error as Error).message).toContain("http://127.0.0.1:8080");
+    expect((error as Error).message).not.toContain("ysecret");
+  });
+
+  test("follows a nextUri on the configured origin", async () => {
+    const result = await followFrom(RUNNING_LINK);
+
+    expect(result).not.toBeInstanceOf(Error);
+    expect(calls.map((call) => call.method)).toEqual(["POST", "GET"]);
+    expect(calls[1].url).toBe(RUNNING_LINK);
+  });
+
+  test("follows a nextUri that spells the IPv6 host differently", async () => {
+    const link = `http://[0:0:0:0:0:0:0:1]:8080/v1/statement/executing/${QUERY_ID}/yexecuting1/1`;
+    const result = await followFrom(link, { host: "::1" });
+
+    expect(result).not.toBeInstanceOf(Error);
+    expect(calls.map((call) => call.method)).toEqual(["POST", "GET"]);
+    expect(calls[1].url).toBe(link);
+  });
+
+  test("follows a nextUri that leaves out the scheme's default port", async () => {
+    const link = `https://127.0.0.1/v1/statement/executing/${QUERY_ID}/yexecuting1/1`;
+    const result = await followFrom(link, { port: 443, ssl: { mode: "require" } });
+
+    expect(result).not.toBeInstanceOf(Error);
+    expect(calls.map((call) => call.method)).toEqual(["POST", "GET"]);
+    expect(calls[1].url).toBe(link);
+  });
+
+  test("refuses a nextUri that is not an http(s) URL", async () => {
+    const error = await followFrom("ftp://127.0.0.1:8080/x");
+
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect(calls).toHaveLength(2);
+    expect(lastCall().method).toBe("DELETE");
+  });
+
+  test("refuses a nextUri that is not a URL at all", async () => {
+    const error = await followFrom("/v1/statement/executing/relative");
+
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect(calls).toHaveLength(2);
+    expect(lastCall().method).toBe("DELETE");
+  });
+});
+
+// ============================================================================
 // Credentials (measured fact 4)
 // ============================================================================
 
@@ -691,11 +788,12 @@ describe("TrinoHttpTransport page loop", () => {
   // The "first POST only" rule is about the X-<Product>-* family; a coordinator
   // behind TLS authenticates each request on its own.
   test("sends the credential on every follow-up", async () => {
-    sequence(...VERSION_PAGES);
+    sequence(...VERSION_PAGES.map((page) => page.replaceAll("http://127.0.0.1:8080", "https://127.0.0.1:8080")));
 
     await makeTransport({ user: "analyst", password: "s3cret", ssl: { mode: "require" } }).query("SELECT 1");
 
     const expected = `Basic ${Buffer.from("analyst:s3cret").toString("base64")}`;
+    expect(calls).toHaveLength(VERSION_PAGES.length);
     expect(calls.every((call) => call.headers.authorization === expected)).toBe(true);
   });
 

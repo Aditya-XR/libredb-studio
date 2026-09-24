@@ -547,10 +547,16 @@ redirect would take the Basic credential and the statement to wherever the serve
 Two things differ from the other HTTP transports. The constructor runs inside `connect()`'s guard
 (it also refuses a password over plain HTTP, [§3.6](#36-a-password-is-a-tls-only-credential)), so a
 refused host or port arrives wrapped in the connect failure, `Failed to connect to Trino: Invalid
-host: ...`. And the `nextUri` links the coordinator returns are requested as it sends them: they
-are never redirected, but they are not checked against the configured origin either. Holding them
-to that origin is a separate decision, since nothing here has measured which address a coordinator
-behind a proxy advertises.
+host: ...`. And the transport follows links the coordinator hands back, so those links are held to
+the connection's own origin (#1087). Before a `nextUri` is requested, its scheme, host and port are
+compared with the configured ones as parsed origins, so `[::1]` against `[0:0:0:0:0:0:0:1]` and a
+default port left out of the URL compare equal. A link on another origin is refused with a
+`ConnectionError` naming only the two origins, never the path (which carries the query id and a
+continuation slug), and the statement is cancelled on the configured coordinator the way every
+other abandoned loop is. Measured against Trino 476, the coordinator builds `nextUri` from the
+request's own `Host` header, so a direct connection always gets links on the origin it used; a
+reverse proxy that rewrites `Host` would make the coordinator advertise its own address, and that
+is what the refusal message points at.
 
 ---
 

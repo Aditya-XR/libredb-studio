@@ -70,10 +70,11 @@ the whole of that choice: a host must be a hostname or an IP literal, a port an 
 65535, and every URL is built with `URL` and checked after it is built, so no value can splice a
 path, a query or another authority into a request. A refusal names the field and never echoes the
 value. A 3xx answer is refused rather than followed, so neither the statement nor the credential
-goes to a server the connection does not name. Three residuals are stated in the provider docs: Trino's
-`nextUri` links are requested as the coordinator sends them and are not held to the configured
-origin, libSQL's version probe answers "no version" on a redirect by contract, and Couchbase's TLS
-path reports a 3xx as an HTTP failure rather than as a redirect.
+goes to a server the connection does not name. Links a server hands back in a response body (Trino's
+`nextUri` chain) are held to the connection's own origin as well: a link on another scheme, host or
+port is refused before any request is sent to it. Two residuals are stated in the provider docs:
+libSQL's version probe answers "no version" on a redirect by contract, and Couchbase's TLS path
+reports a 3xx as an HTTP failure rather than as a redirect.
 
 **1.1.** The Content-Security-Policy permits inline scripts, because the application is statically
 prerendered and its hydration scripts are inline and nonce-less. What the policy contains is

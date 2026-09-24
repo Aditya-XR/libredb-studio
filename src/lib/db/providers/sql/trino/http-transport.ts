@@ -42,7 +42,7 @@
  *    a completed answer terminates it explicitly.
  */
 
-import { endpointUrl, type HttpOrigin, httpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
+import { endpointUrl, type HttpOrigin, httpOrigin, rejectForeignLink, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { DatabaseConnection } from "@/lib/db/types";
 // A `bigint` column arrives as an UNQUOTED JSON number and this protocol has no
 // setting that would quote it, so the raw body is rewritten before it is parsed.
@@ -822,6 +822,7 @@ export class TrinoHttpTransport implements TrinoTransport {
         );
       }
 
+      rejectForeignLink(next, this.origin);
       page = await this.request(next, { method: "GET", headers: this.pollHeaders() }, signal);
     }
 
