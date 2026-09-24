@@ -659,6 +659,17 @@ describe("TrinoHttpTransport nextUri origin", () => {
     expect(calls[1].url).toBe(link);
   });
 
+  // URL compresses the link's host to [::1], so only the configured host can keep
+  // the long spelling. This is the case a plain string compare would refuse.
+  test("follows a short IPv6 nextUri when the host is configured in long form", async () => {
+    const link = `http://[::1]:8080/v1/statement/executing/${QUERY_ID}/yexecuting1/1`;
+    const result = await followFrom(link, { host: "0:0:0:0:0:0:0:1" });
+
+    expect(result).not.toBeInstanceOf(Error);
+    expect(calls.map((call) => call.method)).toEqual(["POST", "GET"]);
+    expect(calls[1].url).toBe(link);
+  });
+
   test("follows a nextUri that leaves out the scheme's default port", async () => {
     const link = `https://127.0.0.1/v1/statement/executing/${QUERY_ID}/yexecuting1/1`;
     const result = await followFrom(link, { port: 443, ssl: { mode: "require" } });
