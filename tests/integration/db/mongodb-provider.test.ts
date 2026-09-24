@@ -69,6 +69,8 @@ let mongoIndexReads: string[] = [];
 let mongoFoundCollections: string[] = [];
 /** A server refusal per `<database>.<collection>`, raised when a `find()` cursor is read. */
 let mockFindErrors: Record<string, Error> = {};
+/** A placeholder credential: the driver is mocked, so nothing ever authenticates with it. */
+const TEST_PASSWORD = "password";
 
 /** The collections one captured sample pipeline names, first arm included. */
 function pipelineNamespaces(pipeline: Record<string, unknown>[]): string[] {
@@ -677,9 +679,9 @@ describe("MongoDBProvider", () => {
       // The path database is also the driver's default auth database, so a stand-in like
       // `/test` would authenticate an `admin` user against `test` and fail as bad
       // credentials. An empty path leaves the driver's own default, which is `admin`.
-      provider = new MongoDBProvider({ ...baseConfig, database: undefined, user: "app", password: "s3cret" });
+      provider = new MongoDBProvider({ ...baseConfig, database: undefined, user: "app", password: TEST_PASSWORD });
       await provider.connect();
-      expect(lastMongoUri).toBe("mongodb://app:s3cret@localhost:27017/");
+      expect(lastMongoUri).toBe(`mongodb://app:${TEST_PASSWORD}@localhost:27017/`);
     });
 
     test("keeps the auth database when no database is configured", async () => {
@@ -702,9 +704,9 @@ describe("MongoDBProvider", () => {
     // the whole string used to take the host of a path-less URI as the database name.
     for (const [uri, expected] of [
       ["mongodb://remote:27017/shop", "shop"],
-      ["mongodb://app:s3cret@remote:27017/?authSource=admin", "test"],
+      [`mongodb://app:${TEST_PASSWORD}@remote:27017/?authSource=admin`, "test"],
       ["mongodb://remote:27017", "test"],
-      ["mongodb+srv://app:s3cret@cluster.example.net/shop?retryWrites=true", "shop"],
+      [`mongodb+srv://app:${TEST_PASSWORD}@cluster.example.net/shop?retryWrites=true`, "shop"],
     ] as const) {
       test(`the session database of ${uri} is ${expected}`, async () => {
         provider = new MongoDBProvider({ ...baseConfig, database: undefined, connectionString: uri });
