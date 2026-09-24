@@ -34,14 +34,23 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type { DatabaseConnection } from "@/lib/types";
 import type { ContainerLevelSpec, KeyScanCapability } from "@/lib/db/types";
-import { buildKeyTree, filterKeyTree, flattenKeyTree, KEY_SEPARATOR, pathKey, type KeyTreeNode } from "./tree";
+import {
+  buildKeyTree,
+  filterKeyTree,
+  flattenKeyTree,
+  KEY_SEPARATOR,
+  keyTreeWindow,
+  KEY_ROW_HEIGHT,
+  pathKey,
+  type KeyTreeNode,
+  type KeyTreeRow,
+} from "./tree";
 import { useKeyDatabases } from "./use-key-databases";
-import { useKeyScan } from "./use-key-scan";
+import { HELD_KEY_LIMIT, useKeyScan } from "./use-key-scan";
 
 export interface KeyBrowserProps {
   readonly connection: DatabaseConnection;
@@ -137,6 +146,16 @@ function outcomeOf(added: number | undefined): string {
   if (added === undefined) return "";
   return added === 0 ? " · nothing new in that page" : ` · +${added} new`;
 }
+
+/**
+ * One drawn row: a row of the key tree, or the database that tree hangs under.
+ *
+ * ONE UNION RATHER THAN A CHILD ELEMENT, because the two scroll and window together: a database row
+ * outside the window would sit above a slice of prefixes while the reader scrolled, which is exactly
+ * the disagreement virtualising a list is supposed to prevent. `kind` is what discriminates, so every
+ * branch below is told apart the way the tree's own rows are.
+ */
+type PanelRow = KeyTreeRow | { readonly kind: "database"; readonly name: string; readonly label: string };
 
 export function KeyBrowser({ connection, capability, databaseLevel, request, onOpenKey }: KeyBrowserProps) {
   const [pattern, setPattern] = useState(request?.pattern ?? "");
@@ -237,6 +256,15 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
     reset,
   } = useKeyScan({ connection, capability, pattern, database });
 
+  /**
+   * Whether the tree is holding as much as this panel takes.
+   *
+   * Derived from the keys rather than asked of the walk, because it is the TREE's state: the walk
+   * stops taking pages when it is reached, and the panel draws one sentence for that bound — the
+   * same number `Scan all` ends its own budget at, worded so a reader can tell the two apart.
+   */
+  const heldFull = keys.length >= HELD_KEY_LIMIT;
+
   /*
    * Start the walk again from cursor `"0"`.
    *
@@ -320,10 +348,12 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
        * into it would make what a reader sees depend on clicks the filter's term does not explain.
        * Clearing the box brings the rows back.
        */
-      if (exhausted || filtering) return false;
+      // THE TREE IS FULL: a press could not add anything, and a row offering what it cannot deliver
+      // is the same defect as one the server would answer "nothing more" to.
+      if (exhausted || filtering || heldFull) return false;
       return nodeCursors.get(pathKey(path)) !== "0";
     },
-    [exhausted, filtering, nodeCursors],
+    [exhausted, filtering, heldFull, nodeCursors],
   );
   const rows = useMemo(
     () => flattenKeyTree(visible, (path) => filtering || open.has(pathKey(path)), canLoadMore),
@@ -337,6 +367,42 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
    * with the database's children.
    */
   const indent = (depth: number): number => 8 + (depth + (databaseRow === null ? 0 : 1)) * 12;
+  /** The ARIA level of a row: the database is one, the prefixes are one deeper when it is drawn. */
+  const ariaLevel = (depth: number): number => depth + (databaseRow === null ? 0 : 1) + 1;
+
+  /*
+   * THE WINDOW'S FOUR NUMBERS. Height is measured in the attach callback rather than an effect,
+   * because writing state synchronously inside an effect is an error in this repository and a ref
+   * callback runs after the same layout - which is also what `ObjectTree` does for its own tree.
+   *
+   * `pinned` is what keeps a focused row in the window: the reader tabs to a row, focus is on it, and
+   * without the pin a scroll would unmount it from under them, which is the one way a virtualised
+   * tree is worse for a keyboard reader than none. Scrolling unpins, so the window follows the
+   * scrollbar again the moment focus is not what is being kept.
+   */
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [focusedRow, setFocusedRow] = useState(-1);
+  const [pinned, setPinned] = useState(false);
+  const attach = useCallback((element: HTMLDivElement | null) => {
+    if (element !== null) setViewportHeight(element.clientHeight);
+  }, []);
+  const onScroll = useCallback((event: { currentTarget: HTMLDivElement }) => {
+    setScrollTop(event.currentTarget.scrollTop);
+    setViewportHeight(event.currentTarget.clientHeight);
+    setPinned(false);
+  }, []);
+
+  /**
+   * The rows the window runs over: the key rows when the database row is folded away or absent, and
+   * the database row plus them when it is drawn.
+   */
+  const panelRows = useMemo<PanelRow[]>(() => {
+    const keyRows = databaseRow === null || databaseOpen ? rows : [];
+    if (databaseRow === null) return keyRows;
+    return [{ kind: "database", name: databaseRow.name, label: databaseRow.label }, ...keyRows];
+  }, [databaseRow, databaseOpen, rows]);
+  const [windowStart, windowEnd] = keyTreeWindow(panelRows.length, scrollTop, viewportHeight, pinned ? focusedRow : -1);
 
   /*
    * WHAT THE TWO NUMBERS OF THE PROGRESS LINE ARE, because they are not the same kind of number and
@@ -353,6 +419,16 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
    */
   const progressPrefix = pattern === "" ? "Scanned" : "Matched";
   const progressSuffix = total === null ? "" : pattern === "" ? `/${total}` : ` of ${total}`;
+  /*
+   * THE NUMERATOR NEVER READS ABOVE THE PANEL'S OWN BUDGET, and that is the whole point of clamping a
+   * number that is otherwise honest: `scanned` counts what the server HANDED over, and a page is
+   * counted whole even when the held limit truncates its tail, so the walk's own tally can sit keys -
+   * up to a batch - above ten thousand. Printed unclamped beside the sentence that declares ten
+   * thousand the limit, it asks one question ("so there is more than ten thousand in there?") whose
+   * answer is no, since the tree holds ten thousand and the sentence says so. The clamp is for
+   * DISPLAY only: the walk's bound keeps counting what crossed the wire, which is what bounds work.
+   */
+  const counted = Math.min(scanned, HELD_KEY_LIMIT);
   /*
    * WHAT A CLUSTERED SERVER'S COUNTS ARE: one node's, and the panel says so in words rather than in
    * a footnote. `SCAN` and `DBSIZE` are per node and neither has a cluster-wide form, so on a
@@ -442,14 +518,14 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
           data-testid="key-browser-progress"
           title={countScope}
         >
-          {progressPrefix} {scanned}
+          {progressPrefix} {counted}
           {progressSuffix}
         </span>
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => void scanMore()}
-            disabled={busy || scanningAll || exhausted}
+            disabled={busy || scanningAll || exhausted || heldFull}
             className="rounded px-2 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
           >
             Scan more
@@ -457,7 +533,7 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
           <button
             type="button"
             onClick={() => (scanningAll ? stop() : void scanAll())}
-            disabled={busy && !scanningAll}
+            disabled={(busy && !scanningAll) || heldFull}
             className="rounded px-2 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
           >
             {scanningAll ? "Stop" : "Scan all"}
@@ -528,6 +604,16 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
         </p>
       )}
 
+      {/* THE OTHER BOUND, and it is drawn from the tree's own size so there is one sentence for it
+          wherever it ends the walk: the reader gets it whether a `Scan all` loop stopped on it, or
+          `Scan more` quietly refused because a tree that is full cannot be given more. */}
+      {heldFull && (
+        <p className="px-1 pb-2 text-[10px] leading-relaxed text-warning" data-testid="key-browser-held">
+          Holding {HELD_KEY_LIMIT.toLocaleString("en-US")} keys, which is this panel&apos;s limit. Narrow the pattern to
+          walk a smaller key space.
+        </p>
+      )}
+
       {stoppedBy !== null && (
         <p className="px-1 pb-2 text-[10px] leading-relaxed text-warning" data-testid="key-browser-stopped">
           {stoppedBy}
@@ -554,9 +640,38 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
         </div>
       )}
 
-      <ScrollArea className="min-h-0 flex-1">
-        <div role="tree" aria-label="Keys">
-          {/*
+      {/*
+        THE ROWS ARE WINDOWED to what the box can show, for the reason a ten-thousand-key prefix must
+        be: the keys are a real array the filter walks on every keystroke, and a window of a few dozen
+        rows is what keeps 6,000 rows from costing 6,000 DOM nodes.
+
+        THE DATABASE ROW IS IN THE SAME WINDOW rather than pinned above it, because a row fixed over a
+        scrolling slice of prefixes would disagree with them about where the list starts. This is the
+        recipe `ObjectTree` already uses: a measured box, flat rows at a fixed height, and the ARIA
+        pair taken from the FULL level — `aria-setsize` is the whole set, so a screen reader is told
+        how long the list really is while the window hides most of it.
+      */}
+      <div
+        ref={attach}
+        role="tree"
+        aria-label="Keys"
+        tabIndex={-1}
+        onScroll={onScroll}
+        className="min-h-0 flex-1 overflow-auto outline-none"
+      >
+        <div role="presentation" className="relative" style={{ height: panelRows.length * KEY_ROW_HEIGHT }}>
+          {panelRows.slice(windowStart, windowEnd).map((row, offset) => {
+            const index = windowStart + offset;
+            const top = index * KEY_ROW_HEIGHT;
+            // Focus is what the window stays aware of: a row the reader tabbed to must not be
+            // unmounted by the scroll that follows, which would leave focus on a container with
+            // nothing under it.
+            const focus = (): void => {
+              setFocusedRow(index);
+              setPinned(true);
+            };
+            {
+              /*
             THE DATABASE THE KEYS ARE IN, drawn as the tree's root because that is what it is: a key
             space belongs to one numbered database, and a tree that began at `app:*` would leave the
             reader to guess which one they were looking at.
@@ -564,196 +679,205 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
             It carries the SERVER'S OWN count (`DBSIZE`, which travels with every page) rather than the
             sample's, and it stands down to nothing until a page has answered — the one slot both kinds
             of row use, so one edge answers "how much is in this row" throughout.
-          */}
-          {databaseRow !== null && (
-            <div
-              role="treeitem"
-              aria-expanded={databaseOpen}
-              tabIndex={0}
-              data-testid="key-browser-database"
-              title={`${databaseRow.label} ${databaseRow.name}`}
-              onClick={() => setDatabaseOpen((wasOpen) => !wasOpen)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
-                setDatabaseOpen((wasOpen) => !wasOpen);
-              }}
-              style={{ paddingLeft: 8 }}
-              className="flex h-6 cursor-pointer select-none items-center gap-1 rounded pr-7 outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-brand"
-            >
-              <ChevronRight
-                strokeWidth={1.5}
-                className={cn(
-                  "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform",
-                  databaseOpen && "rotate-90",
-                )}
-              />
-              <Database strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate font-mono text-xs">{databaseRow.name}</span>
-              <span
-                data-testid="key-browser-database-total"
-                title={
-                  nodeScoped
-                    ? "Keys in this database as THIS NODE counts them: the server is clustered, and SCAN and DBSIZE have no cluster-wide form"
-                    : "Keys in this database, as the server counts them"
-                }
-                className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground"
-              >
-                {total === null ? "" : total.toLocaleString("en-US")}
-              </span>
-            </div>
-          )}
-
-          {(databaseRow === null || databaseOpen) &&
-            rows.map((row) => {
-              if (row.kind === "loadMore") {
-                const key = pathKey(row.path);
-                const loading = nodeLoading.has(key);
-                return (
-                  <button
-                    key={`more:${key}`}
-                    type="button"
-                    data-testid="key-browser-load-more"
-                    disabled={loading}
-                    onClick={() => void loadMoreUnder(row.path)}
-                    /*
-                     * THE ROW SAYS WHAT A PRESS IS WORTH BEFORE IT IS PRESSED. `MATCH` is applied per
-                     * batch and is not indexed, and the keys that come back are then deduplicated, so
-                     * one press can legitimately add nothing at all — a fact that has to be on the row
-                     * rather than discovered by pressing it repeatedly.
-                     */
-                    title={`Ask the server for one more page under this prefix. It answers a batch of buckets rather than a listing, so a page can hold only keys already loaded.`}
-                    // One level deeper than the folder it belongs to, so it reads as following the
-                    // children above it rather than as one of them.
-                    style={{ paddingLeft: indent(row.depth) }}
-                    // `pr-7` and not a token gutter: the object tree reserves the same 28px on every
-                    // row so that a right-hand number is never under the scrollbar, which is a
-                    // measured defect this project has already fixed once (`TreeRow`).
-                    className="flex h-6 w-full items-center gap-1 rounded pr-7 text-left outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-brand disabled:pointer-events-none disabled:opacity-50"
-                  >
-                    <span className="h-3.5 w-3.5 shrink-0" />
-                    {loading ? (
-                      <LoaderCircle
-                        strokeWidth={1.5}
-                        className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
-                      />
-                    ) : (
-                      <PackageOpen strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          */
+            }
+            if (row.kind === "database") {
+              return (
+                <div
+                  key="database"
+                  role="treeitem"
+                  aria-level={1}
+                  aria-setsize={1}
+                  aria-posinset={1}
+                  aria-expanded={databaseOpen}
+                  tabIndex={0}
+                  data-testid="key-browser-database"
+                  title={`${row.label} ${row.name}`}
+                  onClick={() => setDatabaseOpen((wasOpen) => !wasOpen)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    setDatabaseOpen((wasOpen) => !wasOpen);
+                  }}
+                  onFocus={focus}
+                  style={{ top, paddingLeft: 8 }}
+                  className="absolute inset-x-0 flex h-6 cursor-pointer select-none items-center gap-1 rounded pr-7 outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-brand"
+                >
+                  <ChevronRight
+                    strokeWidth={1.5}
+                    className={cn(
+                      "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform",
+                      databaseOpen && "rotate-90",
                     )}
-                    <span className="truncate text-xs text-muted-foreground">
-                      {loading ? "Asking for one more page..." : `Click to load more${outcomeOf(nodeAdded.get(key))}`}
-                    </span>
-                    {/*
+                  />
+                  <Database strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate font-mono text-xs">{row.name}</span>
+                  <span
+                    data-testid="key-browser-database-total"
+                    title={
+                      nodeScoped
+                        ? "Keys in this database as THIS NODE counts them: the server is clustered, and SCAN and DBSIZE have no cluster-wide form"
+                        : "Keys in this database, as the server counts them"
+                    }
+                    className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground"
+                  >
+                    {total === null ? "" : total.toLocaleString("en-US")}
+                  </span>
+                </div>
+              );
+            }
+
+            if (row.kind === "loadMore") {
+              const key = pathKey(row.path);
+              const loading = nodeLoading.has(key);
+              return (
+                <button
+                  key={`more:${key}`}
+                  type="button"
+                  data-testid="key-browser-load-more"
+                  disabled={loading}
+                  onClick={() => void loadMoreUnder(row.path)}
+                  /*
+                   * THE ROW SAYS WHAT A PRESS IS WORTH BEFORE IT IS PRESSED. `MATCH` is applied per
+                   * batch and is not indexed, and the keys that come back are then deduplicated, so
+                   * one press can legitimately add nothing at all — a fact that has to be on the row
+                   * rather than discovered by pressing it repeatedly.
+                   */
+                  title={`Ask the server for one more page under this prefix. It answers a batch of buckets rather than a listing, so a page can hold only keys already loaded.`}
+                  // One level deeper than the folder it belongs to, so it reads as following the
+                  // children above it rather than as one of them.
+                  onFocus={focus}
+                  style={{ top, paddingLeft: indent(row.depth) }}
+                  // `pr-7` and not a token gutter: the object tree reserves the same 28px on every
+                  // row so that a right-hand number is never under the scrollbar, which is a
+                  // measured defect this project has already fixed once (`TreeRow`).
+                  className="absolute inset-x-0 flex h-6 items-center gap-1 rounded pr-7 text-left outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-brand disabled:pointer-events-none disabled:opacity-50"
+                >
+                  <span className="h-3.5 w-3.5 shrink-0" />
+                  {loading ? (
+                    <LoaderCircle
+                      strokeWidth={1.5}
+                      className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
+                    />
+                  ) : (
+                    <PackageOpen strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="truncate text-xs text-muted-foreground">
+                    {loading ? "Asking for one more page..." : `Click to load more${outcomeOf(nodeAdded.get(key))}`}
+                  </span>
+                  {/*
                       THE COUNT THIS PRESS IS MEASURED AGAINST, in the same right-hand column every
                       other row keeps its number in. Without it a page of duplicates looks like a dead
                       button; with it the reader can see the number the press is trying to move.
                     */}
-                    <span
-                      data-testid="key-browser-load-more-count"
-                      className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground"
-                    >
-                      {`${row.count.toLocaleString("en-US")} key${row.count === 1 ? "" : "s"}`}
-                    </span>
-                  </button>
-                );
-              }
-
-              const { node, depth, folder } = row;
-              const key = pathKey(node.path);
-              const isOpen = filtering || open.has(key);
-              const name = node.path.join(KEY_SEPARATOR);
-              /*
-               * A NODE CAN BE TWO THINGS AT ONCE, and this is the row where that shows: `user:42` is
-               * a key AND a prefix of `user:42:profile`, so it has a value to read and children to
-               * open. The row is the KEY and the twisty is the FOLDER, which is the split the object
-               * tree already makes between activating a table and expanding its columns - and it is
-               * what makes a row that was drawn only as a folder reachable as a key.
-               *
-               * A node that is only a folder keeps the whole row as its toggle, because there is
-               * nothing else for a click to mean there.
-               */
-              const readable = node.isKey && onOpenKey !== undefined;
-              const activate = (): void => {
-                if (readable) openKey(node);
-                else if (folder) openPath(node.path);
-              };
-              return (
-                <div
-                  key={key}
-                  role="treeitem"
-                  aria-expanded={folder ? isOpen : undefined}
-                  tabIndex={0}
-                  // The FULL name, which is what a key is identified by, and the `:*` form beside it
-                  // when the row is a prefix too - because a reader needs to know both, and the label
-                  // can only say one.
-                  title={
-                    folder && node.isKey
-                      ? `${name} is a key of this database and a prefix: ${name}:*`
-                      : folder
-                        ? `${name}:*`
-                        : name
-                  }
-                  onClick={activate}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
-                    activate();
-                  }}
-                  // The project's own row recipe, plus the database row above this one, so a key two
-                  // levels down lines up with a table two levels down in the object tree.
-                  style={{ paddingLeft: indent(depth) }}
-                  className={cn(
-                    "flex h-6 cursor-default select-none items-center gap-1 rounded pr-7 outline-none hover:bg-accent",
-                    "focus-visible:ring-1 focus-visible:ring-brand",
-                    // A leaf is actionable only when somebody will act on it, so the pointer follows the
-                    // wiring rather than the row's kind.
-                    (readable || folder) && "cursor-pointer",
-                  )}
-                >
-                  {folder ? (
-                    /*
-                     * THE TWISTY IS ITS OWN CONTROL, and it has to be now that a row can be a key as
-                     * well as a folder: one press cannot mean both "read this value" and "open these
-                     * children". `stopPropagation` keeps the press off the row, and `tabIndex={-1}` is
-                     * the object tree's own choice - arrow keys are what a tree gives a keyboard for
-                     * this, so a second tab stop per row would be noise rather than access.
-                     *
-                     * `-m-1.5 p-1.5` grows the target to 26 by 26 around the 14px glyph without moving
-                     * anything, which is the measurement `TreeRow` records for its own twisty.
-                     */
-                    <button
-                      type="button"
-                      data-testid="key-browser-twisty"
-                      aria-label={`${isOpen ? "Collapse" : "Expand"} ${name}`}
-                      tabIndex={-1}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        openPath(node.path);
-                      }}
-                      onKeyDown={(event) => event.stopPropagation()}
-                      className="-m-1.5 flex h-3.5 w-3.5 box-content shrink-0 items-center justify-center rounded-sm p-1.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-brand"
-                    >
-                      <ChevronRight
-                        strokeWidth={1.5}
-                        className={cn("h-3.5 w-3.5 transition-transform", isOpen && "rotate-90")}
-                      />
-                    </button>
-                  ) : (
-                    // A leaf keeps the column so labels line up down a level, the way the object tree
-                    // pads a row with no twisty.
-                    <span className="h-3.5 w-3.5 shrink-0" />
-                  )}
-                  {folder ? (
-                    <Folder strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-hue-yellow/70" />
-                  ) : (
-                    <KeyRound strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  )}
-                  {/* A row that is a key says the KEY's name, because that is what activating it
-                      addresses; a row that is only a prefix says the prefix it stands for. */}
-                  <span className="truncate font-mono text-xs">
-                    {folder && !node.isKey ? `${node.segment}:*` : name}
+                  <span
+                    data-testid="key-browser-load-more-count"
+                    className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground"
+                  >
+                    {`${row.count.toLocaleString("en-US")} key${row.count === 1 ? "" : "s"}`}
                   </span>
-                  {/*
+                </button>
+              );
+            }
+
+            const { node, depth, folder } = row;
+            const key = pathKey(node.path);
+            const isOpen = filtering || open.has(key);
+            const name = node.path.join(KEY_SEPARATOR);
+            /*
+             * A NODE CAN BE TWO THINGS AT ONCE, and this is the row where that shows: `user:42` is
+             * a key AND a prefix of `user:42:profile`, so it has a value to read and children to
+             * open. The row is the KEY and the twisty is the FOLDER, which is the split the object
+             * tree already makes between activating a table and expanding its columns - and it is
+             * what makes a row that was drawn only as a folder reachable as a key.
+             *
+             * A node that is only a folder keeps the whole row as its toggle, because there is
+             * nothing else for a click to mean there.
+             */
+            const readable = node.isKey && onOpenKey !== undefined;
+            const activate = (): void => {
+              if (readable) openKey(node);
+              else if (folder) openPath(node.path);
+            };
+            return (
+              <div
+                key={key}
+                role="treeitem"
+                aria-expanded={folder ? isOpen : undefined}
+                aria-level={ariaLevel(depth)}
+                aria-setsize={row.setSize}
+                aria-posinset={row.posInSet}
+                onFocus={focus}
+                tabIndex={0}
+                // The FULL name, which is what a key is identified by, and the `:*` form beside it
+                // when the row is a prefix too - because a reader needs to know both, and the label
+                // can only say one.
+                title={
+                  folder && node.isKey
+                    ? `${name} is a key of this database and a prefix: ${name}:*`
+                    : folder
+                      ? `${name}:*`
+                      : name
+                }
+                onClick={activate}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  activate();
+                }}
+                // The project's own row recipe, plus the database row above this one, so a key two
+                // levels down lines up with a table two levels down in the object tree.
+                style={{ top, paddingLeft: indent(depth) }}
+                className={cn(
+                  "absolute inset-x-0 flex h-6 cursor-default select-none items-center gap-1 rounded pr-7 outline-none hover:bg-accent",
+                  "focus-visible:ring-1 focus-visible:ring-brand",
+                  // A leaf is actionable only when somebody will act on it, so the pointer follows the
+                  // wiring rather than the row's kind.
+                  (readable || folder) && "cursor-pointer",
+                )}
+              >
+                {folder ? (
+                  /*
+                   * THE TWISTY IS ITS OWN CONTROL, and it has to be now that a row can be a key as
+                   * well as a folder: one press cannot mean both "read this value" and "open these
+                   * children". `stopPropagation` keeps the press off the row, and `tabIndex={-1}` is
+                   * the object tree's own choice - arrow keys are what a tree gives a keyboard for
+                   * this, so a second tab stop per row would be noise rather than access.
+                   *
+                   * `-m-1.5 p-1.5` grows the target to 26 by 26 around the 14px glyph without moving
+                   * anything, which is the measurement `TreeRow` records for its own twisty.
+                   */
+                  <button
+                    type="button"
+                    data-testid="key-browser-twisty"
+                    aria-label={`${isOpen ? "Collapse" : "Expand"} ${name}`}
+                    tabIndex={-1}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openPath(node.path);
+                    }}
+                    onKeyDown={(event) => event.stopPropagation()}
+                    className="-m-1.5 flex h-3.5 w-3.5 box-content shrink-0 items-center justify-center rounded-sm p-1.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-brand"
+                  >
+                    <ChevronRight
+                      strokeWidth={1.5}
+                      className={cn("h-3.5 w-3.5 transition-transform", isOpen && "rotate-90")}
+                    />
+                  </button>
+                ) : (
+                  // A leaf keeps the column so labels line up down a level, the way the object tree
+                  // pads a row with no twisty.
+                  <span className="h-3.5 w-3.5 shrink-0" />
+                )}
+                {folder ? (
+                  <Folder strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-hue-yellow/70" />
+                ) : (
+                  <KeyRound strokeWidth={1.5} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                )}
+                {/* A row that is a key says the KEY's name, because that is what activating it
+                      addresses; a row that is only a prefix says the prefix it stands for. */}
+                <span className="truncate font-mono text-xs">{folder && !node.isKey ? `${node.segment}:*` : name}</span>
+                {/*
                     A FOLDER COUNTS THE KEYS THE WALK HOLDS UNDER IT, and a leaf carries no number.
 
                     THE BADGE IS THE NUMBER THAT MOVES. A prefix's contents grow as pages arrive — the
@@ -765,34 +889,34 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
                     tooltip is the sample's own admission: keys a page has not reached are not counted,
                     and a count that pretended otherwise would be a total nobody read.
                   */}
-                  {/*
+                {/*
                     A ROW THAT IS BOTH carries BOTH numbers, which is the whole reason this column is
                     two cells rather than one: the type says what the row itself is worth reading as,
                     and the count says how much sits under it. A row that is only one of the two shows
                     only its own, and the type leads so that the count keeps the outer edge every
                     folder's number has.
                   */}
-                  {folder && node.isKey && (
-                    <span
-                      data-testid="key-browser-type"
-                      className="ml-auto shrink-0 pl-2 font-mono text-[10px] text-muted-foreground"
-                    >
-                      {types.get(name) ?? ""}
-                    </span>
-                  )}
-                  {folder ? (
-                    <span
-                      data-testid="key-browser-folder-count"
-                      className={cn(
-                        "shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground",
-                        !node.isKey && "ml-auto",
-                      )}
-                      title={`${node.count.toLocaleString("en-US")} key${node.count === 1 ? "" : "s"} loaded under this prefix so far, in ${node.children.length} row${node.children.length === 1 ? "" : "s"}`}
-                    >
-                      {node.count.toLocaleString("en-US")}
-                    </span>
-                  ) : (
-                    /*
+                {folder && node.isKey && (
+                  <span
+                    data-testid="key-browser-type"
+                    className="ml-auto shrink-0 pl-2 font-mono text-[10px] text-muted-foreground"
+                  >
+                    {types.get(name) ?? ""}
+                  </span>
+                )}
+                {folder ? (
+                  <span
+                    data-testid="key-browser-folder-count"
+                    className={cn(
+                      "shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground",
+                      !node.isKey && "ml-auto",
+                    )}
+                    title={`${node.count.toLocaleString("en-US")} key${node.count === 1 ? "" : "s"} loaded under this prefix so far, in ${node.children.length} row${node.children.length === 1 ? "" : "s"}`}
+                  >
+                    {node.count.toLocaleString("en-US")}
+                  </span>
+                ) : (
+                  /*
                     A LEAF'S TYPE, in the same right-hand column the folders use for their count, so
                     one edge carries "what this row is" for every row.
                     
@@ -801,18 +925,18 @@ export function KeyBrowser({ connection, capability, databaseLevel, request, onO
                     and an empty cell is the honest drawing, since a guess here would be a claim about
                     the value that nobody made.
                   */
-                    <span
-                      data-testid="key-browser-type"
-                      className="ml-auto shrink-0 pl-2 font-mono text-[10px] text-muted-foreground"
-                    >
-                      {types.get(name) ?? ""}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
+                  <span
+                    data-testid="key-browser-type"
+                    className="ml-auto shrink-0 pl-2 font-mono text-[10px] text-muted-foreground"
+                  >
+                    {types.get(name) ?? ""}
+                  </span>
+                )}
+              </div>
+            );
+          })}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }

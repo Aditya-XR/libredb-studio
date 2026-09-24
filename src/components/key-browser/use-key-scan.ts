@@ -37,6 +37,22 @@ import { isUnderPrefix, KEY_SEPARATOR, pathKey, prefixPattern } from "./tree";
  */
 export const SCAN_ALL_MAX_KEYS = 10_000;
 
+/**
+ * How many keys the tree may HOLD, across every page of the walk and every press of Load more.
+ *
+ * `SCAN_ALL_MAX_KEYS` bounds ONE GESTURE, and that is a different question: a reader can press Scan
+ * more a hundred times, or press Load more down a hundred prefixes, and each press is bounded while
+ * the tree they all feed is not. The tree is not virtualised away from memory — the rows are windowed
+ * in the DOM, but the keys are a real array a filter walks on every keystroke — so an unbounded total
+ * is a panel that gets slower the longer it is used, with no way for the reader to see where it is
+ * spending itself.
+ *
+ * The same number as the gesture cap is deliberate rather than a coincidence: it is one budget for
+ * "how much of a key space this panel will hold", stated once, and the two sentences the panel says
+ * are worded so a reader can tell which bound they just met.
+ */
+export const HELD_KEY_LIMIT = 10_000;
+
 /** The batch size to ask for, kept inside what the provider declared it will accept. */
 function batchSize(capability: KeyScanCapability): number {
   return Math.min(capability.defaultCount, capability.maxCount);
@@ -266,8 +282,16 @@ export function useKeyScan(options: {
    * read `walked` before the other had written it would append a batch twice.
    */
   const absorb = useCallback((names: readonly string[]): string[] => {
-    const fresh = names.filter((name) => !walked.current.has(name));
-    for (const name of fresh) walked.current.add(name);
+    const fresh: string[] = [];
+    for (const name of names) {
+      // A repeat is skipped before the limit is even consulted: a key already held is not a key that
+      // the limit is being asked about, and a page of nothing but repeats must not be read as "the
+      // tree is full" when it is merely "you have seen these".
+      if (walked.current.has(name)) continue;
+      if (walked.current.size >= HELD_KEY_LIMIT) break;
+      walked.current.add(name);
+      fresh.push(name);
+    }
     return fresh;
   }, []);
 
@@ -290,6 +314,9 @@ export function useKeyScan(options: {
     // earned and the walk would skip whatever lay between them. A spent walk is refused for the same
     // reason it is spent. A page belonging to an ABANDONED walk is not in this one's way — see `walk`.
     const mine = walk.current;
+    // A tree that is FULL cannot be given anything, so this walk would buy a page to drop it: the
+    // panel's own sentence is what the reader should be reading instead of a request in flight.
+    if (walked.current.size >= HELD_KEY_LIMIT) return;
     if (spent.current || pageInFlight.current === mine) return;
     pageInFlight.current = mine;
     setBusy(true);
@@ -357,6 +384,12 @@ export function useKeyScan(options: {
      * makes "stopped" and "hit the cap" ordered rather than racing in a `finally`.
      */
     let reason: string | null = null;
+    // NO HELD-LIMIT CHECK HERE, and the absence is deliberate rather than an oversight: held keys are
+    // a SUBSET of handed ones (`absorb` only ever adds what a page handed), so a tree at the held
+    // limit always has a walk at the gesture's own limit, and this condition trips before any exit
+    // that check could provide. Adding it would be a branch no reader can reach, which this
+    // repository's coverage gate is right to refuse - the bound's sentence is the panel's, drawn from
+    // the tree's size, and it is shown whether or not a `Scan all` ever ran.
     while (!stopped.current && !spent.current && failure.current === null) {
       await scanMore();
       if (scannedKeys.current >= SCAN_ALL_MAX_KEYS && !spent.current) {
@@ -400,6 +433,11 @@ export function useKeyScan(options: {
   const loadMoreUnder = useCallback(
     async (path: readonly string[]): Promise<void> => {
       const key = pathKey(path);
+
+      // The tree is full: a scoped page would be filtered, deduplicated against a tree that already
+      // holds its keys, and dropped — so the row is not offered and a press that somehow arrives
+      // spends nothing.
+      if (walked.current.size >= HELD_KEY_LIMIT) return;
 
       // One page per prefix at a time, for the reason `scanMore` gives about the global walk: two in
       // flight would both read this prefix's cursor and both advance from it.

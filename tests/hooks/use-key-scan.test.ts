@@ -6,7 +6,7 @@ import { describe, test, expect, afterEach } from "bun:test";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { mockGlobalFetch, restoreGlobalFetch, type MockFetchResponse } from "../helpers/mock-fetch";
 
-import { useKeyScan, SCAN_ALL_MAX_KEYS } from "@/components/key-browser/use-key-scan";
+import { useKeyScan, HELD_KEY_LIMIT, SCAN_ALL_MAX_KEYS } from "@/components/key-browser/use-key-scan";
 import { pathKey } from "@/components/key-browser/tree";
 import type { DatabaseConnection } from "@/lib/types";
 
@@ -1053,5 +1053,44 @@ describe("useKeyScan", () => {
       expect(result.current.scanned).toBe(1);
       expect(bodyAt(fetchMock, 2)).toMatchObject({ cursor: "0" });
     });
+  });
+});
+
+describe("the held-key limit", () => {
+  test("takes the limit's worth of a page and then refuses every further walk", async () => {
+    const fetchMock = mockGlobalFetch({
+      "/api/db/keys/scan": page(
+        Array.from({ length: HELD_KEY_LIMIT + 1 }, (_, index) => `bulk:${index}`),
+        "7",
+      ),
+    });
+    const { result } = hook();
+
+    await act(async () => {
+      await result.current.scanMore();
+    });
+
+    // HANDED and HELD are two different numbers and both are reported: the walk was given ten thousand
+    // and one keys, the tree holds the limit's worth of them, and the difference is the tail this
+    // bound refused rather than keys that were never walked.
+    expect(result.current.scanned).toBe(HELD_KEY_LIMIT + 1);
+    expect(result.current.keys.length).toBe(HELD_KEY_LIMIT);
+
+    // A full tree is NOT a spent walk: the cursor is still live, and nothing arrives now because the
+    // panel cannot take it - so a reader who narrows the pattern gets a fresh walk from cursor zero.
+    expect(result.current.exhausted).toBe(false);
+
+    // The next page would be a page bought to drop, so it is not taken.
+    await act(async () => {
+      await result.current.scanMore();
+    });
+    expect(fetchMock.mock.calls.length).toBe(1);
+
+    // A prefix's own walk refuses before it even asks: no cursor recorded, nothing in flight.
+    await act(async () => {
+      await result.current.loadMoreUnder(["bulk", "0"]);
+    });
+    expect(fetchMock.mock.calls.length).toBe(1);
+    expect(result.current.nodeCursors.size).toBe(0);
   });
 });

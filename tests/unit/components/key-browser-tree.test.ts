@@ -4,6 +4,8 @@ import {
   filterKeyTree,
   flattenKeyTree,
   isUnderPrefix,
+  keyTreeWindow,
+  KEY_ROW_HEIGHT,
   splitKey,
   KEY_SEPARATOR,
   type KeyTreeNode,
@@ -401,5 +403,126 @@ describe("filterKeyTree()", () => {
 
       expect(filterKeyTree(root, ":*")).toBe(root);
     });
+  });
+});
+
+describe("keyTreeWindow()", () => {
+  test("mounts everything it has when the box has not been measured", () => {
+    // Height 0 is a box that is `display:none` or has not been laid out: guessing a height there would
+    // hide rows a reader cannot yet scroll to, behind a scrollbar they will not see. The honest
+    // reading of "I do not know how tall this is" is "show what I have".
+    expect(keyTreeWindow(10_000, 0, 0)).toEqual([0, 10_000]);
+    expect(keyTreeWindow(0, 0, 0)).toEqual([0, 0]);
+  });
+
+  test("mounts what fits plus the overscan, and follows the scroll", () => {
+    // 240px is ten rows of 24, plus four kept mounted beyond each edge.
+    expect(keyTreeWindow(10_000, 0, 240)).toEqual([0, 18]);
+    // Scrolled fifty rows down: the window slides with it rather than widening.
+    expect(keyTreeWindow(10_000, KEY_ROW_HEIGHT * 50, 240)).toEqual([46, 64]);
+  });
+
+  test("never mounts past the end, and a short list is whole", () => {
+    expect(keyTreeWindow(10_000, KEY_ROW_HEIGHT * 10_000, 240)).toEqual([9_982, 10_000]);
+    expect(keyTreeWindow(5, KEY_ROW_HEIGHT * 50, 240)).toEqual([0, 5]);
+    expect(keyTreeWindow(5, 0, 240)).toEqual([0, 5]);
+  });
+
+  test("shifts to CONTAIN a focused row rather than widening", () => {
+    // Focus cannot move to a node that is not in the DOM, so the window follows it: the first row at
+    // the top of a scrolled list stays mounted...
+    expect(keyTreeWindow(10_000, KEY_ROW_HEIGHT * 50, 240, 0)).toEqual([0, 18]);
+    // ...and so does the last one, which a scroll alone would have left eight hundred rows below.
+    expect(keyTreeWindow(10_000, KEY_ROW_HEIGHT * 50, 240, 9_999)).toEqual([9_982, 10_000]);
+  });
+
+  test("focusing a row near the top still mounts something", () => {
+    // THE REGRESSION. The scroll-derived start subtracts the overscan, so anywhere in the first four
+    // rows it was negative, and the focus branch passed that negative straight to the caller. A
+    // negative start is not an early window: `slice(-4, 14)` counts from the END, so a forty-row list
+    // came back EMPTY and the panel drew nothing below the filter box - not even the database row.
+    // Clicking a row is what sets a focus first, which is why this only showed up after a click.
+    for (let focus = 0; focus < 4; focus += 1) {
+      expect(keyTreeWindow(40, 0, 240, focus)).toEqual([0, 18]);
+    }
+    // The same blanking, reached a second way: a focused index that outlives its rows (a rescan, or
+    // collapsing the folder above it) points past the end, and the window must still mount the list.
+    expect(keyTreeWindow(10, 0, 240, 40)).toEqual([0, 10]);
+    expect(keyTreeWindow(5, KEY_ROW_HEIGHT * 50, 240, 7)).toEqual([0, 5]);
+    // And the invariants those cases were breaking, over a spread of counts, scrolls and foci: rows
+    // must actually come back, the focused row must be among them, and the rows a reader can see must
+    // be mounted rather than scrolled past.
+    for (let count = 0; count <= 60; count += 7) {
+      for (const scrollTop of [0, KEY_ROW_HEIGHT, KEY_ROW_HEIGHT * 3, KEY_ROW_HEIGHT * 30]) {
+        const firstVisible = Math.floor(scrollTop / KEY_ROW_HEIGHT);
+        for (const focus of [-1, 0, 1, 3, 8, 30, count - 1]) {
+          const [start, end] = keyTreeWindow(count, scrollTop, 240, focus);
+          const mounted = Array.from({ length: count }, (_, index) => index).slice(start, end);
+          expect(start).toBeGreaterThanOrEqual(0);
+          if (count > 0) expect(mounted.length).toBeGreaterThan(0);
+          if (focus >= 0 && focus < count) expect(mounted).toContain(focus);
+          // The scroll-derived window is the one that owes the reader their viewport. A focus window
+          // deliberately trades coverage for containment, so it makes no such promise.
+          if (focus < 0) {
+            for (let row = firstVisible; row < Math.min(firstVisible + 10, count); row += 1) {
+              expect(mounted).toContain(row);
+            }
+          }
+        }
+      }
+    }
+  });
+});
+
+describe("the ARIA pair every row carries", () => {
+  // Its OWN fixture, with a folder that has a child and a key that is nested three deep: enough to
+  // have three levels, and a load-more row at two of them.
+  const NESTED = ["app:cache:ttl", "app:env", "user:1001:name", "healthcheck"];
+
+  test("numbers the treeitems of a level against each other, and leaves the button out", () => {
+    const rows = flattenKeyTree(
+      buildKeyTree(NESTED),
+      () => true,
+      () => true,
+    );
+    const items = rows.filter((row) => row.kind !== "loadMore");
+    const byDepth = new Map<number, KeyTreeRow[]>();
+    for (const row of items) byDepth.set(row.depth, [...(byDepth.get(row.depth) ?? []), row]);
+
+    // Every level's set is complete (1..n) and every member agrees on its size, which is what a screen
+    // reader is told when the window has hidden the rest of the list.
+    expect(byDepth.size).toBeGreaterThan(1);
+    for (const group of byDepth.values()) {
+      expect(group.map((row) => row.posInSet)).toEqual(group.map((_, index) => index + 1));
+      for (const row of group) expect(row.setSize).toBe(group.length);
+    }
+
+    // There ARE load-more rows here, and they are exactly what would inflate those sets: a button has
+    // no `aria-posinset` of its own, so it is counted by nobody.
+    const buttons = rows.filter((row) => row.kind === "loadMore");
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.every((row) => row.setSize === 0 && row.posInSet === 0)).toBe(true);
+  });
+
+  test("puts a load-more row beside the children of the folder it belongs to", () => {
+    const rows = flattenKeyTree(
+      buildKeyTree(NESTED),
+      () => true,
+      () => true,
+    );
+    const depthOf = (path: string): number | undefined =>
+      rows.find((row) => row.kind === "node" && row.node.path.join(":") === path)?.depth;
+
+    // `cache` is a folder with one child: its button is drawn one level deeper than `cache`, which is
+    // the same level as `ttl` — the claim the window computes each row's `top` from, and the reason
+    // grouping by depth puts the button in the same neighbourhood as the children it follows.
+    const folder = depthOf("app:cache");
+    const child = depthOf("app:cache:ttl");
+    const button = rows.find((row) => row.kind === "loadMore" && row.path.join(":") === "app:cache");
+    expect(folder).toBeDefined();
+    expect(child).toBeDefined();
+    expect(button).toBeDefined();
+    expect(folder).toBe((child as number) - 1);
+    expect(button?.depth).toBe(child);
   });
 });

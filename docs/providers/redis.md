@@ -1339,6 +1339,9 @@ One page carries four fields in and four out:
   kinds: `n` is what the walk was HANDED (with `MATCH`, only the keys that passed it) and `m` is every
   key the database holds. A finished `user:*` walk reporting `137/1531` is not a stuck walk, so the
   word follows the question rather than inviting the reader to wait for a walk that is already over.
+  `n` is **held to the panel's 10,000-key budget**, because a page is counted whole even when that
+  budget truncates the tail of the last one: printed raw, the numerator would read a few keys above
+  the limit the panel states two lines below it, and invite a question whose answer is no.
 - **Rescan** — the same question asked again from cursor `"0"`. A key space changes under a sample, so
   this is an ordinary gesture rather than a recovery: it is the only way to see a key somebody else
   wrote. A page still in the air is dropped rather than mixed into the new walk.
@@ -1348,6 +1351,21 @@ One page carries four fields in and four out:
   between pages. The cap is a client budget and the panel says so in its own words when it ends a
   walk: `SCAN` is O(N) over the whole keyspace, so an unbounded "all" against a key space of millions
   is a request that never returns and a server that is busy while it does not.
+- **A second bound: the keys the tree HOLDS.** That budget is per press, and a reader can press more
+  than once — so the panel also refuses past **10,000 keys held**, across every page and every press
+  of every prefix, with its own sentence (`Holding 10,000 keys, which is this panel's limit…`). When
+  it is reached **Scan more and Scan all are disabled and no `Click to load more` row is offered**,
+  because a page bought for a tree that cannot take it is work thrown away. Both bounds are the same
+  number on purpose: one budget, stated once, and the two sentences say which one was met. A full tree
+  is not a spent one — the cursor is still live — so narrowing the pattern starts a fresh walk from
+  cursor `"0"` and the keys come back.
+- **The tree is WINDOWED.** Rows are drawn at a fixed height and only the ones the scroll box can
+  show are mounted, the way `ObjectTree` already does it: a prefix holding six thousand keys costs a
+  few dozen DOM nodes, not six thousand, and `aria-setsize`/`aria-posinset` are taken from the FULL
+  level so a screen reader is told how long the list really is while the window hides most of it. A
+  row the reader has focus on is kept in the window rather than unmounted, because focus cannot move
+  to a node that is not in the DOM. The database row scrolls with the rest of them — a row pinned over
+  a scrolling slice of prefixes would disagree with it about where the list starts.
 - **Click to load more**, under an open folder — one page of a walk **scoped to that prefix**
   ([§6.3](#63-the-prefix-scoped-walk-load-more)). It is the one control that can find keys the global
   sample never happened to include. The row carries **how many keys are loaded under that prefix** in
@@ -1476,6 +1494,8 @@ more under here".
   means the sample IS the key space, so every prefix in it is complete; a prefix whose own walk came
   back `"0"` is complete too; and while a filter is on the view is of what is held, so a row that
   pulled more into it would make the visible set depend on clicks the filter's term does not explain.
+  A fourth reason is the tree's own limit: at 10,000 keys held the panel takes no more pages of any
+  kind, and a row that could not deliver one is not an offer (§6.2, the held bound).
 
 ### 6.4 Known limitation: clustered deployments
 

@@ -199,37 +199,57 @@ export function flattenKeyTree(
   const rows: KeyTreeRow[] = [];
 
   const walk = (node: KeyTreeNode, depth: number): void => {
-    /*
-     * THE SIBLING SET INCLUDES THE LOAD-MORE ROW when one is offered, because that row is drawn AT
-     * THIS LEVEL, right after the children and beside them. Counting it in is what keeps every
-     * sibling's `posInSet` inside its own `setSize`: the load-more row is the last member of a set
-     * whose first members are the folder's children, so a set that omitted it would have a row
-     * numbered one past the end.
-     */
-    const moreFor = new Map<string, boolean>();
-    for (const child of node.children) moreFor.set(pathKey(child.path), canLoadMore(child.path));
-    const setSize = node.children.length + [...moreFor.values()].filter(Boolean).length;
-
-    node.children.forEach((child, index) => {
+    for (const child of node.children) {
       const folder = child.children.length > 0;
-      rows.push({ kind: "node", node: child, depth, folder, setSize, posInSet: index + 1 });
-      if (!folder || !isExpanded(child.path)) return;
+      rows.push({ kind: "node", node: child, depth, folder, setSize: 0, posInSet: 0 });
+      if (!folder || !isExpanded(child.path)) continue;
       walk(child, depth + 1);
-      if (moreFor.get(pathKey(child.path)) === true) {
+      if (canLoadMore(child.path)) {
         rows.push({
           kind: "loadMore",
           path: child.path,
           depth: depth + 1,
           count: child.count,
-          setSize,
-          posInSet: node.children.length + 1,
+          setSize: 0,
+          posInSet: 0,
         });
       }
-    });
+    }
   };
 
   walk(root, 0);
-  return rows;
+  return numberSiblings(rows);
+}
+
+/**
+ * The ARIA pair every row carries: the FULL set at its level, and its 1-based place in it.
+ *
+ * GROUPED BY DEPTH, which is the level `aria-level` speaks in, and not by parent - and that is the
+ * whole reason this is a pass over the FINISHED list rather than arithmetic at each push. A load-more
+ * row is drawn one level deeper than the folder it belongs to, so it shares a level with that
+ * folder's children while being neither their parent's sibling nor their own: a set computed from the
+ * node being walked would number it against the wrong rows, and the pair is exactly the thing a
+ * screen reader is told when the window has hidden the rest. Grouping the flat list by depth gives
+ * the set by construction, and numbering in emission order gives the place, with no row needing to
+ * know what came before it.
+ */
+function numberSiblings(rows: KeyTreeRow[]): KeyTreeRow[] {
+  // ITEM rows only. A load-more row is a BUTTON, and the ARIA set is the set of `treeitem`s: counting
+  // it would have every sibling announcing a set one larger than the items a screen reader can reach,
+  // and the button itself may not carry the pair at all (a button's role has no place for it).
+  const setSize = new Map<number, number>();
+  for (const row of rows) {
+    if (row.kind === "loadMore") continue;
+    setSize.set(row.depth, (setSize.get(row.depth) ?? 0) + 1);
+  }
+
+  const at = new Map<number, number>();
+  return rows.map((row) => {
+    if (row.kind === "loadMore") return row;
+    const posInSet = (at.get(row.depth) ?? 0) + 1;
+    at.set(row.depth, posInSet);
+    return { ...row, posInSet, setSize: setSize.get(row.depth) ?? 0 };
+  });
 }
 
 /**
@@ -335,12 +355,27 @@ export function keyTreeWindow(
 ): readonly [number, number] {
   if (height <= 0) return [0, count];
   const size = Math.min(count, Math.ceil(height / KEY_ROW_HEIGHT) + KEY_WINDOW_OVERSCAN * 2);
-  const byScroll = Math.floor(scrollTop / KEY_ROW_HEIGHT) - KEY_WINDOW_OVERSCAN;
-  const nearEnd = count - size;
+  /*
+   * CLAMPED TO ZERO ONCE, FOR BOTH BRANCHES BELOW, and that is a correctness rule rather than tidiness:
+   * the overscan subtraction makes this negative anywhere in the first four rows, and a NEGATIVE window
+   * start is not a window that begins early - `slice(-4, 14)` reads from the END of the list and, in a
+   * list longer than fourteen rows, returns NOTHING. The panel then draws no rows at all, the database
+   * row included, which is exactly what a reader sees after clicking a row near the top: the focus pin
+   * below is asked for a window around that row, and the arithmetic handed it a negative start.
+   */
+  const byScroll = Math.max(Math.floor(scrollTop / KEY_ROW_HEIGHT) - KEY_WINDOW_OVERSCAN, 0);
+  const nearEnd = Math.max(count - size, 0);
   const start =
     focusIndex < 0
-      ? Math.min(Math.max(byScroll, 0), Math.max(nearEnd, 0))
-      : Math.min(Math.max(byScroll, focusIndex - size + 1), Math.max(focusIndex, 0));
+      ? Math.min(byScroll, nearEnd)
+      : Math.min(
+          Math.max(byScroll, focusIndex - size + 1),
+          Math.max(focusIndex, 0),
+          // A focus index can outlive the rows it pointed into - a rescan or a collapse shrinks them
+          // while the row is still focused - and an index past the end would otherwise push the whole
+          // window off the list and blank the panel, so it is held to the last window start.
+          nearEnd,
+        );
   return [start, start + size];
 }
 

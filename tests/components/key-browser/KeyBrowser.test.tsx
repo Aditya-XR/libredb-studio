@@ -8,7 +8,8 @@ import userEvent from "@testing-library/user-event";
 import { mockGlobalFetch, restoreGlobalFetch, type MockFetchResponse } from "../../helpers/mock-fetch";
 
 import { KeyBrowser, type KeyPatternRequest } from "@/components/key-browser";
-import { SCAN_ALL_MAX_KEYS } from "@/components/key-browser/use-key-scan";
+import { KEY_ROW_HEIGHT } from "@/components/key-browser/tree";
+import { HELD_KEY_LIMIT, SCAN_ALL_MAX_KEYS } from "@/components/key-browser/use-key-scan";
 import type { ContainerLevelSpec } from "@/lib/db/types";
 import type { DatabaseConnection } from "@/lib/types";
 
@@ -305,7 +306,13 @@ describe("KeyBrowser", () => {
      * `use-key-scan`'s own suite, at 500 a page.
      */
     const wide = { defaultCount: SCAN_ALL_MAX_KEYS, maxCount: SCAN_ALL_MAX_KEYS };
-    const keys = Array.from({ length: SCAN_ALL_MAX_KEYS }, (_, index) => `bulk:${index}`);
+    // HANDED and HELD are counted differently, and the fixture shows both: `scanned` counts every key
+    // the walk was given, repeats included, while the tree holds DISTINCT keys. A page of ten thousand
+    // unique keys would fill the panel's own held budget at the same moment as this gesture's budget
+    // and the two bounds could never be observed apart — so one thousand of them repeat, the walk is
+    // still handed ten thousand, and only the gesture's sentence is under test.
+    const unique = SCAN_ALL_MAX_KEYS - 1_000;
+    const keys = Array.from({ length: SCAN_ALL_MAX_KEYS }, (_, index) => `bulk:${index % unique}`);
     // A no-op default rather than `| null`: the executor below replaces it before anything waits,
     // and a nullable declaration narrows to `null` at the call site, where `release?.()` then has
     // type `never`. `release` is reassigned inside the promise's executor, which TypeScript cannot
@@ -1192,5 +1199,133 @@ describe("KeyBrowser", () => {
         expect(progress()).toBe("Scanned 1/1531");
       });
     });
+  });
+  /**
+   * The panel's OWN bound, which is the one `Scan all`'s per-gesture budget is not.
+   *
+   * `SCAN_ALL_MAX_KEYS` bounds one press; this bounds everything the tree holds across every press of
+   * every control. The two are the same number on purpose - one budget, stated once - but they end
+   * different walks, and only this one can make an OFFER impossible rather than merely expensive.
+   */
+  describe("the held-key limit", () => {
+    test("says the tree is full and stops offering walks it could not use", async () => {
+      // 10,001 keys over THREE sub-folders: the limit is reached, and opening the prefix leaves three
+      // rows rather than ten thousand, so the assertion below is about the offer and not the render.
+      mockGlobalFetch({
+        "/api/db/keys/scan": page(
+          Array.from({ length: HELD_KEY_LIMIT + 1 }, (_, index) => `bulk:${index % 3}:${index}`),
+          "7",
+          12_000,
+        ),
+      });
+      renderBrowser();
+
+      await waitFor(() => {
+        expect(screen.getByTestId("key-browser-held")).toBeDefined();
+      });
+      expect(screen.getByTestId("key-browser-held").textContent).toContain("10,000");
+
+      // The numerator counts what the server HANDED over, and it was handed 10,001 - but the panel
+      // declares ten thousand its budget two lines below, so the fraction stops at the budget rather
+      // than printing a number above the limit it just stated. The tree holds exactly ten thousand,
+      // and the fraction is printed raw rather than with the tree's thousands separators.
+      expect(progress()).toBe("Scanned 10000/12000");
+
+      // The two controls that take pages do not offer one...
+      expect((screen.getByText("Scan more") as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByText("Scan all") as HTMLButtonElement).disabled).toBe(true);
+
+      // ...and a prefix's own row does not either: a scoped page would be filtered, deduplicated and
+      // dropped, so an offer that cannot deliver is worse than none. The cursor is still live, which
+      // is what makes this the held bound rather than the walk being spent.
+      fireEvent.click(screen.getByText("bulk:*"));
+      expect(rows()).toEqual(["bulk:*@0", "0:*@1", "1:*@1", "2:*@1"]);
+      expect(screen.queryByTestId("key-browser-load-more")).toBeNull();
+    });
+  });
+  /**
+   * The window doing its job, and the one row it must not lose.
+   *
+   * jsdom lays nothing out, so an unmeasured box measures 0 — and the panel's rule for that case is
+   * "mount everything you have" rather than a guess. Faking the measurement is therefore how the
+   * window's arithmetic is reached at all, and it is what the panel does on every real scroll.
+   */
+  test("mounts only what the box can show, and keeps a focused row when the window moves", async () => {
+    let pageTwo = 0;
+    const first = Array.from({ length: 40 }, (_, index) => `k${index}`);
+    mockGlobalFetch({
+      "/api/db/keys/scan": () => {
+        pageTwo += 1;
+        return pageTwo === 1 ? page(first, "9") : page(["k40", "k41", "k42"], "0");
+      },
+    });
+    renderBrowser();
+    await waitFor(() => {
+      expect(rows().length).toBe(40);
+    });
+
+    const tree = screen.getByRole("tree");
+    Object.defineProperty(tree, "clientHeight", { configurable: true, value: 240 });
+    // Scrolled past the end on purpose: the window clamps rather than asking for rows that do not
+    // exist, so the slice is the last eighteen rather than an empty one.
+    Object.defineProperty(tree, "scrollTop", { configurable: true, value: KEY_ROW_HEIGHT * first.length });
+    fireEvent.scroll(tree);
+
+    expect(rows().length).toBe(18);
+    expect(rows()[0]).toBe(`k${first.length - 18}@0`);
+
+    // Focus the first row that IS mounted — k22, panel index 22 — and give the row that focus
+    // protects a reason to move: `Scan more` grows the list, which moves the window's start from 22
+    // to 36 and would unmount the row the reader is standing on.
+    fireEvent.focus(screen.queryAllByRole("treeitem")[0]);
+    fireEvent.click(screen.getByText("Scan more"));
+    await waitFor(() => {
+      expect(rows().length).toBeGreaterThan(0);
+    });
+
+    // A focused row is in the window whatever the list did, because focus cannot move to a node that
+    // is not in the DOM. Without the pin, this assertion is the one that fails.
+    expect(rows().map((row) => row.split("@")[0])).toContain("k22");
+
+    // And the pin does NOT fight the scrollbar: scrolling is the reader's own instruction, so the
+    // window follows it again and the focused row may leave — the object tree's own rule.
+    Object.defineProperty(tree, "scrollTop", { configurable: true, value: 0 });
+    fireEvent.scroll(tree);
+    expect(rows().map((row) => row.split("@")[0])).not.toContain("k22");
+  });
+
+  test("keeps the tree mounted when a row near the top takes focus", async () => {
+    // THE REPORTED BUG, driven the way the reader drives it: a measured box, no scrolling, and a click
+    // on a row near the top. The window's overscan subtraction went negative up there, and a negative
+    // start is not an early window — `slice(-4, 14)` counts from the END, so the panel drew nothing at
+    // all below the filter box, database row included, until a click on the picker (which focuses no
+    // row) took the other branch. The row is focused rather than clicked because focus is the state
+    // that matters here, and a click on a treeitem focuses it too.
+    mockGlobalFetch(
+      redisRoutes(
+        page(
+          Array.from({ length: 40 }, (_, index) => `k${index}`),
+          "0",
+          40,
+        ),
+      ),
+    );
+    renderLevel();
+    await waitFor(() => {
+      expect(rows().length).toBeGreaterThan(1);
+    });
+
+    const tree = screen.getByRole("tree");
+    Object.defineProperty(tree, "clientHeight", { configurable: true, value: 240 });
+    // Measuring is the scroll handler's job and the scroll it reports is zero, which is the position
+    // this bug lived in.
+    fireEvent.scroll(tree);
+    fireEvent.focus(screen.queryAllByRole("treeitem")[1]);
+
+    // Eighteen rows is what the box holds, and the database row is the first of them: the tree is
+    // still there, at the same place, rather than emptied by the arithmetic.
+    expect(rows().length).toBe(18);
+    expect(rows()[0]).toBe("0@0");
+    expect(screen.getByTestId("key-browser-database")).toBeDefined();
   });
 });
