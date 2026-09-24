@@ -29,6 +29,7 @@ describe("fenceTagEngine", () => {
       "trino",
       "cassandra",
       "duckdb",
+      "prometheus",
     ] satisfies DatabaseType[];
 
     for (const engine of engines) expect(fenceTagEngine(engine)).toBe(engine);
@@ -91,5 +92,19 @@ describe("fenceTagEngine", () => {
     // The product name is the tag that DOES name the engine, and the canonical-engine
     // walk above asserts it.
     expect(isQueryFenceTag("cassandra")).toBe(true);
+  });
+
+  test("promql is a language tag that still names one engine, because one type-id runs PromQL", () => {
+    // An alias names the type-id a block's text runs on, not a product: `mariadb` names `mysql`
+    // and `turso` names `libsql`. Every PromQL server this product reaches, VictoriaMetrics
+    // included, connects through `prometheus` (#1085), so a ```promql block on any other
+    // connection was written for another engine. Naming none would let it pass there as the run's
+    // deliverable, the `mysql`-on-PostgreSQL case `fenceTagEngine` exists to catch.
+    expect(fenceTagEngine("promql")).toBe("prometheus");
+    // Naming an engine does not stop the block holding a query, so the editor is still offered it.
+    expect(isQueryFenceTag("promql")).toBe(true);
+    // The control: the canonical tag names the same engine, so the two spellings cannot disagree.
+    expect(isQueryFenceTag("prometheus")).toBe(true);
+    expect(fenceTagEngine("prometheus")).toBe("prometheus");
   });
 });

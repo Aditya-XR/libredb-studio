@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getOrCreateProvider } from "@/lib/db";
+import { createDatabaseProvider, getOrCreateProvider } from "@/lib/db";
 import { createErrorResponse } from "@/lib/api/errors";
 import { resolveConnection } from "@/lib/seed/resolve-connection";
 import { guardRoute } from "@/lib/api/require-session";
 import { readBoundParams } from "@/lib/api/bound-params";
+import { ObjectRouteError, objectRouteErrorBody, optionalDatabase } from "@/lib/api/object-route";
 import { getExplainStrategy, type ExplainMode } from "@/lib/explain";
 import { endsOpenQueryTransactions, newQueryCallScope } from "@/lib/db/types";
 import type { ExplainFormat, OpenQueryTransactionOutcome } from "@/lib/db/types";
@@ -51,7 +52,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { sql, options = {}, queryId } = body;
 
-    const connection = await resolveConnection(body, guard.session);
+    let connection = await resolveConnection(body, guard.session);
 
     if (!sql) {
       return NextResponse.json({ error: "Connection and query are required" }, { status: 400 });
@@ -68,6 +69,60 @@ export async function POST(req: NextRequest) {
     const explain = readExplainRequest(body.explain);
     if (!explain.valid) {
       return NextResponse.json({ error: explain.message }, { status: 400 });
+    }
+
+    // The database one RUN should reach. A key lives in exactly one numbered database and
+    // `GET <key>` cannot name it, so a tab opened under a chosen database carries the number here
+    // (`QueryTab.databaseOverride`) and the statement runs where the key is.
+    //
+    // READ RATHER THAN THROWN: this route answers body fields in its own style, and
+    // `createErrorResponse` does not know `ObjectRouteError` — a throw from here would reach it as a
+    // generic 500. The sentence itself is `optionalDatabase`'s and is shared with
+    // `POST /api/db/keys/scan`, so the two routes cannot drift about what an invalid `database` is.
+    let database: number | undefined;
+    try {
+      database = optionalDatabase(body, "database");
+    } catch (error) {
+      if (!(error instanceof ObjectRouteError)) throw error;
+      // The SAME body shape and status `handleObjectRequest` renders for it, so a caller cannot tell
+      // which of the two routes refused the field.
+      return NextResponse.json(objectRouteErrorBody(error), { status: error.status });
+    }
+
+    if (database !== undefined) {
+      /*
+       * APPLIED AFTER THE SEED IS RESOLVED, and gated on the walk being declared.
+       *
+       * `resolveConnection` discards a caller's connection fields when the id claims the `seed:`
+       * namespace (GHSA-3wh2-8x78), which is exactly why the number cannot ride on the connection
+       * object: for a managed connection it would be dropped on the way in and the read would run in
+       * the SESSION's database while the key tab claims it read another — the defect this field
+       * closes. A field of its own, applied to what the OPERATOR's config produced, touches nothing
+       * that decides which connection is opened or as whom, so the role filter is unchanged.
+       *
+       * The gate is `keyScan` for a reason and not a taste: this field carries the database a KEY was
+       * walked in, because Redis has no database-qualified key syntax. On an engine whose statements
+       * can name their own database the same field would be a per-run override of an
+       * operator-pinned `database` with no walk to justify it, so it is refused here in words rather
+       * than quietly honoured or quietly ignored.
+       *
+       * READ FROM THE DECLARATION, BEFORE ANY SOCKET. Capabilities are type-driven, so the
+       * unconnected provider `POST /api/db/provider-meta` reads them from (#457) answers the same
+       * question. Checked after `getOrCreateProvider`, an unreachable Postgres answered 503 for a
+       * request that was never valid, and a reachable one was connected only to be refused.
+       */
+      const declared = await createDatabaseProvider(connection);
+      if (declared.getCapabilities().keyScan === undefined) {
+        return NextResponse.json(
+          {
+            error:
+              `${connection.type} declares no key-space walk: "database" names the database a ` +
+              `key was walked in, and only an engine that needs such a name accepts it`,
+          },
+          { status: 400 },
+        );
+      }
+      connection = { ...connection, database: String(database) };
     }
 
     const provider = await getOrCreateProvider(connection);
@@ -168,7 +223,13 @@ export async function POST(req: NextRequest) {
         offset: prepared.offset,
         hasMore,
         totalReturned: result.rows.length,
-        wasLimited: prepared.wasLimited,
+        // A bound the PROVIDER applied is reported too (#1085, section 5.4). A provider that cuts
+        // its own result, as the Prometheus provider cuts a vector at its series cap, says so on
+        // the result's own `pagination`, and the badge this field drives says "Studio bounded this
+        // result", which is as true of that bound as of the limiter's. Only a `true` crosses, so a
+        // provider cannot clear a bound this layer applied, and `hasMore` above stays on
+        // `prepared.wasLimited` alone, because an offset can only advance a bound this layer wrote.
+        wasLimited: prepared.wasLimited || result.pagination?.wasLimited === true,
       },
     });
   } catch (error) {

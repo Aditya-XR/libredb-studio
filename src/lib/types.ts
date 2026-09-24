@@ -82,7 +82,13 @@ export type DatabaseType =
   // MotherDuck (`md:`), Quack and DuckLake are NOT this id and have no row anywhere
   // yet: each is a different connection story than a local path, and #424 publishes
   // no name it has not connected to.
-  | "duckdb";
+  | "duckdb"
+  // Prometheus (#1085). A metrics store queried in PromQL over its HTTP API, and the first
+  // provider whose `queryLanguage` is neither `sql` nor `json`. The connection is a host, a port
+  // and an optional credential: `user` and `password` are HTTP Basic, and a password with no
+  // user is sent as a bearer token. VictoriaMetrics speaks the same API and is recorded as a
+  // relative of this id, never as an id of its own.
+  | "prometheus";
 
 export type ConnectionEnvironment = "production" | "staging" | "development" | "local" | "other";
 
@@ -541,7 +547,7 @@ export interface QueryTab {
    */
   resultQuery?: string;
   isExecuting: boolean;
-  type: "sql" | "mongodb" | "redis" | "libredb";
+  type: "sql" | "mongodb" | "redis" | "libredb" | "promql";
   viewMode?: "results" | "explain" | "history" | "saved";
   explainPlan?: unknown;
   // Pagination state
@@ -549,9 +555,27 @@ export interface QueryTab {
   isLoadingMore?: boolean;
   allRows?: Record<string, unknown>[];
   /**
+   * The numbered database this tab's statements belong to, when the tab was opened against one
+   * that is NOT the connection's own session database.
+   *
+   * WHY THE TAB CARRIES IT. A key lives in exactly one numbered database, and Redis has no
+   * database-qualified key syntax: the database is a property of the CONNECTION (`SELECT n`) and
+   * never of the statement. `GET report:daily` therefore names the key and cannot name the database
+   * it is in, so the same statement sent on a connection sitting in another database reads a
+   * different key space and answers `(nil)` for a key that is right there. The panel that opened
+   * this tab walked one database, and every run of the tab - the initial read, the next Run, a
+   * selection, an inline edit, the next page - is about the same key, so the one fact travels with
+   * the tab rather than with the call that opened it.
+   *
+   * ABSENT MEANS NO OVERRIDE, and is not database `0` or "the session's number": it is the ordinary
+   * tab saying nothing, whose run reaches whatever database its connection names. Only this number
+   * is overridden; the connection is otherwise the active one, whole.
+   */
+  databaseOverride?: number;
+  /**
    * Present exactly on a Source tab (#789 Phase 2).
    *
-   * An optional FIELD and deliberately not a fifth member of `type`. Every member of that
+   * An optional FIELD and deliberately not another member of `type`. Every member of that
    * union is a QUERY DIALECT that `resolveTabType` may answer and that
    * `editorLanguageForTabType` maps onto `QueryEditor`'s closed language union, so a
    * `"source"` member would be an arm the resolver can never produce and the language mapper

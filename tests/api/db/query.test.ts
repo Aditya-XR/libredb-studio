@@ -27,6 +27,8 @@ import {
 // ─── Mock provider ──────────────────────────────────────────────────────────
 const mockProvider = createMockProvider();
 const mockGetOrCreateProvider = mock(async () => mockProvider);
+/** The unconnected provider a route reads a declaration from, `provider-meta`'s way (#457). */
+const mockCreateDatabaseProvider = mock(async (_connection: unknown) => mockProvider);
 
 const mockGetSession = mock(
   async (): Promise<{ role: string; username: string } | null> => ({ role: "admin", username: "admin" }),
@@ -56,6 +58,20 @@ mock.module("@/lib/seed/resolve-connection", () => {
       if (!body.connection && !body.connectionId) {
         throw new SeedConnectionError("Either connection or connectionId is required", 400);
       }
+      // A managed id resolves from the OPERATOR's config and everything the caller attached to the
+      // request is discarded — which the real `resolveConnection` does for the same reason (a `seed:`
+      // id is the operator's namespace, GHSA-3wh2-8x78). This is exactly the path the top-level
+      // `database` field has to survive: nothing the caller sent on a connection reaches this object.
+      if (typeof body.connectionId === "string" && body.connectionId.startsWith("seed:")) {
+        return {
+          id: body.connectionId,
+          name: "Seed Redis",
+          type: "redis",
+          host: "seed-host",
+          port: 6379,
+          database: "0",
+        };
+      }
       return body.connection;
     }),
     SeedConnectionError,
@@ -65,7 +81,7 @@ mock.module("@/lib/seed/resolve-connection", () => {
 // ─── Mock @/lib/db BEFORE importing the route ───────────────────────────────
 mock.module("@/lib/db", () => ({
   getOrCreateProvider: mockGetOrCreateProvider,
-  createDatabaseProvider: mock(),
+  createDatabaseProvider: mockCreateDatabaseProvider,
   removeProvider: mock(),
   clearProviderCache: mock(),
   getProviderCacheStats: mock(),
@@ -454,6 +470,151 @@ describe("POST /api/db/query", () => {
     expect(res.status).toBe(200);
     expect(data.pagination.hasMore).toBe(false);
     expect(data.pagination.totalReturned).toBe(3);
+  });
+
+  /**
+   * A bound the PROVIDER applied reaches the response too (#1085, section 5.4).
+   *
+   * The route rebuilt `pagination` from `prepareQuery` alone, so a provider that cut its own
+   * result said so into a field the response then overwrote. The fixture is that provider's
+   * shape: its `prepareQuery` rewrites nothing, and its result carries its own `pagination`.
+   * The rows fill `prepared.limit` exactly and the provider's own `hasMore` says true, so a
+   * route that took `hasMore` from the provider, or from the joined `wasLimited`, would offer
+   * a Load More that re-runs the same statement; and the provider's other four fields differ
+   * from the route's, so only `wasLimited` may cross.
+   */
+  test("keeps a provider-reported wasLimited, and hasMore stays on the limiter's own bound", async () => {
+    const selfBounded = createMockProvider({
+      prepareQueryResult: { query: "up", wasLimited: false, limit: 3, offset: 0 },
+    });
+    mockGetOrCreateProvider.mockResolvedValueOnce(selfBounded as never);
+    (selfBounded.query as ReturnType<typeof mock>).mockResolvedValueOnce({
+      rows: [{ value: 1 }, { value: 2 }, { value: 3 }],
+      fields: ["value"],
+      rowCount: 3,
+      executionTime: 4,
+      pagination: { limit: 500, offset: 7, hasMore: true, totalReturned: 500, wasLimited: true },
+    });
+
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: { connection: validConnection, sql: "up" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{
+      pagination: { limit: number; offset: number; hasMore: boolean; totalReturned: number; wasLimited: boolean };
+    }>(res);
+
+    expect(res.status).toBe(200);
+    expect(data.pagination).toEqual({ limit: 3, offset: 0, hasMore: false, totalReturned: 3, wasLimited: true });
+  });
+
+  test("the control: the same provider with no pagination of its own reports the limiter's false", async () => {
+    const unbounded = createMockProvider({
+      prepareQueryResult: { query: "up", wasLimited: false, limit: 3, offset: 0 },
+    });
+    mockGetOrCreateProvider.mockResolvedValueOnce(unbounded as never);
+    (unbounded.query as ReturnType<typeof mock>).mockResolvedValueOnce({
+      rows: [{ value: 1 }, { value: 2 }, { value: 3 }],
+      fields: ["value"],
+      rowCount: 3,
+      executionTime: 4,
+    });
+
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: { connection: validConnection, sql: "up" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{
+      pagination: { limit: number; offset: number; hasMore: boolean; totalReturned: number; wasLimited: boolean };
+    }>(res);
+
+    expect(res.status).toBe(200);
+    expect(data.pagination).toEqual({ limit: 3, offset: 0, hasMore: false, totalReturned: 3, wasLimited: false });
+  });
+
+  test("a SQL result with no pagination of its own answers exactly what the route answered before", async () => {
+    // Every shipped provider's shape: the mock's default `prepareQuery` rewrote the statement
+    // (`wasLimited: true`, limit 50, `tests/helpers/mock-provider.ts:157-165`) and the result
+    // carries no `pagination`. The whole object is pinned, so no field of it moved.
+    (mockProvider.query as ReturnType<typeof mock>).mockResolvedValueOnce({
+      rows: Array.from({ length: 50 }, (_, i) => ({ id: i + 1 })),
+      fields: ["id"],
+      rowCount: 50,
+      executionTime: 10,
+    });
+
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: { connection: validConnection, sql: "SELECT * FROM users" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{
+      pagination: { limit: number; offset: number; hasMore: boolean; totalReturned: number; wasLimited: boolean };
+    }>(res);
+
+    expect(res.status).toBe(200);
+    expect(data.pagination).toEqual({ limit: 50, offset: 0, hasMore: true, totalReturned: 50, wasLimited: true });
+  });
+
+  test("a provider's own false cannot clear a bound the limiter applied", async () => {
+    // The same limiter-bounded statement, and a result that says `wasLimited: false`. No shipped
+    // provider sets `pagination`, so this is the arm that keeps an external implementer's
+    // `false` from hiding the badge, and `hasMore` still answers from the limiter's bound.
+    (mockProvider.query as ReturnType<typeof mock>).mockResolvedValueOnce({
+      rows: Array.from({ length: 50 }, (_, i) => ({ id: i + 1 })),
+      fields: ["id"],
+      rowCount: 50,
+      executionTime: 10,
+      pagination: { limit: 50, offset: 0, hasMore: false, totalReturned: 50, wasLimited: false },
+    });
+
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: { connection: validConnection, sql: "SELECT * FROM users" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{
+      pagination: { limit: number; offset: number; hasMore: boolean; totalReturned: number; wasLimited: boolean };
+    }>(res);
+
+    expect(res.status).toBe(200);
+    expect(data.pagination).toEqual({ limit: 50, offset: 0, hasMore: true, totalReturned: 50, wasLimited: true });
+  });
+
+  test("a provider's own false leaves an untouched statement unlimited", async () => {
+    // The mirror of the test above: nothing bounded this statement, and the provider's result
+    // carries a `pagination` that says `wasLimited: false`. Only a `true` crosses, so a
+    // `pagination` that is present is not by itself a bound, and the badge stays off.
+    const untouched = createMockProvider({
+      prepareQueryResult: { query: "up", wasLimited: false, limit: 3, offset: 0 },
+    });
+    mockGetOrCreateProvider.mockResolvedValueOnce(untouched as never);
+    (untouched.query as ReturnType<typeof mock>).mockResolvedValueOnce({
+      rows: [{ value: 1 }, { value: 2 }, { value: 3 }],
+      fields: ["value"],
+      rowCount: 3,
+      executionTime: 4,
+      pagination: { limit: 3, offset: 0, hasMore: false, totalReturned: 3, wasLimited: false },
+    });
+
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: { connection: validConnection, sql: "up" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{
+      pagination: { limit: number; offset: number; hasMore: boolean; totalReturned: number; wasLimited: boolean };
+    }>(res);
+
+    expect(res.status).toBe(200);
+    expect(data.pagination).toEqual({ limit: 3, offset: 0, hasMore: false, totalReturned: 3, wasLimited: false });
   });
 
   test("returns 499 for interrupted query execution", async () => {
@@ -937,5 +1098,106 @@ describe("POST /api/db/query and the transaction its own statement left open", (
 
     expect(res.status).toBe(200);
     expect("openTransaction" in data).toBe(false);
+  });
+});
+
+// ─── the database a run reads (#1095) ────────────────────────────────────────
+/**
+ * A key lives in exactly one numbered database and `GET <key>` cannot name it, so a run that must
+ * reach another one says which — as a field BESIDE the connection, because a managed connection
+ * travels as an id and the server discards whatever the caller attached to it. The field is refused
+ * outright on an engine that declares no key-space walk: on any other engine it would be a per-run
+ * override of an operator-pinned `database` with no walk to justify it.
+ */
+describe("POST /api/db/query — the database a run reads", () => {
+  beforeEach(() => {
+    clearRateLimitState();
+    mockGetOrCreateProvider.mockClear();
+    mockCreateDatabaseProvider.mockClear();
+    (mockProvider.query as ReturnType<typeof mock>).mockClear();
+    (mockProvider.prepareQuery as ReturnType<typeof mock>).mockClear();
+    (mockProvider.getCapabilities as ReturnType<typeof mock>).mockClear();
+  });
+
+  /** The connections the route asked to open, in order, with the typing the calls carry. */
+  function openedConnections(): Array<Record<string, unknown>> {
+    return (mockGetOrCreateProvider.mock.calls as unknown as Array<[Record<string, unknown>]>).map((call) => call[0]);
+  }
+
+  test("applies a run's database to the connection a managed id resolved to", async () => {
+    // `defaultCapabilities` declares no walk, and the gate reads the declaration: one walk-shaped
+    // answer is injected for this request, exactly as the real provider declares it.
+    (mockProvider.getCapabilities as ReturnType<typeof mock>).mockReturnValueOnce({
+      keyScan: { defaultCount: 500, maxCount: 1000 },
+    });
+
+    const res = await POST(
+      createMockRequest("/api/db/query", {
+        method: "POST",
+        body: { connectionId: "seed:test-redis-6380", sql: "GET db1:only:key", database: 3 },
+      }) as never,
+    );
+
+    expect(res.status).toBe(200);
+    // The declaration is read from the operator's config without a socket, and only the connection
+    // with this run's database applied is opened. Before this field a caller had no way to produce
+    // that connection at all, so the read fell back to the session's database while the key tab
+    // claimed it had read another.
+    expect(mockCreateDatabaseProvider.mock.calls[0]?.[0]).toMatchObject({ host: "seed-host", database: "0" });
+    const opened = openedConnections();
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ host: "seed-host", database: "3" });
+  });
+
+  test("refuses a database on an engine that declares no key-space walk, without connecting", async () => {
+    (mockProvider.getCapabilities as ReturnType<typeof mock>).mockReturnValueOnce({});
+
+    const res = await POST(
+      createMockRequest("/api/db/query", {
+        method: "POST",
+        body: { connection: validConnection, sql: "SELECT 1", database: 1 },
+      }) as never,
+    );
+    const data = await parseResponseJSON<{ error: string }>(res);
+
+    expect(res.status).toBe(400);
+    expect(data.error).toContain("declares no key-space walk");
+    // Refused from the declaration alone: an unreachable Postgres answered 503 here while the gate
+    // ran after the connect, which reported a network fault for a request that was never valid.
+    expect(mockCreateDatabaseProvider).toHaveBeenCalledTimes(1);
+    expect(openedConnections()).toHaveLength(0);
+  });
+
+  test("refuses an invalid database with the sentence the walk route refuses with", async () => {
+    const res = await POST(
+      createMockRequest("/api/db/query", {
+        method: "POST",
+        body: { connection: validConnection, sql: "SELECT 1", database: -1 },
+      }) as never,
+    );
+    const data = await parseResponseJSON<{ error: string }>(res);
+
+    expect(res.status).toBe(400);
+    // `optionalDatabase`'s own sentence, shared with `POST /api/db/keys/scan` — the same words on both
+    // routes is the point, so a change to one of them has to change this expectation too.
+    expect(data.error).toBe('"database" must be a non-negative integer');
+    // Refused before anything is opened at all.
+    expect(openedConnections()).toHaveLength(0);
+  });
+
+  test("names no database at all when a run carries none, and opens the connection once", async () => {
+    const res = await POST(
+      createMockRequest("/api/db/query", {
+        method: "POST",
+        body: { connection: validConnection, sql: "SELECT 1" },
+      }) as never,
+    );
+
+    expect(res.status).toBe(200);
+    // Absent is not zero: one lookup, with the connection exactly as configured, and no
+    // declaration to read.
+    expect(mockCreateDatabaseProvider).not.toHaveBeenCalled();
+    expect(openedConnections()).toHaveLength(1);
+    expect(openedConnections()[0]).toMatchObject({ database: "testdb" });
   });
 });

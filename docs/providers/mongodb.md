@@ -92,9 +92,9 @@ It is optional: absent means the connected database, which is what every stateme
 A non-string or empty value is a `QueryError`, raised before any database is opened: `MongoClient.db()` opens any string it is given, and a database that does not exist answers every read with 0 rows.
 A database the credentials cannot read raises the server's own sentence (`not authorized on analytics to execute command ...`), never an empty result.
 
-Every statement the product writes for a collection carries the key: the tree click and Generate Query (`generateTableQuery`, `generateSelectQuery`), the profiler (`/api/db/profile`) and the test data generator.
-All four read it through `jsonCommandAddress()` in [`query-generators.ts`](../../src/lib/query-generators.ts), which takes the segment the declaration assigns to the `schema` level rather than `path[0]` (standing ruling 5g) and refuses a path that does not match the declared levels.
-Before #843 all four named the collection alone, so a collection outside the connected database read, profiled and was written as the connected database's same-named collection.
+Every statement the product writes for a collection carries the key: the tree click, Generate Query and the count query (`generateTableQuery`, `generateSelectQuery`, `generateCountQuery`), the profiler (`/api/db/profile`) and the test data generator.
+All five read it through `jsonCommandAddress()` in [`query-generators.ts`](../../src/lib/query-generators.ts), which takes the segment the declaration assigns to the `schema` level rather than `path[0]` (standing ruling 5g) and refuses a path that does not match the declared levels.
+Before #843 every one of them named the collection alone, so a collection outside the connected database read, profiled and was written as the connected database's same-named collection.
 
 `distinct` is the one operation with a key of its own: `field`, the driver's own parameter name, and
 it is **required**. The example above answers one row per category, shaped `{ "category": <value> }`.

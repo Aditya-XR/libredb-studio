@@ -58,7 +58,7 @@ defaults:                    # Optional — merges managed/environment/ssl only
 connections:
   - id: "analytics-pg"       # Required, unique, lowercase slug [a-z0-9-]
     name: "Analytics DB"      # Required, display name in UI
-    type: postgres            # Required: postgres|mysql|sqlite|libsql|duckdb|mongodb|redis|oracle|mssql|libredb|couchbase|clickhouse|druid|elasticsearch|opensearch|trino|cassandra
+    type: postgres            # Required: postgres|mysql|sqlite|libsql|duckdb|mongodb|redis|oracle|mssql|libredb|couchbase|clickhouse|druid|elasticsearch|opensearch|trino|cassandra|prometheus
     host: "${PG_HOST}"
     port: 5432
     database: analytics
@@ -133,6 +133,21 @@ connections:
     environment: production
     # No `connectionString`: no URI convention carries localDataCenter, so a pasted
     # one would produce a connection that cannot open.
+
+  - id: "metrics-prom"
+    name: "Prometheus Metrics"
+    type: prometheus
+    host: "${PROMETHEUS_HOST}"
+    port: 9090                # The HTTP API and the web UI share this port
+    roles: ["*"]
+    environment: production
+    # No `database`: one Prometheus server is one TSDB, so there is nothing to select.
+    # No `connectionString` either: http:// and https:// already parse as ClickHouse.
+    # user/password are optional. Both set send Basic auth (Grafana Cloud's scheme,
+    # though its query API sits under a path prefix this version cannot reach); a
+    # password alone is sent as a bearer token, for a token-guarded proxy. Over plain
+    # HTTP either one is readable on the wire, so set `ssl` for a server across a
+    # network you do not control.
 ```
 
 ### Field Reference
@@ -147,7 +162,7 @@ connections:
 | `connections` | Yes | — | Array of connection definitions (min 1) |
 | `connections[].id` | Yes | — | Unique slug: `[a-z0-9-]+`, max 64 chars |
 | `connections[].name` | Yes | — | Display name, max 128 chars |
-| `connections[].type` | Yes | — | Database type: `postgres`, `mysql`, `sqlite`, `libsql`, `duckdb`, `mongodb`, `redis`, `oracle`, `mssql`, `libredb`, `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`, `cassandra` |
+| `connections[].type` | Yes | — | Database type: `postgres`, `mysql`, `sqlite`, `libsql`, `duckdb`, `mongodb`, `redis`, `oracle`, `mssql`, `libredb`, `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`, `cassandra`, `prometheus` |
 | `connections[].host` | No | — | Hostname or IP |
 | `connections[].port` | No | — | Port number (1-65535) |
 | `connections[].database` | No | — | Database name (Couchbase: the bucket. Druid has one catalog and ignores it. Trino: the **catalog**) |
@@ -490,7 +505,8 @@ extraEnvFrom:
 
 ### Credential Protection
 
-- `managed: true` connections: passwords **never reach the client**. The API strips `password` and `connectionString` from responses. Server resolves credentials at query execution time.
+- `managed: true` connections: credentials **never reach the client**. The API strips every field `src/lib/storage/connection-secrets.ts` classifies as secret, which on a seed means `password`, `connectionString`, the Elasticsearch `apiKeyId` and `apiKeySecret` pair, and `ssl.clientKey`. Certificates (`ssl.caCert`, `ssl.clientCert`) are public and still reach it. Server resolves credentials at query execution time.
+- That covers what the API returns, not what an engine answers a statement with. A managed Redis seed that authenticates with `requirepass` answers `CONFIG GET requirepass` with the password, so give a managed seed a least-privilege credential, for Redis an ACL user without `+config`.
 - Config file should be mounted **read-only** (`:ro` in Docker, `readOnly: true` in Kubernetes).
 - Use `${ENV_VAR}` for all secrets. Plaintext passwords trigger a warning log.
 

@@ -19,15 +19,16 @@ Three decisions. The first is the consequential one, which is why it is first.
 
 1. **Does it need a driver at all?** Score the engine against the rubric below. A database with a
    first-class HTTP API can be supported with no dependency at all, and that is worth real effort to
-   establish before you start. Eight shipped type-ids need no driver: SQLite uses the built-in
+   establish before you start. Nine shipped type-ids need no driver: SQLite uses the built-in
    `bun:sqlite`/`node:sqlite` via `sqlite-driver.ts`, and the rest reach the engine over HTTP with
    nothing but `fetch`/`node:https`. Couchbase goes over the documented REST endpoints
    ([couchbase.md](./providers/couchbase.md)), ClickHouse over its HTTP interface
    ([clickhouse.md](./providers/clickhouse.md)), Apache Druid over `POST /druid/v2/sql`
    ([druid.md](./providers/druid.md)), Elasticsearch and OpenSearch over their SQL endpoints
    ([elasticsearch.md](./providers/elasticsearch.md) · [opensearch.md](./providers/opensearch.md)),
-   Apache Trino over its own client protocol ([trino.md](./providers/trino.md)), and libSQL over the
-   Hrana protocol, `POST /v2/pipeline` ([libsql.md](./providers/libsql.md)). If it does need one, it
+   Apache Trino over its own client protocol ([trino.md](./providers/trino.md)), libSQL over the
+   Hrana protocol, `POST /v2/pipeline` ([libsql.md](./providers/libsql.md)), and Prometheus over its
+   HTTP API, `/api/v1/*` ([prometheus.md](./providers/prometheus.md)). If it does need one, it
    will be something like `pg`,
    `mysql2`, `mongodb`, `ioredis`, `oracledb` or `mssql`.
 
@@ -66,7 +67,7 @@ own networking, and the saving is concrete rather than aesthetic:
 - **No install step to fail.** The Couchbase SDK runs a postinstall that downloads a prebuilt binary
   or compiles from source; in an air-gapped or egress-restricted network that breaks `bun install`.
 - **No growth in any distribution channel.** A native module lands in the Docker image, Snap,
-  AppImage, Flatpak, deb/rpm, and in the `@libredb/studio` package that libredb-platform inherits.
+  AppImage, Flatpak, deb/rpm, and in the published `@libredb/studio` package.
   For reference, the Couchbase SDK is 64.6 MB unpacked across 3765 files.
 - **No supply-chain surface** added, and no N-API compatibility question for the Bun runtime.
 
@@ -184,18 +185,16 @@ If your database uses a new editor mode (not `'sql'` or `'mongodb'`), add it:
 ```typescript
 export interface QueryTab {
   // ...
-  type: 'sql' | 'mongodb' | 'redis' | 'libredb';  // Add your type here if needed
+  type: 'sql' | 'mongodb' | 'redis' | 'libredb' | 'promql';  // Add your type here if needed
 }
 ```
 
 For most SQL databases, the existing `'sql'` type is sufficient. You only need a new tab type if your database uses a fundamentally different query language.
 
-A new tab type needs three things wired, all in `src/lib/editor/tab-language.ts` and its neighbours:
-declare `queryDialect` on the provider, add the arm to `resolveTabType()` **above** the
-`queryLanguage === 'json'` rung, and map the type to a Monaco language in
-`editorLanguageForTabType()` — registering that language module in `QueryEditor`'s
-`handleBeforeMount` alongside `registerLibreDBLanguage` / `registerRedisLanguage`. Skipping the
-dialect leaves the tab typed `mongodb` and the arm unreachable, which is exactly what #427 fixed.
+A new tab type is reached one of two ways, and both are wired in `src/lib/editor/tab-language.ts` and its neighbours.
+A language that is a kind of JSON declares a `queryDialect` on the provider and gets an arm in `resolveTabType()` **above** the `queryLanguage === 'json'` rung; skipping the dialect leaves the tab typed `mongodb` and the arm unreachable, which is exactly what #427 fixed.
+A language that is neither SQL nor JSON widens `ProviderCapabilities.queryLanguage` instead, as PromQL did (#1085), and every reader of that union then needs an explicit arm or a test pinning that its branch is right, because a reader written `=== 'json'` sends the new member into its SQL branch and one written `!== 'sql'` into its JSON branch.
+Either way the type is mapped to a Monaco language in `editorLanguageForTabType()`, and that language module is registered in `QueryEditor`'s `handleBeforeMount` alongside `registerLibreDBLanguage`, `registerRedisLanguage` and `registerPromqlLanguage`.
 
 ## Step 2: Create the Provider Class
 
@@ -435,7 +434,7 @@ bun add <driver-package>
 
 If your engine exposes a documented HTTP API, weigh it against the native driver before adding a
 dependency: a native module lands in the Docker image, every native distribution channel, and the
-`@libredb/studio` package that libredb-platform consumes.
+published `@libredb/studio` package.
 
 **DuckDB is the counter-example, and it is worth stating rather than hiding.** It has no first-class
 HTTP query API to weigh — the engine is a library, not a server — so the native `@duckdb/node-api`
@@ -679,7 +678,7 @@ Every field and what it controls:
 
 | Field | Type | Controls |
 |-------|------|----------|
-| `queryLanguage` | `'sql' \| 'json'` | Monaco editor language mode, AI prompt style, query template format |
+| `queryLanguage` | `'sql' \| 'json' \| 'promql'` | Monaco editor language mode, AI prompt style, query template format. A closed union: a new member needs an arm, or a test pinning its branch, in every reader (#1085) |
 | `queryDialect` | `'libredb' \| 'redis' \| undefined` | Optional. Opts a provider's tables into a custom client-side query generator (see `query-generators.ts`) and picks the editor tab type and Monaco language. Checked **before** `queryLanguage` everywhere — `queryLanguage: 'json'` alone means MongoDB, which is how Redis silently got MongoDB documents until #427. Left undefined by SQL and MongoDB |
 | `supportsExplain` | `boolean` | EXPLAIN button visibility in QueryEditor toolbar |
 | `explainFormat` | `ExplainFormat \| undefined` | **Required whenever `supportsExplain` is true.** Selects the strategy in `src/lib/explain/index.ts`. Setting the flag without the format leaves the control visible and dead — the UI resets out of explain mode when metadata lacks it |
@@ -689,9 +688,9 @@ Every field and what it controls:
 | `supportsResultPagination` | `boolean?` | Whether your `prepareQuery` really applies a positive `offset`. `false` hides the results grid's Load More control. Not the same question as `supportsExternalQueryLimiting`; measure it, do not infer it. Optional and gated on `=== true` for the same published-interface reason as the flag above |
 | `supportsTransactions` | `boolean?` | Whether THIS PROVIDER implements the interactive transaction session `POST /api/db/transaction` drives (`beginTransaction`/`commitTransaction`/`rollbackTransaction` over one held connection). `false` withholds the editor toolbar's BEGIN/COMMIT/ROLLBACK trio **and** the SANDBOX toggle, which auto-rolls-back through the same route. It is about the provider's surface, not the engine: SQLite has `BEGIN` and still declares `false`. Optional for the published-interface reason above; the UI gates on `=== true`, so an absent flag and an unresolved metadata fetch both read as no transactions (#464) |
 | `declaresForeignKeys` | `boolean?` | Whether this engine has foreign keys in its model at all. `false` says an empty foreign-key list means "no such constraint exists here", not "this schema declares none" — set it on every engine without referential constraints. Optional for the published-interface reason above; consumers gate on `=== false`, so an absent flag reads as "may declare them" |
-| `tablesAreDerivedGroupings` | `boolean?` | Whether this provider's relation-shaped rows are objects the engine holds, or groupings this server derived from a bounded scan. `true` on Redis and LibreDB only. Where it is true the schema explorer hides every menu item that *addresses* the row — `Profile Table`, `Generate Test Data`, and both per-row maintenance items, all of which name the row to a route that needs a real object — and keeps the ones that merely name it (`Select`, `Generate`, `Copy Name`, `Generate Code`). The agent layer states it to a plan run in one sentence. Consumers gate on `=== true`, so an absent flag reads as "ordinary objects" |
+| `tablesAreDerivedGroupings` | `boolean?` | Whether the relation-shaped rows of this provider are objects the engine holds, or groupings this server derived from a bounded scan. `true` on Redis and LibreDB only. Where it is true the schema explorer hides the items that *address* the row, `Profile Table`, `Generate Count Query` and both per-row maintenance items, all of which name the row to a route that needs a real object, and keeps the ones that merely name it (`Select`, `Generate`, `Copy Name`, `Generate Code`). It does not gate `Generate Test Data`: since #1085 (decision D-M) both row menus offer that item only where the kind of the row declares `acceptsRowWrites` and the engine declares `supportsInlineRowEdit`. With `keyScan` beside it, it is also one half of the gate on `Browse Keys`, the row-menu item that opens the key-space panel with the row's own name as its `MATCH` pattern: a prefix is only a glob on an engine whose rows are prefixes. The agent layer states it to a plan run in one sentence. Consumers gate on `=== true`, so an absent flag reads as "ordinary objects" |
 | `supportsMaintenance` | `boolean` | Whether maintenance API accepts requests for this provider |
-| `maintenanceOperations` | `MaintenanceType[]` | Which global cards and per-table buttons the admin Operations tab renders. `/api/db/maintenance` rejects anything not in this list, so a surface that ignored it could only offer a control answering HTTP 400. The schema explorer's row menu does **not** read it — its per-row maintenance items are gated on `isAdmin` and on `tablesAreDerivedGroupings`; see #496 for the mismatches that leaves |
+| `maintenanceOperations` | `MaintenanceType[]` | Which global cards and per-table buttons the admin Operations tab renders. `/api/db/maintenance` rejects anything not in this list, so a surface that ignored it could only offer a control answering HTTP 400. Both row menus read it too, through `maintenanceControl()` (#496): a per-row maintenance item is offered only for an operation declared here, and not where its `maintenanceOperationSpecs` entry sets `perEntity: false`. Both offer such an item to an admin only, and the schema explorer also withholds it from a derived grouping (`tablesAreDerivedGroupings`) |
 | `supportsConnectionString` | `boolean` | Used for future connection validation logic |
 | `defaultPort` | `number \| null` | Informational; actual UI port comes from `db-ui-config.ts` |
 | `schemaRefreshPattern` | `string` | Regex to detect write/DDL queries that should trigger schema reload |
@@ -746,7 +745,7 @@ const result = await provider.query(prepared.query);
 | Field | Purpose |
 |-------|---------|
 | `query` | The (possibly modified) query string to execute |
-| `wasLimited` | Whether a LIMIT was injected (shown as warning badge in UI) |
+| `wasLimited` | Whether a LIMIT was injected. The query route reports it on the response's `pagination.wasLimited`, which the stats strip shows as the "limited" badge. A provider that bounds its own result instead, as the Prometheus provider cuts a vector at its series cap, returns `false` here and reports its bound on `QueryResult.pagination.wasLimited`, which `POST /api/db/query` keeps (#1085, section 5.4); such a bound never sets `hasMore`, because no offset can advance it |
 | `limit` | The effective row limit |
 | `offset` | The effective offset |
 
@@ -756,7 +755,7 @@ For the authoritative, code-verified reference for each shipped provider (extend
 driver, pooling, capabilities, labels, `prepareQuery` behaviour, and limitations), see the prime
 docs — they are the single source of truth and are kept in sync with the code:
 
-**[docs/providers/](./providers/README.md)** → postgres · mysql · oracle · mssql · sqlite · libsql · duckdb · redis · mongodb · couchbase · clickhouse · druid · elasticsearch · opensearch · trino · cassandra · libredb
+**[docs/providers/](./providers/README.md)** → postgres · mysql · oracle · mssql · sqlite · libsql · duckdb · redis · mongodb · couchbase · clickhouse · druid · elasticsearch · opensearch · trino · cassandra · prometheus · libredb
 
 When implementing a new provider, the closest existing analogue is the best template: a pooled SQL
 provider (postgres/mysql), an embedded SQL provider (sqlite), a non-SQL provider (mongodb/redis), or
@@ -877,8 +876,8 @@ The integration points, all of which need an entry. This is the list the Strateg
       published engine count silently undercount; it is listed here because the count in `README.md`
       and `docs/BRAND_MESSAGING.md` is derived from it and has to move in the same PR
 - [ ] `package.json` — the driver, **if** it needs one. A driver-free provider leaves it untouched, and
-      seven shipped ids do: `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`
-      and `libsql`
+      eight shipped ids do: `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`,
+      `libsql` and `prometheus`
       each add nothing here
 - [ ] `database-compose.yml` — a service, so the next person can repeat the live pass. A distributed
       engine contributes a `profiles: [...]` set instead, as Druid's seven services do, so the default
@@ -887,6 +886,22 @@ The integration points, all of which need an entry. This is the list the Strateg
       the absence as an oversight. Check what the image ships before writing a healthcheck: the
       ClickHouse image has no `curl` and the Trino image ships its own `health-check` script that waits
       for `"starting": false`, which a bare `curl /v1/info` would not
+
+**Also always, and not named above until the Prometheus provider found them (#1085):** each is an exhaustive record or a hand-kept population.
+Three searches reach them: the `git grep -l` of an earlier provider's type-id that the note below names, `git grep -n "Record<DatabaseType" -- src tests` with its two-line form `git grep -n -A1 -E "Record<\s*$" -- src tests | grep -B1 "DatabaseType,"`, and `git grep -n "DatabaseType\[\]" -- src tests`.
+The compiler refuses the first seven without an entry; the last two are refused by a test.
+
+- [ ] `src/lib/db/compatibility.ts`: the `EXTERNAL` record beside `SHIPPED`.
+      It answers whether the new id is an external engine or an embedded store, and every published database count reads it.
+- [ ] `src/lib/db-showcase.ts`: `SHOWCASE_RANK`, the login showcase's order.
+- [ ] `src/lib/sql/fence-tags.ts`: `ENGINE_FENCE_TAGS`, the fence tags a plan-mode draft may carry.
+- [ ] `src/lib/sql/values.ts`: `LITERAL_ESCAPE`.
+- [ ] `src/lib/export/result-export.ts`: `STANDS_ALONE` and `BINARY_LITERAL`, plus a decision on the partial `DIALECT_TYPES`.
+- [ ] `tests/helpers/census-connection.ts`: `CENSUS_CONNECTION`, the unconnected connection every census builds through the real factory.
+- [ ] `tests/isolated/object-column-declarations.test.ts` (`EXPECTED_COLUMN_KINDS`), `tests/isolated/object-source-declarations.test.ts` (`SOURCE_DECLARATIONS`), `tests/unit/db/result-pagination-capability.test.ts` (`EXPECTED`), `tests/unit/schema-diff/migration-dialects.test.ts` (`COLUMN_GRAMMAR`), `tests/unit/schema-diff/migration-generator.test.ts` (`MODIFIED_COLUMN_COVERAGE`, `TRANSACTION_WRAPPER_COVERAGE`) and `tests/hooks/use-connection-form.test.ts` (`PICKER_COVERAGE`).
+- [ ] `tests/unit/lib/db-ui-config.test.ts`: `ALL_TYPES`, which a test holds equal to the keys of `DB_UI_CONFIG`.
+- [ ] `tests/helpers/object-edit-expectation.ts`: `EXPECTED_EDIT_ABSTAINERS`, when the new id declares no editable kind.
+      That is a population, not a record, so the compiler says nothing; `tests/isolated/object-edit-declarations.test.ts` then requires an `Object edit (#789)` heading in the new provider doc naming which absence it is.
 
 **Conditionally, and each one is easy to miss because the code still compiles without it:**
 
@@ -916,10 +931,16 @@ The integration points, all of which need an entry. This is the list the Strateg
       its driver's tokenizer, never from a neighbouring dialect, and leave it at the default rather than
       guess. `tests/unit/sql/grammar.test.ts` holds `Record<DatabaseType, …>` maps for both decisions,
       so the compiler will at least stop you from *forgetting* that a decision exists
+- [ ] `src/lib/db/types.ts`: `queryLanguage`, only when the engine's query text is neither SQL nor JSON.
+      A new member is not neutral: a reader written `=== "json"` sends it into its SQL branch and one written `!== "sql"` into its MongoDB branch, so every reader needs an explicit arm or a test pinning that its branch is right.
+      `grep -rn queryLanguage src` is not the whole population: `src/components/agent/AnswerCard.tsx` reads it through `editorLanguageForTabType`.
+      `docs/providers/prometheus.md` section 3.1 is the worked case.
+- [ ] `src/lib/db-ui-config.ts`: `fieldLabels` and `fieldHints`, when a connection field needs its own label or hint.
+      Declare them there rather than adding a type test to `src/components/ConnectionModal.tsx`, which already carries five (`docs/BACKLOG.md` U36).
 
 **Published where a human reads it, and this is the block with the fewest gates.** `readme:check`
-compares the translated READMEs against `README.md` and `chart:check` compares versions. Eleven of the
-catalog files below are now counted as well:
+compares the translated READMEs against `README.md` and `chart:check` compares versions. The catalog
+files in `COPY_FILES` are now counted as well:
 [`tests/unit/lib/catalog-copy-engine-count.test.ts`](../tests/unit/lib/catalog-copy-engine-count.test.ts)
 walks them, refuses a numeral qualifying "engines" that is not `EXTERNAL_DATABASE_TYPES.length`, and
 where that numeral introduces a list, refuses a list that does not name every one of them by its
@@ -939,7 +960,7 @@ range) is still checked on its numeral only, deliberately, so that no numeral go
       `make -C operator bundle`**: `operator/bundle/manifests/...` is generated from it, and the
       `Verify operator bundle is up to date` step re-runs the generator and diffs, so a hand-wrapped
       YAML folded scalar fails the gate even when the text is identical to what it wants
-- [ ] `README.md` + `README_zh.md` + `README_ja.md`, `DOCKERHUB.md`, `docs/BRAND_MESSAGING.md` — the
+- [ ] `README.md` + the five translations `bun run readme:check` gates (`README_zh.md`, `README_ja.md`, `README_es.md`, `README_ur.md`, `README_hi.md`), `DOCKERHUB.md`, `docs/BRAND_MESSAGING.md` — the
       engine tables and every prose numeral. **Separate the denominators before touching a numeral**:
       type-ids the factory builds, external drivers (that set minus the embedded store), wire-compatible
       relatives, and their sum. `connectableProductCount()` is the arithmetic's one definition — derive

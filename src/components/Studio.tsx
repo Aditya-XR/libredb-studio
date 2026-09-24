@@ -29,7 +29,7 @@ import {
   BottomPanel,
 } from "@/components/studio/index";
 import { AgentRail } from "@/components/agent/AgentRail";
-import { DatabaseConnection, SavedQuery } from "@/lib/types";
+import { DatabaseConnection, type ColumnSchema, SavedQuery } from "@/lib/types";
 import type { DatabaseObject } from "@/lib/db/types";
 import { findKind, kindHasSource, relationKindIds } from "@/lib/db/object-kinds";
 import { httpSourceApplier, ObjectSourceView, type ObjectSourcePatch } from "@/components/object-source";
@@ -743,7 +743,7 @@ export default function Studio() {
   };
 
   /**
-   * Open and run the statement for one object, addressed by its PATH (#789).
+   * Every tab-opening gesture, and the ONE refusal they share (D82).
    *
    * REFUSED while an object apply is in flight, on the same rule and with the same words as the
    * new-tab shortcut (D82). This is the second door into that window and the only palette entry
@@ -752,17 +752,63 @@ export default function Studio() {
    * on `document`, so a reader inside the apply dialog can press it, search, and take the pane and
    * the dialog down with the statement already sent. The reasoning is in `refuseWhileApplying`.
    *
-   * The object tree and the mobile explorer funnel through here too. Both are covered and
-   * aria-hidden by the modal, so the guard is unreachable through them, and they are the `+`
-   * button's case: one funnel, one rule, no drift.
+   * ONE FUNNEL IS THE POINT rather than tidiness. The guard's value is that nothing can reach the
+   * window around it, so a second copy of it is a second place for it to be forgotten. The object
+   * tree, the mobile explorer and the key browser all arrive here, and the two gestures that are
+   * covered and aria-hidden by the modal are that same case: one funnel, one rule, no drift.
+   *
+   * The DATABASE is the one gesture-specific fact that outlives this call. A key belongs to the
+   * numbered database its panel walked, and the runs that come after this one - the next Run, a
+   * selection, an inline edit, the next page - are all about that same key, so the number goes onto
+   * the TAB rather than into this request. `undefined`/`null` is the panel saying "the engine's own
+   * session database", which is not an override at all: that activation opens the tab it always did.
    */
-  const onTableClick = (path: readonly string[]) => {
+  const openTabFor = (path: readonly string[], columns?: readonly ColumnSchema[], database?: number | null) => {
     if (applyInFlight) {
       refuseWhileApplying();
       return;
     }
-    tabMgr.handleTableClick(path, queryExec.executeQuery);
+    const databaseOverride = database ?? undefined;
+    if (databaseOverride === undefined) {
+      // The third argument is passed only when there is one, so an object activation stays the
+      // two-argument call its readers and its tests describe.
+      if (columns === undefined) tabMgr.handleTableClick(path, queryExec.executeQuery);
+      else tabMgr.handleTableClick(path, queryExec.executeQuery, columns);
+      return;
+    }
+    // A caller that knows a database knows the object's columns too, so `?? []` is only what keeps
+    // the call below total: an absent set is the "nobody described this object" the key browser
+    // already sends for a key no page carried.
+    tabMgr.handleTableClick(path, queryExec.executeQuery, columns ?? [], databaseOverride);
   };
+
+  /** Open and run the statement for one object, addressed by its PATH (#789). See `openTabFor`. */
+  const onTableClick = (path: readonly string[]) => openTabFor(path);
+
+  /**
+   * A key activated in the key browser.
+   *
+   * THE TYPE IS THE PAGE'S, so this asks the server for nothing before it opens a tab. The panel drew
+   * the row from a batch that described it, and re-reading it here would be a second opinion about a
+   * value between two requests — the same reason the panel's rows carry types at all.
+   *
+   * A key is NOT A SCHEMA NODE: the cache `handleTableClick` looks objects up in holds prefix groups,
+   * so the type is handed to it instead of looked up. That is also why a key no page described is
+   * passed as no columns at all — the generator's own unknown branch then opens the editor on
+   * `TYPE <key>`, which reports what the key is rather than opening a read nobody chose.
+   *
+   * The same refusal as every other tab-opening gesture, because a key activation ends in
+   * `setActiveTabId` too — and it is `openTabFor`'s rather than a second copy of it.
+   *
+   * THE WALKED DATABASE TRAVELS WITH THE TAB. The panel walked ONE numbered database, and Redis has
+   * no database-qualified key syntax: the database is a property of the connection (`SELECT n`), so
+   * `GET report:daily` cannot name the one it means. Running this statement on the session's
+   * database is what answered `(nil)` for a key that had just been listed, which is why the number
+   * is handed over. `null` is the panel saying "the engine's own session database" - nothing to
+   * override - so that activation is the call it has always been.
+   */
+  const onOpenKey = (key: string, type: string | null, database?: number | null) =>
+    openTabFor([key], type === null ? [] : [{ name: "type", type, nullable: false, isPrimary: false }], database);
 
   /**
    * A row activated in the object tree (#789).
@@ -820,6 +866,7 @@ export default function Studio() {
    */
   const objectActions: TreeRowActionHandlers = {
     onGenerateSelect: (object) => tabMgr.handleGenerateSelect(object.path),
+    onGenerateCount: (object) => tabMgr.handleGenerateCount(object.path),
     onProfileObject: (object) => setProfilerPath(object.path),
     onGenerateCode: (object) => setCodeGenPath(object.path),
     onGenerateTestData: (object) => setTestDataPath(object.path),
@@ -931,6 +978,7 @@ export default function Studio() {
                 onReorderConnections={setConnectionOrder}
                 onAddConnection={() => setIsConnectionModalOpen(true)}
                 onObjectClick={onObjectClick}
+                onOpenKey={onOpenKey}
                 objectActions={objectActions}
                 onShowDiagram={() => setShowDiagram(true)}
                 metadata={metadata}
@@ -1075,6 +1123,10 @@ export default function Studio() {
                       }}
                       onGenerateSelect={(path) => {
                         tabMgr.handleGenerateSelect(path);
+                        setActiveMobileTab("editor");
+                      }}
+                      onGenerateCount={(path) => {
+                        tabMgr.handleGenerateCount(path);
                         setActiveMobileTab("editor");
                       }}
                       onCreateTableClick={() => setIsCreateTableModalOpen(true)}

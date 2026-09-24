@@ -530,6 +530,17 @@ describe("createDatabaseProvider", () => {
     expect(provider.type).toBe("cassandra");
   });
 
+  test('creates provider for type "prometheus"', async () => {
+    // No `database`: the server holds one TSDB and every API read is addressed to it, so the
+    // helper's default database is cleared. Building the provider reads nothing from the network,
+    // so it is built, and declares its language, with no server running.
+    const conn = makeConnection("prometheus", { port: 9090, database: undefined });
+    const provider = await createDatabaseProvider(conn);
+    expect(provider).toBeDefined();
+    expect(provider.type).toBe("prometheus");
+    expect(provider.getCapabilities().queryLanguage).toBe("promql");
+  });
+
   test('creates provider for type "libredb"', async () => {
     // A path the platform owns rather than a hardcoded "/tmp/...", which is not a directory
     // on Windows at all. Nothing opens this file: `createDatabaseProvider` constructs and
@@ -1250,7 +1261,8 @@ describe("acquireExecutionProfileProvider", () => {
     // one, while `agent-operations` sends none and calls the curated reporting methods
     // every provider implements. Asserting them together is what keeps a later
     // simplification from collapsing the two.
-    const connection = makeConnection("redis", { id: "redis-operations" });
+    // A Redis database is a number: the shared fixture's "testdb" is refused at connect.
+    const connection = makeConnection("redis", { id: "redis-operations", database: "0" });
 
     const refused: unknown = await acquireExecutionProfileProvider(connection, "agent-read-only").catch(
       (e: unknown) => e,
@@ -1754,7 +1766,7 @@ describe("single-writer file reuse", () => {
       database: join(dir, "..", basename(dir), "borrowed.duckdb"),
     });
     // Relative TO THE CWD, deliberately, and not to the file's own directory. `fileIdentity`
-    // normalises with `path.resolve` (src/lib/db/factory.ts:301), which resolves against
+    // normalises with `path.resolve` (src/lib/db/factory.ts:376), which resolves against
     // `process.cwd()`, so a spelling relative to anything else would name a different file and
     // this assertion would fail on every platform rather than exercise the borrow.
     //

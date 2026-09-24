@@ -377,6 +377,29 @@ export function requireString(body: Record<string, unknown>, name: string): stri
   return value.trim();
 }
 
+/**
+ * The database one read should reach, or undefined when the caller named none.
+ *
+ * ONE FUNCTION FOR THE TWO ROUTES THAT TAKE IT (`POST /api/db/keys/scan` and `POST /api/db/query`),
+ * because they take it for the same reason and refuse it with the same sentence: Redis has no
+ * database-qualified key syntax, so a run that must reach a key in another database has to say which
+ * one, and two routes answering "what is an invalid database" differently would be two documents
+ * about one rule.
+ *
+ * `0` IS A DATABASE, not an absence — which is why the test is presence on the FIELD and never
+ * truthiness on the VALUE. A `null` or a string is refused rather than read as "no choice": a silent
+ * `undefined` would hand the read to the session's own database while the caller believes it named
+ * another one, which is the same defect the field exists to prevent.
+ */
+export function optionalDatabase(body: Record<string, unknown>, name: string): number | undefined {
+  if (body[name] === undefined) return undefined;
+  const database = body[name];
+  if (typeof database !== "number" || !Number.isSafeInteger(database) || database < 0) {
+    throw new ObjectRouteError(`"${name}" must be a non-negative integer`, 400);
+  }
+  return database;
+}
+
 /** An object path addresses an object, so an empty one addresses nothing. */
 export function requireObjectPath(body: Record<string, unknown>): readonly string[] {
   const path = requireStringArray(body, "path");
@@ -497,7 +520,7 @@ export function requireSourceReader(
  *
  * The route ENFORCES rather than trusts, which is the shipped precedent and not a new rule: the
  * inventory route applies its own two bounds on top of the bound it hands `describeObjects`. The
- * callers behind this one are the sixteen providers that implement `readObjectSource`, and the
+ * callers behind this one are the providers that implement `readObjectSource`, and the
  * route materialises the whole answer and serialises it in one `NextResponse.json`, so this is the
  * one place a memory bound can actually be held. A number merely PASSED to an implementation is a
  * request, not a bound.
@@ -652,7 +675,7 @@ function boundText(part: ObjectSourcePart, limit: number): ObjectSourcePart {
  *
  * There are THREE producers of `edit`: `providers/sql/postgres.ts:3209`, gated on
  * `kindAcceptsSourceEdits(capabilities, kind)`; `providers/sql/trino/index.ts:1279` and
- * `providers/keyvalue/redis.ts:1783`, both gated on `spec.acceptsSourceEdits === true`, which is the
+ * `providers/keyvalue/redis.ts:1948`, both gated on `spec.acceptsSourceEdits === true`, which is the
  * same fact read through the same declaration. All three sit on the READABLE arm, verified rather
  * than assumed: no producer attaches `edit` to a part carrying `unavailable`.
  *
@@ -664,7 +687,7 @@ function boundText(part: ObjectSourcePart, limit: number): ObjectSourcePart {
  * Rule 2's producer set GREW and its character changed, which is the part a bumped digit would have
  * hidden. On PostgreSQL it is a by-product: that site spreads `truncated` and `edit` from a single
  * read, so a routine over `SOURCE_CHARACTER_LIMIT` reaches it. On Redis it is a DECIDED POSITION,
- * stated at `redis.ts:1776-1782`: the affordance is offered on a truncated part deliberately, because
+ * stated at `redis.ts:1941-1947`: the affordance is offered on a truncated part deliberately, because
  * the bound is the CALLER's and the same object read without one is whole, so a provider that withheld
  * it there would be answering a property of the REQUEST as a property of the object. Rule 2 is what
  * makes that position safe on the standalone path, and the pane's predicate and `buildObjectEdit`'s
@@ -684,7 +707,7 @@ function boundText(part: ObjectSourcePart, limit: number): ObjectSourcePart {
  *
  * THE BOUND, on both sides of the same constant. `edit-plan/route.ts:74` refuses a SUBMITTED text
  * longer than `EDIT_CHARACTER_LIMIT`, and all three day-one providers refuse a READ definition longer
- * than it inside `buildObjectEdit`: `providers/sql/postgres.ts:3366`, `providers/keyvalue/redis.ts:1873`
+ * than it inside `buildObjectEdit`: `providers/sql/postgres.ts:3366`, `providers/keyvalue/redis.ts:2038`
  * and `providers/sql/trino/index.ts:1473`. The second is what closes the class rather than narrowing
  * it: a plan is minted only from the build's own read, so a definition the pane could only have shown
  * truncated never reaches a plan at all, whatever the client POSTs.

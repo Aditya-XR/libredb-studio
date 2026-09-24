@@ -105,7 +105,7 @@ const explainCapable: DatabaseType[] = providerFiles(PROVIDER_ROOT)
 
 /**
  * The engines a listing may NOT name in an explain sentence. `libredb` is excluded from
- * both sides: it is the embedded engine, not one of the fourteen a listing counts, and
+ * both sides: it is the embedded engine, not one of the engines a listing counts, and
  * its label is a substring of the product name in every one of these files.
  */
 const explainIncapable = (Object.keys(DB_UI_CONFIG) as DatabaseType[])
@@ -253,7 +253,21 @@ describe("no listing claims data management on an engine that cannot edit", () =
       "Apache Druid, Elasticsearch, OpenSearch, Apache Trino and Apache Cassandra.";
     const claims = manageDataClaims(submitted);
     expect(claims).toHaveLength(1);
-    expect(overclaimed(claims[0])).toEqual(notEditable);
+    // The nine it named, by id. Pinned rather than read from `notEditable`, which grows with every
+    // engine that ships unable to edit: Prometheus (#1085) is in that set and was never in this
+    // sentence, which predates it.
+    expect(overclaimed(claims[0])).toEqual([
+      "cassandra",
+      "clickhouse",
+      "couchbase",
+      "druid",
+      "elasticsearch",
+      "mongodb",
+      "opensearch",
+      "redis",
+      "trino",
+    ]);
+    expect(notEditable).toContain("prometheus");
   });
 
   test("an editing sentence that names what cannot edit is left alone", () => {

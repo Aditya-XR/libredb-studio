@@ -1,7 +1,18 @@
 import { describe, test, expect } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { getDBConfig, getDBIcon, getDBColor, isFileBased, takesConnectionField } from "@/lib/db-ui-config";
+import {
+  connectionFieldHint,
+  connectionFieldLabel,
+  DB_UI_CONFIG,
+  getDBConfig,
+  getDBIcon,
+  getDBColor,
+  isFileBased,
+  takesConnectionField,
+  type ConnectionField,
+  type DatabaseUIConfig,
+} from "@/lib/db-ui-config";
 import { SHOWCASE_DATABASE_ORDER, SHOWCASE_RANK, listShowcaseDatabases } from "@/lib/db-showcase";
 import type { DatabaseType } from "@/lib/types";
 
@@ -25,6 +36,7 @@ const ALL_TYPES: DatabaseType[] = [
   "cassandra",
   "libsql",
   "duckdb",
+  "prometheus",
 ];
 
 describe("db-ui-config", () => {
@@ -196,6 +208,22 @@ describe("db-ui-config", () => {
       expect(getDBConfig("duckdb").showConnectionStringToggle).toBe(false);
     });
 
+    test("prometheus exposes its label, the API port and the four fields its HTTP API reads", () => {
+      expect(getDBConfig("prometheus").label).toBe("Prometheus");
+      expect(getDBConfig("prometheus").defaultPort).toBe("9090");
+      expect(getDBConfig("prometheus").connectionFields).toEqual(["host", "port", "user", "password"]);
+    });
+
+    test("prometheus offers no Database box, because the server holds one TSDB and nothing to select", () => {
+      // Every read of the HTTP API is addressed to the one TSDB the server holds (#1085 6.1), the
+      // Druid and OpenSearch shape: a selector would be a control with no effect.
+      expect(getDBConfig("prometheus").connectionFields).not.toContain("database");
+      expect(takesConnectionField("prometheus", "database")).toBe(false);
+      // The control: the same entry takes the credential boxes its transport reads.
+      expect(takesConnectionField("prometheus", "user")).toBe(true);
+      expect(takesConnectionField("prometheus", "password")).toBe(true);
+    });
+
     test("every provider carries a distinct colour class", () => {
       const colors = ALL_TYPES.map((type) => getDBConfig(type).color);
       expect(new Set(colors).size).toBe(colors.length);
@@ -238,6 +266,7 @@ describe("db-ui-config", () => {
       expect(isFileBased("couchbase")).toBe(false);
       expect(isFileBased("clickhouse")).toBe(false);
       expect(isFileBased("druid")).toBe(false);
+      expect(isFileBased("prometheus")).toBe(false);
     });
   });
 
@@ -364,6 +393,92 @@ describe("db-ui-config", () => {
   });
 });
 
+// ============================================================================
+// Declared connection-field copy (#1085)
+// ============================================================================
+
+/**
+ * Every connection field, as a total record so a field added to `connectionFields` fails to
+ * compile here until it is listed, and the walk below cannot miss it.
+ */
+const FIELD_CHECKLIST: Record<ConnectionField, true> = {
+  host: true,
+  port: true,
+  user: true,
+  password: true,
+  database: true,
+  schema: true,
+  connectionString: true,
+  serviceName: true,
+  instanceName: true,
+  localDataCenter: true,
+  authSource: true,
+  apiKeyId: true,
+  apiKeySecret: true,
+};
+const EVERY_FIELD = Object.keys(FIELD_CHECKLIST) as ConnectionField[];
+
+describe("declared connection-field copy (#1085)", () => {
+  const plain = getDBConfig("postgres");
+  /** A synthetic declaration, so the helpers' rule is tested apart from what any shipped entry declares. */
+  const declaring: DatabaseUIConfig = {
+    ...plain,
+    fieldLabels: { password: "Password or token" },
+    fieldHints: { password: "Leave User empty to send this as a bearer token." },
+  };
+
+  test("a declared label replaces the caller's fallback for its field", () => {
+    expect(connectionFieldLabel(declaring, "password", "Password")).toBe("Password or token");
+    // The control: a field the same declaration does not name keeps the caller's word.
+    expect(connectionFieldLabel(declaring, "user", "Username")).toBe("Username");
+  });
+
+  test("with nothing declared, the caller's fallback is the label", () => {
+    expect(connectionFieldLabel(plain, "password", "Password")).toBe("Password");
+  });
+
+  test("a declared hint is answered for its field and no other", () => {
+    expect(connectionFieldHint(declaring, "password")).toBe("Leave User empty to send this as a bearer token.");
+    expect(connectionFieldHint(declaring, "user")).toBeUndefined();
+    expect(connectionFieldHint(plain, "password")).toBeUndefined();
+  });
+
+  test("an empty declaration declares nothing", () => {
+    const empty: DatabaseUIConfig = { ...plain, fieldLabels: {}, fieldHints: {} };
+    expect(connectionFieldLabel(empty, "password", "Password")).toBe("Password");
+    expect(connectionFieldHint(empty, "password")).toBeUndefined();
+  });
+
+  test("only prometheus declares field copy, so every other engine draws every label and hint it drew before", () => {
+    const declared = Object.entries(DB_UI_CONFIG)
+      .filter(([, config]) => config.fieldLabels !== undefined || config.fieldHints !== undefined)
+      .map(([type]) => type);
+    expect(declared).toEqual(["prometheus"]);
+    // The control that the walk saw the whole table rather than nothing.
+    expect(Object.keys(DB_UI_CONFIG).sort()).toEqual([...ALL_TYPES].sort());
+    for (const type of ALL_TYPES.filter((candidate) => !declared.includes(candidate))) {
+      for (const field of EVERY_FIELD) {
+        expect(connectionFieldLabel(getDBConfig(type), field, "the dialog's own word")).toBe("the dialog's own word");
+        expect(connectionFieldHint(getDBConfig(type), field)).toBeUndefined();
+      }
+    }
+  });
+
+  test("prometheus declares the password label and hint, because its one password box also carries a bearer token", () => {
+    const config = getDBConfig("prometheus");
+    expect(connectionFieldLabel(config, "password", "Password")).toBe("Password or token");
+    expect(connectionFieldHint(config, "password")).toBe("Leave User empty to send this as a bearer token.");
+    // The hint and the credential refusal both name the field "User", so the label says it too.
+    expect(connectionFieldLabel(config, "user", "Username")).toBe("User");
+    expect(connectionFieldHint(config, "user")).toBeUndefined();
+    // The control: every other field keeps the dialog's own word and draws no hint.
+    for (const field of EVERY_FIELD.filter((candidate) => candidate !== "password" && candidate !== "user")) {
+      expect(connectionFieldLabel(config, field, "the dialog's own word")).toBe("the dialog's own word");
+      expect(connectionFieldHint(config, field)).toBeUndefined();
+    }
+  });
+});
+
 describe("db-showcase", () => {
   describe("SHOWCASE_RANK", () => {
     test("assigns every database type a distinct rank covering 0..N-1", () => {
@@ -406,6 +521,9 @@ describe("db-showcase", () => {
         "clickhouse",
         "druid",
         "trino",
+        // Behind Trino and ahead of libSQL (#1085): a name every cloud-native evaluator knows,
+        // met as the metrics store beside their databases rather than as one of them.
+        "prometheus",
         "libsql",
         "libredb",
       ]);

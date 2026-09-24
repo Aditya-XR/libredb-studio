@@ -16,7 +16,7 @@ import type { ColumnSchema, DatabaseConnection } from "@/lib/types";
  * The three absence states are the point of this surface and are asserted as three different
  * outcomes: an undeclared kind draws NO folder, `{ count: 0 }` draws a folder with a zero badge,
  * and `{ unavailable }` draws the engine's own sentence on a row that cannot be opened. A fourth
- * state sits above them: sixteen of seventeen engines answer 501 today, and that has to read as
+ * state sits above them: an engine that answers 501, which has to read as
  * "this engine is not wired up yet" rather than as an empty database.
  */
 
@@ -596,7 +596,12 @@ describe("ObjectTree object rows", () => {
     // An ICON, not a word laid out in the row: the word is there for a reader who needs it.
     expect(status.querySelector("svg")).not.toBeNull();
     expect(status.getAttribute("title")).toBe("INVALID");
-    expect(within(row(/orders/)).getByTestId("tree-row-count").textContent).toBe("1,234");
+    expect(within(row(/orders/)).getByTestId("tree-row-count").textContent).toBe("1.2K");
+    expect(
+      within(row(/orders/))
+        .getByTestId("tree-row-count")
+        .getAttribute("title"),
+    ).toContain("1,234 rows");
     expect(within(row(/order_total/)).queryByTestId("tree-row-status")).toBeNull();
     expect(within(row(/order_total/)).queryByTestId("tree-row-count")).toBeNull();
   });

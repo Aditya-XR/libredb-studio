@@ -169,6 +169,68 @@ export function maintenanceControl(
   return { offered: spec[placement], label: spec.label };
 }
 
+/**
+ * Whether column profiling may be offered for this engine: the one gate both row menus
+ * (`src/components/object-tree/row-actions.ts` and the mobile
+ * `src/components/schema-explorer/TableItem.tsx`) and `POST /api/db/profile` ask, so that no
+ * menu offers an action the route refuses.
+ *
+ * The route writes exactly two statement shapes: SQL aggregates, and a MongoDB `aggregate`
+ * document with a `$sample` stage. So profiling is offered for `"sql"`, and for `"json"` only
+ * when no `queryDialect` says the JSON is some other grammar. Redis and LibreDB declare
+ * `"json"` with a dialect of their own, and `"promql"` is not JSON at all; before this gate the
+ * route sent every one of them the MongoDB document, which only MongoDB reads (#1085).
+ *
+ * Unknown capabilities are not a permission, for the reason `maintenanceControl` gives:
+ * `/api/db/provider-meta` answers with nothing both while it is in flight and when it failed.
+ */
+export function offersColumnProfiling(capabilities: ProviderCapabilities | undefined): boolean {
+  if (capabilities === undefined) return false;
+  if (capabilities.queryLanguage === "sql") return true;
+  return capabilities.queryLanguage === "json" && capabilities.queryDialect === undefined;
+}
+
+/**
+ * Whether the code generator may be offered for this engine, asked by both row menus.
+ *
+ * `src/components/CodeGenerator.tsx` maps an object's columns onto a TypeScript interface, a Zod
+ * schema, a Prisma model, a Go struct, a Python dataclass and a Java POJO: the models an
+ * application writes over a table or a document collection. It is offered for `"sql"` and
+ * `"json"`, dialects included, because it names the row rather than addressing it, which is why
+ * Redis and LibreDB keep it (#427). A PromQL metric's columns are its label names, and a record
+ * type over them models nothing an application stores, so `"promql"` is not offered it (#1085).
+ * The two languages are named rather than `"promql"` excluded, so a language added later is not
+ * offered the generator until somebody decides that it should be.
+ *
+ * Unknown capabilities are not a permission, as for `offersColumnProfiling`.
+ */
+export function offersCodeGeneration(capabilities: ProviderCapabilities | undefined): boolean {
+  return capabilities?.queryLanguage === "sql" || capabilities?.queryLanguage === "json";
+}
+
+/**
+ * Whether "Generate Count Query" may be offered for this engine, asked by both row menus and by
+ * `generateCountQuery` itself (#702).
+ *
+ * The generator writes two shapes: a SQL `SELECT COUNT(*)`, and a MongoDB `count` document. So
+ * it is offered for `"sql"` and `"json"`, and only when no `queryDialect` says the language is
+ * some other grammar. The dialect is read for both languages rather than for JSON alone, as
+ * `offersColumnProfiling` does, so that a dialect declared on a SQL engine later refuses the
+ * action until somebody writes its count. Redis and LibreDB have no count
+ * statement in their command grammars, and `"promql"` is not offered it either: `count()` in
+ * PromQL counts series at an instant, which is not the row count this action promises.
+ *
+ * A derived grouping is refused on top of the language, because a Redis `user:*` row is a
+ * summary this server built and there is no object to address (#427).
+ *
+ * Unknown capabilities are not a permission, as for `offersColumnProfiling`.
+ */
+export function offersCountQuery(capabilities: ProviderCapabilities | undefined): boolean {
+  if (capabilities === undefined) return false;
+  if (capabilities.queryDialect !== undefined || capabilities.tablesAreDerivedGroupings === true) return false;
+  return capabilities.queryLanguage === "sql" || capabilities.queryLanguage === "json";
+}
+
 // ============================================================================
 // Provider Capabilities & Labels
 // ============================================================================
@@ -207,11 +269,114 @@ export type ContainerLevels =
   | readonly [ContainerLevelSpec]
   | readonly [ContainerLevelSpec, ContainerLevelSpec];
 
-export interface ProviderCapabilities {
-  queryLanguage: "sql" | "json";
+/**
+ * Whether an engine can page a resumable walk of its own KEY SPACE, and the batch sizes it
+ * will accept.
+ *
+ * THE ENGINE THIS EXISTS FOR IS THE ONE WITH NO CATALOG. Sixteen engines answer
+ * `listObjects` from a stored definition — a table, a collection, an index — and a stored
+ * definition is enumerable in full. A Redis key is not: there is no prefix index and no
+ * directory, so the only way to learn what exists is `SCAN`, and `SCAN` is a CURSOR rather
+ * than a listing. A caller who stops at one batch holds a SAMPLE; a caller who wants the
+ * whole key space has to come back with the cursor it was handed.
+ *
+ * That difference is why this is a capability and not an object kind. `listObjects` answers
+ * "what is here" in one call and is allowed to be finite. This answers "here is the next
+ * batch and the cursor after it", which is a different contract, and expressing it as an
+ * object kind would have to lie about either the bound or the completeness.
+ *
+ * The declaration is STATIC, like `objectKinds` and for a related reason: it states what the
+ * PROVIDER can do, not what the connected server answered. A Redis-wire relative that
+ * refuses `SCAN` would be a different provider, not a different capability.
+ */
+export interface KeyScanCapability {
+  /** Batch size used when the caller names none. */
+  readonly defaultCount: number;
   /**
-   * Optional client-side query dialect. `queryLanguage` only says SQL vs JSON;
-   * for non-SQL providers the query generators otherwise assume MongoDB syntax.
+   * Largest batch this provider forwards. A caller asking for more is REFUSED rather than
+   * clamped: a silent clamp answers a request for 10,000 with a batch of 1,000 and says
+   * nothing, which is a wrong answer about what a batch is. The caller can ask again.
+   */
+  readonly maxCount: number;
+}
+
+export interface KeyScanOptions {
+  /** The cursor the previous page answered with; `"0"` starts a walk. */
+  readonly cursor: string;
+  /** A `MATCH` pattern, or omitted for every key. */
+  readonly pattern?: string;
+  /** Batch size, within `[1, maxCount]`. */
+  readonly count: number;
+  /** Which numbered database to walk, for an engine that has more than one. */
+  readonly database?: number;
+}
+
+export interface KeyScanPage {
+  /** The keys this batch returned. NOT deduplicated: `SCAN` may repeat a key. */
+  readonly keys: readonly string[];
+  /** The cursor for the next batch. `"0"` means this walk reached the end. */
+  readonly cursor: string;
+  /**
+   * Each key's value type, by key name.
+   *
+   * IT TRAVELS WITH THE PAGE RATHER THAN BEING ASKED FOR SEPARATELY, because the type is what makes
+   * a key row readable and a panel that fetched it afterwards would draw a list without it and then
+   * fill it in. `TYPE` is a single-key command — Redis publishes no batch form — so the provider
+   * pipelines one per key in the page: the cost is ONE extra round trip per page whatever the page
+   * holds, not one per key.
+   *
+   * A KEY ABSENT FROM THIS MAP IS ONE WHOSE TYPE COULD NOT BE READ, and the honest thing to draw is
+   * nothing. A key that vanished between the walk and this read is present, with the server's own
+   * answer for it (`"none"`): a row the sample says is there, beside a type that says it is not, is
+   * a true pair and a reader can act on it.
+   *
+   * WHAT IT DESCRIBES IS THE MOMENT IT WAS READ. The walk is a sample and so is this: a key whose
+   * type changed between two pages is described by the earlier page's answer for as long as that
+   * answer is what the caller holds.
+   */
+  readonly types: Readonly<Record<string, string>>;
+  /**
+   * The engine's own count of the keys in the database being walked — what a progress
+   * indicator divides by.
+   *
+   * SERVER-WIDE, NOT THE WALK'S OWN TOTAL, which is why it looks like a naive field. A
+   * `SCAN` cursor says nothing about how much is left, so no denominator can be computed
+   * from the batches a caller has already seen; this is the one number the engine publishes
+   * (`DBSIZE`, which is O(1)). On a clustered deployment it is the LOCAL node's key count,
+   * because `DBSIZE` has no cluster-wide form and `SCAN` walks one node's slots — a panel
+   * drawing 2000/6355 there is showing a fraction of one node and not of the cluster.
+   */
+  readonly total: number;
+  /**
+   * Whether this answer is about ONE NODE of a clustered deployment.
+   *
+   * `SCAN` and `DBSIZE` are per node and neither has a cluster-wide form, so on a cluster the keys
+   * and the count describe the node that answered and nothing else. Absent means the deployment
+   * does not say it is clustered, which is the ordinary server.
+   */
+  readonly clustered?: boolean;
+}
+
+export interface ProviderCapabilities {
+  /**
+   * The language this engine's statements are written in: what its editor tabs are typed and
+   * highlighted as (`src/lib/editor/tab-language.ts`), and the arm the query generators take for a
+   * tree click and for "Generate Query" (`src/lib/query-generators.ts`).
+   *
+   * A CLOSED union, and a member added to it is not neutral: a reader written `=== "json"` sends
+   * the new member into its SQL branch, and one written `!== "sql"` sends it into its JSON
+   * (MongoDB) branch. So a new member lands with an explicit arm in every reader, or with a test
+   * pinning that the branch it falls into is right for it. `"promql"` is the Prometheus provider's
+   * (#1085), and it declares no `queryDialect`, because PromQL is not a kind of JSON.
+   *
+   * Published through `src/exports/types.ts`, so widening it breaks a consumer's exhaustive
+   * switch over it; that ships with a release note, not a compatibility layer.
+   */
+  queryLanguage: "sql" | "json" | "promql";
+  /**
+   * Optional client-side query dialect, and only ever a kind of JSON. `queryLanguage`
+   * says SQL, JSON or PromQL; for a `"json"` provider the query generators otherwise
+   * assume MongoDB syntax.
    * A provider sets `queryDialect` to opt its tables into a custom client-side
    * generator (see `query-generators.ts`), and it is checked BEFORE
    * `queryLanguage` everywhere. Left undefined by SQL and MongoDB, so their
@@ -484,12 +649,25 @@ export interface ProviderCapabilities {
    * "the provider declares no object kinds, so there is nothing to list" as a
    * `CATALOG_READ_REFUSED` capture - so a run is never handed an empty inventory as
    * though it were an empty database. It is deliberately not a construction-time throw:
-   * every one of the seventeen shipped type ids declares kinds, so the shape is
+   * every shipped type id declares kinds, so the shape is
    * unreachable here, and refusing to CONNECT over it would take a connection away from
    * an implementer whose query editor works perfectly well while their catalog reading is
    * still being written (#789).
    */
   objectKinds?: readonly ObjectKindSpec[];
+  /**
+   * Present iff this engine can page a resumable key-space walk. See `KeyScanCapability`.
+   *
+   * OPTIONAL BECAUSE THIS INTERFACE IS PUBLISHED. A required field added after the fact stops
+   * every external implementer from compiling — the same reason `supportsInlineRowEdit` is
+   * optional. Absent reads as "no such walk", which is the honest answer for the other sixteen
+   * shipped type ids: they enumerate what they hold from a catalog, so there is nothing to page.
+   *
+   * Present IMPLIES `scanKeysPage` is implemented, and a provider test enforces that pair the
+   * way it already enforces `explainFormat` against `supportsExplain`. A declaration with no
+   * reader behind it would draw a panel whose every gesture fails.
+   */
+  keyScan?: KeyScanCapability;
   schemaRefreshPattern: string;
 }
 
@@ -610,6 +788,27 @@ export interface ProviderLabels {
    * `errors`), and an absence is not an error.
    */
   sessionsEmptyState?: string;
+
+  /**
+   * What the rows `getTableStats()` answers ARE, declared only by an engine whose list is a
+   * ranked subset of what the database holds rather than every table in it.
+   *
+   * Three readers. The monitoring `TablesTab` renders it above its cards and then counts the rows
+   * as listed rather than as the database's tables. The admin Operations list renders it above its
+   * rows, titles them "Listed (N)" rather than "Tables (N)", and answers a filter that matches none
+   * of them with "No listed table matches the filter.", because a table outside the list may match.
+   * The agent's table-stats reading puts it in the header a model reads the rows under. Neither list
+   * shows it where the read was refused or published no statistics: there is no list to scope.
+   * Without it both lists titled a cut list "Tables" and the tab summed it as the database:
+   * measured 2026-09-23 on the compose Prometheus, the 50 metrics with the most head series read
+   * "Tables 50, 858 rows" beside an Overview of 344 metrics and a head of 1,237 series (#1085 6.2
+   * frames the list as the top N).
+   *
+   * Every engine whose list is whole leaves this absent, and both lists then render as they always
+   * have. Optional, like every field added to this published interface after the fact, so an
+   * external implementer keeps compiling.
+   */
+  tableStatsCaption?: string;
 }
 
 /**
@@ -825,6 +1024,22 @@ export interface DatabaseProvider {
   countObjects(container: readonly string[]): Promise<Record<string, KindCount>>;
   /** Objects of one kind in one container. Names only: columns come from describeObject. */
   listObjects(container: readonly string[], kind: string): Promise<DatabaseObject[]>;
+  /**
+   * One page of a resumable walk of this engine's own KEY SPACE, for an engine that declares
+   * `getCapabilities().keyScan`.
+   *
+   * A different contract from `listObjects`, which is why it is not that method with a cursor
+   * bolted on. `listObjects` is finite by definition and answers a whole folder; this answers
+   * one batch of a walk with no end until the cursor returns `"0"`, and the CALLER holds the
+   * position between two calls. Nothing is retained on the provider side, so a page is a round
+   * trip rather than a session, and a cursor arriving after a reconnect is still valid: it is
+   * a position in a hash table, not a handle.
+   *
+   * The optional shape follows `endOpenQueryTransaction`: an engine with no key space of its
+   * own has nothing truthful to implement here. `keyScan` is the declaration a route checks
+   * first, so reaching this method at all means the capability was already claimed.
+   */
+  scanKeysPage?(options: KeyScanOptions): Promise<KeyScanPage>;
   /**
    * Columns, indexes and foreign keys for one object.
    *
@@ -1437,8 +1652,9 @@ export interface ObjectKindSpec {
    * only the provider knows which.
    *
    * The engine-wide `supportsInlineRowEdit` stays, and it is a SEPARATE fact rather than
-   * the other half of a conjunction. It has one reader, `src/components/Studio.tsx:144`,
-   * where it gates the results grid's inline row editor and nothing else. MongoDB,
+   * the other half of a conjunction. It gates the results grid's inline row editor
+   * (`canEditRows` in `src/components/Studio.tsx`), and the two row menus, which need both
+   * facts for Generate Test Data, conjoin it with this field at the call site. MongoDB,
    * Couchbase and Cassandra declare it false, and #789 declares a kind that accepts row
    * writes on each of those three, so requiring both would refuse an import all three
    * engines do support.
@@ -1604,7 +1820,7 @@ export interface ObjectDetail {
  * cap somebody set: `reason` is the field that says WHICH bound bit, and it is the one to
  * show a person. Making the field optional was considered and refused: it is published
  * through `src/exports/types.ts`, every consumer compares against it, and an absent number
- * would buy accuracy on two engines by making the comparison conditional on all seventeen.
+ * would buy accuracy on two engines by making the comparison conditional on every engine.
  *
  * `reason` is ONE SENTENCE for one event across every engine, and that is a rule rather
  * than a convention: build the caller's half with `callerBoundTruncationReason()` in

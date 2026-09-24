@@ -52,6 +52,7 @@ const mockUpdateCurrentTab = mock(() => {});
 const mockUpdateTabById = mock(() => {});
 const mockHandleTableClick = mock(() => {});
 const mockHandleGenerateSelect = mock(() => {});
+const mockHandleGenerateCount = mock(() => {});
 // Transaction Control
 const mockResetTransactionState = mock(() => {});
 const mockSetPlaygroundMode = mock(() => {});
@@ -171,6 +172,7 @@ mock.module("@/hooks/use-tab-manager", () => ({
     updateTabById: mockUpdateTabById,
     handleTableClick: mockHandleTableClick,
     handleGenerateSelect: mockHandleGenerateSelect,
+    handleGenerateCount: mockHandleGenerateCount,
     ...tabMgrOverride,
   })),
 }));
@@ -563,6 +565,7 @@ describe("Studio", () => {
     mockUpdateTabById.mockClear();
     mockHandleTableClick.mockClear();
     mockHandleGenerateSelect.mockClear();
+    mockHandleGenerateCount.mockClear();
     mockResetTransactionState.mockClear();
     mockHandleTransaction.mockClear();
     mockSetPlaygroundMode.mockClear();
@@ -924,6 +927,76 @@ describe("Studio", () => {
     expect(mockHandleTableClick).not.toHaveBeenCalled();
   });
 
+  /**
+   * A key activated in the key browser.
+   *
+   * The TYPE arrives with the key, from the page that described it, so what this opens is a READ —
+   * no probe, and no request of its own. The carrier column travels through `handleTableClick`'s
+   * override because a key is not a schema node: the cache that hook looks objects up in holds prefix
+   * groups, and there is no key in it to read a type off.
+   */
+  test("a key activated in the key browser opens the read its type calls for", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("videobackend:login:refreshToken:1", "hash", null));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["videobackend:login:refreshToken:1"], mockExecuteQuery, [
+      { name: "type", type: "hash", nullable: false, isPrimary: false },
+    ]);
+  });
+
+  /**
+   * The walked database, handed over with the key (the #1095 review).
+   *
+   * The panel walked ONE numbered database, and the statement that reads the key cannot say which:
+   * Redis has no database-qualified key syntax, so `GET report:daily` run on the session's database
+   * answers `(nil)` for a key that was just on screen. The number must therefore reach the TAB, and
+   * the fourth argument is where this shell hands it over - the third stays the type carrier, so an
+   * activation that walked nothing is the call it has always been.
+   */
+  test("a key from a walked database opens its tab in that database", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("report:daily", "string", 3));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(
+      ["report:daily"],
+      mockExecuteQuery,
+      [{ name: "type", type: "string", nullable: false, isPrimary: false }],
+      3,
+    );
+  });
+
+  /**
+   * `null` is the panel saying "the engine's own session database", which is not a database to
+   * override: that activation stays the three-argument call it was before the number existed.
+   */
+  test("a key from the session's own database carries no override", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("report:daily", "string", null));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["report:daily"], mockExecuteQuery, [
+      { name: "type", type: "string", nullable: false, isPrimary: false },
+    ]);
+    expect((mockHandleTableClick.mock.calls.at(-1) as unknown[]).length).toBe(3);
+  });
+
+  test("a key no page described is handed over with no type at all", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("videobackend:login:refreshToken:1", null, null));
+
+    // Not a guess and not the commonest type: NO columns is what sends the generator to its own
+    // unknown branch, and the editor opens on `TYPE <key>` — a command that reports what the key is
+    // rather than opening a read nobody chose.
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["videobackend:login:refreshToken:1"], mockExecuteQuery, []);
+  });
+
   // --- objectActions: the row menu's six, restored (U22, #789) ---
   //
   // WHICH of them a row is offered is the provider's declaration and is asserted against
@@ -943,6 +1016,9 @@ describe("Studio", () => {
 
     act(() => actions.onGenerateSelect?.(usersObject));
     expect(mockHandleGenerateSelect).toHaveBeenCalledWith(["app", "users"]);
+
+    act(() => actions.onGenerateCount?.(usersObject));
+    expect(mockHandleGenerateCount).toHaveBeenCalledWith(["app", "users"]);
 
     act(() => actions.onProfileObject?.(usersObject));
     expect(queryByTestId("dataprofiler")).not.toBeNull();
@@ -2155,6 +2231,16 @@ describe("Studio", () => {
     const genFn = capturedSchemaExplorerProps.onGenerateSelect as (name: string) => void;
     act(() => genFn("users"));
     expect(mockHandleGenerateSelect).toHaveBeenCalledWith("users");
+    expect(queryByTestId("schema-explorer")).toBeNull();
+  });
+
+  test("mobile schema count returns to the editor with the complete object address", () => {
+    connMgrOverride = { activeConnection: pgConn };
+    const { queryByTestId } = render(<Studio />);
+    act(() => (capturedMobileNavProps.onTabChange as (tab: string) => void)("schema"));
+    act(() => (capturedSchemaExplorerProps.onGenerateCount as (path: readonly string[]) => void)(["app", "users"]));
+    expect(mockHandleGenerateCount).toHaveBeenCalledWith(["app", "users"]);
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
     expect(queryByTestId("schema-explorer")).toBeNull();
   });
 
