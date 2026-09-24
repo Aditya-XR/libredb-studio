@@ -36,7 +36,8 @@
   <a href="https://docs.yugabyte.com/stable/integrations/tools/libredb-studio/">YugabyteDB</a>、
   <a href="https://www.dragonflydb.io/docs/integrations/libredb-studio">DragonflyDB</a>、
   <a href="https://opensearch.org/community-projects/">OpenSearch</a>、
-  <a href="https://duckdb.org/docs/preview/guides/sql_editors/libredb_studio">DuckDB</a>
+  <a href="https://duckdb.org/docs/preview/guides/sql_editors/libredb_studio">DuckDB</a>、
+  <a href="https://docs.starrocks.io/docs/integrations/IDE_integrations/LibreDB_Studio/">StarRocks</a>
   の公式ドキュメントにも掲載
 </p>
 
