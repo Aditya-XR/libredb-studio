@@ -112,23 +112,23 @@ function retryAfterSeconds(response: Response): number | null {
 }
 
 /**
- * The connection ONE RUN must reach, when its tab belongs to a numbered database of its own.
+ * The connection half of ONE RUN's request body, plus the database its tab belongs to.
  *
- * The whole body of a run is built from a connection, and the database is a field of THAT
- * connection rather than anything the statement can say (`QueryTab.databaseOverride`): Redis has no
- * database-qualified key syntax, so `GET report:daily` reaches whichever database the connection it
- * travels with names. The tab is where "this key is in database 3" lives, and this is the one place
- * a run turns that fact back into the field the wire carries. `String` because
- * `DatabaseConnection.database` is the string the driver parses, and the override is the number the
- * panel walked.
+ * A TOP-LEVEL FIELD RATHER THAN A FIELD OF THE CONNECTION, and that is the whole of this function. A
+ * run's connection is expressed two ways on the wire: a user's own saved connection travels as a
+ * full object, and a managed one travels as an id (`{ connectionId: "seed:..." }`) that the server
+ * resolves from the OPERATOR's config — discarding any connection field the caller attached, by
+ * design (GHSA-3wh2-8x78). So a `database` merged into the connection object is dropped for every
+ * managed connection, and the read would run in the session's database while the key tab claims it
+ * read another. As a field beside the connection it survives the resolve, and `POST /api/db/query`
+ * applies it after resolving: same field, same meaning as `POST /api/db/keys/scan`.
  *
  * `undefined` is NOT database 0 and NOT "the session's number": it is the absence of an override, so
- * the connection is handed back as the very object it came in as, and an ordinary tab's request body
- * is byte for byte what it was before this existed.
+ * the body is byte for byte what it was before this existed.
  */
-function connectionForDatabase(connection: DatabaseConnection, database: number | undefined): DatabaseConnection {
-  if (database === undefined) return connection;
-  return { ...connection, database: String(database) };
+function payloadForRun(connection: DatabaseConnection, database: number | undefined): Record<string, unknown> {
+  const payload = buildConnectionPayload(connection);
+  return database === undefined ? payload : { ...payload, database };
 }
 
 export function useQueryExecution({
@@ -272,10 +272,11 @@ export function useQueryExecution({
         return false;
       }
 
-      // The connection this run reaches. A tab opened from a key browser walked ONE numbered
-      // database, so every run of that tab - the initial read, a re-run, a selection, an inline
-      // edit, the next page - is sent on a connection naming it. See `connectionForDatabase`.
-      const runConnection = connectionForDatabase(activeConnection, tabToExec.databaseOverride);
+      // The connection this run reaches, and the database it reads when the tab was opened in one: a
+      // tab opened from a key browser walked ONE numbered database, so every run of that tab - the
+      // initial read, a re-run, a selection, an inline edit, the next page - names it. See
+      // `payloadForRun`.
+      const runPayload = payloadForRun(activeConnection, tabToExec.databaseOverride);
 
       // Safety check for dangerous queries (skip for explain, load-more, playground, and force-execute)
       const skipSafety = executionOptions?.skipSafety ?? false;
@@ -372,7 +373,7 @@ export function useQueryExecution({
           const beginRes = await appFetch("/api/db/transaction", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...buildConnectionPayload(runConnection), action: "begin" }),
+            body: JSON.stringify({ ...runPayload, action: "begin" }),
           });
           if (!beginRes.ok) {
             logger.warn("Playground transaction BEGIN failed", { route: "use-query-execution" });
@@ -421,7 +422,7 @@ export function useQueryExecution({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            ...buildConnectionPayload(runConnection),
+            ...runPayload,
             // The parameter array travels beside the SQL on whichever endpoint the
             // statement takes, and only when the caller supplied one: a request
             // without values must stay a request without a `params` key (#290).
@@ -458,7 +459,7 @@ export function useQueryExecution({
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                ...buildConnectionPayload(runConnection),
+                ...runPayload,
                 sql: queryToExecute,
                 options: {},
                 explain: { mode: "estimate" },
@@ -681,7 +682,7 @@ export function useQueryExecution({
             await appFetch("/api/db/transaction", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ...buildConnectionPayload(runConnection), action: "rollback" }),
+              body: JSON.stringify({ ...runPayload, action: "rollback" }),
             });
           } catch {
             logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });
@@ -728,7 +729,7 @@ export function useQueryExecution({
             await appFetch("/api/db/transaction", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ...buildConnectionPayload(runConnection), action: "rollback" }),
+              body: JSON.stringify({ ...runPayload, action: "rollback" }),
             });
           } catch {
             logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });

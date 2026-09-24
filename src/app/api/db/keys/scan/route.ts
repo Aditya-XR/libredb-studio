@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { handleObjectRequest, ObjectRouteError, requireString } from "@/lib/api/object-route";
+import { handleObjectRequest, ObjectRouteError, optionalDatabase, requireString } from "@/lib/api/object-route";
 import type { KeyScanCapability } from "@/lib/db/types";
 
 export const dynamic = "force-dynamic";
@@ -67,7 +67,9 @@ export async function POST(req: NextRequest) {
       cursor: readCursor(body),
       pattern: readPattern(body),
       count: readCount(body, capability),
-      database: readDatabase(body),
+      // Absent means the provider's own session database, which is the provider's answer to give:
+      // `SELECT` state lives on the connection and not in this route.
+      database: optionalDatabase(body, "database"),
     });
   });
 }
@@ -114,17 +116,4 @@ function readCount(body: Record<string, unknown>, capability: KeyScanCapability)
     );
   }
   return count;
-}
-
-/**
- * Which numbered database to walk. Absent means the one the session is already in, which is the
- * provider's answer to give: `SELECT` state lives on the connection and not in this route.
- */
-function readDatabase(body: Record<string, unknown>): number | undefined {
-  if (body.database === undefined) return undefined;
-  const database = body.database;
-  if (typeof database !== "number" || !Number.isSafeInteger(database) || database < 0) {
-    throw new ObjectRouteError('"database" must be a non-negative integer', 400);
-  }
-  return database;
 }

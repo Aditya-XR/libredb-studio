@@ -193,9 +193,14 @@ describe("useQueryExecution", () => {
 
   /**
    * A key browser activation opens its tab against ONE numbered database, and Redis has no
-   * database-qualified key syntax: the database is a field of the CONNECTION, so `GET report:daily`
-   * reaches whichever one the connection it travels with names. The tab carries the number and this
-   * is where it becomes the field the request body carries.
+   * database-qualified key syntax: `GET report:daily` cannot name it, so the number travels with the
+   * run and this is where the tab's own fact becomes a request field.
+   *
+   * A FIELD BESIDE THE CONNECTION, NOT INSIDE IT, and that is the whole of this case: a managed
+   * connection travels as an id and the server discards any connection field the caller attached
+   * (GHSA-3wh2-8x78), so a database merged into the connection object is silently dropped for every
+   * zero-config deployment - and the read runs in the SESSION's database while the tab claims it read
+   * another. Beside the connection, `POST /api/db/query` applies it after resolving the id.
    */
   test("a run on a tab opened against a numbered database sends that database", async () => {
     const fetchMock = mockGlobalFetch({
@@ -218,11 +223,13 @@ describe("useQueryExecution", () => {
     });
     expect(mainCall).toBeDefined();
     const body = JSON.parse(mainCall![1]!.body as string);
-    expect(body.connection.database).toBe("3");
-    // The control: only the database moved. The rest of the connection is the active one, whole.
+    expect(body.database).toBe(3);
+    // The control: the CONNECTION does not move at all - its saved database is still its saved one,
+    // so nothing a stored connection pins is rewritten by a tab's own walk. Only the field beside it
+    // names the run's database.
     expect(body.connection.id).toBe("qe-pg-1");
     expect(body.connection.host).toBe("localhost");
-    expect(body.connection.database).not.toBe(mockConnection.database);
+    expect(body.connection.database).toBe(mockConnection.database);
   });
 
   test("a run on an ordinary tab keeps the connection's own database", async () => {
@@ -244,6 +251,9 @@ describe("useQueryExecution", () => {
     });
     const body = JSON.parse(mainCall![1]!.body as string);
     expect(body.connection.database).toBe("testdb");
+    // ABSENT is not 0 and not "the session's number": a tab with no override sends no field, so the
+    // body is byte for byte what it was before this existed.
+    expect("database" in body).toBe(false);
   });
 
   // ── executeQuery updates tab result on success ─────────────────────────────
@@ -613,7 +623,7 @@ describe("useQueryExecution", () => {
       expect(queryCall).toBeDefined();
       const body = JSON.parse(queryCall![1]!.body as string);
       expect(body.options.offset).toBe(500);
-      expect(body.connection.database).toBe("3");
+      expect(body.database).toBe(3);
     });
   });
 

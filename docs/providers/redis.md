@@ -1371,6 +1371,14 @@ One page carries four fields in and four out:
   The type carrier is handed to the generator rather than looked up, because a KEY IS NOT A SCHEMA
   NODE — the cache the generator's other callers read types from holds prefix groups, and no key is
   in it.
+
+  THE READ RUNS IN THE DATABASE THE WALK WAS READING, not the connection's own. A key lives in one
+  numbered database and `GET <key>` cannot name it, so the number travels with the run as its own
+  field beside the connection — which is what makes it reach a **managed** connection too, where
+  anything attached to the connection object is discarded on the way in (`resolveConnection`, and
+  with it the session's database while the panel claims a different one). Every run of that tab
+  follows the number — the initial read, a re-run, a selection, an inline edit and the next page —
+  and a restored tab keeps it after a reload.
 - **Browse Keys**, in the row menu of a key-pattern row in the OBJECT tree — the one action that
   opens this panel instead of acting on the object. It switches the sidebar to Keys and hands the
   row's name over as the `MATCH` pattern, escaped in its prefix half by the same helper the Load more

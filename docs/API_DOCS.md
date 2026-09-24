@@ -333,6 +333,36 @@ The `pagination` object reports the auto-limiting applied by the server. `limit`
 
 Not every engine can serve a positive `offset`. Cassandra and Elasticsearch answer one with HTTP 400 rather than silently returning page one; MongoDB, Redis and LibreDB ignore it. `GET /api/db/provider-meta` reports each one's `capabilities.supportsResultPagination`, which is the same flag the app reads before offering its Load More control.
 
+**The database a run reads (optional):**
+```json
+{
+  "connectionId": "seed:test-redis-6380",
+  "sql": "GET db1:only:key",
+  "database": 3
+}
+```
+
+`database` is a **non-negative integer** that sits BESIDE the connection, and it is applied *after* the
+connection is resolved — which is the whole reason it is its own field rather than a field of
+`connection`. A managed connection travels as an id and the server discards whatever the caller
+attached to the connection it sent (`resolveConnection`, GHSA-3wh2-8x78), so a `database` merged into
+that object reaches no server on a zero-config deployment and the run falls back to the session's
+database while the caller believes it named another.
+
+The value it carries is the walk's own number: a key lives in exactly one numbered database and
+`GET <key>` cannot name it, so a tab opened under a chosen database sends it here and the statement
+runs where the key is. The connection's own `database` field is not rewritten by it. **Absent** is the
+ordinary case and the one every statement other than a key read sends.
+
+The field is accepted only where the provider declares `keyScan`, because that is the engine for which
+a run cannot name a database in its statement; on any other engine it would be a per-run override of an
+operator-pinned `database` with no walk to justify it, so it is refused rather than quietly honoured:
+
+| Condition | Status | Body |
+|-----------|--------|------|
+| `database` present and not a non-negative integer | `400` | `{ "error": "\"database\" must be a non-negative integer" }` — the same sentence `POST /api/db/keys/scan` refuses with, shared in `optionalDatabase` |
+| The provider declares no `keyScan` | `400` | `{ "error": "<type> declares no key-space walk: \"database\" names the database a key was walked in, and only an engine that needs such a name accepts it" }` |
+
 **Bound parameters (optional):**
 ```json
 {

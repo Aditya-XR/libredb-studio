@@ -146,12 +146,26 @@ export type KeyTreeRow =
       readonly depth: number;
       /** True when the row can be opened. A node that is also a key is a folder as well as a key. */
       readonly folder: boolean;
+      /**
+       * This row's ARIA `aria-setsize`, the FULL sibling set it belongs to.
+       *
+       * Computed here rather than from what is drawn, because a window draws a slice: the pattern
+       * wants the count of the whole set even when most of it is outside the DOM, and a number
+       * derived from the mounted rows would change as the reader scrolls.
+       */
+      readonly setSize: number;
+      /** This row's ARIA `aria-posinset`: 1-based, within `setSize`. */
+      readonly posInSet: number;
     }
   | {
       readonly kind: "loadMore";
       /** The prefix this row would ask about. */
       readonly path: readonly string[];
       readonly depth: number;
+      /** See the node arm: the whole sibling set, load-more row included. */
+      readonly setSize: number;
+      /** The load-more row is last in its set, which is why its set includes it. */
+      readonly posInSet: number;
       /**
        * How many keys the walk is HOLDING under this prefix — the same `count` the folder above this
        * row draws.
@@ -185,15 +199,33 @@ export function flattenKeyTree(
   const rows: KeyTreeRow[] = [];
 
   const walk = (node: KeyTreeNode, depth: number): void => {
-    for (const child of node.children) {
+    /*
+     * THE SIBLING SET INCLUDES THE LOAD-MORE ROW when one is offered, because that row is drawn AT
+     * THIS LEVEL, right after the children and beside them. Counting it in is what keeps every
+     * sibling's `posInSet` inside its own `setSize`: the load-more row is the last member of a set
+     * whose first members are the folder's children, so a set that omitted it would have a row
+     * numbered one past the end.
+     */
+    const moreFor = new Map<string, boolean>();
+    for (const child of node.children) moreFor.set(pathKey(child.path), canLoadMore(child.path));
+    const setSize = node.children.length + [...moreFor.values()].filter(Boolean).length;
+
+    node.children.forEach((child, index) => {
       const folder = child.children.length > 0;
-      rows.push({ kind: "node", node: child, depth, folder });
-      if (!folder || !isExpanded(child.path)) continue;
+      rows.push({ kind: "node", node: child, depth, folder, setSize, posInSet: index + 1 });
+      if (!folder || !isExpanded(child.path)) return;
       walk(child, depth + 1);
-      if (canLoadMore(child.path)) {
-        rows.push({ kind: "loadMore", path: child.path, depth: depth + 1, count: child.count });
+      if (moreFor.get(pathKey(child.path)) === true) {
+        rows.push({
+          kind: "loadMore",
+          path: child.path,
+          depth: depth + 1,
+          count: child.count,
+          setSize,
+          posInSet: node.children.length + 1,
+        });
       }
-    }
+    });
   };
 
   walk(root, 0);
@@ -266,6 +298,50 @@ export function filterKeyTree(root: KeyTreeNode, term: string): KeyTreeNode {
 function searchTerm(term: string): string {
   const trimmed = term.trim().toLowerCase();
   return trimmed.endsWith(`${KEY_SEPARATOR}*`) ? trimmed.slice(0, -2) : trimmed;
+}
+
+/**
+ * How tall one row is, fixed because a window is arithmetic over a slice of them.
+ *
+ * 24 is the row this panel already draws (`h-6`). The object tree's own 28 is ITS number, and a
+ * shared constant would be two trees agreeing on something neither of them needs to share — what has
+ * to agree is the shape of `keyTreeWindow` and `treeWindow`, which is what the test pins.
+ */
+export const KEY_ROW_HEIGHT = 24;
+
+/** Rows kept mounted beyond each edge of the viewport, so a scroll does not flash empty. */
+const KEY_WINDOW_OVERSCAN = 4;
+
+/**
+ * The half-open row range to mount, for a tree drawn as a flat list.
+ *
+ * AN UNMEASURED BOX MOUNTS EVERYTHING IT HAS. Height 0 means the container has not been laid out
+ * yet — it is `display:none`, or the panel was mounted hidden — and guessing a height there would
+ * hide rows a reader cannot yet scroll to, behind a scrollbar they will not see. The object tree
+ * answers the same fact differently (it mounts `2 * overscan` rows and waits for a scroll) because
+ * its rows are windowed against a box it measures on every scroll; this panel takes the other side
+ * deliberately: the honest reading of "I do not know how tall this is" is "show what I have".
+ *
+ * `focusIndex` shifts the window to CONTAIN that row rather than widening it, so a row the reader
+ * has focused is never unmounted under them — focus cannot move to a node that is not in the DOM,
+ * and losing focus mid-scroll is the one way virtualising a tree can make a keyboard reader worse
+ * off than no virtualisation at all.
+ */
+export function keyTreeWindow(
+  count: number,
+  scrollTop: number,
+  height: number,
+  focusIndex = -1,
+): readonly [number, number] {
+  if (height <= 0) return [0, count];
+  const size = Math.min(count, Math.ceil(height / KEY_ROW_HEIGHT) + KEY_WINDOW_OVERSCAN * 2);
+  const byScroll = Math.floor(scrollTop / KEY_ROW_HEIGHT) - KEY_WINDOW_OVERSCAN;
+  const nearEnd = count - size;
+  const start =
+    focusIndex < 0
+      ? Math.min(Math.max(byScroll, 0), Math.max(nearEnd, 0))
+      : Math.min(Math.max(byScroll, focusIndex - size + 1), Math.max(focusIndex, 0));
+  return [start, start + size];
 }
 
 /**
