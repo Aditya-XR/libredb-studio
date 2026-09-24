@@ -202,7 +202,10 @@ describe("POST /api/db/profile", () => {
 
   test("returns column profiles for MongoDB provider", async () => {
     const mongoProvider = createMockProvider({
-      capabilities: { queryLanguage: "json" },
+      capabilities: {
+        queryLanguage: "json",
+        containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
+      },
     });
     (mongoProvider.query as ReturnType<typeof mock>).mockImplementation(async (queryStr: string) => {
       const parsed = JSON.parse(queryStr);
@@ -230,7 +233,7 @@ describe("POST /api/db/profile", () => {
 
     const req = createMockRequest("/api/db/profile", {
       method: "POST",
-      body: { connection: mongoConnection, tablePath: ["public", "users"], columns: ["status", "name"] },
+      body: { connection: mongoConnection, tablePath: ["sample_shop", "users"], columns: ["status", "name"] },
     });
 
     const res = await POST(req as never);
@@ -457,10 +460,17 @@ describe("POST /api/db/profile", () => {
     expect(emitted).toContain('FROM demo.".inner_id.fake"');
   });
 
-  test("MongoDB is addressed by the collection's own segment, not by the joined path", async () => {
+  test("MongoDB is addressed by its database and the collection's own segment, not by the joined path", async () => {
     // A collection's path is [database, collection] and the driver takes the collection
-    // alone, the same reading `quoteObjectPath`'s JSON branch and the generators use.
-    const mongoProvider = createMockProvider({ capabilities: { queryLanguage: "json" } });
+    // alone, so the database rides as its own key (#843): without it both reads went to
+    // the connected database's same-named collection. `jsonCommandAddress` is the reading
+    // the generators use too.
+    const mongoProvider = createMockProvider({
+      capabilities: {
+        queryLanguage: "json",
+        containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
+      },
+    });
     (mongoProvider.query as ReturnType<typeof mock>).mockImplementation(async (queryStr: string) => {
       const parsed = JSON.parse(queryStr);
       if (parsed.operation === "count")
@@ -476,8 +486,13 @@ describe("POST /api/db/profile", () => {
 
     await POST(req as never);
 
-    for (const call of (mongoProvider.query as ReturnType<typeof mock>).mock.calls) {
-      expect(JSON.parse(String(call[0])).collection).toBe("users");
+    const calls = (mongoProvider.query as ReturnType<typeof mock>).mock.calls;
+    // Both reads, the sample and the count, so the loop below cannot pass over nothing.
+    expect(calls.map((call) => JSON.parse(String(call[0])).operation)).toEqual(["aggregate", "count"]);
+    for (const call of calls) {
+      const parsed = JSON.parse(String(call[0]));
+      expect(parsed.database).toBe("sample_shop");
+      expect(parsed.collection).toBe("users");
     }
   });
 

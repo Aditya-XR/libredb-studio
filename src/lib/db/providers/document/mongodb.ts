@@ -66,6 +66,9 @@ import { CACHE_HIT_RATIO_UNAVAILABLE, formatCacheHitRatio, measuredNumber } from
 
 interface MongoQuery {
   collection: string;
+  // The database the command runs in. Absent means the connected database, which is
+  // every statement written before the key existed (#843).
+  database?: string;
   operation:
     | "find"
     | "findOne"
@@ -689,7 +692,7 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       // it excludes: naming only what the language IS did not survive contact with
       // the model's prior on Elasticsearch, and does not here either.
       statementLanguage:
-        'the JSON command object this editor executes - {"collection": "<name>", "operation": "find" | "findOne" | "aggregate" | "count" | "distinct", "filter": {...}, "pipeline": [...], "field": "<name>" (distinct only), "options": {"limit": 50}} - and NOT mongosh shell syntax: a statement that starts with `db.` cannot be run here',
+        'the JSON command object this editor executes - {"collection": "<name>", "operation": "find" | "findOne" | "aggregate" | "count" | "distinct", "database": "<name>" (optional, another database than the connected one), "filter": {...}, "pipeline": [...], "field": "<name>" (distinct only), "options": {"limit": 50}} - and NOT mongosh shell syntax: a statement that starts with `db.` cannot be run here',
       // `getSlowQueries()` reads `system.profile`, which does not exist until the
       // profiler is switched on - so the empty panel is the ordinary case here, and it
       // used to name a PostgreSQL extension (#463).
@@ -710,11 +713,10 @@ export class MongoDBProvider extends BaseDatabaseProvider {
     super.validate();
 
     if (!this.config.connectionString) {
+      // No database check: it is only the default for a statement that names none, and
+      // every statement the product writes names its own (#843).
       if (!this.config.host) {
         throw new DatabaseConfigError("Host or connection string is required for MongoDB", "mongodb");
-      }
-      if (!this.config.database) {
-        throw new DatabaseConfigError("Database name is required for MongoDB", "mongodb");
       }
     }
   }
@@ -815,7 +817,10 @@ export class MongoDBProvider extends BaseDatabaseProvider {
 
     const host = this.config.host || "localhost";
     const port = this.config.port || 27017;
-    const database = this.config.database || "test";
+    // Empty when none is configured. The path database is also the driver's default auth
+    // database, so a stand-in such as `test` would authenticate against it instead of
+    // `admin`, the driver's own default for an empty path (#843).
+    const database = this.config.database || "";
 
     // The database the credentials live in, which is not always the one being opened:
     // without it the driver authenticates against the database in the path, so users
@@ -831,9 +836,11 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       return this.config.database;
     }
 
-    // Extract from connection string
+    // The URI's path, after the authority. The authority cannot hold a `/` (a password
+    // carrying one is percent-encoded), so the first `/` after `://` starts the path. A
+    // pattern over the whole string took the host of `mongodb://host:27017` as the name.
     if (this.config.connectionString) {
-      const match = this.config.connectionString.match(/\/([^/?]+)(\?|$)/);
+      const match = this.config.connectionString.match(/^[^:]+:\/\/[^/]*\/([^?]+)/);
       if (match) {
         return match[1];
       }
@@ -867,7 +874,11 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       const { result, executionTime } = await this.measureExecution(async () => {
         try {
           const query = this.parseQuery(queryStr);
-          const collection = this.db!.collection(query.collection);
+          // #843: a statement may name the database it runs in. `this.db` is the
+          // connected database and nothing else, so a collection in another database
+          // read the same-named collection of the connected one instead.
+          const db = query.database !== undefined ? this.client!.db(query.database) : this.db!;
+          const collection = db.collection(query.collection);
 
           if (!SUPPORTED_OPERATIONS.has(query.operation)) {
             throw new QueryError(`Unsupported operation: ${query.operation}`, "mongodb");
@@ -1011,6 +1022,11 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       }
       if (!parsed.operation) {
         throw new QueryError("Operation is required in query (find, findOne, aggregate, etc.)", "mongodb");
+      }
+      // Refused rather than handed to `MongoClient.db()`, which opens any string it is
+      // given: a database that does not exist answers every read with 0 rows.
+      if (parsed.database !== undefined && (typeof parsed.database !== "string" || parsed.database.length === 0)) {
+        throw new QueryError('"database" must be a non-empty string: the database the command runs in', "mongodb");
       }
 
       return parsed as MongoQuery;

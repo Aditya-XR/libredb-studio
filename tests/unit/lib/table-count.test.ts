@@ -65,7 +65,9 @@ const EXPECTED_COUNT: Readonly<Record<DatabaseType, string | null>> = Object.fre
   elasticsearch: 'SELECT COUNT(*) AS row_count\nFROM "Order""Items"',
   opensearch: 'SELECT COUNT(*) AS row_count\nFROM `Order"Items`',
   couchbase: 'SELECT COUNT(*) AS row_count\nFROM `c0`.`c1`.`Order"Items`;',
-  mongodb: '{\n  "collection": "Order\\"Items",\n  "operation": "count",\n  "filter": {}\n}',
+  // The database rides as its own key (#843), or the count answers for the connected
+  // database's same-named collection.
+  mongodb: '{\n  "database": "c0",\n  "collection": "Order\\"Items",\n  "operation": "count",\n  "filter": {}\n}',
   redis: null,
   libredb: null,
   prometheus: null,
@@ -95,9 +97,14 @@ describe("editable count queries (#702)", () => {
   });
 
   test("MongoDB emits an editable count/filter document with a lossless collection name", () => {
-    const capabilities = caps({ queryLanguage: "json", defaultPort: 27017 });
+    const capabilities = caps({
+      queryLanguage: "json",
+      defaultPort: 27017,
+      containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
+    });
     const collection = 'Order.Items"\n';
-    expect(JSON.parse(generators.generateCountQuery(["database", collection], capabilities)!)).toEqual({
+    expect(JSON.parse(generators.generateCountQuery(["shop", collection], capabilities)!)).toEqual({
+      database: "shop",
       collection,
       operation: "count",
       filter: {},

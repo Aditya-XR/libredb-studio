@@ -5,7 +5,7 @@ import { offersColumnProfiling } from "@/lib/db/types";
 import { createErrorResponse } from "@/lib/api/errors";
 import { resolveConnection } from "@/lib/seed/resolve-connection";
 import { guardRoute } from "@/lib/api/require-session";
-import { objectSegment, quoteIdentifier, quoteObjectPath } from "@/lib/query-generators";
+import { jsonCommandAddress, objectSegment, quoteIdentifier, quoteObjectPath } from "@/lib/query-generators";
 import { quoteLiteral } from "@/lib/sql/values";
 
 export async function POST(req: NextRequest) {
@@ -57,11 +57,12 @@ export async function POST(req: NextRequest) {
       const isSQL = capabilities.queryLanguage === "sql";
 
       if (!isSQL) {
-        // MongoDB profiling
+        // MongoDB profiling. The database rides as its own key: the connected database is
+        // not the collection's database in general, and without the key both reads went to
+        // the connected database's same-named collection (#843).
+        const address = jsonCommandAddress(path, capabilities);
         const profileQuery = JSON.stringify({
-          // The collection's own segment: a collection path is [database, collection] and
-          // the driver is already connected to the database (standing ruling 2).
-          collection: tableName,
+          ...address,
           operation: "aggregate",
           pipeline: [
             { $sample: { size: 1000 } },
@@ -71,7 +72,7 @@ export async function POST(req: NextRequest) {
         const sampleResult = await provider.query(profileQuery);
         const totalCountResult = await provider.query(
           JSON.stringify({
-            collection: tableName,
+            ...address,
             // `count`, the operation MongoDBProvider dispatches (it calls the
             // driver's countDocuments internally). `countDocuments` is not in its
             // SUPPORTED_OPERATIONS, so every MongoDB profile answered 400

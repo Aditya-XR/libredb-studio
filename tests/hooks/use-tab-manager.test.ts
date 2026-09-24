@@ -122,14 +122,24 @@ describe("useTabManager", () => {
   test("a MongoDB count opens in the correct editor language", () => {
     const metadata = {
       ...defaultMetadata,
-      capabilities: { ...defaultMetadata.capabilities, queryLanguage: "json" as const },
+      capabilities: {
+        ...defaultMetadata.capabilities,
+        queryLanguage: "json" as const,
+        containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }] as const,
+      },
     };
     const { result } = renderHook(() =>
       useTabManager({ activeConnection: makeConnection({ type: "mongodb" }), metadata, schema: [] }),
     );
-    act(() => result.current.handleGenerateCount(["database", "orders"]));
+    act(() => result.current.handleGenerateCount(["shop", "orders"]));
     expect(result.current.tabs[1].type).toBe("mongodb");
-    expect(JSON.parse(result.current.tabs[1].query)).toEqual({ collection: "orders", operation: "count", filter: {} });
+    // The database rides as its own key (#843), or the count answers for the connected one.
+    expect(JSON.parse(result.current.tabs[1].query)).toEqual({
+      database: "shop",
+      collection: "orders",
+      operation: "count",
+      filter: {},
+    });
   });
 
   test.each([

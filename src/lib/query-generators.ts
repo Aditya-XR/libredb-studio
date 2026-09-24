@@ -1,3 +1,4 @@
+import { declaredLevels } from "@/lib/db/object-kinds";
 import { metricSelector } from "@/lib/db/providers/timeseries/prometheus/promql";
 import { offersCountQuery, type ProviderCapabilities } from "@/lib/db/types";
 import type { ColumnSchema } from "@/lib/types";
@@ -161,6 +162,42 @@ export function objectSegment(path: readonly string[]): string {
   const segment = path[path.length - 1];
   if (segment === undefined) throw new Error("Cannot generate a query: the object address has no segments.");
   return segment;
+}
+
+/**
+ * The address a JSON command carries: the collection's own segment, and the database that
+ * holds it as a key of its own (#843). `db.collection("sample_shop.users")` would name a
+ * collection literally called that, so the database cannot ride inside `collection`.
+ *
+ * The database is the segment the declaration assigns to its `schema` level, never
+ * `path[0]` (standing ruling 5g), and it is emitted unconditionally, including for the
+ * connected database, for the reason `quoteObjectPath` qualifies unconditionally. A path
+ * whose length does not match the declared levels is refused: a collection that lost its
+ * database would otherwise read the connected database's same-named collection, which is
+ * the wrong answer #843 was.
+ *
+ * The one reader for every statement the product writes for MongoDB: the three generators
+ * below, the profiler route and the test data generator.
+ */
+export function jsonCommandAddress(
+  path: readonly string[],
+  capabilities: ProviderCapabilities,
+): { database?: string; collection: string } {
+  const levels = declaredLevels(capabilities);
+  if (path.length !== levels.length + 1) {
+    const shape = [...levels.map((level) => level.id), "name"].join(", ");
+    throw new Error(`Cannot generate a query: the object path is [${shape}], received ${JSON.stringify(path)}.`);
+  }
+  const collection = objectSegment(path);
+  if (levels.length === 0) return { collection };
+  const index = levels.findIndex((level) => level.id === "schema");
+  if (index < 0) {
+    throw new Error(
+      `Cannot generate a query: a JSON command needs a "schema" container level for its database; ` +
+        `the declaration is [${levels.map((level) => level.id).join(", ")}].`,
+    );
+  }
+  return { database: path[index], collection };
 }
 
 /**
@@ -438,7 +475,11 @@ export function generateTableQuery(
     return renderRedisCommand(keyType ? REDIS_COMMANDS[keyType].read(base) : ["TYPE", base]);
   }
   if (capabilities.queryLanguage === "json") {
-    return JSON.stringify({ collection: tableName, operation: "find", filter: {}, options: { limit: 50 } }, null, 2);
+    return JSON.stringify(
+      { ...jsonCommandAddress(path, capabilities), operation: "find", filter: {}, options: { limit: 50 } },
+      null,
+      2,
+    );
   }
   // PromQL (#1085). A metric is addressed by a SELECTOR, never by a quoted path: the bare name
   // where the lexer reads it as one and a `__name__` matcher for every other name, both written
@@ -599,7 +640,7 @@ export function generateSelectQuery(
     });
     return JSON.stringify(
       {
-        collection: tableName,
+        ...jsonCommandAddress(path, capabilities),
         operation: "find",
         filter: {},
         options: {
@@ -663,9 +704,10 @@ export function generateSelectQuery(
 /** Prepare an editable count statement, without a row limit or any execution (#702). */
 export function generateCountQuery(path: readonly string[], capabilities: ProviderCapabilities): string | null {
   if (!offersCountQuery(capabilities)) return null;
-  const name = objectSegment(path);
+  // Refuses an empty address before any dialect spells it, the JSON arm's own check included.
+  objectSegment(path);
   if (capabilities.queryLanguage === "json") {
-    return JSON.stringify({ collection: name, operation: "count", filter: {} }, null, 2);
+    return JSON.stringify({ ...jsonCommandAddress(path, capabilities), operation: "count", filter: {} }, null, 2);
   }
   // COUNT returns an int on SQL Server; COUNT_BIG preserves billion-row counts.
   const count = capabilities.defaultPort === 1433 ? "COUNT_BIG(*)" : "COUNT(*)";
