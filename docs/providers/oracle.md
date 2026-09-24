@@ -1584,7 +1584,7 @@ No kind here declares `acceptsSourceEdits`, and `tests/isolated/object-edit-decl
 ## 8. Monitoring & health
 
 All from `V$`/`USER_*` views; `getMonitoringData()` (inherited) fans them out in parallel. Each
-sub-query is independently privilege-guarded ([§3.6](#36-privilege-resilient-monitoring)).
+sub-query is independently privilege-guarded ([§3.7](#37-privilege-resilient-monitoring)).
 
 | Method | Primary source | Notes / degradation |
 |--------|----------------|---------------------|
