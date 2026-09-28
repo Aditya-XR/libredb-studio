@@ -4,7 +4,7 @@ import "../helpers/mock-navigation";
 
 import React from "react";
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QuerySafetyDialog, isDangerousQuery } from "@/components/QuerySafetyDialog";
 import { KafkaProvider } from "@/lib/db/providers/stream/kafka/index";
 import { PrometheusProvider } from "@/lib/db/providers/timeseries/prometheus/index";
@@ -59,6 +59,136 @@ describe("QuerySafetyDialog", () => {
       <QuerySafetyDialog isOpen={false} query="SELECT 1" schemaContext="" onClose={onClose} onProceed={onProceed} />,
     );
     expect(container.textContent).toBe("");
+  });
+
+  test("when open, getByRole alertdialog finds the dialog, and its accessible description contains the statement", () => {
+    const query = "DELETE FROM employee WHERE 1 = 0";
+    const { getByRole } = render(
+      <QuerySafetyDialog isOpen query={query} schemaContext="" onClose={onClose} onProceed={onProceed} />,
+    );
+    const dialog = getByRole("alertdialog", { name: "Query Safety Check" });
+    expect(dialog).not.toBeNull();
+    expect(document.querySelectorAll('[role="alertdialog"]').length).toBe(1);
+    const describedBy = dialog.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const descriptionElement = document.getElementById(describedBy!);
+    expect(descriptionElement?.textContent).toContain(query);
+  });
+
+  test("document.activeElement is the Cancel button right after it opens", () => {
+    const { getByRole } = render(
+      <QuerySafetyDialog
+        isOpen
+        query="DELETE FROM employee WHERE 1 = 0"
+        schemaContext=""
+        onClose={onClose}
+        onProceed={onProceed}
+      />,
+    );
+    const dialog = getByRole("alertdialog", { name: "Query Safety Check" });
+    const cancelButton = within(dialog).getByRole("button", { name: "Cancel" });
+    expect(document.activeElement).toBe(cancelButton);
+  });
+
+  test("Escape calls onClose once and never onProceed", () => {
+    const { getByRole } = render(
+      <QuerySafetyDialog
+        isOpen
+        query="DELETE FROM employee WHERE 1 = 0"
+        schemaContext=""
+        onClose={onClose}
+        onProceed={onProceed}
+      />,
+    );
+    getByRole("alertdialog", { name: "Query Safety Check" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onProceed).not.toHaveBeenCalled();
+  });
+
+  test("Cancel calls onClose once and never onProceed", () => {
+    const { getByRole } = render(
+      <QuerySafetyDialog
+        isOpen
+        query="DELETE FROM employee WHERE 1 = 0"
+        schemaContext=""
+        onClose={onClose}
+        onProceed={onProceed}
+      />,
+    );
+    const dialog = getByRole("alertdialog", { name: "Query Safety Check" });
+    const cancelButton = within(dialog).getByRole("button", { name: "Cancel" });
+    fireEvent.click(cancelButton);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onProceed).not.toHaveBeenCalled();
+  });
+
+  test("Execute calls onProceed once and never onClose", async () => {
+    const { getByRole } = render(
+      <QuerySafetyDialog
+        isOpen
+        query="DELETE FROM employee WHERE 1 = 0"
+        schemaContext=""
+        onClose={onClose}
+        onProceed={onProceed}
+      />,
+    );
+    const dialog = getByRole("alertdialog", { name: "Query Safety Check" });
+    const executeButton = within(dialog).getByRole("button", { name: "Execute Query" });
+    await waitFor(() => expect(executeButton.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(executeButton);
+    expect(onProceed).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // Radix hands focus back only to an AlertDialogTrigger, and the editor opens this dialog without
+  // one, so the element that had focus is what the dialog itself must return to.
+  test.each([
+    ["Escape", () => fireEvent.keyDown(document, { key: "Escape" })],
+    ["Cancel", () => fireEvent.click(screen.getByRole("button", { name: "Cancel" }))],
+  ])("after %s, focus is back where it was when the dialog opened", async (_label, dismiss) => {
+    function Editor() {
+      const [open, setOpen] = React.useState(false);
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>RUN</button>
+          <QuerySafetyDialog
+            isOpen={open}
+            query="DELETE FROM employee WHERE 1 = 0"
+            schemaContext=""
+            onClose={() => setOpen(false)}
+            onProceed={onProceed}
+          />
+        </>
+      );
+    }
+    const { getByRole, queryByRole } = render(<Editor />);
+    const run = getByRole("button", { name: "RUN" });
+    run.focus();
+    fireEvent.click(run);
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    dismiss();
+    await waitFor(() => expect(queryByRole("alertdialog")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(run));
+    expect(onProceed).not.toHaveBeenCalled();
+  });
+
+  test("keeps the primitive's phone gutter", () => {
+    // `max-w-lg` alone would replace the primitive's `max-w-[calc(100%-2rem)]`, and at 390px wide
+    // the dialog would touch both edges of the screen, where main kept 16px on each side.
+    const { getByRole } = render(
+      <QuerySafetyDialog
+        isOpen
+        query="DELETE FROM employee"
+        schemaContext=""
+        onClose={onClose}
+        onProceed={onProceed}
+      />,
+    );
+    const classes = getByRole("alertdialog").className.split(/\s+/);
+    expect(classes).toContain("max-w-[calc(100%-2rem)]");
+    expect(classes).toContain("sm:max-w-lg");
+    expect(classes).not.toContain("max-w-lg");
   });
 
   test("renders parsed high-risk analysis and caution action label", async () => {
@@ -220,7 +350,7 @@ describe("QuerySafetyDialog", () => {
       createStreamResponse({ chunks: [JSON.stringify(safePayload)] }),
     ) as unknown as typeof fetch;
 
-    const { queryByText, container } = render(
+    const { queryByText, getByRole } = render(
       <QuerySafetyDialog isOpen query="SELECT * FROM users" schemaContext="" onClose={onClose} onProceed={onProceed} />,
     );
 
@@ -238,9 +368,9 @@ describe("QuerySafetyDialog", () => {
     fireEvent.click(proceedButton!);
     expect(onProceed).toHaveBeenCalled();
 
-    const closeIconButton = container.querySelector("button");
+    const closeIconButton = getByRole("button", { name: "Close" });
     expect(closeIconButton).not.toBeNull();
-    fireEvent.click(closeIconButton!);
+    fireEvent.click(closeIconButton);
     expect(onClose.mock.calls.length).toBeGreaterThan(1);
   });
 
@@ -258,13 +388,13 @@ describe("QuerySafetyDialog", () => {
       createStreamResponse({ chunks: [JSON.stringify(safePayload)] }),
     ) as unknown as typeof fetch;
 
-    const { container } = render(
+    const { getByText } = render(
       <QuerySafetyDialog isOpen query={longQuery} schemaContext="" onClose={onClose} onProceed={onProceed} />,
     );
 
-    const preElement = container.querySelector("pre");
+    const preElement = getByText(longQuery.substring(0, 300) + "...");
     expect(preElement).not.toBeNull();
-    const preText = preElement!.textContent || "";
+    const preText = preElement.textContent || "";
     expect(preText.length).toBeLessThanOrEqual(303); // 300 chars + '...'
     expect(preText.endsWith("...")).toBe(true);
     expect(preText).toBe(longQuery.substring(0, 300) + "...");
@@ -1372,7 +1502,7 @@ describe("isDangerousQuery", () => {
    */
   test.each<[string, string]>([
     ["a no-break space", " DROP TABLE users"],
-    ["a line separator", " DROP TABLE users"],
+    ["a line separator", "\u2028DROP TABLE users"],
   ])("still prompts for a destructive statement behind %s", (_label, query) => {
     expect(isDangerousQuery(query, "mysql")).toBe(true);
     expect(isDangerousQuery(query)).toBe(true);
