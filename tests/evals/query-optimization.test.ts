@@ -616,6 +616,32 @@ describe("the bar a plan is judged against arrives with the plan, not with the r
     expect(drive.verdict).toEqual({ outcome: "answered", verifier: "agent-query-optimization.3", unmet: [] });
   });
 
+  test("it waits for a PLAN: another tool's result does not trigger it", async () => {
+    /*
+      The condition the notice turns on, pinned because nothing pinned it.
+
+      Removing `tool !== "inspect_plan"` from the guard left every test green, which is the
+      definition of the guard being untested: the notice would then fire after the first tool of
+      any kind, including on a run that had read no plan at all. That run is the one
+      `no-plan-comparison` already speaks to, with a different sentence that sends it to the
+      reading rather than naming a bar it holds nothing for.
+    */
+    const run = await open("sqlite");
+
+    const drive = await run.drive([
+      callsTool("inspect_schema", { schema: "public" }, "call_schema"),
+      callsTool("inspect_plan", { sql: SLOW }, "call_plan_before"),
+      callsTool("inspect_plan", { sql: FAST }, "call_plan_after"),
+      comparesPlans(),
+      reportOn("The rewrite reaches the same rows by index."),
+    ]);
+
+    // Nothing after the schema read; the bar lands only after the plan.
+    expect(drive.transcripts[1]).not.toContain("judged on a comparison");
+    expect(drive.transcripts[2]).toContain("judged on a comparison");
+    expect(drive.verdict).toEqual({ outcome: "answered", verifier: "agent-query-optimization.3", unmet: [] });
+  });
+
   test("it is said once, however many plans the run goes on to read", async () => {
     const run = await open("sqlite");
 

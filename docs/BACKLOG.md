@@ -41,7 +41,7 @@ None of it is a GitHub issue.
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Security scanner triage](#security-scanner-triage) — SCAN1 · 1
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B89 · 30
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B91 · 32
 - [MCP server deferrals (#246)](#mcp-server-deferrals-246)
 
 ---
@@ -4259,6 +4259,24 @@ Not fixed there: reordering the kinds would reorder the tree, and a per-kind sha
 **Done when:** a plan run against a Kafka cluster past the topic cap holds its consumer groups and brokers, with a test that drives the grounding walk over a provider whose first kind's batch is truncated and asserts that the later kinds are still read.
 
 ---
+
+### B90. `compose_report` refuses a small model's report on the same input hundreds of times in one cell
+`composeReportTool` in `src/lib/agent/tools.ts` answers an unreadable payload with `INVALID_TOOL_INPUT` and the validator's field paths, and the run resends the same shape until its turns are gone.
+Measured 2026-09-28 on the local harness: `qwen2.5:3b-instruct` earned 155 such refusals in ONE data-analysis cell and 92 in one assessment cell, `lfm2.5:8b` 8 in one analysis cell, `mistral-small:24b` 3.
+A field path says which key is absent; it never says where the model put the value instead, which is the reading `readDisplacedRecommendation` makes for `recommend_change` (#1192) and nothing makes for `compose_report`.
+The refusal is correct - the payload genuinely does not satisfy the schema - so this is not a wrong answer but an answer the run cannot act on, the shape `docs/AGENT.md` calls a refusal that names no remedy.
+The captured arguments say the displaced-key reading would reach some of them: the same capture that produced the `recommend_change` reader holds 2,272 declines, of which 1,701 name an absent `statement` and 1,046 carry a complete `CREATE INDEX` under a key the model chose.
+Found 2026-09-28 while measuring five models to 30/30 (#1192).
+Not fixed there: `compose_report` carries a nested claims/evidence shape rather than one flat statement, so the reading that answers it is a different piece of work from the one that branch makes, and guessing which key holds a claim is how a report comes to cite evidence the run never produced.
+**Done when:** a refusal of `compose_report` names what the run may do instead when the payload is readable under a key the schema does not use, and a test drives a model sending the three shapes the capture holds and asserts the run recovers rather than resending.
+### B91. The MCP settings page hands OpenCode a snippet OpenCode cannot read
+`src/lib/mcp/client-config.ts` renders the OpenCode snippet under `mcp.servers.libredb`; OpenCode reads `mcp.libredb` and requires an `enabled` field, so a user copying the snippet from the settings UI gets a configuration error rather than a server.
+Measured 2026-09-28 on macOS against the four documented install channels: every other client's snippet on that page connected, and this one did not.
+The same page's request path has no body-size limit either - a 2 MB JSON-RPC body was accepted with HTTP 200 - so an unauthenticated reach at `POST /api/mcp` is bounded by the platform default rather than by the route.
+Found 2026-09-28 while testing MCP end to end on macOS.
+Not fixed in #1192: that branch is the agent's measurement path and touches nothing under `src/lib/mcp/`, and a size limit is a ruling about the route's contract rather than a snippet correction.
+**Done when:** the OpenCode snippet uses the key that client reads, with a test asserting each client's snippet against that client's documented shape, and the MCP route rejects a body past a stated bound with a refusal that names it.
+
 
 ## MCP server deferrals (#246)
 
