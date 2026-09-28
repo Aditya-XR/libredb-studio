@@ -319,6 +319,7 @@ The `from` forms:
 Bound `params` are refused with a `DatabaseConfigError`: there is no binding, and ignoring them would run a different read from the one the caller built.
 Text that is empty once whitespace is removed is refused with a `QueryError`, before the request is parsed.
 Invalid JSON is refused with a `QueryError` carrying the fixed text "The read request is not valid JSON", never the parser's message, which under Node quotes the start of the text.
+A `partition` the topic does not have is refused with a `QueryError` naming the partitions the topic has, such as `Topic "orders" has partitions 0 to 2; partition 3 does not exist`, before any offset is read.
 `supportsResultPagination` and `supportsExternalQueryLimiting` are both `false`, as on Redis and MongoDB, and `prepareQuery` is the base pass-through: the request carries its own limit.
 
 A topic click in the tree writes and runs `{"topic": <name>, "from": "latest", "limit": 50}`, the action the labels name "Read Latest 50".
@@ -553,6 +554,7 @@ Mapped from the protocol error name, the client's error code and the Node error 
 | a package the client library requires that the installation does not resolve, at connect ([§2.5](#25-the-client-and-why)) | `DatabaseConfigError` naming the package, never the runtime's text, which carries the server's paths |
 | empty editor text | `QueryError` |
 | a read request that is invalid JSON or breaks the schema of [§5.1](#51-the-read-request) | `QueryError` |
+| a partition the topic does not have | `QueryError` naming the partitions the topic has |
 | an unknown topic ("Unknown topic <name>.") | `QueryError`: the topic does not exist |
 | an internal topic, refused by name before any request names it | `QueryError`: internal to Kafka and not readable here |
 | a partition with no leader | `QueryError` naming the leaderless partitions |

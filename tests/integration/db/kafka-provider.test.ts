@@ -1008,7 +1008,7 @@ describe("reads over captured payloads", () => {
     expect(recorded.calls.filter(([name]) => name === "fetchV13")).toHaveLength(1);
   });
 
-  test("refusals: empty text first, an invalid request, bound params, a missing topic, an offset outside the range", async () => {
+  test("refusals: empty text first, an invalid request, bound params, a missing topic, a partition the topic does not have, an offset outside the range", async () => {
     const { provider, recorded } = await connected();
     const sent = recorded.calls.length;
     const empty = await provider.query("  \n ", [1]).catch((e) => e);
@@ -1090,6 +1090,13 @@ describe("reads over captured payloads", () => {
     // An empty parameter list binds nothing, so the request reads.
     expect((await provider.query('{"topic":"codec-gzip","from":"earliest","limit":1}', [])).rows).toHaveLength(1);
     await expect(provider.query('{"topic":"ghost"}')).rejects.toBeInstanceOf(QueryError);
+    // A partition the topic does not have is refused where the read is planned, after the topic's
+    // metadata is read and before any offset is listed (spec 5.1): the refusal names the partitions
+    // the topic has, and the class it answers as is pinned here, so a change to the error mapping
+    // cannot move it back without a failing test.
+    const notHeld = await provider.query('{"topic":"orders","partition":3}').catch((e) => e);
+    expect(notHeld).toBeInstanceOf(QueryError);
+    expect(notHeld.message).toBe('Topic "orders" has partitions 0 to 2; partition 3 does not exist');
     const pastEnd = await provider.query('{"topic":"orders","partition":1,"from":{"offset":1000}}').catch((e) => e);
     expect(pastEnd).toBeInstanceOf(QueryError);
     expect(pastEnd.message).toBe(
