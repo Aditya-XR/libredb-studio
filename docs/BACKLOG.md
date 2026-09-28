@@ -4260,15 +4260,19 @@ Not fixed there: reordering the kinds would reorder the tree, and a per-kind sha
 
 ---
 
-### B90. `compose_report` refuses a small model's report on the same input hundreds of times in one cell
-`composeReportTool` in `src/lib/agent/tools.ts` answers an unreadable payload with `INVALID_TOOL_INPUT` and the validator's field paths, and the run resends the same shape until its turns are gone.
-Measured 2026-09-28 on the local harness: `qwen2.5:3b-instruct` earned 155 such refusals in ONE data-analysis cell and 92 in one assessment cell, `lfm2.5:8b` 8 in one analysis cell, `mistral-small:24b` 3.
-A field path says which key is absent; it never says where the model put the value instead, which is the reading `readDisplacedRecommendation` makes for `recommend_change` (#1192) and nothing makes for `compose_report`.
-The refusal is correct - the payload genuinely does not satisfy the schema - so this is not a wrong answer but an answer the run cannot act on, the shape `docs/AGENT.md` calls a refusal that names no remedy.
-The captured arguments say the displaced-key reading would reach some of them: the same capture that produced the `recommend_change` reader holds 2,272 declines, of which 1,701 name an absent `statement` and 1,046 carry a complete `CREATE INDEX` under a key the model chose.
+### B90. The worked example a refused call could copy is off by default, and off is where the models that need it are
+
+`offersRefusalExamples` gates the worked call that `compose_report`, `recommend_change` and `present_answer` attach to a refusal, and `refusalExamples` defaults to false: 2 of the 40 shipped profiles turn it on (`granite4.1:8b`, `nemotron3:33b`).
+The refusal is not bare without it - it names the failing field paths, `readSerializedClaims` recovers a claims array the model serialized as text, `readMisfiledEvidence` resolves evidence filed under the wrong source, and `citableEvidence` offers what the run actually holds - so what the flag withholds is the one thing a model can copy rather than parse.
+A model earns the flag by being measured, and the models that reach these refusals most are the ones nobody has measured yet, so the default lands the wrong way round for them.
+Measured 2026-09-28 on the local harness with the flag off: `qwen2.5:3b-instruct` earned 155 `compose_report:INVALID_TOOL_INPUT` refusals in ONE data-analysis cell and 92 in one assessment cell, `lfm2.5:8b` 8 in one analysis cell, `mistral-small:24b` 3.
+Whether the example would have moved those runs is not established here and is the question a ruling needs: the same capture shows the evidence contract is already obeyed by most calls that reach it - of 2,713 citations in 1,004 refused reports, 874 name a real artifact and 587 the schema snapshot correctly, while 1,185 name an id the run never produced, which no example can fix.
+
 Found 2026-09-28 while measuring five models to 30/30 (#1192).
-Not fixed there: `compose_report` carries a nested claims/evidence shape rather than one flat statement, so the reading that answers it is a different piece of work from the one that branch makes, and guessing which key holds a claim is how a report comes to cite evidence the run never produced.
-**Done when:** a refusal of `compose_report` names what the run may do instead when the payload is readable under a key the schema does not use, and a test drives a model sending the three shapes the capture holds and asserts the run recovers rather than resending.
+Not fixed there: turning the example on by default lengthens every refusal on every model, which is a ruling about prompt cost rather than a correction, and the branch that found it changes no defaults.
+
+**Done when:** a ruling chooses between a default-on example, an example offered only on a repeated refusal of the same tool in one run, and the present per-model flag; and if the default moves, a measurement says what it cost the models that already pass without it.
+
 ### B91. The MCP settings page hands OpenCode a snippet OpenCode cannot read
 `src/lib/mcp/client-config.ts` renders the OpenCode snippet under `mcp.servers.libredb`; OpenCode reads `mcp.libredb` and requires an `enabled` field, so a user copying the snippet from the settings UI gets a configuration error rather than a server.
 Measured 2026-09-28 on macOS against the four documented install channels: every other client's snippet on that page connected, and this one did not.
