@@ -78,6 +78,56 @@ export interface ServerStorageProvider {
   isHealthy(): Promise<boolean>;
   /** Cleanup resources */
   close(): Promise<void>;
+  /** Every local account. Empty until the first seed. Not used for OIDC identities. */
+  listAccounts(): Promise<StoredAccount[]>;
+  /** One account by its stored email, or null. */
+  getAccount(email: string): Promise<StoredAccount | null>;
+  /** Insert. The email is the primary key. */
+  insertAccount(account: StoredAccount): Promise<void>;
+  /** Replace the mutable columns of an existing email. Does not rename. */
+  updateAccount(account: StoredAccount, options?: AccountWriteOptions): Promise<void>;
+  /**
+   * Remove the account and its `user_storage` rows. Disabling an account does not call this:
+   * a disabled account keeps its rows so re-enabling restores them.
+   */
+  deleteAccount(email: string, options?: AccountWriteOptions): Promise<void>;
+}
+
+export interface AccountWriteOptions {
+  /**
+   * Write only if an enabled admin remains afterwards, decided inside the write's own transaction
+   * with the admin rows locked, so two concurrent requests cannot each remove one of the last two.
+   */
+  keepEnabledAdmin?: boolean;
+}
+
+/** A guarded account write that would have left no enabled admin. Nothing was written. */
+export class LastAdminError extends Error {
+  constructor() {
+    super("The write would leave no enabled admin");
+    this.name = "LastAdminError";
+  }
+}
+
+/**
+ * One local email/password account on the server store.
+ * `passwordHash` is the scrypt encoding from src/lib/password-hash.ts, never the password.
+ * `totpPending` is an enrolment that has not been confirmed; login ignores it.
+ */
+export interface StoredAccount {
+  email: string;
+  passwordHash: string;
+  role: "admin" | "user";
+  totpSecret: string | null;
+  totpPending: string | null;
+  disabled: boolean;
+  /**
+   * Copied into each session token at login. Disabling, a role change and a password change
+   * increment it, which ends every session minted before the change at its next request.
+   */
+  sessionVersion: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** Storage config returned by /api/storage/config */
