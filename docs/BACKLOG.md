@@ -41,7 +41,7 @@ None of it is a GitHub issue.
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4
 - [Security scanner triage](#security-scanner-triage) — SCAN1 · 1
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A1–A8 · 7
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B89 · 30
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B91 · 32
 - [MCP server deferrals (#246)](#mcp-server-deferrals-246)
 
 ---
@@ -4259,6 +4259,28 @@ Not fixed there: reordering the kinds would reorder the tree, and a per-kind sha
 **Done when:** a plan run against a Kafka cluster past the topic cap holds its consumer groups and brokers, with a test that drives the grounding walk over a provider whose first kind's batch is truncated and asserts that the later kinds are still read.
 
 ---
+
+### B90. The worked example a refused call could copy is off by default, and off is where the models that need it are
+
+`offersRefusalExamples` gates the worked call that `compose_report`, `recommend_change` and `present_answer` attach to a refusal, and `refusalExamples` defaults to false: 2 of the 40 shipped profiles turn it on (`granite4.1:8b`, `nemotron3:33b`).
+The refusal is not bare without it - it names the failing field paths, `readSerializedClaims` recovers a claims array the model serialized as text, `readMisfiledEvidence` resolves evidence filed under the wrong source, and `citableEvidence` offers what the run actually holds - so what the flag withholds is the one thing a model can copy rather than parse.
+A model earns the flag by being measured, and the models that reach these refusals most are the ones nobody has measured yet, so the default lands the wrong way round for them.
+Measured 2026-09-28 on the local harness with the flag off: `qwen2.5:3b-instruct` earned 155 `compose_report:INVALID_TOOL_INPUT` refusals in ONE data-analysis cell and 92 in one assessment cell, `lfm2.5:8b` 8 in one analysis cell, `mistral-small:24b` 3.
+Whether the example would have moved those runs is not established here and is the question a ruling needs: the same capture shows the evidence contract is already obeyed by most calls that reach it - of 2,713 citations in 1,004 refused reports, 874 name a real artifact and 587 the schema snapshot correctly, while 1,185 name an id the run never produced, which no example can fix.
+
+Found 2026-09-28 while measuring five models to 30/30 (#1192).
+Not fixed there: turning the example on by default lengthens every refusal on every model, which is a ruling about prompt cost rather than a correction, and the branch that found it changes no defaults.
+
+**Done when:** a ruling chooses between a default-on example, an example offered only on a repeated refusal of the same tool in one run, and the present per-model flag; and if the default moves, a measurement says what it cost the models that already pass without it.
+
+### B91. The MCP settings page hands OpenCode a snippet OpenCode cannot read
+`src/lib/mcp/client-config.ts` renders the OpenCode snippet under `mcp.servers.libredb`; OpenCode reads `mcp.libredb` and requires an `enabled` field, so a user copying the snippet from the settings UI gets a configuration error rather than a server.
+Measured 2026-09-28 on macOS against the four documented install channels: every other client's snippet on that page connected, and this one did not.
+The same page's request path has no body-size limit either - a 2 MB JSON-RPC body was accepted with HTTP 200 - so an unauthenticated reach at `POST /api/mcp` is bounded by the platform default rather than by the route.
+Found 2026-09-28 while testing MCP end to end on macOS.
+Not fixed in #1192: that branch is the agent's measurement path and touches nothing under `src/lib/mcp/`, and a size limit is a ruling about the route's contract rather than a snippet correction.
+**Done when:** the OpenCode snippet uses the key that client reads, with a test asserting each client's snippet against that client's documented shape, and the MCP route rejects a body past a stated bound with a refusal that names it.
+
 
 ## MCP server deferrals (#246)
 
