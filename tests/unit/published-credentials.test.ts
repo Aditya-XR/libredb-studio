@@ -35,6 +35,7 @@ const ROOTS = [
   "README_es.md",
   "README_hi.md",
   "README_ja.md",
+  "README_ru.md",
   "README_ur.md",
   "README_zh.md",
   "README_pt.md",
