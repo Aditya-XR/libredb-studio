@@ -91,7 +91,7 @@ interface StudioMobileHeaderProps {
   onAskAgent?: () => void;
 }
 
-export function StudioMobileHeader({
+export const StudioMobileHeader = React.memo(function StudioMobileHeader({
   connections,
   activeConnection,
   connectionPulse,
@@ -404,4 +404,4 @@ export function StudioMobileHeader({
       )}
     </header>
   );
-}
+});

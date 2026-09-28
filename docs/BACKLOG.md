@@ -2002,14 +2002,13 @@ writers. `csv.ts` and `result-export.ts` are pure and hold no browser reference 
 can reuse them; `download.ts` is the only browser-bound module there. Worth costing against the
 agent's own export gap (B33, B34), which wants the same route.
 
-### X5. `Studio.tsx` re-renders its whole tree on every keystroke
+### X5. `Studio.tsx` still re-renders three children and its inline dialogs on every keystroke
 
-14 `useState`, no `useMemo`/`useCallback`, no memoized children, React Compiler off. #422's
-code-splitting is not this fix and does not help it. It touches every prop in the shell, which is why
-it was not mixed into a correctness PR.
-
-`framer-motion` is also still in the first load: `Studio.tsx`, `ConnectionModal`, `SchemaExplorer`,
-`ConnectionItem` and `TableItem` all import it statically and all mount on arrival.
+#1127 memoized the shell's children and took `framer-motion` out of the first load.
+Measured with a commit counter in a real browser, 27 keystrokes in the editor: the sidebar, the agent rail, the toolbar, the connections list and the desktop header no longer re-render, and the shell's component renders fell from 11961 to 6588.
+Three memoized children still re-render on each keystroke, because each is handed the tab or its text: `BottomPanel` (`currentTab`), `StudioTabBar` (`tabs`) and `StudioMobileHeader` (`currentQuery`), which also take inline handlers.
+Most of the remaining renders are the dialogs `Studio.tsx` still renders inline, about a dozen Radix `Dialog`s per keystroke, plus `CommandPalette` and `MobileNav`, which are not memoized.
+The first group needs those children handed what they show rather than the whole tab, which changes `BottomPanel`'s props; the second is moving the dialogs into a component of their own.
 
 ### X9. What `columnTypes` still cannot name, measured
 

@@ -23,7 +23,7 @@ interface StudioDesktopHeaderProps {
   onLogout: () => void;
 }
 
-export function StudioDesktopHeader({
+export const StudioDesktopHeader = React.memo(function StudioDesktopHeader({
   activeConnection,
   connectionPulse,
   user,
@@ -126,4 +126,4 @@ export function StudioDesktopHeader({
       </div>
     </header>
   );
-}
+});

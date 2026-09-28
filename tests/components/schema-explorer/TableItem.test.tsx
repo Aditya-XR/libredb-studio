@@ -270,6 +270,21 @@ describe("TableItem", () => {
     expect(queryByText("1.5K")).not.toBeNull();
   });
 
+  // Where there is no hover the menu button is always shown, so it cannot share the count's
+  // slot the way it does on a desktop: the two drew on top of each other on a phone.
+  test("on a screen with no hover the count and the menu button sit side by side", () => {
+    const { getByText } = render(
+      <TableItem table={largeTable} isExpanded={false} onToggle={mock(() => {})} isAdmin={false} />,
+    );
+    const count = getByText("1.5K");
+    const slot = count.parentElement as HTMLElement;
+    const trigger = slot.querySelector("button") as HTMLElement;
+
+    expect(slot.className).toContain("[@media(hover:none)]:w-auto");
+    expect(count.className).toContain("[@media(hover:none)]:static");
+    expect(trigger.className).toContain("[@media(hover:none)]:static");
+  });
+
   test("compacts millions while the title carries the full reported count and its caveat", () => {
     const { getByText } = render(
       <TableItem

@@ -73,7 +73,7 @@ interface StudioTabBarProps {
   onAddTab: () => void;
 }
 
-export function StudioTabBar({
+export const StudioTabBar = React.memo(function StudioTabBar({
   tabs,
   activeTabId,
   editingTabId,
@@ -234,4 +234,4 @@ export function StudioTabBar({
       </button>
     </div>
   );
-}
+});

@@ -221,7 +221,7 @@ interface BottomPanelProps {
   onDismissAgentArtifact?: () => void;
 }
 
-export function BottomPanel({
+export const BottomPanel = React.memo(function BottomPanel({
   mode,
   onSetMode,
   currentTab,
@@ -640,4 +640,4 @@ export function BottomPanel({
       </div>
     </div>
   );
-}
+});

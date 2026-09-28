@@ -35,7 +35,7 @@ interface QueryToolbarProps {
   onImport?: () => void;
 }
 
-export function QueryToolbar({
+export const QueryToolbar = React.memo(function QueryToolbar({
   activeConnection,
   metadata,
   isExecuting,
@@ -208,4 +208,4 @@ export function QueryToolbar({
       </div>
     </>
   );
-}
+});
