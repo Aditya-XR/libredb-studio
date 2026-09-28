@@ -792,6 +792,59 @@ function readNearMissKeys(input: unknown, keys: readonly string[]): unknown {
   return read;
 }
 
+/**
+ * The two ways a run that HAS its answer fails to say how to show it.
+ *
+ * Measured 2026-09-19 with the argument capture left on for a whole sweep: 206 of 221 refused calls
+ * are these two, and both belong to the two models whose `data-analysis` cell sits at 0/5. Neither
+ * is a model that failed to do the work - both read the data, produced the artifact, and lost the
+ * run at the rendering.
+ *
+ *   A SPEC ON A TABLE. 113 refusals, all one model, all shaped like
+ *   `{"kind":"table","spec":{"x":"total_rows","y":9488,"caption":"Total rows"}}`. It is not a chart
+ *   and could not become one - no `type`, and `y` holds a number where a list of columns goes. It
+ *   is a caption the model wanted to hang on a table. `kind` is explicit, so the surplus goes and
+ *   the table stays: a decoration is not a reason to discard the answer.
+ *
+ *   NO PRESENTATION AT ALL. 93 refusals of `{"artifact":"<a real id>"}`. This reverses the line
+ *   drawn on 2026-09-17, when the same call was left refused because defaulting it would be the
+ *   server choosing how the user's answer is displayed. The measurement is what changed the
+ *   reading: a table is not a choice between renderings, it is this contract's own statement that
+ *   a result shown as itself is a complete answer - and the alternative on offer was never a better
+ *   rendering, it was no answer at all.
+ *
+ * Bounded to an ABSENT presentation. One that arrived and failed to validate is a model saying
+ * something specific, and overriding that would be the server choosing: `{"kind":"spreadsheet"}`
+ * stays refused.
+ */
+function readMisrenderedPresentation(input: unknown): unknown {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
+  const read = { ...(input as Record<string, unknown>) };
+  if (read["artifact"] === undefined) return read;
+
+  const { presentation } = read;
+  if (presentation === undefined) return { ...read, presentation: { kind: "table" } };
+  if (typeof presentation !== "object" || presentation === null || Array.isArray(presentation)) return read;
+
+  const shown = presentation as Record<string, unknown>;
+  /*
+    A table keeps `kind` and nothing else.
+
+    The first version dropped `spec` by name and left three more surplus keys that models use for
+    the same purpose - 47 further refusals in one sweep: `data` holding the row, `rows` holding the
+    list, `columns` holding name/value pairs. The model is pasting the RESULT into the presentation,
+    which it never needs to: the artifact beside it already names those rows and `presentation` only
+    says how to show them. Dropping by name is the mistake that produced the second round.
+
+    Safe because a table takes no options at all. A CHART is left untouched - its `spec` IS the
+    instruction, and discarding an unrecognised key there could change the picture silently.
+  */
+  if (shown["kind"] === "table") {
+    return Object.keys(shown).length === 1 ? read : { ...read, presentation: { kind: "table" } };
+  }
+  return read;
+}
+
 function readSerializedPresentation(input: unknown): unknown {
   if (typeof input !== "object" || input === null) return input;
   const { presentation } = input as { presentation?: unknown };
@@ -933,6 +986,65 @@ function readDisplacedRecommendation(input: unknown): unknown {
     const kind = changeKindOf(change);
     if (kind !== undefined) read = { ...read, change: kind, statement: change };
   }
+  /*
+    The statement decides the kind whenever the card cannot say it, or says it wrong.
+    121 refusals in one sweep, three inputs, one question:
+
+      `change: null`                                        - nothing said
+      `change: "CREATE INDEX ..."` with `statement` FILLED   - the clause above only moves SQL
+                                                              out of `change` when `statement` is
+                                                              empty, so a model that filled both
+                                                              got nothing
+      `change: "index"` with a SELECT in `statement`         - said, and contradicted by the SQL
+                                                              (50 of these; five consecutive
+                                                              `granite4.2:3b` confirmations died
+                                                              on this one refusal)
+
+    Only one of the two fields can be trusted and it is the statement: `CREATE INDEX` or `SELECT`
+    IS the kind of change, while `change` is a label chosen before the SQL was written. Applied
+    only where the statement names its own kind, so prose still reaches the refusal it earns.
+  */
+  const written = read["statement"];
+  if (typeof written === "string") {
+    const kind = changeKindOf(written);
+    if (kind !== undefined && read["change"] !== kind) read = { ...read, change: kind };
+  }
+
+  /*
+    The statement under a key the model chose, when `statement` is empty.
+
+    The largest single refusal in the measurement, and the statement was never missing. Of 1595
+    captured `recommend_change` refusals carrying `statement: expected string, received nothing`,
+    949 hold a complete `CREATE INDEX` somewhere else: 576 as `{"sql": "CREATE INDEX ..."}` alone,
+    301 with an `index_name` beside it, 72 with the table and column spelled out too. One model
+    sent that shape 1189 times - which is the proof that the sentence it got back was unusable,
+    because a model able to act on "statement: expected string, received nothing" does not repeat
+    the bytes it just sent 1189 times.
+
+    Read by the statement's own opening rather than by a list of blessed key names: `CREATE INDEX`
+    or `SELECT` IS the kind of change, so `changeKindOf` both identifies the value and decides the
+    kind, and prose under the same key still names no statement and is still refused. The key the
+    model reached for is not evidence of anything and is deliberately not consulted.
+
+    Only where `statement` is absent, so a call that filled it correctly is never touched. And the
+    lone-rename rule below cannot serve this: it needs exactly one absent field and exactly one
+    surplus key, while these calls are missing three and often carry two or three extras.
+
+    It buys 37 calls outright. Its real work is on the other 1196, which carry ONLY the statement:
+    reading it leaves the refusal naming `rationale` and `evidence` - the two that are genuinely
+    absent - instead of four fields of which three had arrived.
+  */
+  if (read["statement"] === undefined) {
+    for (const [key, value] of Object.entries(read)) {
+      if ((RECOMMENDATION_KEYS as readonly string[]).includes(key)) continue;
+      if (typeof value !== "string") continue;
+      const kind = changeKindOf(value);
+      if (kind === undefined) continue;
+      const { [key]: _moved, ...rest } = read;
+      read = { ...rest, change: kind, statement: value };
+      break;
+    }
+  }
 
   const absent = RECOMMENDATION_KEYS.filter((key) => read[key] === undefined);
   const surplus = Object.keys(read).filter((key) => !(RECOMMENDATION_KEYS as readonly string[]).includes(key));
@@ -943,9 +1055,35 @@ function readDisplacedRecommendation(input: unknown): unknown {
     read = { ...rest, [to]: moved };
   }
 
+  /*
+    An evidence item inside a wrapper named after its own source.
+
+    150 refusals from `granite4.1:3b` in one sweep, 71 of them exactly
+    `{"artifact": {"correlationId": "...", "source": "artifact"}}` - the reference complete and
+    correct, one level down. The lone-object reading below then made it the single member of a
+    list and the schema reported `evidence.0.source: invalid union`, which is true of the WRAPPER
+    and says nothing about what it holds. That cell is `granite4.1:3b` optimize, 0/5 over five
+    readings and the last one between that model and 30/30.
+
+    One key whose value carries `source` is unambiguous. Two keys is a model saying something this
+    cannot read, and choosing a half would be the server choosing the citation.
+  */
+  const acilan = (item: unknown): unknown => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return item;
+    const fields = item as Record<string, unknown>;
+    if ("source" in fields) return item;
+    const keys = Object.keys(fields);
+    if (keys.length !== 1) return item;
+    const inner = fields[keys[0] as string];
+    if (typeof inner === "object" && inner !== null && !Array.isArray(inner) && "source" in inner) return inner;
+    return item;
+  };
+
   const { evidence } = read;
-  if (typeof evidence === "object" && evidence !== null && !Array.isArray(evidence)) {
-    read = { ...read, evidence: [evidence] };
+  if (Array.isArray(evidence)) {
+    read = { ...read, evidence: evidence.map(acilan) };
+  } else if (typeof evidence === "object" && evidence !== null) {
+    read = { ...read, evidence: [acilan(evidence)] };
   }
   /*
     And the array serialized as a string, which is `readSerializedClaims`' case one field over.
@@ -1929,10 +2067,34 @@ function columnsThatExist(message: string, connection: DatabaseConnection): stri
   // taking the first two would look up "e" and find nothing. Measured — the only database error
   // this fix could have answered in a whole sweep had that shape, and the first version missed it.
   const qualified = /no such column:\s*(?:\w+\.)*?(\w+)\.(\w+)\s*$/i.exec(message.trim());
-  if (qualified === null) return undefined;
-  const [, qualifier, missing] = qualified;
   const snapshot = heldSnapshotForConnection(connectionIdentity(connection));
   if (snapshot === null) return undefined;
+  /*
+    The column named with NO table in front of it, which is what a model writes most of the time.
+
+    The qualified form is what this function was built for and it leaves the commonest shape
+    unanswered: `no such column: dept_name`. Measured 2026-09-23 on `granite4:3b` - two drafts in
+    one run, `dept_name` then `dept_no`, both bare, both answered with the engine's four words and
+    nothing else; the run then offered its table profile as the answer and was refused 121 times
+    across the sweep. That cell, data-analysis 0/5, is the only one between that model and 30/30.
+
+    With no qualifier there is no table whose columns to list, so what is named is WHERE the column
+    lives. That is the half that moves a model anyway - a join it can write, rather than a fact
+    about a table it did not ask about. A name that is nowhere in the inventory produces nothing:
+    saying "no table has it" is true and leads nowhere, and the inventory is already in the prompt.
+  */
+  if (qualified === null) {
+    const bare = /no such column:\s*(\w+)\s*$/i.exec(message.trim());
+    if (bare === null) return undefined;
+    const [, missing] = bare;
+    const holders = snapshot.objects
+      .filter((entry) => entry.columns.some((column) => column.name.toLowerCase() === missing.toLowerCase()))
+      .slice(0, 6)
+      .map((entry) => entry.name);
+    if (holders.length === 0) return undefined;
+    return `${missing} is in ${holders.join(", ")} — join through one of those, or qualify it.`;
+  }
+  const [, qualifier, missing] = qualified;
   // The inventory names a table as the engine qualifies it — `public.engineering` on
   // PostgreSQL — while the error names it as the statement wrote it, usually bare. So the last
   // segment is compared as well, which is what makes the two spellings meet.
@@ -1941,7 +2103,26 @@ function columnsThatExist(message: string, connection: DatabaseConnection): stri
     const name = entry.name.toLowerCase();
     return name === wanted || name.split(".").at(-1) === wanted;
   });
-  if (table === undefined || table.columns.length === 0) return undefined;
+  /*
+    A qualifier that is an ALIAS still gets the half of the answer that does not need it.
+
+    This returned nothing here, on the reasoning that resolving `e` to `employee` needs the FROM
+    clause and inventing a mapping is worse than silence. The silence is worse. Measured
+    2026-09-23 on `granite4:3b`: told where a bare `dept_name` lived, it rewrote the statement
+    with the right join and hit `no such column: e.dept_no` — then sent the identical statement
+    three more times, because that refusal carried nothing. Its columns cannot be listed without
+    knowing the table; WHERE the column lives needs no alias at all, and that is the half a model
+    can act on.
+  */
+  if (table === undefined || table.columns.length === 0) {
+    const holders = snapshot.objects
+      .filter((entry) => entry.columns.some((column) => column.name.toLowerCase() === missing.toLowerCase()))
+      .slice(0, 6)
+      .map((entry) => entry.name);
+    return holders.length === 0
+      ? undefined
+      : `${missing} is in ${holders.join(", ")} — "${qualifier}" is not one of them.`;
+  }
   // Bounded: a wide table's whole column list would bury the sentence that carries it.
   const named = table.columns.slice(0, 12).map((column) => column.name);
   /*
@@ -4434,7 +4615,7 @@ export function presentAnswerTool(
 
   const parsed = parseToolInput(
     presentAnswerSchema,
-    readNearMissKeys(readSerializedPresentation(input), ["artifact", "presentation"]),
+    readMisrenderedPresentation(readNearMissKeys(readSerializedPresentation(input), ["artifact", "presentation"])),
   );
   if (!parsed.ok) {
     /*
@@ -4502,6 +4683,11 @@ export function presentAnswerTool(
       different instructions.
     */
     const instead = presentableArtifact(run.events);
+    // Captured beside the schema failures, because this refusal is reached AFTER the schema and so
+    // was invisible to a dump that only fires on a parse failure. `granite4:3b` loses its analyze
+    // cell to this code 28 times a sweep, and the two readings it could have - nothing readable
+    // existed, or the named alternative was ignored - call for opposite fixes. The cited operation
+    // and whether an alternative was offered are what tell them apart.
     return unavailable(
       "ANSWER_NOT_A_DATA_READ",
       instead === undefined ? undefined : `this run already read ${instead} — present that`,
@@ -4590,6 +4776,10 @@ export function composeReportTool(
     if (!claim.evidence.every((reference) => verifiedAgainst(run.events, reference))) {
       // Asked of the WHOLE claim list rather than this one claim, so the path it names is
       // the one the model sent — a per-claim reader would say `claims.0` for every claim.
+      // Captured for the same reason the schema failures are: this refusal NAMES the citable ids
+      // and models go on citing something else - one `granite4.2:3b` optimize run was refused here
+      // fourteen times and spent its whole 450-second budget in the loop. The paths cannot say
+      // what it cited instead, and that is the only thing that would explain the loop.
       return unavailable("UNVERIFIABLE_EVIDENCE", unverifiableCitation(run.events, parsed.value.claims));
     }
     claims.push({

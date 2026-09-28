@@ -78,6 +78,7 @@ import { erDetailForWorkflow, renderErDiagram } from "./er-diagram";
 import { type AgentGoalShortfall, verifyRunGoal } from "./goal-verifier";
 import { type AgentInventoryNoun, inventoryNoun } from "./inventory-noun";
 import {
+  CALL_NAMING_KEYS,
   PROMPTED_ACTION_SHAPE,
   PROMPTED_PROTOCOL_REMINDER,
   promptedToolContract,
@@ -280,6 +281,29 @@ const AGENT_RULES = [
  * event log — which is why it repeats `AGENT_CITATION_RULE` verbatim rather than
  * softening it: a forced report is a cited report or it is no report.
  */
+/**
+ * What an optimization run is told the moment it reads a plan.
+ *
+ * Every other sentence about this bar is delivered by HOLDING `compose_report`, and holds are
+ * suppressed inside the report reserve for a reason that is right: a run held on its last turn
+ * files no report at all, which is a worse verdict than the one the hold was avoiding. The
+ * consequence, unmeasured until now, is that a run which spends its turns READING is never told
+ * at all - the one sentence it needed is timed to arrive only after it can no longer be used.
+ *
+ * `laguna-xs-2.1` loses this cell five times out of five exactly there: eleven tool calls, THREE
+ * plans inspected, two reserve notices, a report, `no-plan-comparison`. It holds everything a
+ * comparison needs and stops, because nothing said a comparison was what the report rests on.
+ *
+ * So it is said when the plan arrives instead, riding on the turn that was about to be taken -
+ * the `report-reserve` pattern, which spends no turn and changes no rule. Early is safe here
+ * precisely because it costs nothing: the run that would have compared anyway loses nothing by
+ * being told, and the run that would not is told while it still has turns to act.
+ */
+const AGENT_PLAN_BAR_NOTICE = [
+  "You have a plan in hand, and this workflow is judged on a comparison rather than on the plan alone: a report answers when two plans have been compared, or when an index is recommended citing the plan whose access path it would change.",
+  "Neither is recorded yet. Before you call compose_report, either call inspect_plan on a rewritten form of the statement and then compare_plans with the two artifact ids, or call recommend_change for an index citing the plan artifact you already hold.",
+].join(" ");
+
 export const AGENT_REPORT_RESERVE_NOTICE = [
   "This run is nearly out of room: treat this as your last turn.",
   "Call compose_report now with what you have already established, and leave out what you have not.",
@@ -808,7 +832,13 @@ function citedArtifactIds(input: unknown): readonly string[] {
  * still nothing is executed or repaired. All this decides is whether the model is told what
  * happened to its call.
  */
-const CALL_NAMING_KEYS = "name|action|tool|tool_name|function|function_name";
+/*
+  One list, shared with the reader that RECOVERS these calls. They were written separately and
+  drifted: this path recognised `{"name": "compose_report", …}` well enough to tell the model it
+  had used the wrong channel, while `readPromptedAction` could not read it and the finished report
+  was discarded. A shape now either reads or is not recognised at all.
+*/
+const NAMING_KEY_PATTERN = CALL_NAMING_KEYS.join("|");
 
 function stoppedWithAToolCall(text: string, holds: (name: string) => boolean): boolean {
   const body = text
@@ -817,7 +847,7 @@ function stoppedWithAToolCall(text: string, holds: (name: string) => boolean): b
     .replace(/\s*```$/, "")
     .trim();
   if (body.startsWith("{")) {
-    const named = new RegExp(`"(?:${CALL_NAMING_KEYS})"\\s*:\\s*"([A-Za-z_][A-Za-z0-9_]*)"`).exec(body);
+    const named = new RegExp(`"(?:${NAMING_KEY_PATTERN})"\\s*:\\s*"([A-Za-z_][A-Za-z0-9_]*)"`).exec(body);
     return named !== null && holds(named[1] as string);
   }
   /*
@@ -2607,6 +2637,7 @@ export function guidanceDelivered(events: readonly AgentRunEvent[]): Readonly<Re
     "plan-statement": 0,
     "turn-cut-off": 0,
     "report-reserve": 0,
+    "plan-bar": 0,
     "unread-stop": 0,
     "present-before-report": 0,
     "cite-what-you-read": 0,
@@ -3203,6 +3234,8 @@ export async function runInvestigation(
     */
     /** The reserve notice is a one-shot: a run is told once that it is out of room. */
     let reserveAnnounced = delivered["report-reserve"] > 0;
+    // Read from the ledger for the reason the line above is: a resumed run has already heard it.
+    let planBarAnnounced = delivered["plan-bar"] > 0;
     /** Whether a tool this run HOLDS has been called; see `remindToReport`. */
     let anyToolCalled = false;
     /**
@@ -3269,6 +3302,23 @@ export async function runInvestigation(
       reserveAnnounced = true;
       messages.push({ role: "user", content: notice(AGENT_REPORT_RESERVE_NOTICE) });
       await issueGuidance("report-reserve");
+    };
+
+    /**
+     * Tells an optimization run, once, what its report is judged on - at the moment it reads a
+     * plan, which is the moment it can still act on the answer.
+     *
+     * Safe for the same three reasons `announceReserve` is: it rides on a turn already being
+     * taken, it spends no statement and consults no deadline, and it touches neither the policy
+     * version nor the verifier. `holdsTool("compare_plans")` is the workflow test, the same
+     * proxy the compose-time hold uses - a run whose verdict does not want a comparison is not
+     * handed the tool, so it is never told about one.
+     */
+    const announcePlanBar = async (tool: string): Promise<void> => {
+      if (planBarAnnounced || tool !== "inspect_plan" || !holdsTool("compare_plans")) return;
+      planBarAnnounced = true;
+      messages.push({ role: "user", content: notice(AGENT_PLAN_BAR_NOTICE) });
+      await issueGuidance("plan-bar");
     };
 
     /**
@@ -4070,6 +4120,7 @@ export async function runInvestigation(
         }
         if (outcome.kind === "reported") return conclude("succeeded", "report-composed");
         messages.push(prompted ? promptedResultMessage(call, outcome.text) : toolResultMessage(call, outcome.text));
+        await announcePlanBar(call.toolName);
       }
       return null;
     };

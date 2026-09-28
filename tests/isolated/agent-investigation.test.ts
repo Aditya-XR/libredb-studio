@@ -3966,24 +3966,27 @@ describe("a run that stops having read nothing is told to read it itself", () =>
 
     `unreadableToolCall` does not serve it and cannot: that notice answers a call that arrived
     through the TOOL channel and could not be parsed, and tells the model to send arguments only.
-    This call parses perfectly. What it needs is the other half - that a call written into the text
-    channel is not a call at all.
+    This call parses perfectly.
 
-    Free by the same argument every notice in this file rests on: the run is concluding when this
-    fires, so it has already earned `no-report` and the turn cannot cost a pass. Once per run.
+    It is RUN, not answered. The first remedy here was a notice - the run was told which channel it
+    had used and given the turn to use the other one - and the wider measurement then showed what
+    that costs. Counted over the open cells' ledgers: 45 of the 46 tool-call-shaped stops are this
+    exact wire form, from three models, every payload complete and citing ids from its own run.
+    Every one got the notice; the notice moved none of them, because a model that already wrote the
+    call correctly has nothing new to write when asked again.
+
+    So `readPromptedAction` reads it and the run dispatches it, on the same terms as every other
+    recovery in this file: the named tool must be one the run HOLDS, and what comes back goes
+    through `AGENT_TOOL_DEFINITIONS` and the audited pipeline exactly as a native call does. The
+    notice stays for the shape that cannot be recovered - the FENCED call in the test below, which
+    is not JSON and carries no arguments to run.
   */
-  test("a tool call written as text is named as one, and the run gets the turn to send it properly", async () => {
+  test("a tool call written as text is run, not answered with a reminder", async () => {
     const b = boot(freshDataDir());
     const run = await startRun(b);
     const callAsText = (): Response =>
-      chatTextStream(JSON.stringify({ name: "inspect_schema", parameters: { schema: "public" } }));
-    const script = scriptedModel(
-      callsTool("inspect_schema", { schema: "public" }),
-      callAsText,
-      // Given the turn and told why, it sends the same call through the tool channel.
-      callsTool("inspect_schema", { schema: "public" }),
-      reportOn(),
-    );
+      chatTextStream(JSON.stringify({ name: "inspect_schema", parameters: { kind: "columns" } }));
+    const script = scriptedModel(callsTool("inspect_schema", { schema: "public" }), callAsText, reportOn());
 
     const result = await runInvestigation(run.runId, {
       service: b.service,
@@ -3992,9 +3995,13 @@ describe("a run that stops having read nothing is told to read it itself", () =>
     });
 
     const events = await eventsOf(b.store, run.runId);
-    expect(events.filter((event) => event.kind === "guidance-issued").map((event) => event.notice)).toContain(
+    // The written call was dispatched, so the turn cost nothing and no notice was needed. Its
+    // arguments differ from the native call above only so that the repeat-call guard does not
+    // collapse the two and hide what this asserts.
+    expect(events.filter((event) => event.kind === "guidance-issued").map((event) => event.notice)).not.toContain(
       "tool-call-as-text",
     );
+    expect(events.filter((event) => event.kind === "tool-invoked" && event.tool === "inspect_schema")).toHaveLength(2);
     expect(result.stopReason).toBe("report-composed");
   });
 
@@ -4064,24 +4071,23 @@ describe("a run that stops having read nothing is told to read it itself", () =>
     far narrower than prose: a key that introduces a call, a colon, and a quoted tool this run HOLDS.
     The test below this pair pins the line - prose that merely mentions a tool stays untouched.
 
-    Nothing is executed and nothing is repaired. A malformed call is not made good by being
-    recognised; the model is told where its call went and given the turn to send it properly.
+    It is now REPAIRED and run, which reverses what this test first asserted. The original rule was
+    that a malformed call is recognised and never made good - the model is told where its call went
+    and given the turn to resend. The wider count retired that: of the runs ending in prose holding
+    a tool-call-shaped object, 113 held one that would not parse, and dropping closers that match
+    nothing while appending the ones owed recovers 22 - every one of them citing an artifact id its
+    own run produced. A model that already wrote the call correctly except for one bracket has
+    nothing new to write when asked again. See `parseTolerantly` for the two rules that keep the
+    repair from inventing anything, and the test beside it for the string it refuses to close.
   */
-  test("a call whose JSON is one brace short is still recognised, because the brace is not what went wrong", async () => {
+  test("a call whose JSON is one brace short is repaired and run, because the brace is not what went wrong", async () => {
     const b = boot(freshDataDir());
     const run = await startRun(b);
     // The exact shape twenty-four of the twenty-seven wore: the closing brace of the last array
     // member written twice. `JSON.parse` refuses it; the call it describes is unambiguous.
     const brokenCall = (): Response =>
-      chatTextStream(
-        '{"name": "inspect_schema", "arguments": {"schema": "public"}, "extra": [{"a": 1}, {"b": 2}}]}',
-      );
-    const script = scriptedModel(
-      callsTool("inspect_schema", { schema: "public" }),
-      brokenCall,
-      callsTool("inspect_schema", { schema: "public" }),
-      reportOn(),
-    );
+      chatTextStream('{"name": "inspect_schema", "arguments": {"kind": "columns"}, "extra": [{"a": 1}, {"b": 2}}]}');
+    const script = scriptedModel(callsTool("inspect_schema", { schema: "public" }), brokenCall, reportOn());
 
     const result = await runInvestigation(run.runId, {
       service: b.service,
@@ -4090,9 +4096,10 @@ describe("a run that stops having read nothing is told to read it itself", () =>
     });
 
     const events = await eventsOf(b.store, run.runId);
-    expect(events.filter((event) => event.kind === "guidance-issued").map((event) => event.notice)).toContain(
+    expect(events.filter((event) => event.kind === "guidance-issued").map((event) => event.notice)).not.toContain(
       "tool-call-as-text",
     );
+    expect(events.filter((event) => event.kind === "tool-invoked" && event.tool === "inspect_schema")).toHaveLength(2);
     expect(result.stopReason).toBe("report-composed");
   });
 
@@ -4108,13 +4115,40 @@ describe("a run that stops having read nothing is told to read it itself", () =>
     const b = boot(freshDataDir());
     const run = await startRun(b);
     const actionCall = (): Response =>
-      chatTextStream('{"action": "inspect_schema", "arguments": {"schema": "public"}, "why": [{"a": 1}}]}');
-    const script = scriptedModel(
-      callsTool("inspect_schema", { schema: "public" }),
-      actionCall,
-      callsTool("inspect_schema", { schema: "public" }),
-      reportOn(),
-    );
+      chatTextStream('{"action": "inspect_schema", "arguments": {"kind": "columns"}, "why": [{"a": 1}}]}');
+    const script = scriptedModel(callsTool("inspect_schema", { schema: "public" }), actionCall, reportOn());
+
+    const result = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: b.resources,
+    });
+
+    const events = await eventsOf(b.store, run.runId);
+    expect(events.filter((event) => event.kind === "tool-invoked" && event.tool === "inspect_schema")).toHaveLength(2);
+    expect(result.stopReason).toBe("report-composed");
+  });
+
+  test("an object naming a tool it holds, cut off mid-argument, is answered with the reminder", async () => {
+    /*
+      The half of the detector that no test reached: an UNFENCED object.
+
+      `readPromptedAction` recovers a written call and runs it, which is why the tests above assert
+      no notice - and `parseTolerantly` widens that to calls a bracket short. The one shape it
+      refuses on purpose is an UNTERMINATED STRING: closing it would invent the rest of a value the
+      model never finished writing, and a recovered call resting on an invented argument is worse
+      than no call. So that run reaches this detector instead, which reads only the NAME and asks
+      for the call again rather than guessing at it.
+
+      The fenced form was covered and this one was not, which is the wrong way round: the fence is
+      the rarer dress. Found by the coverage gate rather than by a measurement, and that is the gate
+      doing its job - both dresses of the same mistake now have a test.
+    */
+    const b = boot(freshDataDir());
+    const run = await startRun(b);
+    // Names a tool this run holds, in the position a call names it, and then stops mid-value.
+    const cutOff = (): Response => chatTextStream('{"name": "inspect_schema", "arguments": {"schema": "pub');
+    const script = scriptedModel(callsTool("inspect_schema", { schema: "public" }), cutOff, reportOn());
 
     const result = await runInvestigation(run.runId, {
       service: b.service,
@@ -4126,6 +4160,7 @@ describe("a run that stops having read nothing is told to read it itself", () =>
     expect(events.filter((event) => event.kind === "guidance-issued").map((event) => event.notice)).toContain(
       "tool-call-as-text",
     );
+    // The turn was given back rather than spent: the run went on to report.
     expect(result.stopReason).toBe("report-composed");
   });
 
@@ -6138,11 +6173,18 @@ describe("a run is told to report only when it holds something to report from", 
       Naming what would have worked is the move that carried this whole effort — it is what
       the worked example does, and what the citable-id list does. A closed set is the cheapest
       case of it: the values are in the schema, and the refusal already had them in hand.
+
+      The INPUT here changed on 2026-09-20 and the rule did not. It used to omit `change` beside a
+      `CREATE INDEX` statement, which no longer reaches this refusal: `readDisplacedRecommendation`
+      reads the kind off the statement, because 121 refusals in one sweep were models that had
+      written the SQL and could not label it. What still reaches it — and what this now sends — is
+      a statement whose kind cannot be read at all, beside a label that is not in the set. There
+      the server has nothing to correct from, and naming the two values is the whole remedy.
     */
     const b = boot(freshDataDir());
     const run = await startRun(b, "agent", "query-optimization");
     const script = scriptedModel(
-      callsTool("recommend_change", { statement: "CREATE INDEX ON salary (dept_no)" }),
+      callsTool("recommend_change", { change: "reindex", statement: "VACUUM salary" }),
       answersProse("understood"),
       answersProse("understood"),
     );
