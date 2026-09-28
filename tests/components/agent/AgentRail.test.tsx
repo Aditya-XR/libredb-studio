@@ -83,6 +83,8 @@ const openedFor = (workflowType: AgentRunWorkflowType): string =>
 
 const STARTED_LINE = `${JSON.stringify({ kind: "event", event: { kind: "run-started", atMs: 1_001, mode: "planning" } })}\n`;
 
+const PAUSED_LINE = `${JSON.stringify({ kind: "event", event: { kind: "run-paused", atMs: 1_002 } })}\n`;
+
 /**
  * The same event for a run the server opened in AGENT mode.
  *
@@ -2261,20 +2263,82 @@ describe("AgentRail", () => {
     });
 
     /**
-     * Pausing and resuming are not offered, and that is the bar rather than an
-     * omission: `AgentRunService` has no pause at all, and the resume path
-     * (`POST /api/agent/drive`) is authenticated by a server-minted machine
-     * credential a browser never holds. A control the service cannot honour is not
-     * rendered — not even disabled, which would read as a capability that is merely
-     * unavailable right now.
+     * Pause and resume are offered only where the service can honour them:
+     * pause on a live running run, resume on a paused one. A control the service
+     * cannot honour is not rendered — not even disabled, which would read as a
+     * capability that is merely unavailable right now.
      */
-    test("no pause or resume control is offered, because the service can honour neither", async () => {
+    test("pause is offered while a run is running, and resume is not", async () => {
       const view = await startRun([OPENED_LINE, STARTED_LINE]);
-      const { queryByTestId } = view;
 
       await findAllEntries(view);
-      expect(queryByTestId("agent-pause")).toBeNull();
-      expect(queryByTestId("agent-resume")).toBeNull();
+      expect(view.queryByTestId("agent-pause")).not.toBeNull();
+      expect(view.queryByTestId("agent-resume")).toBeNull();
+    });
+
+    test("resume is offered while a run is paused, and pause is not", async () => {
+      const view = await startRun([OPENED_LINE, STARTED_LINE, PAUSED_LINE]);
+
+      await findAllEntries(view);
+      expect(view.queryByTestId("agent-resume")).not.toBeNull();
+      expect(view.queryByTestId("agent-pause")).toBeNull();
+    });
+
+    test("a paused run can still be asked to stop", async () => {
+      const view = await startRun([OPENED_LINE, STARTED_LINE, PAUSED_LINE]);
+
+      await findAllEntries(view);
+      expect(view.queryByTestId("agent-stop")).not.toBeNull();
+    });
+
+    test("a paused run still offers its stored result, because its rows are still held", async () => {
+      const onShowArtifact = mock(() => {});
+      mockAgentFetch([OPENED_LINE, STARTED_LINE, DRAFTED_LINE, COMPLETED_LINE, PAUSED_LINE]);
+      const view = render(<AgentRail {...DEFAULT_PROPS} onShowArtifact={onShowArtifact} />);
+      fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "why is checkout slow" } });
+      await act(async () => {
+        fireEvent.click(view.getByTestId("agent-start"));
+      });
+
+      await findAllEntries(view);
+      expect(view.queryAllByTestId("agent-show-result")).toHaveLength(1);
+    });
+
+    test("a paused run is not rendered as a finished answer", async () => {
+      const view = await startRun([OPENED_LINE, STARTED_LINE, DRAFTED_LINE, COMPLETED_LINE, REPORT_LINE, PAUSED_LINE]);
+
+      await findAllEntries(view);
+      expect(view.queryByTestId("agent-answer-report")).toBeNull();
+      expect((await view.findByTestId("agent-answer-status")).textContent).toBe("paused");
+    });
+
+    test("a paused run is not treated as ended, so it is not offered as the run to continue from", async () => {
+      const fetchMock = mockAgentFetch([OPENED_LINE, STARTED_LINE, PAUSED_LINE]);
+      const view = render(<AgentRail {...DEFAULT_PROPS} />);
+      fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "why is checkout slow" } });
+      await act(async () => {
+        fireEvent.click(view.getByTestId("agent-start"));
+      });
+      await waitFor(() => {
+        expect(view.getByTestId("agent-run-status").textContent).toBe("paused");
+      });
+
+      // A paused run is OPEN, so the box is a one-line summary; editing it is the way
+      // back to a box the user can ask a new question from.
+      fireEvent.click(view.getByTestId("agent-objective-edit"));
+      fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "and what else is slow" } });
+      await act(async () => {
+        fireEvent.click(view.getByTestId("agent-start"));
+      });
+
+      const runCalls = (fetchMock.mock.calls as [RequestInfo | URL, RequestInit?][]).filter(
+        ([url]) => String(url) === "/api/agent/runs",
+      );
+      // Non-vacuous: the second start DID fire, so the absence below is about the
+      // paused run not being a continue target, not about nothing having happened.
+      expect(runCalls).toHaveLength(2);
+      const lastBody = JSON.parse(String(runCalls.at(-1)?.[1]?.body)) as Record<string, unknown>;
+      expect(lastBody.previousRunId).toBeUndefined();
     });
   });
 
@@ -2349,13 +2413,12 @@ describe("AgentRail", () => {
     });
 
     /**
-     * A ceiling is per drive while the ledger spans every drive, so a resumed run
-     * can fold to more than one drive's allowance. The numeral says what the run
-     * actually spent — hiding that would be the misleading direction — while the
-     * bar is clamped, because a bar past its own track reads as a larger allowance
-     * than exists.
+     * What the tracker enforces and what the ledger records are measured differently,
+     * so a fold can read past a ceiling. The numeral says what the run actually spent
+     * — hiding that would be the misleading direction — while the bar is clamped,
+     * because a bar past its own track reads as a larger allowance than exists.
      */
-    test("a run past a per-drive ceiling shows the real figure and a bar that does not overflow", async () => {
+    test("a run whose ledger reads past a ceiling shows the real figure and a bar that does not overflow", async () => {
       mockAgentFetch([OPENED_LINE, STARTED_LINE, OVERSPENT_LINE]);
       const { getByTestId, findByText } = render(<AgentRail {...DEFAULT_PROPS} />);
       fireEvent.change(getByTestId("agent-objective"), { target: { value: "why is checkout slow" } });
@@ -2437,10 +2500,11 @@ describe("AgentRail", () => {
       expect(getByTestId("agent-budget-caveats").textContent ?? "").not.toContain("holds no duration for");
     });
 
-    // Every ceiling is per drive (`docs/BACKLOG.md` B6), so a resumed run starts
-    // each of them again. A meter that read as a per-run total would understate
-    // what a run can cost.
-    test("the meter states the limits it cannot measure, and that they are per drive", () => {
+    // A resumed run CONTINUES its spend: `deriveDriveCeilings` folds the ledger's
+    // completed reads into the statement and database-time ceilings (#999), and the
+    // deadline is wall clock from the run's opening. A meter that said "per drive"
+    // would promise a resumed run a fresh allowance it does not get.
+    test("the meter states the limits it cannot measure, and that a resume continues the spend", () => {
       const view = render(<AgentRail {...DEFAULT_PROPS} />);
       const { getByTestId } = view;
       // Stated for a workflow the user NAMED: under Automatic there is no workflow yet
@@ -2455,7 +2519,12 @@ describe("AgentRail", () => {
       expect(limits).toContain("10.0 s");
       expect(limits).toContain("7.5 min");
       expect(limits).toContain("36 model turns");
-      expect(getByTestId("agent-budget-caveats").textContent).toContain("per drive");
+      const caveats = getByTestId("agent-budget-caveats").textContent ?? "";
+      expect(caveats).toContain("continues its spend");
+      expect(caveats).toContain("wall clock");
+      // The one ceiling that really is per drive, named rather than implied.
+      expect(caveats).toContain("Repair attempts");
+      expect(caveats).not.toContain("starts each of them again");
     });
 
     /**
@@ -3454,6 +3523,28 @@ describe("AgentRail", () => {
         expect(view.scroller.firstElementChild?.getAttribute("data-testid")).toBe("agent-answer");
       });
 
+      test("a pause does not spend the once-per-run answer reveal", async () => {
+        const view = await startRun();
+        await act(async () => {
+          view.stream.push(OPENED_LINE);
+          view.stream.push(STARTED_LINE);
+        });
+        await waitFor(() => {
+          expect(view.scroller.scrollTop).toBe(BOTTOM);
+        });
+
+        // A paused run is OPEN, not ended: it is still following its own end, so the
+        // reveal stays unspent for the ending that will actually come.
+        await act(async () => {
+          view.stream.push(DRAFT_LINE);
+          view.stream.push(PAUSED_LINE);
+        });
+
+        await waitFor(() => {
+          expect(view.scroller.scrollTop).toBe(BOTTOM);
+        });
+      });
+
       test("a reader who scrolled away is not yanked to the answer either", async () => {
         const { stream, scroller } = await startRun();
         await act(async () => {
@@ -3499,8 +3590,9 @@ describe("AgentRail", () => {
   });
 
   /**
-   * Auto-execute (§2.1, §2.5, §2.6 of `docs/AGENT_ANALYST_DESIGN.md`), which is now
-   * asked for in the consent step rather than beside the objective.
+   * Auto-execute (see the "Auto-execute: when the run runs the answer in your editor"
+   * section of `docs/AGENT_GUIDE.md`), which is now asked for in the consent step
+   * rather than beside the objective.
    *
    * The control names the bound it gives up and the one it keeps, because "auto-mode"
    * transfers no responsibility: a checkbox that names no bound cannot be consented

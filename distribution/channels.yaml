@@ -480,9 +480,13 @@ channels:
       upstream_repo: https://github.com/azukaar/cosmos-servapps-official
       docs: deploy/cosmos/README.md
     pin:
-      strategy: remote_file
-      url: https://raw.githubusercontent.com/azukaar/cosmos-servapps-official/master/servapps/LibreDB-Studio/cosmos-compose.json
-      extract: 'libredb-studio:(\d+\.\d+\.\d+)'
+      strategy: none
+      note: The servapp pins ghcr.io/libredb/libredb-studio:latest, so there is no version to
+        measure - the same shape as the Koyeb deploy button. It carried a semver until
+        azukaar/cosmos-servapps-official#305 (merged 2026-09-21) moved it to the floating tag, and
+        a remote_file pin left behind after that reports UNKNOWN on every run rather than drift,
+        because the extract pattern can never match. Cosmos installs whatever :latest resolves to
+        at install time, which is why this row went from a drift reminder to nothing to check.
 
   - id: kubero
     name: Kubero template catalog
@@ -587,6 +591,37 @@ channels:
       note: Merged in IceWhaleTech/CasaOS-AppStore#992 (7 Sep 2026); live in the CasaOS App Store. The pin
         reads the image tag in Apps/LibreDBStudio/docker-compose.yml, the file a bump PR touches. Installs a
         Docker container on the user's own device, so the platform is container.
+
+  - id: okxlin-appstore
+    name: 1Panel community app store (okxlin/appstore)
+    short_name: 1Panel community store
+    status: live
+    category: paas-catalogs
+    platforms: [container]
+    runtime: channel_supplied
+    tier: 3
+    kind: one-click-template
+    update:
+      method: upstream_pr
+      sla: on_demand
+    links:
+      first_pr: https://github.com/okxlin/appstore/pull/6552
+      last_bump_pr: https://github.com/okxlin/appstore/pull/6938
+      catalog: https://github.com/okxlin/appstore/tree/localApps/apps/libredb-studio
+      upstream_repo: https://github.com/okxlin/appstore
+      docs: docs/DISTRIBUTION.md
+    pin:
+      strategy: probe
+      probe: github-dir-max-version
+      urls:
+        catalog: https://api.github.com/repos/okxlin/appstore/contents/apps/libredb-studio
+      note: The community-maintained app store for 1Panel, merged in okxlin/appstore#6552 (normalized by
+        okxlin/appstore#6591) and bumped by the store's own Renovate, which carried it to 0.16.0 in
+        okxlin/appstore#6938. The OFFICIAL 1Panel store declined us in 1Panel-dev/appstore#9398 - the
+        maintainer keeps that catalog to projects above 10,000 stars and pointed at this one - so this row
+        is the whole 1Panel presence, not a staging step. Measured as a directory listing rather than as a
+        file, because the store publishes one directory per version under apps/libredb-studio and a fixed
+        file URL would keep reporting a superseded version forever.
 
   - id: umbrel
     name: Umbrel App Store
@@ -706,6 +741,62 @@ channels:
         PRs - bundle first, then the rendered catalogs - and that second PR is only bot-created when the
         bundle version directory ships a release-config.yaml, which submit-catalogs writes.
 
+  - id: zopdev-helm-charts
+    name: ZopDev Helm Charts (helm.zop.dev, ZopDay)
+    short_name: ZopDev Helm Charts
+    status: pending
+    category: kubernetes-operators
+    platforms: [kubernetes]
+    runtime: channel_supplied
+    tier: 3
+    kind: helm-chart
+    update:
+      method: upstream_pr
+      sla: on_demand
+    links:
+      first_pr: https://github.com/zopdev/helm-charts/pull/322
+      upstream_repo: https://github.com/zopdev/helm-charts
+    pin:
+      strategy: none
+      note: PR zopdev/helm-charts#322 is open, so nothing is listed yet. It is a chart of its own in their
+        repo, not a copy of ours, suggested by the ZopDay team (#1183). On merge, flip to live, add catalog
+        https://helm.zop.dev, and add a remote_file pin on
+        https://raw.githubusercontent.com/zopdev/helm-charts/main/charts/libredb-studio/Chart.yaml with
+        extract 'appVersion:\s*"(\d+\.\d+\.\d+)"'. A bump there is appVersion plus version, a Helm 3
+        package into docs/ and a regenerated docs/index.yaml.
+
+  - id: yunohost
+    name: YunoHost app catalog
+    short_name: YunoHost
+    status: live
+    category: paas-catalogs
+    platforms: [linux]
+    runtime: channel_supplied
+    tier: 3
+    kind: one-click-template
+    update:
+      method: upstream_pr
+      sla: on_demand
+    links:
+      first_pr: https://github.com/YunoHost/apps/pull/3618
+      catalog: https://apps.yunohost.org/app/libredb_studio
+      upstream_repo: https://github.com/YunoHost-Apps/libredb_studio_ynh
+      docs: docs/DISTRIBUTION.md
+    pin:
+      strategy: remote_file
+      url: https://raw.githubusercontent.com/YunoHost-Apps/libredb_studio_ynh/master/manifest.toml
+      extract: 'version = "(\d+\.\d+\.\d+)~ynh\d+"'
+      note: Listed by YunoHost/apps#3618, merged 2026-09-20. Unlike the other self-hosting catalogs here, the
+        package installs no container; it unpacks the standalone Linux tarball under systemd and fetches its
+        own Node 24 through YunoHost's `n`, which is why platforms is linux and the runtime is
+        channel_supplied. The catalog entry points at a repository in the YunoHost-Apps organization - the
+        package was written for this release, opened under libredb, and transferred on the maintainer's
+        invitation, which is the route that repository's CI and packagers come with. A bump is therefore a
+        pull request against THAT repository, and their autoupdate cron opens one when a release asset
+        matching the manifest pattern appears. The pin reads past the `~ynh` packaging suffix and captures
+        the application version, so a packaging-only change does not read as drift. apps.yunohost.org serves
+        what its own periodic catalog build picked up, so the catalog link lags a merge by up to one build.
+
   # ---- Tier 4: partner and curated catalogs (not self-serve) --------------
 
   - id: rancher-partner
@@ -819,9 +910,10 @@ channels:
       docs: deploy/azure/README.md
     pin:
       strategy: none
-      note: Published 7 Sep 2026 as a free ("Get It Now") Azure Application solution template
-        (package 1.0.1). There is no pin to add, because the listed version lives in Partner
-        Center the way Google's lives in the Producer Portal.
+      note: Published 7 Sep 2026 as a free ("Get It Now") Azure Application solution template.
+        The package version is recorded once, in deploy/azure/package-version.txt; naming it
+        here as well is what let the two drift apart. There is no pin to add, because the
+        listed version lives in Partner Center the way Google's lives in the Producer Portal.
 
   - id: aws-marketplace
     name: AWS Marketplace (free AMI product)
@@ -850,6 +942,26 @@ channels:
         dispatches it, so an ordinary release still builds no AMI.
         There is no pin to read, because the listed version lives in the AWS Marketplace Management
         Portal the way Azure's lives in Partner Center; it is checked by hand against the portal.
+
+  - id: civo-marketplace
+    name: Civo Kubernetes Marketplace
+    status: pending
+    category: cloud-marketplaces
+    platforms: [kubernetes]
+    runtime: channel_supplied
+    tier: 3
+    kind: marketplace
+    update:
+      method: upstream_pr
+      sla: on_demand
+    links:
+      tracking_issue: https://github.com/libredb/libredb-studio/issues/975
+      first_pr: https://github.com/civo/kubernetes-marketplace/pull/1076
+      upstream_repo: https://github.com/civo/kubernetes-marketplace
+    pin:
+      strategy: none
+      note: The version lives in `libredb-studio/manifest.yaml` in the upstream repository, so there
+        is nothing to pin here. The row flips to `live` when civo/kubernetes-marketplace#1076 merges.
 
   - id: winget
     name: winget community repository (LibreDB.Studio)

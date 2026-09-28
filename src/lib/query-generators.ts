@@ -1,4 +1,6 @@
-import type { ProviderCapabilities } from "@/lib/db/types";
+import { declaredLevels } from "@/lib/db/object-kinds";
+import { metricSelector } from "@/lib/db/providers/timeseries/prometheus/promql";
+import { offersCountQuery, type ProviderCapabilities } from "@/lib/db/types";
 import type { ColumnSchema } from "@/lib/types";
 
 /** Couchbase management port, the capability signal for the SQL++ dialect. */
@@ -73,7 +75,8 @@ const COUCHBASE_KEY_PROJECTION = `META(${COUCHBASE_ALIAS}).id AS ${COUCHBASE_DOC
  * Adding a branch would only duplicate it.
  */
 export function quoteIdentifier(name: string, capabilities: ProviderCapabilities): string {
-  // Document stores (MongoDB) don't use SQL identifier quoting.
+  // The JSON-language engines don't use SQL identifier quoting: MongoDB, and Redis, LibreDB and
+  // Kafka, which declare a JSON dialect of their own (#1088).
   if (capabilities.queryLanguage === "json") return name;
 
   // An explicit declaration wins over the port heuristic below, because the port
@@ -163,6 +166,42 @@ export function objectSegment(path: readonly string[]): string {
 }
 
 /**
+ * The address a JSON command carries: the collection's own segment, and the database that
+ * holds it as a key of its own (#843). `db.collection("sample_shop.users")` would name a
+ * collection literally called that, so the database cannot ride inside `collection`.
+ *
+ * The database is the segment the declaration assigns to its `schema` level, never
+ * `path[0]` (standing ruling 5g), and it is emitted unconditionally, including for the
+ * connected database, for the reason `quoteObjectPath` qualifies unconditionally. A path
+ * whose length does not match the declared levels is refused: a collection that lost its
+ * database would otherwise read the connected database's same-named collection, which is
+ * the wrong answer #843 was.
+ *
+ * The one reader for every statement the product writes for MongoDB: the three generators
+ * below, the profiler route and the test data generator.
+ */
+export function jsonCommandAddress(
+  path: readonly string[],
+  capabilities: ProviderCapabilities,
+): { database?: string; collection: string } {
+  const levels = declaredLevels(capabilities);
+  if (path.length !== levels.length + 1) {
+    const shape = [...levels.map((level) => level.id), "name"].join(", ");
+    throw new Error(`Cannot generate a query: the object path is [${shape}], received ${JSON.stringify(path)}.`);
+  }
+  const collection = objectSegment(path);
+  if (levels.length === 0) return { collection };
+  const index = levels.findIndex((level) => level.id === "schema");
+  if (index < 0) {
+    throw new Error(
+      `Cannot generate a query: a JSON command needs a "schema" container level for its database; ` +
+        `the declaration is [${levels.map((level) => level.id).join(", ")}].`,
+    );
+  }
+  return { database: path[index], collection };
+}
+
+/**
  * Render a schema-tree node name for a `#` comment line. A node name is a real
  * key/collection name taken from the server, and a Redis key is an arbitrary
  * byte string — so a name containing a newline used to END the header comment
@@ -174,7 +213,7 @@ export function objectSegment(path: readonly string[]): string {
  * JSON quoting is the fix: it escapes CR, LF and the quote character in one
  * lossless step, and for an ordinary name it renders exactly the `"name"` the
  * headers already wrote by hand. Any name entering a comment line must go
- * through this (#427).
+ * through this (#427), a PromQL metric's name included (#1085).
  */
 function commentName(name: string): string {
   return JSON.stringify(name);
@@ -312,7 +351,7 @@ function renderRedisCommand(parts: string[]): string {
  * unescaped `[` opens a glob class that matches the wrong set. Escaping a key
  * argument would instead corrupt a literal key that genuinely contains `*` (#427).
  */
-function escapeGlob(value: string): string {
+export function escapeGlob(value: string): string {
   return value.replace(/[\\*?[\]^]/g, String.raw`\$&`);
 }
 
@@ -351,11 +390,15 @@ function redisScan(base: string): string {
  * "Select Top N" and "Generate Query" - because those are the statements this file
  * writes on the user's behalf.
  *
- * The Oracle and the fallthrough returns both ask this; SQL Server and Couchbase keep a
- * literal `;`, because both accept one. Oracle did not, and that is the one measurement
- * that moved: `SELECT * FROM app_customers FETCH FIRST 50 ROWS ONLY;` answers ORA-00933,
- * so clicking a table on Oracle had never once worked. See
- * `ProviderCapabilities.statementTerminator` for both measurements.
+ * `generateTableQuery`'s returns all ask this now. They did not always: Oracle and SQL
+ * Server had branches of their own to spell their row bound, and #816 removed the bound,
+ * which left the two branches doing nothing the shared return did not. `generateSelectQuery`
+ * still keeps a literal `;` in its SQL Server and Couchbase branches, because both accept
+ * one and neither branch has been touched.
+ *
+ * Oracle is the measurement that moved: `SELECT * FROM app_customers FETCH FIRST 50
+ * ROWS ONLY;` answers ORA-00933, so clicking a table on Oracle had never once worked.
+ * See `ProviderCapabilities.statementTerminator` for both measurements.
  */
 function terminator(capabilities: ProviderCapabilities): string {
   return capabilities.statementTerminator === "none" ? "" : ";";
@@ -386,8 +429,25 @@ function libredbNewlineNote(base: string): string | null {
  *
  * It takes the object's PATH, because that is what addresses an object; `name` is what
  * labels it (standing ruling 2). Every dialect below that addresses by qualification gets
- * the whole path, and the three that address a single key or collection get the object's
- * own segment.
+ * the whole path, and each that addresses a single key, collection, topic or metric gets
+ * the object's own segment.
+ *
+ * NO SQL RETURN HERE CARRIES A ROW BOUND (#816). It used to: `LIMIT 50`, `FETCH FIRST 50
+ * ROWS ONLY`, `SELECT TOP 50`. Nothing downstream could then tell that preview cap from a
+ * bound the user typed, because both are text in the same string — and the limiter
+ * returns a self-bounded statement UNTOUCHED, discarding the offset with it, so the page
+ * after the first was the first again. The cap travels as the `limit` EXECUTION OPTION
+ * instead (`PREVIEW_PAGE_SIZE` in `use-tab-manager.ts`), which leaves a user-written
+ * `LIMIT n` with exactly one meaning: a hard bound we do not page past.
+ *
+ * The three JSON-language branches keep their own bound, and that is not an exception to
+ * the rule. None of MongoDB, Redis and Kafka can be asked for page two at all
+ * (`supportsResultPagination: false`, measured), so their bound is the only one there is
+ * and no control is offered that a preview cap in the text could disengage. Kafka's is
+ * the read request's own `limit` (#1088).
+ *
+ * The PromQL branch writes the metric's selector and no bound at all (#1085): PromQL has no row
+ * bound to write, and the provider caps the series it returns (#1085, section 5.4).
  */
 export function generateTableQuery(
   path: readonly string[],
@@ -416,27 +476,39 @@ export function generateTableQuery(
     const keyType = redisKeyType(columns);
     return renderRedisCommand(keyType ? REDIS_COMMANDS[keyType].read(base) : ["TYPE", base]);
   }
+  // Kafka reads a topic through a JSON read request, not a MongoDB document: without
+  // this arm a tree click would auto-execute a `find` the provider refuses (#1088 3.3).
+  // The name goes through JSON.stringify with the rest, so no topic name leaves its string.
+  if (capabilities.queryDialect === "kafka") {
+    return JSON.stringify({ topic: tableName, from: "latest", limit: 50 }, null, 2);
+  }
   if (capabilities.queryLanguage === "json") {
-    return JSON.stringify({ collection: tableName, operation: "find", filter: {}, options: { limit: 50 } }, null, 2);
+    return JSON.stringify(
+      { ...jsonCommandAddress(path, capabilities), operation: "find", filter: {}, options: { limit: 50 } },
+      null,
+      2,
+    );
+  }
+  // PromQL (#1085). A metric is addressed by a SELECTOR, never by a quoted path: the bare name
+  // where the lexer reads it as one and a `__name__` matcher for every other name, both written
+  // by `metricSelector`, the one PromQL builder (#1085 S4). An instant selector evaluates at now
+  // and answers one row per series; the provider caps the series (#1085, section 5.4), so no
+  // bound is written here, and PromQL has no statement terminator to append.
+  if (capabilities.queryLanguage === "promql") {
+    return metricSelector(tableName);
   }
   const table = quoteObjectPath(path, capabilities);
-  // Couchbase (SQL++)
+  // Couchbase (SQL++). The one SQL branch left, and it is about the PROJECTION: the
+  // document key is not a column, so the grid has nothing to show without the alias.
   if (capabilities.defaultPort === COUCHBASE_PORT) {
-    return `SELECT ${COUCHBASE_KEY_PROJECTION}, ${COUCHBASE_ALIAS}.* FROM ${table} AS ${COUCHBASE_ALIAS} LIMIT 50;`;
+    return `SELECT ${COUCHBASE_KEY_PROJECTION}, ${COUCHBASE_ALIAS}.* FROM ${table} AS ${COUCHBASE_ALIAS}${terminator(capabilities)}`;
   }
-  // Oracle
-  if (capabilities.defaultPort === 1521) {
-    return `SELECT * FROM ${table} FETCH FIRST 50 ROWS ONLY${terminator(capabilities)}`;
-  }
-  // MSSQL
-  if (capabilities.defaultPort === 1433) {
-    return `SELECT TOP 50 * FROM ${table};`;
-  }
-  // PostgreSQL / MySQL / SQLite / ClickHouse / Elasticsearch / OpenSearch. The
-  // trailing LIMIT matters for ClickHouse specifically: it also accepts `FORMAT x`
-  // and `SETTINGS ...` as trailing clauses, and a LIMIT placed after either is a
-  // syntax error, so the limit must stay last (issue #264).
-  return `SELECT * FROM ${table} LIMIT 50${terminator(capabilities)}`;
+  // Every other SQL dialect, Oracle and SQL Server included. They had branches of their
+  // own only to spell their row bound — `FETCH FIRST 50 ROWS ONLY` and `SELECT TOP 50` —
+  // and with no bound to spell, one statement serves all of them. Issue #264's rule, that
+  // a ClickHouse bound must sit after any `FORMAT` or `SETTINGS` clause, is moot for the
+  // same reason: there is no generated bound to misplace.
+  return `SELECT * FROM ${table}${terminator(capabilities)}`;
 }
 
 /**
@@ -541,6 +613,20 @@ function redisCheatsheet(tableName: string, columns: readonly ColumnSchema[]): s
  * Takes the object's PATH for the same reason `generateTableQuery` does, and the two stay
  * in step: a user who clicks a row and a user who asks for the statement must be handed
  * the same address.
+ *
+ * IT KEEPS ITS `LIMIT 100`, and #816 left it there deliberately. The bound left
+ * `generateTableQuery` because that statement is RUN on the user's behalf, so its cap was
+ * the product's own and had to be distinguishable from one the user typed. This one is
+ * written into the editor and run only if the user presses Run, at which point it is a
+ * statement they chose to execute and its bound is theirs: a hard bound, honoured, and not
+ * paged past. Removing it would instead hand them an unbounded scan they never asked for.
+ *
+ * The Kafka branch keeps a bound for the same reason, in the read request's own `limit`: 50, the
+ * click's and the request's default (#1088).
+ *
+ * The PromQL branch is the exception, for the tree click's reason: PromQL has no bound to write,
+ * so the text is the metric's selector, with the two range forms that widen it written as
+ * comments above it (#1085).
  */
 export function generateSelectQuery(
   path: readonly string[],
@@ -558,6 +644,16 @@ export function generateSelectQuery(
   if (capabilities.queryDialect === "redis") {
     return redisCheatsheet(tableName, columns);
   }
+  // Kafka (#1088): ONE read request, because the tab's whole buffer is sent as one request
+  // (`handleGenerateSelect` in use-tab-manager.ts) and JSON has no comments to hold the other forms.
+  // The click reads the latest messages; this names a partition and reads it from its earliest
+  // offset, which exists on any retention, and the result's `offset` column shows the offsets the
+  // `{"offset": n}` form takes. The offset and timestamp forms are documented in
+  // docs/providers/kafka.md. The columns are the fields each message comes back with, not keys of
+  // the request, so none is written; the name goes through JSON.stringify with the rest.
+  if (capabilities.queryDialect === "kafka") {
+    return JSON.stringify({ topic: tableName, partition: 0, from: "earliest", limit: 50 }, null, 2);
+  }
   if (capabilities.queryLanguage === "json") {
     const projection: Record<string, number> = {};
     columns.forEach((c) => {
@@ -565,7 +661,7 @@ export function generateSelectQuery(
     });
     return JSON.stringify(
       {
-        collection: tableName,
+        ...jsonCommandAddress(path, capabilities),
         operation: "find",
         filter: {},
         options: {
@@ -576,6 +672,31 @@ export function generateSelectQuery(
       null,
       2,
     );
+  }
+  // PromQL (#1085): exactly ONE runnable expression, the metric's selector on the last line,
+  // and the two range forms #1085 section 5.1 teaches as `#` comments above it. PromQL reads
+  // `#` as a comment to the end of the line, so the whole buffer, run as it stands, is that one
+  // expression. The name reaches its comment through `commentName`, which escapes CR and LF;
+  // the selector reaches its comments already escaped, because `metricSelector` writes any name
+  // that is not a bare identifier as a JSON-quoted `__name__` matcher. So neither can end a
+  // comment line early and turn its remainder into a second expression. The label columns are
+  // not read: a label name is server text too, and nothing here needs one. The rate form is
+  // written whatever the metric's type, because nothing this function receives says it, so its
+  // comment says it is the form for a counter.
+  if (capabilities.queryLanguage === "promql") {
+    const selector = metricSelector(tableName);
+    return [
+      `# PromQL for the metric ${commentName(tableName)}. Only the last line runs: a line starting with # is a comment.`,
+      "# To try a form below, select it after its # and use Run Selected.",
+      "#",
+      "# Every raw sample from the last five minutes, one column per series:",
+      `#   ${selector}[5m]`,
+      "# For a counter: its per-second rate over the last hour, one row a minute:",
+      `#   rate(${selector}[5m])[1h:1m]`,
+      "#",
+      "# Every series of the metric as of now, one row per series:",
+      selector,
+    ].join("\n");
   }
   const table = quoteObjectPath(path, capabilities);
   // Couchbase (SQL++): every field is reached through the keyspace alias, and the
@@ -599,6 +720,19 @@ export function generateSelectQuery(
     return `SELECT TOP 100\n${cols}\nFROM ${table}\nWHERE 1=1;`;
   }
   return `SELECT\n${cols}\nFROM ${table}\nWHERE 1=1\nLIMIT 100${terminator(capabilities)}`;
+}
+
+/** Prepare an editable count statement, without a row limit or any execution (#702). */
+export function generateCountQuery(path: readonly string[], capabilities: ProviderCapabilities): string | null {
+  if (!offersCountQuery(capabilities)) return null;
+  // Refuses an empty address before any dialect spells it, the JSON arm's own check included.
+  objectSegment(path);
+  if (capabilities.queryLanguage === "json") {
+    return JSON.stringify({ ...jsonCommandAddress(path, capabilities), operation: "count", filter: {} }, null, 2);
+  }
+  // COUNT returns an int on SQL Server; COUNT_BIG preserves billion-row counts.
+  const count = capabilities.defaultPort === 1433 ? "COUNT_BIG(*)" : "COUNT(*)";
+  return `SELECT ${count} AS row_count\nFROM ${quoteObjectPath(path, capabilities)}${terminator(capabilities)}`;
 }
 
 export function shouldRefreshSchema(query: string, schemaRefreshPattern: string): boolean {

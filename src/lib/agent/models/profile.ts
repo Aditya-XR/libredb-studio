@@ -10,8 +10,8 @@ import type { AgentRunWorkflowType } from "../types";
 
 /** How a turn is sampled. Structural output, so the default explores nothing. */
 export interface AgentSampling {
-  readonly temperature: number;
-  readonly topP: number;
+  readonly temperature?: number;
+  readonly topP?: number;
 }
 
 export interface AgentModelProfile {

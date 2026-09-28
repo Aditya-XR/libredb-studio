@@ -3,8 +3,10 @@ import {
   CONNECTION_FIELDS,
   decryptConnections,
   encryptConnections,
+  type FieldClass,
   SSH_TUNNEL_FIELDS,
   SSL_FIELDS,
+  withoutSecretFields,
 } from "@/lib/storage/connection-secrets";
 import { ENVELOPE_VERSION, readSecret, resetStorageEncryptionKey } from "@/lib/storage/encryption";
 import type { DatabaseConnection } from "@/lib/types";
@@ -43,6 +45,8 @@ function fullConnection(): DatabaseConnection {
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
     agentUser: "agent-ro",
     agentPassword: "CANARY-AGENT-PASSWORD",
+    apiKeyId: "CANARY-API-KEY-ID",
+    apiKeySecret: "CANARY-API-KEY-SECRET",
     ssl: {
       mode: "verify-full",
       caCert: "-----BEGIN CERTIFICATE-----CA-----END CERTIFICATE-----",
@@ -71,6 +75,8 @@ const CANARIES = [
   "CANARY-SSH-PRIVATE-KEY",
   "CANARY-SSH-PASSPHRASE",
   "CANARY-AGENT-PASSWORD",
+  "CANARY-API-KEY-ID",
+  "CANARY-API-KEY-SECRET",
 ];
 
 describe("the classification is exhaustive by construction", () => {
@@ -85,6 +91,11 @@ describe("the classification is exhaustive by construction", () => {
       [
         "agentPassword",
         "agentUser",
+        // Elasticsearch's API key pair (#708). Unlike `user`, an id is one generated,
+        // opaque half of a credential pair rather than a name an operator chose, so
+        // both halves are classified secret below.
+        "apiKeyId",
+        "apiKeySecret",
         // MongoDB's auth database. A database NAME, so `public`; the password
         // checked against it is the secret and is classified below.
         "authSource",
@@ -106,6 +117,10 @@ describe("the classification is exhaustive by construction", () => {
         "password",
         "port",
         "queryTimeout",
+        // Kafka's SASL mechanism (#1088). A mechanism NAME (`SCRAM-SHA-512`), which the
+        // broker's own configuration lists in the clear, so `public`; the password it checks
+        // is the secret and is classified above.
+        "saslMechanism",
         "seedId",
         // Whether this browser reads the catalog when the connection opens (#765). A
         // display preference: it grants nothing and unlocks nothing.
@@ -119,7 +134,7 @@ describe("the classification is exhaustive by construction", () => {
     );
   });
 
-  test("exactly the seven credential-bearing fields are classified secret", () => {
+  test("exactly the nine credential-bearing fields are classified secret", () => {
     const secrets = [
       ...Object.keys(CONNECTION_FIELDS).filter((k) => CONNECTION_FIELDS[k as never] === "secret"),
       ...Object.keys(SSL_FIELDS)
@@ -133,6 +148,8 @@ describe("the classification is exhaustive by construction", () => {
     expect(secrets).toEqual(
       [
         "agentPassword",
+        "apiKeyId",
+        "apiKeySecret",
         "connectionString",
         "password",
         "ssl.clientKey",
@@ -146,6 +163,10 @@ describe("the classification is exhaustive by construction", () => {
   test("a certificate is not a secret and stays readable for diagnosis", () => {
     expect(SSL_FIELDS.caCert).toBe("public");
     expect(SSL_FIELDS.clientCert).toBe("public");
+  });
+
+  test("a SASL mechanism names how the password is checked, and is no secret itself", () => {
+    expect(CONNECTION_FIELDS.saslMechanism).toBe("public");
   });
 });
 
@@ -169,6 +190,8 @@ describe("encryptConnections", () => {
     expect(encrypted.sshTunnel?.password?.startsWith(prefix)).toBe(true);
     expect(encrypted.sshTunnel?.privateKey?.startsWith(prefix)).toBe(true);
     expect(encrypted.sshTunnel?.passphrase?.startsWith(prefix)).toBe(true);
+    expect(encrypted.apiKeyId?.startsWith(prefix)).toBe(true);
+    expect(encrypted.apiKeySecret?.startsWith(prefix)).toBe(true);
   });
 
   test("leaves the fields an operator needs to identify the deployment readable", () => {
@@ -271,8 +294,8 @@ describe("decryptConnections", () => {
     resetStorageEncryptionKey();
     const result = decryptConnections(encrypted);
 
-    // Seven unreadable fields on one record.
-    expect(result.undecryptable).toBe(7);
+    // Nine unreadable fields on one record.
+    expect(result.undecryptable).toBe(9);
     // The record SURVIVES. Dropping it would be persisted as a deletion by the write-through
     // cache on the next sync, destroying ciphertext a restored key could still have opened.
     expect(result.connections).toHaveLength(1);
@@ -290,10 +313,71 @@ describe("decryptConnections", () => {
     process.env.JWT_SECRET = "a-different-secret-that-cannot-open-it";
     resetStorageEncryptionKey();
 
-    expect(decryptConnections(encrypted).undecryptable).toBe(14);
+    expect(decryptConnections(encrypted).undecryptable).toBe(18);
   });
 
   test("an empty list is not an error", () => {
     expect(decryptConnections([])).toEqual({ connections: [], undecryptable: 0 });
+  });
+});
+
+describe("withoutSecretFields", () => {
+  const keysOf = (map: Record<string, FieldClass>, fieldClass: FieldClass): string[] =>
+    Object.keys(map).filter((key) => map[key] === fieldClass);
+  const groups = (conn: DatabaseConnection) =>
+    [
+      [conn as unknown as Record<string, unknown>, CONNECTION_FIELDS],
+      [conn.ssl as unknown as Record<string, unknown>, SSL_FIELDS],
+      [conn.sshTunnel as unknown as Record<string, unknown>, SSH_TUNNEL_FIELDS],
+    ] as const;
+
+  // Derived from the maps rather than listed, so a field classified secret tomorrow is covered
+  // by this test the day it is classified.
+  test("removes every field the maps classify as secret", () => {
+    const original = fullConnection();
+    for (const [group, map] of groups(original)) {
+      for (const key of keysOf(map, "secret")) {
+        // Control: the fixture really carries each secret, so the absence below is not vacuous.
+        expect(typeof group[key]).toBe("string");
+      }
+    }
+
+    const withheld = withoutSecretFields(original);
+    for (const [group, map] of groups(withheld)) {
+      for (const key of keysOf(map, "secret")) {
+        expect(key in group).toBe(false);
+      }
+    }
+    const serialized = JSON.stringify(withheld);
+    for (const canary of CANARIES) {
+      expect(serialized).not.toContain(canary);
+    }
+  });
+
+  test("keeps every public field as it was", () => {
+    const original = fullConnection();
+    const withheld = withoutSecretFields(fullConnection());
+    const before = groups(original);
+    const after = groups(withheld);
+    for (const [index, [group, map]] of before.entries()) {
+      for (const key of keysOf(map, "public")) {
+        expect(after[index][0][key]).toEqual(group[key]);
+      }
+    }
+  });
+
+  // An empty value holds nothing to withhold, and the walker skips it as encryption does.
+  test("leaves an empty secret as it is", () => {
+    const withheld = withoutSecretFields({ ...fullConnection(), password: "" });
+    expect(withheld.password).toBe("");
+    expect("apiKeySecret" in withheld).toBe(false);
+  });
+
+  test("leaves the connection it was given untouched", () => {
+    const original = fullConnection();
+    withoutSecretFields(original);
+    expect(original.password).toBe("CANARY-DB-PASSWORD");
+    expect(original.ssl?.clientKey).toBe("CANARY-TLS-CLIENT-KEY");
+    expect(original.sshTunnel?.privateKey).toBe("CANARY-SSH-PRIVATE-KEY");
   });
 });

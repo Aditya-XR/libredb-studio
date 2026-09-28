@@ -9,29 +9,31 @@ what a partner-charts submission copies; the refresh submitted on 2026-09-09 is 
 (see the delivery note at the end).
 `E2E_VALIDATION_TASK.md` covers the validation side.
 
-The listing is live at https://www.suse.com/pcsc/viewVersionPage?versionID=26969 (SUSE
-published it on 2026-08-05 from an earlier revision of this file). Edits here do not
-propagate automatically — SUSE owns the page, so any change has to be mailed to the
-partner contact.
+The listing went live on 2026-08-05 from an earlier revision of this file.
+SUSE imports new chart versions from rancher/partner-charts about once a week, and each import creates a new version page with a new `versionID`, so link the partner search rather than one page: https://www.suse.com/pcsc/home#search?productName=&sortOrder.sortOrder=1&partnerName=Sekoya&platforms=1027
+The import takes the page title from `appVersion` and the chart version from `version`; the description is pasted by hand.
+Edits here do not propagate automatically — SUSE owns the page, so any change has to be mailed to the partner contact.
+What gets mailed is `pcsc-listing.html` beside this file, not the sections below: the page template holds at most 1494 characters including the list markup, and `tests/unit/pcsc-listing.test.ts` keeps that file under it.
 
-> **Accuracy gate — engine count.** The wording below says sixteen engines. That is true only
-> from the release that carries **DuckDB** ([#424](https://github.com/libredb/libredb-studio/issues/424)),
-> which followed libSQL; fourteen was true from **0.13.0** onwards, the release that carried
-> Elasticsearch, OpenSearch, Apache Trino and Apache Cassandra alongside the ten of 0.11.0.
+> **Accuracy gate: engine count.** The wording below says eighteen engines. That is true only
+> from the release that carries **Apache Kafka** ([#1088](https://github.com/libredb/libredb-studio/issues/1088)), which followed Prometheus; seventeen is true of a release that carries **Prometheus** ([#1085](https://github.com/libredb/libredb-studio/issues/1085)) and not Kafka, if one is cut,
+> which followed DuckDB; sixteen was true from the release that carried **DuckDB**
+> ([#424](https://github.com/libredb/libredb-studio/issues/424)), which followed libSQL, and fourteen from **0.13.0** onwards, the release that carried
+> Elasticsearch, OpenSearch, Trino and Apache Cassandra alongside the ten of 0.11.0.
 > The number is the `SHIPPED` record in
 > `src/lib/db/compatibility.ts` minus the embedded `libredb`, which `EXTERNAL` in the same
 > file already splits out; read it from there rather than from this file. The catalog entry
-> is version-scoped, so do not publish the sixteen-engine wording against a version that
-> predates DuckDB — send the fourteen-engine variant (0.13.0 onwards), the ten-engine one
+> is version-scoped, so do not publish the eighteen-engine wording against a version that
+> predates Kafka: send the seventeen-engine variant for a release with Prometheus and not Kafka (its size-cut body is `pcsc-listing.html` at 8dfdfcce), the sixteen-engine variant (the DuckDB release onwards; its size-cut body is `pcsc-listing.html` at 06a4cb11), the fourteen-engine one (0.13.0 onwards), the ten-engine one
 > (0.11.0 onwards) or the eight-engine one instead.
 >
-> **The scope goes with the count.** Browsing and querying reach all sixteen; editing data does
+> **The scope goes with the count.** Browsing and querying reach all eighteen; editing data does
 > not, so "manage data across …" must never be written over the whole list. Read the split from
 > the providers: `supportsInlineRowEdit` and `supportsCreateTable` default to `true` in
 > `src/lib/db/base-provider.ts` and each provider that cannot turns them off, which leaves inline
 > row editing on PostgreSQL, MySQL, Oracle, SQL Server, SQLite, libSQL and DuckDB, and table
-> creation on those seven plus Apache Trino. Every other engine — Cassandra, ClickHouse, Couchbase, Druid,
-> Elasticsearch, MongoDB, OpenSearch and Redis — reports those controls as unsupported. The
+> creation on those seven plus Trino. Every other engine (Cassandra, ClickHouse, Couchbase, Druid,
+> Elasticsearch, Apache Kafka, MongoDB, OpenSearch, Prometheus and Redis) reports those controls as unsupported. The
 > reason differs per engine and the copy must not flatten it: on Elasticsearch no mutation is in
 > the SQL grammar at all, while OpenSearch's grammar carries exactly one — `DELETE`, off by
 > default on the cluster (`docs/providers/opensearch.md` §5.6, and `SEARCH_SCHEMA_REFRESH_PATTERN`
@@ -49,13 +51,22 @@ partner contact.
 > no listing may say the assistant writes SQL from a plain-English question. What ships is
 > AI query *explanation*, and it is **not** available on any connection: the write-up is
 > derived from the engine's own `EXPLAIN` plan, and `src/components/studio/BottomPanel.tsx`
-> drops the Explain tab unless the provider declares `explainFormat`. Seven do — PostgreSQL,
-> MySQL, SQLite, Couchbase, ClickHouse, Apache Druid and Apache Trino — so name that set rather
-> than a count, and check it by grepping `explainFormat:` under `src/lib/db/providers/` rather
-> than by trusting this line. Alongside it is the read-only agent rail
+> drops the Explain tab unless the provider declares `explainFormat`. Nine do — PostgreSQL,
+> MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid and Trino — so name that
+> set rather than a count, and check it by grepping `explainFormat:` under
+> `src/lib/db/providers/` rather than by trusting this line. Keep the colon: without it the
+> search provider's own account of why it declares none is counted as a declaration, and the
+> answer comes back as ten. PostgreSQL and MySQL spread the value in from a connect-time
+> probe instead of writing a literal, which is why `DECLARES_EXPLAIN_FORMAT` in
+> `tests/unit/marketplace-copy.test.ts` carries a second alternative for them. Alongside it is the read-only agent rail
 > ([`docs/AGENT.md`](https://github.com/libredb/libredb-studio/blob/main/docs/AGENT.md)),
-> which executes statements on PostgreSQL and SQLite only (`queryReadOnly` exists on those
-> two providers alone) in a session the database enforces as read-only. "Executes nothing it
+> which executes statements on PostgreSQL, SQLite, DuckDB and SQL Server only (`queryReadOnly`
+> exists on those four providers alone), with the database and not the IDE refusing the write. Do
+> NOT write "in a read-only session": that is true of three of the four and false of SQL Server,
+> which has no read-only transaction and no session-level read-only switch, and bounds the run by
+> a principal verified at open to be unable to write plus an optimizer admission per statement
+> (`docs/providers/mssql.md`). "Never writes" is engine-independent and is the sentence to use.
+> "Executes nothing it
 > recommends" is an overclaim this product already rejected: the consented editor hand-over
 > runs exactly the recommended statement
 > (`src/app/api/agent/runs/[runId]/handover/route.ts` calls `queryReadOnly(answer.sql, …)`).
@@ -77,8 +88,11 @@ partner contact.
 > `operator/helm-charts/libredb-studio/` by hand, or the sync guard fails the required check.
 >
 > What *is* release-coupled is every marketplace description that spells the count:
-> `deploy/azure`, `deploy/railway` and `deploy/caprover` all say sixteen as of the DuckDB
-> release - and all three were still on fourteen when it landed, a full engine behind, because
+> `deploy/azure`, `deploy/railway` and `deploy/caprover` said seventeen from the merge of #1085 and say eighteen from the merge of #1088,
+> because `tests/unit/lib/catalog-copy-engine-count.test.ts` holds every counted numeral there to
+> `EXTERNAL_DATABASE_TYPES` on `main`.
+> So until the CapRover version default and the Railway image pin move from 0.16.2 to a release that carries Prometheus and Apache Kafka, those two name a tag two engines short of their own description, the one exception to the rule below that the number is true at the tag it names.
+> At the DuckDB release they said sixteen - and all three were still on fourteen when it landed, a full engine behind, because
 > libSQL had moved the code and not them. `deploy/railway/template.json` and
 > `deploy/caprover/libredb-studio.yml` were on thirteen once for the same reason: each channel
 > spells the count in a second file nobody reads while editing the first. Each of these
@@ -90,7 +104,7 @@ partner contact.
 > day the next engine lands (issue #445) - but their exhaustive descriptions still name every
 > engine, and so does `desktop/src-tauri/tauri.conf.json`.
 > `packaging/linux/nfpm.yaml` and the operator CSVs are consumed at release time from `main`,
-> so they name sixteen now and the next tag publishes it.
+> so they name eighteen now and the next tag publishes it.
 
 ## Listing facts
 
@@ -103,7 +117,7 @@ partner contact.
 | License | MIT (open source) |
 | Specialization | SUSE One — INNOVATE |
 | Certification | SUSE Ready, Platform: SUSE Rancher — granted, live since 2026-08-05 |
-| Catalog listing | https://www.suse.com/pcsc/viewVersionPage?versionID=26969 |
+| Catalog listing | https://www.suse.com/pcsc/viewVersionPage?versionID=27107 (0.16.2 / chart 0.1.67, imported 2026-09-23; the ID changes with every import) |
 | Website | https://libredb.org |
 | Source | https://github.com/libredb/libredb-studio |
 | Helm repository | https://libredb.org/libredb-studio/ (also OCI: `oci://ghcr.io/libredb/charts/libredb-studio`) |
@@ -115,26 +129,27 @@ partner contact.
 
 LibreDB Studio is an MIT-licensed, AI-assisted open source SQL IDE that connects to
 PostgreSQL, MySQL, Oracle, SQL Server, SQLite, libSQL, DuckDB, MongoDB, Redis, Couchbase,
-ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Apache Trino and Apache Cassandra
-directly from the browser.
+ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra,
+Prometheus and Apache Kafka directly from the browser.
 
 ## Long description
 
 LibreDB Studio brings a full SQL IDE to Rancher-managed Kubernetes clusters: browse
 schemas and run queries across PostgreSQL, MySQL, Oracle, SQL Server, SQLite, libSQL, DuckDB,
-MongoDB, Redis, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Apache Trino
-and Apache Cassandra from a single web interface, with no desktop client to install. Editing
+MongoDB, Redis, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino,
+Apache Cassandra, Prometheus and Apache Kafka from a single web interface, with no desktop
+client to install. Editing
 data follows the engine rather than the IDE: inline row editing on PostgreSQL, MySQL,
-Oracle, SQL Server, SQLite, libSQL and DuckDB, table creation on those seven and Apache Trino, and
+Oracle, SQL Server, SQLite, libSQL and DuckDB, table creation on those seven and Trino, and
 everywhere else the controls are reported as unsupported rather than offered and then
 failed — Elasticsearch SQL has no mutation in its grammar at all, OpenSearch's one
 mutation (`DELETE`) is off by default, and Druid SQL has no `UPDATE`, no `DELETE` and no
 `CREATE TABLE`. An optional AI assistant (bring your own key: Gemini, OpenAI, or a local
 model) writes up a query in plain English from the engine's own EXPLAIN plan, on
-PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid and Apache Trino —
-the engines that return one — and runs a read-only investigation agent on PostgreSQL,
-SQLite and DuckDB whose every claim cites the result it came from, and that never writes: the session
-is read-only and the database, not the IDE, refuses writes and DDL. It stays off unless
+PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid and Trino,
+the engines that return one. It also runs a read-only investigation agent on PostgreSQL,
+SQLite, DuckDB and SQL Server whose every claim cites the result it came from, and that never writes:
+the database, not the IDE, is what refuses writes and DDL. It stays off unless
 configured.
 
 The Helm chart installs from the Rancher Apps catalog with default values: first-run
@@ -147,16 +162,16 @@ versions are documented and validated for every release.
 
 ## Key features (bullet form, if the catalog template asks for them)
 
-- Sixteen database engines in one browser-based IDE: PostgreSQL, MySQL, Oracle,
+- Eighteen database engines in one browser-based IDE: PostgreSQL, MySQL, Oracle,
   SQL Server, SQLite, libSQL, DuckDB, MongoDB, Redis, Couchbase, ClickHouse, Apache Druid,
-  Elasticsearch, OpenSearch, Apache Trino, Apache Cassandra
+  Elasticsearch, OpenSearch, Trino, Apache Cassandra, Prometheus, Apache Kafka
 - One-click install from the Rancher Apps catalog — deployable with default values,
   zero configuration required
 - Optional AI assistance (Gemini, OpenAI, or a self-hosted model; off by default):
   plain-English query explanation on the engines that return an EXPLAIN plan (PostgreSQL,
-  MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Apache Trino), and a
-  read-only investigation agent on PostgreSQL, SQLite and DuckDB that never writes — the database enforces
-  the read-only session, not the IDE
+  MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Trino). Plus a
+  read-only investigation agent on PostgreSQL, SQLite, DuckDB and SQL Server that never writes — the
+  database, not the IDE, is what refuses the write
 - Hardened chart defaults: non-root, read-only root filesystem, NetworkPolicy, PDB,
   HPA, Ingress/TLS
 - Self-hosted and air-gap friendly: no external services required to operate the IDE
@@ -171,9 +186,9 @@ partner contact rather than sending them one at a time.
 
 | Field on the page | Published value | Should be |
 |---|---|---|
-| Version | LibreDB Studio 0.9.44 | 0.13.5, with the release link pointing at <https://github.com/libredb/libredb-studio/releases/tag/0.13.5> — the sixteen-engine wording in this file is accurate as of that release, which is the one DuckDB ships in |
-| Key features | "Seven database engines" | sixteen — the accuracy gate above is satisfied as of 0.13.5, the release DuckDB ships in |
-| Short and long description | the pre-0.11.0 revision, which names seven engines and an AI that writes SQL from natural language | the text in this file — sixteen engines, and no natural-language-to-SQL claim: that feature was removed from the product |
+| Version | LibreDB Studio 0.9.44 | 0.13.5 when this row was written, with the release link pointing at <https://github.com/libredb/libredb-studio/releases/tag/0.13.5>; resolved by the weekly import, which carries 0.16.2 as of 2026-09-23 (the note of that date below) |
+| Key features | "Seven database engines" | sixteen while the page carries a release before Prometheus, 0.16.2 as of 2026-09-23, seventeen from a release that carries Prometheus (#1085) and not Kafka, and eighteen, the wording in this file, from the release that carries Apache Kafka (#1088) |
+| Short and long description | the pre-0.11.0 revision, which names seven engines and an AI that writes SQL from natural language | until the page carries the release with Prometheus, the sixteen-engine body at 06a4cb11 (`git show 06a4cb11:deploy/rancher/pcsc-listing.html`); from a release with Prometheus and not Kafka, the seventeen-engine body at 8dfdfcce; from the release with Kafka, `pcsc-listing.html` as it stands, eighteen engines. No natural-language-to-SQL claim either way: that feature was removed from the product |
 | Hardware Architecture | x86-64 | x86-64 and Arm64 (`ghcr.io/libredb/libredb-studio` is linux/amd64 + linux/arm64) |
 
 Two open questions for the same mail: whether the version field can track the latest
@@ -222,6 +237,14 @@ carried our releases since the 0.1.36 listing without a pull request, taking the
 chart version at each run rather than every version in between.
 An overlay edit reaches the catalog with the next version that CI integrates, because the
 overlay is copied in only when a new chart version is built.
+
+**2026-09-23.** SUSE imported every release since 0.9.44 up to 0.16.2 / chart 0.1.67, so the Version row in the corrections table is resolved by the weekly import and needs no mail.
+The description is still the pre-0.11.0 text: the long description above did not fit the page template, which holds at most 1494 characters including the markup for the bullet list.
+`pcsc-listing.html` is the body cut to fit, and it is what goes to SUSE from now on.
+It answers to the same accuracy gates as this file, plus the size gate in `tests/unit/pcsc-listing.test.ts`, which counts line breaks as CRLF because we do not know how the form counts them.
+The open question to SUSE is whether their import can read the listing from a chart field; if it can, the paste step goes away.
+Since #1085, `app-readme.md` and `pcsc-listing.html` name seventeen engines, one more than #1168 and the page's 0.16.2 carry, so neither goes out before a release that carries Prometheus reaches the catalog.
+Since #1088 they name eighteen, two more than the page's 0.16.2 carries, so neither goes out before a release that carries Apache Kafka reaches the catalog.
 
 Vendor naming, as settled: the page heads the partner as **Sekoya** (the legal entity,
 Sekoya Grup Bilisim ve Teknoloji Ltd. Sti.) with the product named **LibreDB Studio**.

@@ -15,6 +15,7 @@ import { SavedQueries } from "@/components/SavedQueries";
 import { ChunkBoundary, ViewLoading } from "@/components/LazyView";
 import { lazyRetry } from "@/lib/lazy";
 import { describeExportScope } from "@/lib/export/scope";
+import { pageOfferFor } from "@/components/results-grid/page-offer";
 import type { ResultExportFormat } from "@/lib/export/result-export";
 
 import { resolveExplainPlan } from "@/lib/explain";
@@ -30,6 +31,7 @@ import {
   LayoutDashboard,
   LayoutGrid,
   Terminal,
+  TriangleAlert,
   X,
   Zap,
 } from "lucide-react";
@@ -219,7 +221,7 @@ interface BottomPanelProps {
   onDismissAgentArtifact?: () => void;
 }
 
-export function BottomPanel({
+export const BottomPanel = React.memo(function BottomPanel({
   mode,
   onSetMode,
   currentTab,
@@ -288,9 +290,22 @@ export function BottomPanel({
    * export, so this is the grid's artifact and no other's.
    */
   const exportArtifact = mode === "results" && hydratedResult !== null ? agentArtifact : null;
+  /**
+   * The next-page offer these rows carry, which is what the grid gates its control on.
+   *
+   * Computed here as well as in `ResultsGrid` because two surfaces speak about the same
+   * offer and must not disagree: the export dialog's "load them first" names an action
+   * only this offer makes available. Both call `pageOfferFor`, so there is one definition
+   * of the condition and not two (#816).
+   */
+  const gridPageOffer = pageOfferFor(
+    displayedResult?.pagination,
+    metadata?.capabilities.supportsResultPagination,
+    hydratedHere ? undefined : onLoadMore,
+  );
   // How much of the result an export would write — the count the button carries and
   // the shortfall the menu states. Derived here so both read the same numbers.
-  const exportScope = describeExportScope(displayedResult ?? { rows: [] });
+  const exportScope = describeExportScope(displayedResult ?? { rows: [] }, gridPageOffer !== undefined);
 
   /**
    * Hands one format entry to whichever destination the user chose.
@@ -571,6 +586,12 @@ export function BottomPanel({
                 result={displayedResult}
                 onLoadMore={hydratedHere ? undefined : onLoadMore}
                 isLoadingMore={isLoadingMore}
+                supportsResultPagination={metadata?.capabilities.supportsResultPagination}
+                // The statement these ROWS came from, for the ordering notice. Withheld
+                // for a hydrated result for the same reason `onLoadMore` is: those rows
+                // are an agent run's, and the tab's own statement did not produce them.
+                resultQuery={hydratedHere ? undefined : currentTab.resultQuery}
+                databaseType={activeConnection?.type}
                 maskingEnabled={maskingEnabled}
                 onToggleMasking={onToggleMasking}
                 userRole={userRole}
@@ -581,6 +602,32 @@ export function BottomPanel({
                 onApplyChanges={onApplyChanges}
                 onDiscardChanges={onDiscardChanges}
               />
+            ) : currentTab.runError !== undefined ? (
+              /*
+                The tab's last run failed, and its failure stands where its rows would.
+                After the grid, so a hydrated result keeps its precedence, and before the
+                empty state, which would read as "nothing ran". Rendered here rather than
+                left to the toast: the embedded shell mounts no Toaster, so in that product
+                this block is the only failure signal there is.
+              */
+              <div
+                role="alert"
+                className="h-full flex flex-col items-center justify-center px-3 text-center bg-surface"
+                data-testid="run-failure"
+              >
+                <TriangleAlert
+                  aria-hidden="true"
+                  strokeWidth={1.5}
+                  className="mb-2 h-8 w-8 text-destructive opacity-50"
+                />
+                <p className="text-xs font-medium text-destructive">The query failed.</p>
+                <p
+                  className="mt-1 max-w-xl break-words whitespace-pre-wrap font-mono text-xs text-destructive"
+                  data-testid="run-failure-message"
+                >
+                  {currentTab.runError}
+                </p>
+              </div>
             ) : (
               <div className="h-full flex flex-col items-center justify-center opacity-20 bg-surface">
                 <Terminal strokeWidth={1.5} className="w-12 h-12 mb-4" />
@@ -593,4 +640,4 @@ export function BottomPanel({
       </div>
     </div>
   );
-}
+});

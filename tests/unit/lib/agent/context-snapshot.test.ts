@@ -19,6 +19,7 @@ import type { AgentToolContext } from "@/lib/agent/tools";
 import type { AgentContextSnapshot, AgentRunEvent } from "@/lib/agent/types";
 import { UNTRUSTED_CONTENT_BEGIN, UNTRUSTED_CONTENT_END } from "@/lib/agent/untrusted-content";
 import { ConnectionError, ExecutionProfileError, QueryError } from "@/lib/db/errors";
+import { createDatabaseProvider } from "@/lib/db/factory";
 import { measureResultBytes } from "@/lib/db/providers/sql/read-only-budget";
 import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
@@ -34,9 +35,19 @@ import type {
   DatabaseObject,
   DatabaseProvider,
   KindCount,
+  ObjectDetailBatch,
   ObjectKindSpec,
   ProviderCapabilities,
 } from "@/lib/db/types";
+import {
+  countObjects as countKafkaObjects,
+  describeObjects as describeKafkaObjects,
+  KAFKA_CONTAINER_LEVELS,
+  KAFKA_OBJECT_KINDS,
+  KAFKA_TOPIC_LIST_CAP,
+  listObjects as listKafkaObjects,
+  type ObjectsClient as KafkaObjectsClient,
+} from "@/lib/db/providers/stream/kafka/objects";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { TABLE_LABELS } from "../../../fixtures/provider-labels";
@@ -878,6 +889,45 @@ describe("captureContextSnapshot — an environment failure on the composed path
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
     expect(capture.detail).toContain("under the execution profile a grounding read takes");
     expect(capture.detail).not.toContain("could not be decrypted");
+    // The generic sentence names no cause, so what the operator gets is that sentence AND
+    // the advice for this deny code. Asserted per code rather than by substring of a
+    // shared prefix, because the whole point of the advice is that it DIFFERS per code.
+    expect(capture.detail).toContain("both a user and a password are required");
+    expect(capture.detail).not.toMatch(/so its schema was not read for this run\.$/);
+  });
+
+  test("a profile that refuses the principal says what to do about it, in the deny code's own words", async () => {
+    // The measured case this exists for: a SQL Server connection saved as `sa`, which is
+    // how most of them are saved, is refused correctly and was reported only as "could not
+    // open a connection", which names no cause and reads like the server being down. The
+    // operator's real next step is one `CREATE LOGIN`, so the refusal has to say so.
+    //
+    // Driven on `postgres` because the advice is keyed by the DENY CODE and not by the
+    // engine: this harness's composed path needs a type whose provider declares object
+    // kinds, and choosing one changes nothing the assertions below read.
+    const h = harness("postgres");
+
+    const capture = await captureContextSnapshot({
+      ...h.context,
+      acquireProvider: async () => {
+        throw new ExecutionProfileError(
+          "the session principal holds privileges no read-only boundary can contain",
+          "PROFILE_PRIVILEGES_TOO_BROAD",
+        );
+      },
+    });
+
+    expect(capture.kind).toBe("unavailable");
+    if (capture.kind !== "unavailable") throw new Error("unreachable");
+    expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
+    expect(capture.detail).toContain("under the execution profile a grounding read takes");
+    expect(capture.detail).toContain("Point the connection's agent credential at a least-privilege principal");
+    // The generic sentence alone is not what a caller gets, and the advice is not the
+    // credential code's: a shared sentence would make both assertions above vacuous.
+    expect(capture.detail).not.toMatch(/so its schema was not read for this run\.$/);
+    expect(capture.detail).not.toContain("both a user and a password are required");
+    // The error's own message stays out of the note a run reads as the server's voice.
+    expect(capture.detail).not.toContain("the session principal holds");
   });
 
   test("anything that is not one of those two is this server's own bug, and propagates", async () => {
@@ -1268,6 +1318,9 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
     expect(capture.detail).toContain("under the execution profile a grounding read takes");
     expect(capture.detail).not.toContain("could not be decrypted");
+    // Same refusal, same advice, on the other of the two paths that catch this error.
+    expect(capture.detail).toContain("both a user and a password are required");
+    expect(capture.detail).not.toMatch(/so its schema was not read for this run\.$/);
   });
 
   test("anything that is not one of those two is this server's own bug, and propagates", async () => {
@@ -1569,6 +1622,12 @@ describe("captureContextSnapshot — the object surface that says what each entr
       readonly counts?: (container: readonly string[]) => Record<string, KindCount>;
       readonly objects?: (container: readonly string[], kind: string) => readonly DatabaseObject[];
       readonly containers?: (parent?: readonly string[]) => readonly Container[];
+      /** The folder's bulk column read; absent, it answers the table and view columns of `schema`. */
+      readonly describeObjects?: (
+        container: readonly string[],
+        kind: string,
+        limit?: number,
+      ) => Promise<ObjectDetailBatch>;
       readonly omitObjectSurface?: boolean;
       readonly omitContainerListing?: boolean;
       readonly listThrows?: Error;
@@ -1597,16 +1656,22 @@ describe("captureContextSnapshot — the object surface that says what each entr
     );
 
     const provider = {
-      describeObjects: mock(async (container: readonly string[], kind: string) => ({
-        details: (options.schema ?? COLUMNS)
-          .filter((object) => (kind === "table" ? object.name.endsWith("orders") : object.name.endsWith("summary")))
-          .map((object) => ({
-            path: [...container, object.name.split(".")[object.name.split(".").length - 1]],
-            columns: object.columns,
-            indexes: object.indexes,
-            foreignKeys: object.foreignKeys ?? [],
-          })),
-      })),
+      describeObjects: mock(async (container: readonly string[], kind: string, limit?: number) =>
+        options.describeObjects !== undefined
+          ? options.describeObjects(container, kind, limit)
+          : {
+              details: (options.schema ?? COLUMNS)
+                .filter((object) =>
+                  kind === "table" ? object.name.endsWith("orders") : object.name.endsWith("summary"),
+                )
+                .map((object) => ({
+                  path: [...container, object.name.split(".")[object.name.split(".").length - 1]],
+                  columns: object.columns,
+                  indexes: object.indexes,
+                  foreignKeys: object.foreignKeys ?? [],
+                })),
+            },
+      ),
       // Carried so a catalog dialect can be driven through this harness: the composed
       // path reads through `queryReadOnly` and never asks the object surface.
       queryReadOnly: mock(async (sql: string) => answerPostgres(sql)),
@@ -1786,6 +1851,96 @@ describe("captureContextSnapshot — the object surface that says what each entr
     expect(snapshot.objects.find((object) => object.kind === "table")?.path).toEqual(["orders"]);
   });
 
+  /**
+   * KM1 of the Kafka provider (#1088, spec 4.3 and 11). Its topic listing is capped at 2,000
+   * names, and past the cap its bulk read reports the cap as `truncated`, as the contract
+   * requires. This walk stops at the first truncated batch, so past the cap plan mode grounds
+   * topics and nothing else: a stated limit, not one the declaration order can fix without
+   * reordering the tree. Both arms run through the real walk over the Kafka module's own
+   * declaration, counts, listings and bulk reads, since no live fixture reaches 2,000 topics.
+   */
+  async function kafkaHarness(topicCount: number): Promise<ObjectHarness> {
+    const names = Array.from({ length: topicCount }, (_unused, index) => `topic_${String(index).padStart(5, "0")}`);
+    const unread = async (): Promise<never> => {
+      throw new Error("the inventory walk reads no offsets, configs or group descriptions");
+    };
+    const client: KafkaObjectsClient = {
+      listTopics: async () => names,
+      metadata: async (topics) => ({
+        clusterId: "c",
+        controllerId: 1,
+        brokers: [
+          { nodeId: 1, host: "b1", port: 9092, rack: null },
+          { nodeId: 2, host: "b2", port: 9092, rack: null },
+        ],
+        topics: (topics ?? names).map((name) => ({ name, id: name, partitions: [] })),
+      }),
+      listGroups: async () => [{ groupId: "billing", state: "Stable", groupType: "classic", protocolType: "consumer" }],
+      offsets: unread,
+      topicConfigs: unread,
+      brokerConfigs: unread,
+      describeGroup: unread,
+      committedOffsets: unread,
+    };
+    const counts = await countKafkaObjects(client, []);
+    const listed = new Map(
+      await Promise.all(
+        KAFKA_OBJECT_KINDS.map(async (kind) => [kind.id, await listKafkaObjects(client, [], kind.id)] as const),
+      ),
+    );
+    return objectHarness({
+      kinds: KAFKA_OBJECT_KINDS,
+      containerLevels: KAFKA_CONTAINER_LEVELS,
+      counts: () => counts,
+      objects: (_container, kind) => listed.get(kind) ?? [],
+      describeObjects: (container, kind, limit) => describeKafkaObjects(client, container, kind, limit),
+    });
+  }
+
+  test("Kafka past its topic cap: the walk grounds topics only and says why, in the provider's sentence", async () => {
+    const harness = await kafkaHarness(KAFKA_TOPIC_LIST_CAP + 1);
+
+    const snapshot = await inventoryOf(harness);
+
+    expect(snapshot.objects).toHaveLength(KAFKA_TOPIC_LIST_CAP);
+    expect(new Set(snapshot.objects.map((object) => object.kind))).toEqual(new Set(["topic"]));
+    expect(snapshot.truncated).toEqual({
+      limit: KAFKA_TOPIC_LIST_CAP,
+      reason: "the listing is one topic listing capped at 2,000 names",
+    });
+    expect(snapshot.kinds?.find((kind) => kind.id === "topic")?.sampledFrom).toBe(
+      "one topic listing capped at 2,000 names",
+    );
+    // The walk stopped at the topic folder: the groups and brokers were counted but never listed.
+    expect(harness.listObjects.mock.calls.map((call) => call[1])).toEqual(["topic"]);
+  });
+
+  test("Kafka below its topic cap: the walk also grounds the consumer groups and the brokers", async () => {
+    const harness = await kafkaHarness(7);
+
+    const snapshot = await inventoryOf(harness);
+
+    expect(snapshot.truncated).toBeUndefined();
+    const byKind = Object.groupBy(snapshot.objects, (object) => object.kind ?? "");
+    expect(byKind.topic).toHaveLength(7);
+    expect(byKind.consumer_group?.map((object) => object.name)).toEqual(["billing"]);
+    // Addressed by node id, labelled with host and port.
+    expect(byKind.broker?.map((object) => [object.name, object.label])).toEqual([
+      ["1", "1 b1:9092"],
+      ["2", "2 b2:9092"],
+    ]);
+    expect(snapshot.objects.find((object) => object.kind === "topic")?.columns.map((column) => column.name)).toEqual([
+      "partition",
+      "offset",
+      "timestamp",
+      "key",
+      "key_encoding",
+      "value",
+      "value_encoding",
+      "headers",
+    ]);
+  });
+
   test("more container and kind pairs than the read may issue is reported as truncated too", async () => {
     const snapshot = await inventoryOf(
       objectHarness({
@@ -1952,7 +2107,7 @@ describe("captureContextSnapshot — the object surface that says what each entr
    * whose grounding is enveloped keep their grounding and lose the KINDS. That is a loss of
    * detail rather than of grounding, which is the trade this module already makes for a
    * refused object read, and it is the only one available without either weakening the
-   * envelope or giving seventeen providers an enveloped object surface.
+   * envelope or giving every provider an enveloped object surface.
    */
   test("a dialect whose grounding is enveloped never reaches for the object surface", async () => {
     const harness = objectHarness({ type: "postgres" });
@@ -2223,8 +2378,9 @@ describe("captureContextSnapshot — the kind, composed on the catalog path", ()
  * id, or the run and the tree disagree about what a thing is. The right-hand side of
  * `COMPOSED_KIND_WORDS` is therefore a copy of each provider's own mapping, and a copy
  * that nothing checks is a copy that drifts - which is why `POSTGRES_SYSTEM_SCHEMAS` is
- * pinned the same way in `composed-sql.test.ts`. Source-level, because the agent side
- * must not import a provider module.
+ * pinned the same way in `composed-sql.test.ts`. The postgres arm stays source-level,
+ * because the agent side must not import a provider module; the sqlite arm asks the
+ * constructed provider instead (#981).
  */
 describe("the composed kind vocabulary cannot drift from the provider's declaration", () => {
   const readSource = (relativePath: string): string => readFileSync(join(process.cwd(), relativePath), "utf8");
@@ -2234,6 +2390,28 @@ describe("the composed kind vocabulary cannot drift from the provider's declarat
       readSource("src/lib/agent/context-snapshot.ts"),
     )?.[1];
     return Object.fromEntries([...(block ?? "").matchAll(/(\w+): "(\w+)"/g)].map((match) => [match[1], match[2]]));
+  };
+
+  /**
+   * The provider's own sqlite kind ids (#981). Asking the constructed provider rather than
+   * reading `sqlite.ts` as text is what makes the guard independent of how the declaration
+   * is laid out: the scrape it replaced matched a single-line entry only.
+   *
+   * Capabilities are type-driven, so this needs no socket - the same reason the
+   * `provider-meta` route can read them off a provider it never connects.
+   */
+  const declaredSqliteKindIds = async (): Promise<string[]> => {
+    const provider = await createDatabaseProvider({
+      id: "kind-vocabulary-guard",
+      name: "kind-vocabulary-guard",
+      type: "sqlite",
+      // The provider validates its config in the constructor and wants a file path, even
+      // though capabilities are read without ever connecting. `:memory:` is the documented
+      // way to satisfy that without naming a file.
+      database: ":memory:",
+      createdAt: new Date(0),
+    } satisfies DatabaseConnection);
+    return (provider.getCapabilities().objectKinds ?? []).map((kind) => kind.id);
   };
 
   test("PostgreSQL: every relkind is mapped exactly as the provider's own CASE maps it", () => {
@@ -2253,17 +2431,27 @@ describe("the composed kind vocabulary cannot drift from the provider's declarat
     expect(composedMap("postgres")).toEqual(providerMap);
   });
 
-  test("SQLite: the four words sqlite_schema types objects with are the four ids declared", () => {
-    const declaredIds = [
-      ...(
-        /const SQLITE_OBJECT_KINDS[\s\S]*?\n\];/.exec(readSource("src/lib/db/providers/sql/sqlite.ts"))?.[0] ?? ""
-      ).matchAll(/\{ id: "(\w+)"/g),
-    ].map((match) => match[1]);
+  test("SQLite: the four words sqlite_schema types objects with are the four ids declared", async () => {
+    // Read through the provider rather than this file's text (#981). The scrape this
+    // replaced matched a single-line `{ id: "..."` entry only, so a kind declared across
+    // two lines left BOTH sides one word shorter and the guard passed over a kind nothing
+    // maps. The provider answers the same question without caring how the array is laid out.
+    const declaredIds = await declaredSqliteKindIds();
 
     expect(declaredIds.length).toBeGreaterThan(0);
     // The identity map, which is the claim: `sqlite_schema.type` and the declared kind
     // ids are the same vocabulary, so neither side may gain a word alone.
     expect(composedMap("sqlite")).toEqual(Object.fromEntries(declaredIds.map((id) => [id, id])));
+  });
+
+  test("a fifth declared kind that nothing maps fails the guard, however its entry is laid out", async () => {
+    const composed = composedMap("sqlite");
+    const declaredIds = await declaredSqliteKindIds();
+
+    // Control: the real declaration agrees, so the mutant below is the only difference.
+    expect(composed).toEqual(Object.fromEntries(declaredIds.map((id) => [id, id])));
+    // Mutant: one more declared kind, and the SAME comparison must stop holding.
+    expect(composed).not.toEqual(Object.fromEntries([...declaredIds, "fifth_kind"].map((id) => [id, id])));
   });
 });
 

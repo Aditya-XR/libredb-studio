@@ -61,11 +61,15 @@
 import { QueryError } from "@/lib/db/errors";
 import {
   applySourceBound,
+  assertContainerPathShape,
+  assertObjectPathShape,
   callerBoundTruncationReason,
   containerDepth,
   declaredKinds,
   findKind,
   requireSourceKind,
+  type ContainerPathShapeEngine,
+  type ObjectPathShapeEngine,
 } from "@/lib/db/object-kinds";
 import { comparePaths } from "@/lib/db/object-path";
 import type {
@@ -95,6 +99,18 @@ import {
 import { type ClickHouseRow, type ClickHouseTransport, ClickHouseTransportError } from "./transport";
 
 const PROVIDER = "clickhouse" as const;
+
+/**
+ * ClickHouse's identity for the shared container-path renderer.
+ *
+ * Which paths this engine accepts is not a field here: it is `containerPathShapes` in
+ * `getCapabilities()` (`./index.ts`), which the object routes read too (#1147).
+ */
+const CLICKHOUSE_CONTAINER_PATH_ENGINE: ContainerPathShapeEngine = {
+  code: PROVIDER,
+  label: "A ClickHouse",
+  shapeNames: "label",
+};
 
 // ============================================================================
 // Declaration
@@ -128,10 +144,37 @@ export const CLICKHOUSE_CONTAINER_LEVELS: ContainerLevels = Object.freeze([
  * objects with no text at all - a config-file dictionary and a function whose `origin` is
  * `ExecutableUserDefined` or `WasmUserDefined` - and each is a refusal PART beside readable
  * siblings of the same kind, never a dropped declaration.
+ *
+ * `hasColumns` is declared on the four kinds `CLICKHOUSE_OBJECT_CATALOGS` gives a column
+ * statement to, which is the same split `describeObject` gates on: a function has no entry
+ * there and answers three empty arrays with no round trip (`describeObject` below), so it
+ * declares nothing and its rows stay leaves. A DICTIONARY declares columns although it is
+ * `role: "config"`, and that is the measurement rather than the role: `describeDictionary()`
+ * reads its key and attribute columns out of `system.dictionaries`, the only catalog both
+ * flavours of dictionary are in. Writing the four literally rather than deriving them from
+ * `CLICKHOUSE_OBJECT_CATALOGS` keeps this array free of a temporal dead zone - that map is
+ * declared after it - and invariant 8 in `tests/helpers/object-surface-conformance.ts` checks
+ * every one of them against what this provider's own `describeObject` answers.
  */
 export const CLICKHOUSE_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
-  { id: "table", role: "relation", label: "Table", labelPlural: "Tables", hasSource: true, sourceLanguage: "sql" },
-  { id: "view", role: "relation", label: "View", labelPlural: "Views", hasSource: true, sourceLanguage: "sql" },
+  {
+    id: "table",
+    role: "relation",
+    label: "Table",
+    labelPlural: "Tables",
+    hasSource: true,
+    sourceLanguage: "sql",
+    hasColumns: true,
+  },
+  {
+    id: "view",
+    role: "relation",
+    label: "View",
+    labelPlural: "Views",
+    hasSource: true,
+    sourceLanguage: "sql",
+    hasColumns: true,
+  },
   {
     id: "materialized_view",
     role: "relation",
@@ -139,6 +182,7 @@ export const CLICKHOUSE_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze(
     labelPlural: "Materialized Views",
     hasSource: true,
     sourceLanguage: "sql",
+    hasColumns: true,
   },
   {
     id: "dictionary",
@@ -147,6 +191,7 @@ export const CLICKHOUSE_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze(
     labelPlural: "Dictionaries",
     hasSource: true,
     sourceLanguage: "sql",
+    hasColumns: true,
   },
   {
     id: "function",
@@ -518,37 +563,19 @@ function containerSegment(
  * which is the worst way to report a caller mistake.
  */
 function containerDatabase(capabilities: ProviderCapabilities, container: readonly string[]): string {
-  const levels = declaredLevels(capabilities);
-  if (container.length !== levels.length) {
-    throw new QueryError(
-      `A ClickHouse container path is [${levels.map((level) => level.label.toLowerCase()).join(", ")}], ` +
-        `received ${JSON.stringify(container)}`,
-      PROVIDER,
-    );
-  }
+  assertContainerPathShape(capabilities, container, CLICKHOUSE_CONTAINER_PATH_ENGINE);
   return containerSegment(capabilities, container, "schema");
 }
 
 /**
- * Refuses an object path of the wrong shape, naming the shape it does admit.
- *
- * ONE writer for two readers since #789 Phase 2: `describeObject` and `readObjectSource` ask
- * the same question about the same path, and two copies of this derivation are two chances
- * for the detail pane and the Source tab to disagree about what an object's address is.
- *
- * Derived, not counted. One segment per declared container level plus the name, and the
- * segment NAMES are the declared level labels sliced to the same depth, so the message and
- * the check cannot disagree. No kind here declares `attachedTo`, so there is a single shape
- * rather than the two MySQL accepts.
+ * ClickHouse: no kind declares `attachedTo`, so the policy is inert and the shape is
+ * always the declared levels plus the name.
  */
-function assertObjectPathShape(capabilities: ProviderCapabilities, kind: string, path: readonly string[]): void {
-  const shape = [...declaredLevels(capabilities).map((level) => level.label.toLowerCase()), "name"];
-  if (path.length === shape.length) return;
-  throw new QueryError(
-    `A ClickHouse "${kind}" path is [${shape.join(", ")}], received ${JSON.stringify(path)}`,
-    PROVIDER,
-  );
-}
+const PATH_SHAPE_ENGINE: ObjectPathShapeEngine = {
+  code: PROVIDER,
+  label: "A ClickHouse",
+  attachedSegment: "required",
+};
 
 /**
  * Every declared kind seeded at zero, before any row is read.
@@ -865,7 +892,7 @@ export async function describeObject(
     throw new QueryError(`ClickHouse declares no object kind "${kind}"`, PROVIDER);
   }
 
-  assertObjectPathShape(capabilities, kind, path);
+  assertObjectPathShape(capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
 
   // The same two questions `listObjects` asks, in the same order: the DECLARATION
   // decides whether the kind exists, then the catalog map decides whether anything can
@@ -1354,7 +1381,7 @@ export async function readObjectSource(
   limit?: number,
 ): Promise<ObjectSourceDocument> {
   const spec = requireSourceKind(capabilities, kind, { displayName: "ClickHouse", type: PROVIDER });
-  assertObjectPathShape(capabilities, kind, path);
+  assertObjectPathShape(capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
   const catalog = objectCatalog(kind);
   if (catalog === undefined) {
     throw new QueryError(

@@ -38,6 +38,13 @@ function clickhouseDefaultKind(value: string): string {
   return CLICKHOUSE_DEFAULT_KINDS.find((kind) => value.startsWith(`${kind} `)) ?? "DEFAULT";
 }
 
+function defaultClause(col: ColumnDiff, dialect: DatabaseType): string {
+  const value = defaultSql(col);
+  if (value === undefined) return "";
+  if (dialect === "clickhouse" && clickhouseDefaultKind(value) !== "DEFAULT") return ` ${value}`;
+  return ` DEFAULT ${value}`;
+}
+
 /**
  * Canonical type ids whose engine has no column-modification statement at all.
  *
@@ -132,6 +139,22 @@ const NO_COLUMN_MODIFICATION: Partial<Record<DatabaseType, { label: string; reas
     label: "LibreDB",
     reason: "The embedded engine speaks a JSON command grammar, not SQL DDL.",
   },
+  // Not a table store at all (#1085): a metric is whatever scrapes and recording rules write
+  // under its name, and the HTTP API declares no column anywhere. The sentence is the one
+  // `NO_TABLE_DDL` below prints when it declines the whole diff.
+  prometheus: {
+    label: "Prometheus",
+    reason:
+      "A metric is written by scrapes and recording rules, not declared with columns, so there is no column definition to change.",
+  },
+  // Not a table store either (#1088): a topic holds messages whose keys and values are bytes the
+  // producers chose, and the broker declares no column anywhere; the columns the object browser
+  // shows are the fixed shape of a read result. The sentence is the one `NO_TABLE_DDL` below
+  // prints when it declines the whole diff.
+  kafka: {
+    label: "Apache Kafka",
+    reason: "A topic holds messages, not rows with declared columns, so there is no column definition to change.",
+  },
 };
 
 /**
@@ -171,6 +194,12 @@ const NO_COLUMN_MODIFICATION: Partial<Record<DatabaseType, { label: string; reas
  *
  * Oracle DDL commits implicitly and BEGIN opens a PL/SQL block, not a transaction.
  * SQL Server is handled separately with BEGIN TRANSACTION.
+ *
+ * `prometheus` (#1085) joined later, on the fact `mongodb` and `redis` already rest on: its
+ * text is PromQL, not SQL (`NON_SQL_DIALECTS`). `NO_TABLE_DDL` declines its whole diff before
+ * any wrapper is written, so this entry keeps the two sets agreeing rather than changing output.
+ * `kafka` (#1088) joined on the same fact and for the same reason: its text is a JSON read
+ * request, not SQL.
  */
 const NO_TRANSACTION_WRAPPER: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   "oracle",
@@ -186,6 +215,8 @@ const NO_TRANSACTION_WRAPPER: ReadonlySet<DatabaseType> = new Set<DatabaseType>(
   "elasticsearch",
   "opensearch",
   "trino",
+  "prometheus",
+  "kafka",
 ]);
 
 // These engines cannot apply a relational table diff through SQL. In particular,
@@ -199,6 +230,8 @@ const NO_TABLE_DDL: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   "druid",
   "elasticsearch",
   "opensearch",
+  "prometheus",
+  "kafka",
 ]);
 
 // IndexDiff carries column names/uniqueness, not ClickHouse's index expression,
@@ -220,6 +253,23 @@ function commentName(name: string): string {
   return name.replace(/[\r\n\u2028\u2029]/g, " ");
 }
 
+/**
+ * The text that goes after DEFAULT: the engine's own SQL where the provider measured it, and
+ * the raw field otherwise.
+ *
+ * `targetDefault` is the VALUE the column defaults to, and a value is not SQL. Measured on
+ * MariaDB 12.3.2: `CREATE TABLE t (note varchar(20) DEFAULT abc)` is ERROR 1054 (42S22)
+ * Unknown column 'abc' in 'DEFAULT', while `DEFAULT 'abc'` is accepted. Dialects whose
+ * provider declares no expression fall back to the raw field and are unchanged.
+ *
+ * Every caller gates on `=== undefined` and never on truthiness, because the empty string is
+ * a default a column really has. `diffColumns` compares the same quantity by presence, so a
+ * truthiness gate here would report a change the migration then silently does not carry.
+ */
+function defaultSql(col: ColumnDiff): string | undefined {
+  return col.targetDefaultSql ?? col.targetDefault;
+}
+
 function generateColumnDef(col: ColumnDiff, dialect: DatabaseType): string {
   const type = col.targetType || col.sourceType || (dialect === "oracle" ? "VARCHAR2(255)" : "TEXT");
   // A CQL column definition is a name and a type, full stop. Measured on 5.0.9:
@@ -229,7 +279,7 @@ function generateColumnDef(col: ColumnDiff, dialect: DatabaseType): string {
   // component cannot be null) and there are no defaults at all.
   if (dialect === "cassandra") return `${escapeIdentifier(col.columnName, dialect)} ${type}`;
   const nullable = col.targetNullable === false ? " NOT NULL" : "";
-  const defaultVal = col.targetDefault ? ` DEFAULT ${col.targetDefault}` : "";
+  const defaultVal = defaultClause(col, dialect);
   // Oracle's column grammar puts DEFAULT before inline constraints such as NOT NULL.
   const modifiers = dialect === "oracle" ? `${defaultVal}${nullable}` : `${nullable}${defaultVal}`;
   return `${escapeIdentifier(col.columnName, dialect)} ${type}${modifiers}`;
@@ -499,14 +549,16 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
       } else if (dialect === "mysql") {
         const type = col.targetType || col.sourceType || "TEXT";
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
-        const defaultVal = col.targetDefault ? ` DEFAULT ${col.targetDefault}` : "";
+        const declaredDefault = defaultSql(col);
+        const defaultVal = declaredDefault === undefined ? "" : ` DEFAULT ${declaredDefault}`;
         lines.push(
           `ALTER TABLE ${id} MODIFY COLUMN ${escapeIdentifier(col.columnName, dialect)} ${type}${nullable}${defaultVal};`,
         );
       } else if (dialect === "oracle") {
         const type = col.targetType || col.sourceType || "VARCHAR2(255)";
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
-        const defaultVal = col.targetDefault ? ` DEFAULT ${col.targetDefault}` : "";
+        const declaredDefault = defaultSql(col);
+        const defaultVal = declaredDefault === undefined ? "" : ` DEFAULT ${declaredDefault}`;
         lines.push(
           `ALTER TABLE ${id} MODIFY (${escapeIdentifier(col.columnName, dialect)} ${type}${defaultVal}${nullable});`,
         );
@@ -514,9 +566,10 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         const type = col.targetType || col.sourceType || "NVARCHAR(MAX)";
         const nullable = col.targetNullable === false ? " NOT NULL" : " NULL";
         lines.push(`ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} ${type}${nullable};`);
-        if (col.sourceDefault !== col.targetDefault && col.targetDefault) {
+        const declaredDefault = defaultSql(col);
+        if (col.sourceDefault !== col.targetDefault && declaredDefault !== undefined) {
           lines.push(
-            `ALTER TABLE ${id} ADD DEFAULT ${col.targetDefault} FOR ${escapeIdentifier(col.columnName, dialect)};`,
+            `ALTER TABLE ${id} ADD DEFAULT ${declaredDefault} FOR ${escapeIdentifier(col.columnName, dialect)};`,
           );
         }
       } else if (dialect === "clickhouse") {
@@ -527,13 +580,9 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
         // (live-probed). See CLICKHOUSE_DEFAULT_KINDS for the kind vocabulary and its traps.
         const column = escapeIdentifier(col.columnName, dialect);
         const type = col.targetType || col.sourceType || "String";
-        let declared = "";
-        if (col.targetDefault) {
-          const kind = clickhouseDefaultKind(col.targetDefault);
-          declared = kind === "DEFAULT" ? ` DEFAULT ${col.targetDefault}` : ` ${col.targetDefault}`;
-        }
+        const declared = defaultClause(col, dialect);
         lines.push(`ALTER TABLE ${id} MODIFY COLUMN ${column} ${type}${declared};`);
-        if (col.sourceDefault && !col.targetDefault) {
+        if (col.sourceDefault && defaultSql(col) === undefined) {
           const kind = clickhouseDefaultKind(col.sourceDefault);
           if (CLICKHOUSE_REMOVABLE_KINDS.includes(kind)) {
             lines.push(`ALTER TABLE ${id} MODIFY COLUMN ${column} REMOVE ${kind};`);
@@ -562,9 +611,10 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
           }
         }
         if (col.sourceDefault !== col.targetDefault) {
-          if (col.targetDefault) {
+          const declaredDefault = defaultSql(col);
+          if (declaredDefault !== undefined) {
             lines.push(
-              `ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} SET DEFAULT ${col.targetDefault};`,
+              `ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} SET DEFAULT ${declaredDefault};`,
             );
           } else {
             lines.push(`ALTER TABLE ${id} ALTER COLUMN ${escapeIdentifier(col.columnName, dialect)} DROP DEFAULT;`);

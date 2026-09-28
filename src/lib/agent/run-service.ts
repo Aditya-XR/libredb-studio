@@ -42,8 +42,10 @@
  * effect is a callback, so this module reaches no database and no model.
  */
 
+import { randomUUID } from "node:crypto";
 import { releaseExecutionRun } from "@/lib/db/operations/execution";
 import { logger } from "@/lib/logger";
+import { AGENT_WORKFLOW_BUDGETS } from "./execution-policy";
 import { verifyRunGoal } from "./goal-verifier";
 import type { AgentHistoryCursor, AgentHistoryPage } from "./history";
 import type { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
@@ -233,7 +235,8 @@ export type AgentRunStepResult =
   | { readonly kind: "performed"; readonly settlement: AgentRunStepSettlement }
   | { readonly kind: "replayed"; readonly event: AgentSettledStepEvent }
   | { readonly kind: "indeterminate"; readonly stepId: string }
-  | { readonly kind: "cancelled" };
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "paused" };
 
 export type AgentRunServiceReason =
   | "RUN_NOT_FOUND"
@@ -241,14 +244,24 @@ export type AgentRunServiceReason =
   | "RUN_NOT_RESUMABLE"
   | "RUN_NOT_STARTABLE"
   | "RUN_NOT_RUNNING"
+  | "RUN_NOT_PAUSED"
+  /** A stop was already asked for; pausing would strand it with a pending cancel. */
+  | "RUN_CANCELLATION_PENDING"
   | "RUN_HAS_LIVE_EXECUTION"
   /** The caller's target scope is not the connection the run was opened for. */
   | "RUN_CONNECTION_MISMATCH"
   /**
-   * Another drive already owns this run in THIS process. The durable ledger has no
-   * compare-and-append fence, so two drives on one run would both read a step as
-   * uninvoked and both execute it (`docs/BACKLOG.md` B5). This is the process-local
-   * half of that fence; the cross-process half still belongs to the durable backend.
+   * Another drive already owns this run. The refusal comes first from the
+   * in-process `activeDrives` map, then from the durable `drive-claimed` ledger
+   * record the claim wrote, so a second drive is refused before it can read a
+   * step as uninvoked and execute it twice.
+   *
+   * That fence is whole in ONE process only. `AgentRunStore.tryClaimDrive`
+   * serializes its read-then-append per store instance, which two OS processes
+   * over the same ledger do not share: both could read "no claim" and both
+   * append one. Making the durable half hold needs a conditional append on the
+   * stream's tail index, which the world does not offer (`docs/BACKLOG.md` B5,
+   * B16).
    */
   | "RUN_ALREADY_DRIVEN";
 
@@ -267,9 +280,19 @@ function report(view: AgentRunLedgerView): AgentRunStatusReport {
   return { record: view.record, cancellationRequested: view.cancellationRequestedAtMs !== null };
 }
 
-/** The runs this process is currently driving. Process memory on purpose: the
- * durable ledger's queue is the cross-process owner; this closes the in-process gap. */
-const activeDrives = new Set<string>();
+/**
+ * How long a drive claim outlives the run's own deadline. The claim is written
+ * BEFORE the run is started or resumed, so a drive whose model call runs to the
+ * deadline must still be inside its claim when the loop checks it again.
+ */
+const DRIVE_CLAIM_GRACE_MS = 60_000;
+
+/**
+ * The runs this process is currently driving, and the drive id each one holds.
+ * Process memory plus the durable claim in the ledger: the set refuses fast and
+ * the ledger refuses across processes (`docs/BACKLOG.md` B5).
+ */
+const activeDrives = new Map<string, string>();
 
 export class AgentRunService {
   private readonly store: AgentRunStore;
@@ -287,29 +310,54 @@ export class AgentRunService {
   }
 
   /**
-   * Claims the right to drive a run in THIS process. A second drive on the same run
-   * refuses rather than waits, because two drives would both pass `runStep`'s
-   * read-then-append check and execute the same step twice. The caller releases in a
-   * `finally`, so a drive that throws still leaves the run claimable by the next one.
+   * Claims the right to drive a run, durably. A second drive — in this process or
+   * another — refuses rather than waits, because two drives would both pass
+   * `runStep`'s read-then-append check and execute the same step twice. The caller
+   * releases in a `finally`, so a drive that throws still leaves the run claimable
+   * by the next one.
    *
-   * The claim has no expiry, and needs none inside one process: the drive's `finally`
-   * always releases it, a single drive is bounded by the run's own deadline, and a
-   * process death drops the whole set — the cross-process case belongs to the durable
-   * backend's queue (`docs/BACKLOG.md` B5).
+   * The durable claim carries an expiry that outlives the run's own deadline by
+   * `DRIVE_CLAIM_GRACE_MS`: a drive whose model call runs to the deadline must
+   * still be inside its claim. A process death therefore releases the claim when
+   * it lapses, which is the seam the B9 sweep producer will read.
    */
-  claimDrive(runId: string): void {
+  async claimDrive(runId: string): Promise<void> {
     if (activeDrives.has(runId)) {
       throw new AgentRunServiceError(
         "RUN_ALREADY_DRIVEN",
         `agent run "${runId}" is already being driven in this process`,
       );
     }
-    activeDrives.add(runId);
+    const view = await this.readOrThrow(runId);
+    const budget = AGENT_WORKFLOW_BUDGETS[view.record.workflowType].runDeadlineMs;
+    const expiresAtMs = this.clock() + budget + DRIVE_CLAIM_GRACE_MS;
+    const driveId = randomUUID();
+    const result = await this.store.tryClaimDrive(runId, driveId, expiresAtMs);
+    if (!result.claimed) {
+      throw new AgentRunServiceError("RUN_ALREADY_DRIVEN", `agent run "${runId}" is already being driven`);
+    }
+    activeDrives.set(runId, driveId);
   }
 
-  /** Releases the drive claim taken by `claimDrive`. Idempotent. */
-  releaseDrive(runId: string): void {
+  /**
+   * Releases the drive claim taken by `claimDrive`. Idempotent: a run this process
+   * never claimed is left untouched. The durable release is skipped once the run is
+   * terminal — a finished run's claim is moot, and its ledger is closed.
+   */
+  async releaseDrive(runId: string): Promise<void> {
+    const driveId = activeDrives.get(runId);
     activeDrives.delete(runId);
+    if (driveId === undefined) return;
+    try {
+      const view = await this.store.read(runId);
+      if (view !== null && !view.terminal) {
+        await this.store.releaseDrive(runId, driveId);
+      }
+    } catch (error) {
+      logger.error(`agent run ${runId}: failed to record the drive release; the claim lapses at its expiry`, error, {
+        runId,
+      });
+    }
   }
 
   /**
@@ -377,13 +425,14 @@ export class AgentRunService {
    * to write the entries the durability argument rests on, so the type refuses at
    * compile time rather than a check refusing at run time.
    *
-   * A narrative entry may only be added to a RUNNING run, for the same reason a
-   * step may: a terminal run's ledger is closed, and an append after `close`
-   * resolves while `read` never returns it (`run-store.ts`).
+   * A narrative entry may be added to a RUNNING run or a PAUSED one: a pause means
+   * "take no new step", not "lose the sentence the model already wrote". A queued
+   * run has nothing in flight to narrate, and a terminal run's ledger is closed —
+   * an append after `close` resolves while `read` never returns it (`run-store.ts`).
    */
   async recordEvent(runId: string, narrative: AgentRunNarrative): Promise<void> {
     const view = await this.readOrThrow(runId);
-    if (view.record.status !== "running") {
+    if (view.record.status !== "running" && view.record.status !== "paused") {
       throw new AgentRunServiceError("RUN_NOT_RUNNING", `agent run "${runId}" is ${view.record.status}, not running`);
     }
     await this.store.appendEvent(runId, { ...narrative, atMs: this.clock() } as AgentRunNarrativeEvent);
@@ -398,11 +447,11 @@ export class AgentRunService {
   /**
    * Asks for a run to stop.
    *
-   * A run no loop has picked up is ended here and now: there is no checkpoint to
-   * wait for, and leaving it queued with a pending request would be a cancel that
-   * never lands. A running run gets the request recorded — its own loop is what
-   * ends it, at the next step, which is the only place where the run's resources
-   * can be released with nothing in flight.
+   * A run with nothing in flight — queued, or paused — is ended here and now:
+   * there is no checkpoint to wait for, and leaving it with a pending request
+   * would be a cancel that never lands. A running run gets the request recorded —
+   * its own loop is what ends it, at the next step, which is the only place where
+   * the run's resources can be released with nothing in flight.
    *
    * The gap that leaves, stated rather than implied: a run whose loop DIED while
    * running keeps a pending request and is not ended by anything this service
@@ -418,7 +467,7 @@ export class AgentRunService {
     try {
       const view = await this.readOrThrow(runId);
       if (view.terminal) return report(view);
-      if (view.record.status === "queued") {
+      if (view.record.status === "queued" || view.record.status === "paused") {
         return report(await this.finalize(runId, "cancelled", { stopReason: "cancelled" }));
       }
       await this.store.requestCancellation(runId, by);
@@ -457,7 +506,70 @@ export class AgentRunService {
     if (view.terminal) {
       throw new AgentRunServiceError("RUN_ALREADY_TERMINAL", `agent run "${runId}" already ${view.record.status}`);
     }
+    // A paused run is not advanced to terminal from here: it has not failed, and
+    // finishing it would record an outcome its drive never reached. Resume it, or
+    // cancel it; the drive's own pause checkpoints are what stop it cleanly.
+    if (view.record.status === "paused") {
+      throw new AgentRunServiceError("RUN_NOT_RUNNING", `agent run "${runId}" is paused, not running`);
+    }
     return (await this.finalize(runId, status, ending)).record;
+  }
+
+  /**
+   * Pauses a RUNNING run: its ledger records `run-paused`, and the run holds no
+   * further steps until it is unpaused. A paused run is not terminal — it keeps
+   * its artifacts, and an unpause continues the same run.
+   *
+   * A pause after a stop was asked for is refused: the run is already on its way
+   * to being cancelled, and pausing it would strand it with a pending request. A
+   * pause that lost a race to the run ending answers the run's current state
+   * instead of throwing, the way `cancel` reconciles the same race.
+   */
+  async pause(runId: string): Promise<AgentRunRecord> {
+    try {
+      const view = await this.readOrThrow(runId);
+      if (view.terminal) return view.record;
+      if (view.cancellationRequestedAtMs !== null) {
+        throw new AgentRunServiceError("RUN_CANCELLATION_PENDING", `agent run "${runId}" has a pending cancellation`);
+      }
+      if (view.record.status !== "running") {
+        throw new AgentRunServiceError("RUN_NOT_RUNNING", `agent run "${runId}" is ${view.record.status}, not running`);
+      }
+      await this.store.appendEvent(runId, { kind: "run-paused", atMs: this.clock() });
+      return (await this.readOrThrow(runId)).record;
+    } catch (error) {
+      if (error instanceof AgentRunStoreError && error.reasonCode === "RUN_ALREADY_CLOSED") {
+        const settled = await this.readOrThrow(runId);
+        if (settled.terminal) return settled.record;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Unpauses a PAUSED run: its ledger records `run-resumed` and it is `running`
+   * again, claimable and drivable by the next drive. The user-visible unpause is
+   * what the PATCH route then drives in-process; see the route.
+   *
+   * An unpause that lost a race to the run ending answers the run's current state
+   * instead of throwing.
+   */
+  async unpause(runId: string): Promise<AgentRunRecord> {
+    try {
+      const view = await this.readOrThrow(runId);
+      if (view.terminal) return view.record;
+      if (view.record.status !== "paused") {
+        throw new AgentRunServiceError("RUN_NOT_PAUSED", `agent run "${runId}" is ${view.record.status}, not paused`);
+      }
+      await this.store.appendEvent(runId, { kind: "run-resumed", atMs: this.clock() });
+      return (await this.readOrThrow(runId)).record;
+    } catch (error) {
+      if (error instanceof AgentRunStoreError && error.reasonCode === "RUN_ALREADY_CLOSED") {
+        const settled = await this.readOrThrow(runId);
+        if (settled.terminal) return settled.record;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -516,6 +628,13 @@ export class AgentRunService {
     const view = await this.readOrThrow(runId);
     if (view.terminal) {
       throw new AgentRunServiceError("RUN_ALREADY_TERMINAL", `agent run "${runId}" already ${view.record.status}`);
+    }
+    // A pause is a stop the drive must honour, not an error to record: without this
+    // checkpoint the next step would throw RUN_NOT_RUNNING and the drive would end
+    // the run as failed. Like the cancellation checkpoint below, the run stays
+    // non-terminal and the drive stops of its own accord.
+    if (view.record.status === "paused") {
+      return { kind: "paused" };
     }
     // A step may only run on a run that is RUNNING. Without this, "a queued run
     // has nothing in flight" would be an assumption, and `cancel` ends a queued

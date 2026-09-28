@@ -1,10 +1,11 @@
 /**
  * The accuracy gate for outward-facing marketplace copy.
  *
- * These six files are copy submitted to somebody else's catalog: Railway,
- * DigitalOcean, SUSE PCSC, Azure Partner Center, the AWS Marketplace Management Portal,
- * and the app-readme overlay Rancher renders. Nobody in this repo reviews them again once
- * they are submitted - the first five by mail, the last by a pull request against
+ * These seven files are copy submitted to somebody else's catalog: Railway,
+ * DigitalOcean, SUSE PCSC (the canonical wording and the size-limited page body cut from
+ * it), Azure Partner Center, the AWS Marketplace Management Portal, and the app-readme
+ * overlay Rancher renders. Nobody in this repo reviews them again once they are
+ * submitted - the first six by mail, the last by a pull request against
  * `rancher/partner-charts`, where no test here can reach the copy that ships - so the only
  * thing standing between a corrected claim and its return is a test.
  *
@@ -39,6 +40,7 @@ const LISTINGS = {
   azure: "deploy/azure/listing/listing-fields.md",
   aws: "deploy/aws/listing/listing-fields.md",
   rancherAppReadme: "deploy/rancher/app-readme.md",
+  rancherPcsc: "deploy/rancher/pcsc-listing.html",
 } as const;
 
 /**
@@ -50,6 +52,10 @@ const LISTINGS = {
  */
 function submittedCopy(path: string): string {
   const content = readFileSync(join(REPO_ROOT, path), "utf8");
+  // The PCSC page body is HTML, and every sentence splitter below reads line and bullet
+  // boundaries. A list item is a boundary on the rendered page, so it is one here too;
+  // without it a bullet ending in an engine name runs into the next bullet's claim.
+  if (path === LISTINGS.rancherPcsc) return content.replace(/<\/?(?:ul|li)>/g, "\n\n");
   if (path !== LISTINGS.rancher) return content;
   const from = content.indexOf("## Short description");
   const to = content.indexOf("## Outstanding corrections");
@@ -99,7 +105,7 @@ const explainCapable: DatabaseType[] = providerFiles(PROVIDER_ROOT)
 
 /**
  * The engines a listing may NOT name in an explain sentence. `libredb` is excluded from
- * both sides: it is the embedded engine, not one of the fourteen a listing counts, and
+ * both sides: it is the embedded engine, not one of the engines a listing counts, and
  * its label is a substring of the product name in every one of these files.
  */
 const explainIncapable = (Object.keys(DB_UI_CONFIG) as DatabaseType[])
@@ -146,6 +152,18 @@ describe("the explanation claim names only engines that return a plan", () => {
           expect(claim).not.toContain(getDBConfig(type).label);
         }
       }
+    });
+  }
+});
+
+describe("no listing says the agent runs in a read-only session", () => {
+  for (const [name, path] of Object.entries(LISTINGS)) {
+    test(`${name} does not put SQL Server in a read-only session`, () => {
+      // True of PostgreSQL, SQLite and DuckDB, false of SQL Server, which has no read-only
+      // transaction and no session-level read-only switch (docs/providers/mssql.md). The
+      // gate in CATALOG_LISTING.md bans the phrase by name; "never writes" is the
+      // engine-independent sentence to use.
+      expect(submittedCopy(path)).not.toMatch(/read-only session/i);
     });
   }
 });
@@ -235,7 +253,21 @@ describe("no listing claims data management on an engine that cannot edit", () =
       "Apache Druid, Elasticsearch, OpenSearch, Apache Trino and Apache Cassandra.";
     const claims = manageDataClaims(submitted);
     expect(claims).toHaveLength(1);
-    expect(overclaimed(claims[0])).toEqual(notEditable);
+    // The nine it named, by id. Pinned rather than read from `notEditable`, which grows with every
+    // engine that ships unable to edit: Prometheus (#1085) is in that set and was never in this
+    // sentence, which predates it.
+    expect(overclaimed(claims[0])).toEqual([
+      "cassandra",
+      "clickhouse",
+      "couchbase",
+      "druid",
+      "elasticsearch",
+      "mongodb",
+      "opensearch",
+      "redis",
+      "trino",
+    ]);
+    expect(notEditable).toContain("prometheus");
   });
 
   test("an editing sentence that names what cannot edit is left alone", () => {

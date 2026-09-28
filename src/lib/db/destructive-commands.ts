@@ -10,13 +10,15 @@ import type { DatabaseType } from "@/lib/types";
  * reason every other by-database difference in this repo does: one type-to-facts
  * table, read by one function, so the gate carries no type test of its own.
  *
- * Scope rule, and the reason this file is short: it names ONLY what these two
- * providers can really run. Both were read before the tables below were written -
- * `src/lib/db/providers/keyvalue/redis.ts` and
- * `src/lib/db/providers/document/mongodb.ts` - and neither was probed against a live
- * server in this change, so nothing here is claimed as measured behaviour. What each
- * command or operation DOES is taken from the engines' own command references; what
- * can REACH the engine is taken from the provider code.
+ * Scope rule, and the reason this file is short: it names ONLY what each provider
+ * can really run. Each was read before its table below was written -
+ * `src/lib/db/providers/keyvalue/redis.ts`,
+ * `src/lib/db/providers/document/mongodb.ts`,
+ * `src/lib/db/providers/timeseries/prometheus/` and
+ * `src/lib/db/providers/stream/kafka/` - and none was probed against a live
+ * server for the rows here, so nothing here is claimed as measured behaviour. What
+ * each command or operation DOES is taken from the engines' own command references;
+ * what can REACH the engine is taken from the provider code.
  */
 
 /** Whether `value` is a JSON object - not an array, not null. */
@@ -70,7 +72,14 @@ const MONGODB_DESTRUCTIVE_OPERATIONS: ReadonlySet<string> = new Set([
  * `CLUSTER SHARDS` are the reads); every form of it reassigns a slot, which is what
  * puts it beside `CLUSTER RESET` and `CLUSTER FORGET`.
  *
- * Every name here can reach the server: `runCommand` calls
+ * Every name here is a command the provider runs: `query()` refuses some commands
+ * before they reach the server (`sharedConnectionRefusal` in
+ * `src/lib/db/providers/keyvalue/redis.ts`, documented in section 5.2b of
+ * `docs/providers/redis.md`), and a confirmation followed by that refusal would be
+ * the double take this gate exists to avoid. The blocking list and sorted-set pops
+ * (`BLPOP`, `BZPOPMIN` and the rest of the `B` forms) are refused that way, so only their
+ * non-blocking forms (`LPOP`, `RPOP`, `LMPOP`, `LMOVE`, `RPOPLPUSH`, `ZPOPMIN`,
+ * `ZPOPMAX`, `ZMPOP`) are here. `runCommand` itself calls
  * `client.call(command, ...args)` with no allow-list of any kind, so the vocabulary
  * is bounded by what Redis accepts rather than by what this provider implements.
  * Container commands are spelled with their subcommand (`CONFIG SET`), which the
@@ -131,16 +140,11 @@ const REDIS_DESTRUCTIVE_COMMANDS: ReadonlySet<string> = new Set([
   "LPOP",
   "RPOP",
   "LMPOP",
-  "BLPOP",
-  "BRPOP",
-  "BLMPOP",
   "LSET",
   "LREM",
   "LTRIM",
   "LMOVE",
-  "BLMOVE",
   "RPOPLPUSH",
-  "BRPOPLPUSH",
   // Sets
   "SPOP",
   "SREM",
@@ -155,10 +159,7 @@ const REDIS_DESTRUCTIVE_COMMANDS: ReadonlySet<string> = new Set([
   "ZREMRANGEBYLEX",
   "ZPOPMIN",
   "ZPOPMAX",
-  "BZPOPMIN",
-  "BZPOPMAX",
   "ZMPOP",
-  "BZMPOP",
   "ZUNIONSTORE",
   "ZINTERSTORE",
   "ZDIFFSTORE",
@@ -192,6 +193,29 @@ const REDIS_DESTRUCTIVE_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * PromQL operations that destroy or change anything: none, so the set is empty.
+ *
+ * Not an omission. The language has no statement that writes, and the provider sends
+ * editor text to one place, `POST /api/v1/query`, which evaluates an expression and
+ * does nothing else. Every path the provider can call is a read, and all of them are
+ * listed in `PATHS` in `src/lib/db/providers/timeseries/prometheus/http-transport.ts`
+ * (#1085 S9). Series deletion and snapshots, which are the admin API, and the
+ * lifecycle endpoints are calls this product never makes (#1085, section 2).
+ */
+const PROMETHEUS_DESTRUCTIVE_OPERATIONS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Kafka read-request operations that destroy or change anything: none, so the set is empty.
+ *
+ * Not an omission. The editor text is one JSON read request (#1088, section 5.1): a topic, a
+ * partition, where to start and how many messages, and the provider refuses any other key. It
+ * names no operation at all, and the provider sends nothing that writes: it never produces,
+ * commits an offset, joins a group or creates a topic, and `tests/unit/db/kafka/seam-guard.test.ts`
+ * holds the one file that calls its client library to an allowlist of reads (#1088, section 2).
+ */
+const KAFKA_DESTRUCTIVE_OPERATIONS: ReadonlySet<string> = new Set<string>();
+
+/**
  * The names a query would run, or `undefined` when the text cannot be read as one.
  *
  * `undefined` is not "nothing to run": it means the reader could not tell WHAT would
@@ -204,6 +228,22 @@ interface DestructiveVocabulary {
   readonly operations: ReadonlySet<string>;
   /** How this engine's query text names the operations it would run. */
   readonly read: OperationReader;
+  /**
+   * Whether this row is the gate's whole answer, so the gate's SQL keyword test never
+   * reads the text.
+   *
+   * False keeps that test in front of the row as a backstop: a SQL write keyword in a
+   * MongoDB or Redis buffer asks, although the provider would refuse the text. The
+   * backstop is not free on Redis, where a read whose arguments are `update` and then
+   * `set` (`MGET update set`) meets its `UPDATE ... SET` probe and asks.
+   *
+   * True where reading the text as SQL is wrong rather than cautious. A PromQL
+   * expression can start with a metric name the server's data chooses, `update`,
+   * `delete` and `drop` are legal names, and read as SQL the tree's own selector for
+   * such a metric is a write. A Kafka read request names its topic, which can carry
+   * any of those names too, in text that can only ever read that topic.
+   */
+  readonly decidesAlone: boolean;
 }
 
 /**
@@ -329,14 +369,46 @@ const readRedisOperations: OperationReader = (query) => {
 };
 
 /**
- * The single type-to-facts table. A type with no row here is one whose statements the
- * SQL half of the gate reads; a row would be a second, weaker opinion about the same
- * text.
+ * What a PromQL buffer would run: never an operation this gate asks about.
+ *
+ * The MongoDB and Redis readers turn text they cannot resolve into a prompt. This one
+ * has nothing to resolve: whatever the text says, the one request it becomes is an
+ * evaluation, and text the server cannot parse is refused there with nothing changed.
+ */
+const readPrometheusOperations: OperationReader = () => [];
+
+/**
+ * What a Kafka buffer would run: never an operation this gate asks about.
+ *
+ * Nothing to resolve here either: whatever the text says, the provider either parses it as one
+ * read of one topic's messages or refuses it before anything is sent, so text it cannot parse
+ * changes nothing and asks nothing.
+ */
+const readKafkaOperations: OperationReader = () => [];
+
+/**
+ * The single type-to-facts table. It has a row for exactly the types that
+ * `readsSqlText` in `@/lib/sql/grammar` reports as not SQL, and a test holds the two
+ * tables to that. A type with no row here is one whose statements the SQL half of the
+ * gate reads; a row would be a second, weaker opinion about the same text.
  */
 export const NON_SQL_DESTRUCTIVE_VOCABULARY: Readonly<Partial<Record<DatabaseType, DestructiveVocabulary>>> = {
-  mongodb: { operations: MONGODB_DESTRUCTIVE_OPERATIONS, read: readMongodbOperations },
-  redis: { operations: REDIS_DESTRUCTIVE_COMMANDS, read: readRedisOperations },
+  kafka: { operations: KAFKA_DESTRUCTIVE_OPERATIONS, read: readKafkaOperations, decidesAlone: true },
+  mongodb: { operations: MONGODB_DESTRUCTIVE_OPERATIONS, read: readMongodbOperations, decidesAlone: false },
+  prometheus: { operations: PROMETHEUS_DESTRUCTIVE_OPERATIONS, read: readPrometheusOperations, decidesAlone: true },
+  redis: { operations: REDIS_DESTRUCTIVE_COMMANDS, read: readRedisOperations, decidesAlone: false },
 };
+
+/**
+ * Whether this type's row is the gate's whole answer, which `isDangerousQuery` asks
+ * before it reads the text as SQL at all.
+ *
+ * False for every type with no row, and for no type at all: the SQL half reads those.
+ */
+export function vocabularyDecidesAlone(databaseType?: DatabaseType): boolean {
+  const facts = databaseType === undefined ? undefined : NON_SQL_DESTRUCTIVE_VOCABULARY[databaseType];
+  return facts?.decidesAlone === true;
+}
 
 /**
  * Whether this query, on a type whose text is not SQL, asks for a confirmation.

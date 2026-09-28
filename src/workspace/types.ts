@@ -7,6 +7,7 @@ import type {
   Container,
   DatabaseObject,
   KindCount,
+  ObjectDetail,
   ObjectEditBuild,
   ObjectEditConsequenceClass,
   ObjectEditOutcome,
@@ -38,6 +39,13 @@ export interface WorkspaceConnection {
    * Additive and optional, like every field on this published interface. Absent
    * reads exactly as it did before the field existed — studio treats the provider
    * as unknown and falls back to SQL and to the base labels.
+   *
+   * `supportsResultPagination` is read from here (#816). It is gated on `=== true`, so a
+   * host that declares no capabilities, or declares them without that field, gets no Load
+   * More control. That is deliberate rather than an omission: only the host knows whether
+   * its `onQueryExecute` really applies a positive `offset`, and a control that re-fetches
+   * page one is worse than none. Declare it `true` once your implementation pages, and
+   * report `pagination.hasMore` honestly: the control also requires `hasMore: true`.
    */
   capabilities?: ProviderCapabilities;
   /** This provider's UI wording, as `getLabels()` reports it. See `capabilities`. */
@@ -100,6 +108,38 @@ export interface WorkspaceObjectReader {
   countObjects(connectionId: string, container: readonly string[]): Promise<Record<string, KindCount>>;
   /** The objects of one container and one kind, which is one opened folder. */
   listObjects(connectionId: string, container: readonly string[], kind: string): Promise<readonly DatabaseObject[]>;
+  /**
+   * One object's COLUMNS, if this host can read them (#789, columns under an object row).
+   *
+   * OPTIONAL, and the absence is the documented shape of a thing a shell cannot do rather than an
+   * error: when it is missing the workspace declares `readsColumns` false, so the tree gives an
+   * object row no twisty and no `aria-expanded`, derives no read, and nothing can fail. An adopter
+   * who does nothing sees the tree exactly as it is today; an adopter who implements one method
+   * gets the columns. That is B76's rule applied literally, and the failure it rules out is
+   * concrete: making every object row expandable unconditionally would send every table in the
+   * tree to a host method that is not there, and each one would draw the failure panel.
+   *
+   * The argument list is `DatabaseProvider.describeObject(path, kind)` with a connection id in
+   * front, exactly as the three required methods are their provider originals with one in front,
+   * so a host holding a provider implements it in a line. `kind` is required and is not inferred,
+   * for the reason the route records: without it a provider has to guess what it is holding from
+   * whatever the path's last segment matches in a catalog.
+   *
+   * THE ADAPTER CALLS IT BOUND, for the reason `objectEditor` states two fields down: a method
+   * read off an object as a value and called with no receiver loses whatever it reaches through
+   * `this`, so a host implementing this interface as a class instance whose `describeObject`
+   * reaches `this.clients[id]` would list fine and fail to expand.
+   *
+   * `ObjectDetail` is already published through `src/exports/types.ts`, so a host can name the
+   * return type today. The declared type is not a runtime guarantee and the seam does not assume
+   * it is: `columns` must be an array of records carrying a string `name` and a string `type`,
+   * checked at the seam before anything is drawn, and a body failing that check is reported as a
+   * failed read with the tree's own sentence rather than thrown into the render. A method that
+   * THROWS before returning, or that returns a non-thenable, is turned into a failed read too,
+   * because the tree awaits this call inside its loader's try (`readThrough` is `async` and `run`
+   * catches, both in `src/components/object-tree/use-tree-nodes.ts`).
+   */
+  describeObject?(connectionId: string, path: readonly string[], kind: string): Promise<ObjectDetail>;
   /**
    * One object's definition text, if this host can read one (#789 Phase 2).
    *
@@ -352,6 +392,26 @@ export interface StudioWorkspaceProps {
   connections: WorkspaceConnection[];
   currentUser?: WorkspaceUser;
 
+  /**
+   * Runs one statement and answers with its rows.
+   *
+   * HONOUR `options.limit`. It is optional in the type and it has always been, but what travels in
+   * it changed with #816: the statement the workspace sends for a schema-tree click no longer
+   * carries a row bound of its own. It used to read `SELECT * FROM t LIMIT 50`, and a host that
+   * ignored the options was bounded by the text anyway; today the same click sends
+   * `SELECT * FROM t` with `{ limit: 50 }`, and a host that ignores it returns every row of the
+   * table.
+   *
+   * The bound left the text because nothing downstream could tell a preview cap the product
+   * generated from a bound the user typed, and a statement carrying its own bound is one no page
+   * after the first can be requested for.
+   *
+   * `offset` is what a Load More click asks for, and `limit` on that call is the size of the page
+   * already on screen. A host that cannot apply a positive `offset` should leave
+   * `capabilities.supportsResultPagination` undeclared and report `pagination.hasMore: false`:
+   * `pageOfferFor` offers the control only when both are true, and `pagination.wasLimited`
+   * drives only the "limited" badge.
+   */
   onQueryExecute: (
     connectionId: string,
     sql: string,

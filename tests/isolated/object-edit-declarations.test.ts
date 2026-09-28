@@ -1,8 +1,8 @@
 /**
  * The fleet census of object EDIT declarations (#789 Phase 3).
  *
- * WHY THIS FILE EXISTS. Phase 3 makes four (type-id, kind) pairs editable and leaves fourteen
- * type-ids declaring nothing, and both halves are claims about the BUILD. The expectation they
+ * WHY THIS FILE EXISTS. Phase 3 makes four (type-id, kind) pairs editable and leaves every other
+ * type-id declaring nothing, and both halves are claims about the BUILD. The expectation they
  * are measured against is `tests/helpers/object-edit-expectation.ts`, committed in wave 1 before
  * any provider declared anything and transcribed from the design's day-one table. It was never
  * derived from a declaration, and that independence is the whole value of a census: one that
@@ -22,20 +22,21 @@
  * import. It used to be imported from the source census itself, which works and costs the run
  * that census twice: importing a TEST file registers its suite in this process too, so
  * `bun test ./tests/isolated/object-edit-declarations.test.ts` reported fifteen tests where this
- * file declares six, each of the nine strays building all seventeen providers a second time.
+ * file declares six, each of the nine strays building every provider a second time.
  * Under one bun process per test file that double count is in every run. Copying the record
- * instead was the other option and it is the worse one: a second seventeen-row
+ * instead was the other option and it is the worse one: a second per-type-id
  * `Record<DatabaseType, DatabaseConnection>` goes stale the first time an engine's port moves in
  * only one of them, and the record exists so a new member of the union is a compile error rather
  * than a missing row, which two records defeat exactly.
  *
  * THE MARIADB LEVER, and it is measured rather than a worry. `createDatabaseProvider("mysql")`
  * is UNCONNECTED, and mysql is the one provider whose `objectKinds` is not a constant:
- * `objectKindsFor(undefined)` answers the MySQL six and structurally EXCLUDES MariaDB's
+ * `objectKindsFor("mysql")` answers the MySQL six and structurally EXCLUDES MariaDB's
  * `package` and `sequence`. A census that never drove the MariaDB branch could certify that
  * nothing on mysql accepts an edit while the branch a real MariaDB server resolves declared one.
  * The branch is driven below the same way the Phase 2 census drives it, by writing the private
- * `measuredServerVersion` field that `connect()` writes.
+ * `measuredFlavour` field that `connect()` writes, which holds the flavour derived from the
+ * server's version string rather than the string itself.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
@@ -52,8 +53,8 @@ import {
 import { CENSUS_CONNECTION } from "../helpers/census-connection";
 
 /**
- * The version string a MariaDB server answers `SELECT VERSION()` with, measured on
- * `mariadb:latest` (12.3.2) by the mysql provider task on 2026-09-11.
+ * The flavour a MariaDB server is measured as, which is the derived fact the provider stores
+ * once it has read `SELECT VERSION()`.
  *
  * THIRD OWNER, DISCLOSED RATHER THAN HOISTED, and the two others say the same about each other:
  * `tests/isolated/object-source-declarations.test.ts` and
@@ -62,11 +63,12 @@ import { CENSUS_CONNECTION } from "../helpers/census-connection";
  * to be written again rather than hoist it while another implementer holds the checkout, and a
  * shared module would be a file this task does not own.
  *
- * No copy can drift in silence: a string that stops matching `objectKindsFor`'s `/mariadb/i`
- * makes its own file go red by name. Here it is the named throw in the MariaDB test, which
- * refuses to compare an editable set it never reached the two extra kinds in.
+ * No copy can drift in silence: a flavour the provider no longer knows is a type error at the
+ * write below, and a write that lands on nothing leaves the MySQL default answering. Here that
+ * is the named throw in the MariaDB test, which refuses to compare an editable set it never
+ * reached the two extra kinds in.
  */
-const MARIADB_VERSION_STRING = "12.3.2-MariaDB-ubu2404";
+const MARIADB_FLAVOUR = "mariadb";
 
 /** `<type-id>/<kind id>`, the shape both halves of the expectation are compared in. */
 const pair = (type: DatabaseType, kind: ObjectKindSpec): string => `${type}/${kind.id}`;
@@ -77,7 +79,7 @@ const EXPECTED_PAIRS: readonly string[] = EXPECTED_EDITABLE_KINDS.map(([type, ki
 /**
  * The mysql provider's kinds as a MariaDB server resolves them, which no unconnected read shows.
  *
- * The measured version is a PRIVATE field written by `connect()`. It is set directly rather than
+ * The measured flavour is a PRIVATE field written by `connect()`. It is set directly rather than
  * through a stub of `getCapabilities`, because a stub would return a kind list this test typed,
  * and the whole point of a census is that the code produces the list. Writing the field drives
  * the real `objectKindsFor` branch. If the field is ever renamed, this write lands on nothing,
@@ -86,7 +88,7 @@ const EXPECTED_PAIRS: readonly string[] = EXPECTED_EDITABLE_KINDS.map(([type, ki
  */
 async function mariadbKinds(): Promise<readonly ObjectKindSpec[]> {
   const provider = await createDatabaseProvider(CENSUS_CONNECTION.mysql);
-  (provider as unknown as { measuredServerVersion: string | undefined }).measuredServerVersion = MARIADB_VERSION_STRING;
+  (provider as unknown as { measuredFlavour: "mysql" | "mariadb" }).measuredFlavour = MARIADB_FLAVOUR;
   return declaredKinds(provider.getCapabilities());
 }
 
@@ -105,7 +107,7 @@ const ROOT = path.resolve(import.meta.dir, "../..");
 
 /**
  * A markdown HEADING line whose text ends in `Object edit (#789)`, at any level and with any
- * trailing clause after it, which two of the fourteen carry (`druid.md` and `libredb.md` both
+ * trailing clause after it, which two of the abstainers carry (`druid.md` and `libredb.md` both
  * continue the heading with "nothing to write"). Anchored to `^#` so a mention of the phrase in a
  * paragraph, or in a link, cannot satisfy the guard.
  */
@@ -144,7 +146,7 @@ describe("the fleet census of object edit declarations", () => {
     if (declaring.length + abstaining.length === 0) {
       throw new Error("the abstainer census read 0 type-ids, so it certifies nothing about the fleet");
     }
-    // A biconditional is satisfied by a population holding only one side of it, so the fourteen
+    // A biconditional is satisfied by a population holding only one side of it, so the abstainers
     // are asserted as their own committed list and the three declaring ids are asserted beside
     // them. A run that reached no abstainer would certify nothing about the absence half.
     expect(abstaining.sort()).toEqual([...EXPECTED_EDIT_ABSTAINERS].map(String).sort());
@@ -215,10 +217,10 @@ describe("the fleet census of object edit declarations", () => {
   });
 
   test("every abstainer's provider doc carries the Object edit (#789) section naming its absence", () => {
-    // WHY THIS IS A TEST AND NOT PROSE. Each of the fourteen abstainer sections ends by saying
+    // WHY THIS IS A TEST AND NOT PROSE. Each abstainer section ends by saying
     // that THIS FILE is what holds that absence and that section together. Without this guard
     // that sentence was false in one direction: the census pinned the DECLARATION half only, so a
-    // seventeenth external engine landing as an abstainer would grow
+    // new external engine landing as an abstainer would grow
     // `EXPECTED_EDIT_ABSTAINERS`, pass the census with its new id, and ship with no section
     // written anywhere, and nothing in this repository would go red. The population this iterates
     // is the committed abstainer list, which is the same list the census above compares the
@@ -228,7 +230,7 @@ describe("the fleet census of object edit declarations", () => {
     // truth value a test can read. What it does buy is that a new absence cannot be shipped
     // silent.
     if (EXPECTED_EDIT_ABSTAINERS.length === 0) {
-      throw new Error("the doc-section guard read 0 abstainers, so it certifies nothing about the fourteen sections");
+      throw new Error("the doc-section guard read 0 abstainers, so it certifies nothing about the abstainer sections");
     }
     const missing: string[] = [];
     for (const type of EXPECTED_EDIT_ABSTAINERS) {
@@ -255,7 +257,7 @@ describe("the fleet census of object edit declarations", () => {
     const extras = mariadb.filter((kind) => !unconnected.some((other) => other.id === kind.id)).map((kind) => kind.id);
     if (extras.length === 0) {
       throw new Error(
-        `the MariaDB branch resolved the same kinds as the unconnected provider, so ${MARIADB_VERSION_STRING} ` +
+        `the MariaDB branch resolved the same kinds as the unconnected provider, so the measured flavour ${MARIADB_FLAVOUR} ` +
           "no longer reaches it and this test certifies nothing",
       );
     }

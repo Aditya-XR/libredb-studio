@@ -707,7 +707,7 @@ describe("OperationsTab", () => {
       fireEvent.click(analyzeBtn!.closest("button")!);
     });
 
-    expect(mockRunMaintenance).toHaveBeenCalledWith("analyze", undefined);
+    expect(mockRunMaintenance).toHaveBeenCalledWith("analyze", undefined, undefined);
     // Operation log should appear with success
     expect(queryByText("Operation Log (this session)")).not.toBeNull();
     expect(queryByText("ANALYZE")).not.toBeNull();
@@ -724,7 +724,7 @@ describe("OperationsTab", () => {
     await act(async () => {
       fireEvent.click(vacuumBtn!.closest("button")!);
     });
-    expect(mockRunMaintenance).toHaveBeenCalledWith("vacuum", undefined);
+    expect(mockRunMaintenance).toHaveBeenCalledWith("vacuum", undefined, undefined);
     expect(queryByText("VACUUM")).not.toBeNull();
   });
 
@@ -739,7 +739,7 @@ describe("OperationsTab", () => {
     await act(async () => {
       fireEvent.click(reindexBtn!.closest("button")!);
     });
-    expect(mockRunMaintenance).toHaveBeenCalledWith("reindex", undefined);
+    expect(mockRunMaintenance).toHaveBeenCalledWith("reindex", undefined, undefined);
     expect(queryByText("REINDEX")).not.toBeNull();
   });
 
@@ -815,7 +815,7 @@ describe("OperationsTab", () => {
       fireEvent.click(buttons[0]!);
     });
 
-    expect(mockRunMaintenance).toHaveBeenCalledWith("analyze", "users");
+    expect(mockRunMaintenance).toHaveBeenCalledWith("analyze", "users", "public");
   });
 
   test("per-table vacuum button calls runMaintenance with table name", async () => {
@@ -832,7 +832,7 @@ describe("OperationsTab", () => {
       fireEvent.click(buttons[1]!);
     });
 
-    expect(mockRunMaintenance).toHaveBeenCalledWith("vacuum", "users");
+    expect(mockRunMaintenance).toHaveBeenCalledWith("vacuum", "users", "public");
   });
 
   // =========================================================================
@@ -1411,10 +1411,67 @@ describe("OperationsTab", () => {
     // Both rows are listed - the filter is by label - and exactly ONE is marked.
     const selected = container.querySelectorAll('[data-selected="true"]');
     expect(selected.length).toBe(1);
-    // The row does not print its schema, so the row COUNT is what tells the two apart:
+    // The row prints its schema (#977), and the row COUNT is a second signal:
     // 20 rows is the `archive` one, 10 is `public`.
     expect(selected[0]?.textContent).toContain("20 rows");
     expect(selected[0]?.textContent).not.toContain("10 rows");
+  });
+
+  // ── The row names its schema, so two schemas holding one label are told apart (#977) ──
+  //
+  // Two tables that share a name in different schemas rendered as identical rows, so an
+  // operator choosing between them could not tell which was which. The deep link carries the
+  // whole address, but the ROW still has to say which address it is.
+
+  test("prints the schema on the row, so two schemas sharing a label are distinguishable", async () => {
+    const collidingTables = [
+      { tableName: "orders", schemaName: "public", rowCount: 10, tableSize: "1 MB", totalSize: "1 MB", bloatRatio: 0 },
+      { tableName: "orders", schemaName: "archive", rowCount: 20, tableSize: "2 MB", totalSize: "2 MB", bloatRatio: 0 },
+    ];
+    monitoringOverride = { data: { activeSessions: defaultSessions, tables: collidingTables } };
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OperationsTab />);
+    });
+    const { queryAllByText, queryByText } = renderResult!;
+
+    // The shared label is on both rows...
+    expect(queryAllByText("orders").length).toBe(2);
+    // ...and each row names its own schema, which is what tells them apart. This assertion
+    // goes red the moment the schema is dropped from the row again.
+    expect(queryByText("public")).not.toBeNull();
+    expect(queryByText("archive")).not.toBeNull();
+  });
+
+  test("keeps the long-name truncation on the table name", async () => {
+    const longName = "a".repeat(120);
+    monitoringOverride = {
+      data: {
+        activeSessions: defaultSessions,
+        tables: [
+          {
+            tableName: longName,
+            schemaName: "public",
+            rowCount: 1,
+            tableSize: "1 MB",
+            totalSize: "1 MB",
+            bloatRatio: 0,
+          },
+        ],
+      },
+    };
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OperationsTab />);
+    });
+    const { queryByText } = renderResult!;
+
+    // The schema sits outside the truncating span, so it survives a long table name.
+    const nameSpan = queryByText(longName);
+    expect(nameSpan).not.toBeNull();
+    expect(nameSpan!.className).toContain("truncate");
+    expect(nameSpan!.className).toContain("max-w-[160px]");
+    expect(queryByText("public")).not.toBeNull();
   });
 
   test("a link naming a container this engine does not report marks nothing", async () => {
@@ -1638,7 +1695,7 @@ describe("OperationsTab", () => {
       fireEvent.click(button!);
     });
 
-    expect(mockRunMaintenance).toHaveBeenCalledWith("optimize", undefined);
+    expect(mockRunMaintenance).toHaveBeenCalledWith("optimize", undefined, undefined);
   });
 
   test("an operation with no whole-database form gets no global card", async () => {
@@ -1711,7 +1768,7 @@ describe("OperationsTab", () => {
     });
 
     // The target is what made this control honest: "users" is the collection row.
-    expect(mockRunMaintenance).toHaveBeenCalledWith("reindex", "users");
+    expect(mockRunMaintenance).toHaveBeenCalledWith("reindex", "users", "public");
   });
 
   test("an operation that ignores its target gets no per-row control", async () => {
@@ -1865,5 +1922,130 @@ describe("OperationsTab", () => {
 
     // The rows and their controls are there; the operator's own filter hid them.
     expect(queryByTestId("operations-maintenance-unreachable")).toBeNull();
+  });
+
+  // =========================================================================
+  // A provider whose list is a ranked subset of what the database holds says
+  // which subset (#1085 6.2), and this list then heads its rows with it and
+  // titles them as listed, as the monitoring Tables tab does over the same rows.
+  // On the compose Prometheus (2026-09-23) the list holds 50 of 344 metrics, so
+  // this panel read "Tables (50)" and answered a filter for prometheus_build_info,
+  // a metric outside the 50, with "No tables found.".
+  // =========================================================================
+
+  const LIST_CAPTION = "The metrics with the most head series, at most 50";
+
+  /** The Prometheus declaration: no maintenance of any kind, and the caption its labels carry. */
+  const captionedList = {
+    capabilities: { supportsMaintenance: false, maintenanceOperations: [] },
+    labels: { tableStatsCaption: LIST_CAPTION },
+  };
+
+  /** Rows of the Prometheus shape: one per metric, its head series as the row count, no schema and no size. */
+  const listedMetrics = [
+    {
+      tableName: "prometheus_http_request_duration_seconds_bucket",
+      schemaName: "",
+      rowCount: 180,
+      totalSize: "N/A",
+      totalSizeBytes: 0,
+    },
+    { tableName: "go_gc_duration_seconds", schemaName: "", rowCount: 5, totalSize: "N/A", totalSizeBytes: 0 },
+  ];
+
+  /** A metric no listed name contains, so a filter for it matches no row. */
+  const UNLISTED_METRIC = "prometheus_build_info";
+
+  const filterFor = async (result: ReturnType<typeof render>, value: string) => {
+    await act(async () => {
+      fireEvent.change(result.getByPlaceholderText("Filter..."), { target: { value } });
+    });
+  };
+
+  test("a declared caption heads the list, and its rows are titled as listed, not as the database's tables", async () => {
+    mockMetadata = captionedList;
+    monitoringOverride = { data: { activeSessions: [], tables: listedMetrics } };
+
+    const { getByTestId, queryByText } = await render_();
+
+    expect(getByTestId("operations-tables-list-scope").textContent).toBe(LIST_CAPTION);
+    expect(queryByText("Listed (2)")).not.toBeNull();
+    expect(queryByText("Tables (2)")).toBeNull();
+  });
+
+  test("a filter that matches none of the listed rows does not say the table does not exist", async () => {
+    mockMetadata = captionedList;
+    monitoringOverride = { data: { activeSessions: [], tables: listedMetrics } };
+
+    const result = await render_();
+    await filterFor(result, UNLISTED_METRIC);
+
+    // The metric can exist outside the list, so "No tables found." would be false.
+    expect(result.getByTestId("operations-tables-empty").textContent).toBe("No listed table matches the filter.");
+  });
+
+  test("an engine that declares no caption keeps the Tables title and the empty-state copy", async () => {
+    // The control for the two tests above: labels without the caption, over the same rows.
+    mockMetadata = { capabilities: captionedList.capabilities, labels: {} };
+    monitoringOverride = { data: { activeSessions: [], tables: listedMetrics } };
+
+    const result = await render_();
+
+    expect(result.queryByText("Tables (2)")).not.toBeNull();
+    expect(result.queryByText("Listed (2)")).toBeNull();
+    expect(result.queryByTestId("operations-tables-list-scope")).toBeNull();
+    await filterFor(result, UNLISTED_METRIC);
+    expect(result.getByTestId("operations-tables-empty").textContent).toBe("No tables found.");
+  });
+
+  test("a refused read carries no caption, and keeps its own sentence under the plain title", async () => {
+    // No list means nothing to scope: the refusal is the panel's whole answer.
+    const refusal = "the TSDB status could not be read";
+    mockMetadata = captionedList;
+    monitoringOverride = { data: { activeSessions: [], errors: { tables: refusal } } };
+
+    const { getByTestId, getByText, queryByTestId, queryByText } = await render_();
+
+    expect(queryByTestId("operations-tables-list-scope")).toBeNull();
+    expect(getByText("Tables")).not.toBeNull();
+    expect(queryByText(/^Listed/)).toBeNull();
+    expect(getByTestId("operations-tables-empty").textContent).toBe(refusal);
+  });
+
+  test("an empty list keeps its empty-state copy under a caption, and one beside a counted overview carries none", async () => {
+    mockMetadata = captionedList;
+
+    // Nothing listed and nothing counted: there is no row for a filter to have missed.
+    monitoringOverride = { data: { activeSessions: [], tables: [], overview: { tableCount: 0 } } };
+    const empty = await render_();
+    expect(empty.getByTestId("operations-tables-empty").textContent).toBe("No tables found.");
+    cleanup();
+
+    // No rows beside an overview that counts tables means the statistics are absent, not a list to scope.
+    monitoringOverride = { data: { activeSessions: [], tables: [], overview: { tableCount: 344 } } };
+    const absent = await render_();
+    expect(absent.queryByTestId("operations-tables-list-scope")).toBeNull();
+    expect(absent.queryByText("Tables (0)")).not.toBeNull();
+    expect(absent.getByTestId("operations-tables-empty").textContent).toBe("No tables found.");
+  });
+
+  test("a row with no schema prints its bare name, and a row with one keeps the schema before it", async () => {
+    // A metric has no schema, so a separator before it separates nothing: it read ".go_gc_duration_seconds".
+    mockMetadata = captionedList;
+    const inSchema = {
+      tableName: "orders",
+      schemaName: "public",
+      rowCount: 1,
+      totalSize: "8 kB",
+      totalSizeBytes: 8192,
+    };
+    monitoringOverride = { data: { activeSessions: [], tables: [...listedMetrics, inSchema] } };
+
+    const { getByText } = await render_();
+    const printedName = (name: string) => getByText(name).parentElement?.textContent;
+
+    expect(printedName("go_gc_duration_seconds")).toBe("go_gc_duration_seconds");
+    // The control: a row that has a schema still prints it, joined by the separator.
+    expect(printedName("orders")).toBe("public.orders");
   });
 });

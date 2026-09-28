@@ -52,6 +52,7 @@ const mockUpdateCurrentTab = mock(() => {});
 const mockUpdateTabById = mock(() => {});
 const mockHandleTableClick = mock(() => {});
 const mockHandleGenerateSelect = mock(() => {});
+const mockHandleGenerateCount = mock(() => {});
 // Transaction Control
 const mockResetTransactionState = mock(() => {});
 const mockSetPlaygroundMode = mock(() => {});
@@ -98,6 +99,9 @@ let authOverride: Record<string, unknown> = {};
 let editingOverride: Record<string, unknown> = {};
 let capabilitiesOverride: Record<string, unknown> = {};
 let metadataOverride: Record<string, unknown> = {};
+// The split views whose stub throws on render (X5). A throw from the lazy component lands
+// where a rejected import does, at the lazy element, so it reaches the same boundary.
+const failingSplitViews = new Set<"diagram" | "connection-dialog" | "schema-explorer">();
 
 // ---- Mock all hooks ----
 
@@ -171,6 +175,7 @@ mock.module("@/hooks/use-tab-manager", () => ({
     updateTabById: mockUpdateTabById,
     handleTableClick: mockHandleTableClick,
     handleGenerateSelect: mockHandleGenerateSelect,
+    handleGenerateCount: mockHandleGenerateCount,
     ...tabMgrOverride,
   })),
 }));
@@ -295,6 +300,7 @@ mock.module("@/components/schema-explorer", () => {
   const React = require("react");
   return {
     SchemaExplorer: (props: Record<string, unknown>) => {
+      if (failingSplitViews.has("schema-explorer")) throw new Error("Loading chunk 9 failed");
       capturedSchemaExplorerProps = props;
       return React.createElement("div", { "data-testid": "schema-explorer" }, "SchemaExplorer");
     },
@@ -303,6 +309,7 @@ mock.module("@/components/schema-explorer", () => {
 
 mock.module("@/components/ConnectionModal", () => ({
   ConnectionModal: (props: Record<string, unknown>) => {
+    if (failingSplitViews.has("connection-dialog")) throw new Error("Loading chunk 8 failed");
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const React = require("react");
     capturedConnectionModalProps = props;
@@ -357,6 +364,7 @@ mock.module("@/components/CommandPalette", () => ({
 
 mock.module("@/components/SchemaDiagram", () => ({
   SchemaDiagram: () => {
+    if (failingSplitViews.has("diagram")) throw new Error("Loading chunk 7 failed");
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const React = require("react");
     return React.createElement("div", { "data-testid": "schemadiagram" }, "SchemaDiagram");
@@ -551,6 +559,7 @@ describe("Studio", () => {
     editingOverride = {};
     capabilitiesOverride = {};
     metadataOverride = {};
+    failingSplitViews.clear();
 
     // Clear trackable mocks
     mockHandleLogout.mockClear();
@@ -563,6 +572,7 @@ describe("Studio", () => {
     mockUpdateTabById.mockClear();
     mockHandleTableClick.mockClear();
     mockHandleGenerateSelect.mockClear();
+    mockHandleGenerateCount.mockClear();
     mockResetTransactionState.mockClear();
     mockHandleTransaction.mockClear();
     mockSetPlaygroundMode.mockClear();
@@ -746,14 +756,17 @@ describe("Studio", () => {
   // Reached here through the mobile schema tab, which still renders the flat explorer
   // (#789). The desktop sidebar reaches the same handler through the object tree's row
   // menu, which is asserted further down under `objectActions` (U22).
-  function openSchemaTab(): void {
+  // The schema explorer is `React.lazy` (X5), so its props arrive one async tick
+  // after the tab is opened; `waitFor` settles that before the handler is read.
+  async function openSchemaTab(): Promise<void> {
     act(() => (capturedMobileNavProps.onTabChange as (tab: string) => void)("schema"));
+    await waitFor(() => expect(capturedSchemaExplorerProps.onOpenMaintenance).toBeDefined());
   }
 
-  test("openMaintenance navigates to admin operations when admin", () => {
+  test("openMaintenance navigates to admin operations when admin", async () => {
     connMgrOverride = { activeConnection: pgConn };
     render(<Studio />);
-    openSchemaTab();
+    await openSchemaTab();
     const fn = capturedSchemaExplorerProps.onOpenMaintenance as () => void;
     act(() => fn());
     expect(mockRouterPush).toHaveBeenCalledWith("/admin/operations");
@@ -762,20 +775,20 @@ describe("Studio", () => {
   // The Explorer's row items call this with the row's ADDRESS; it rides the admin route's
   // query string, one `path` parameter per segment, so the Operations tab lands on that row
   // (#459) and a segment with a space, a dot or a slash survives the trip (#789).
-  test("openMaintenance carries the named row's address to the operations tab", () => {
+  test("openMaintenance carries the named row's address to the operations tab", async () => {
     connMgrOverride = { activeConnection: pgConn };
     render(<Studio />);
-    openSchemaTab();
+    await openSchemaTab();
     const fn = capturedSchemaExplorerProps.onOpenMaintenance as (tab?: string, path?: readonly string[]) => void;
     act(() => fn("tables", ["sales.2026", "order items"]));
     expect(mockRouterPush).toHaveBeenCalledWith("/admin/operations?path=sales.2026&path=order+items");
   });
 
-  test("openMaintenance navigates to monitoring when not admin", () => {
+  test("openMaintenance navigates to monitoring when not admin", async () => {
     authOverride = { isAdmin: false };
     connMgrOverride = { activeConnection: pgConn };
     render(<Studio />);
-    openSchemaTab();
+    await openSchemaTab();
     const fn = capturedSchemaExplorerProps.onOpenMaintenance as () => void;
     act(() => fn());
     expect(mockRouterPush).toHaveBeenCalledWith("/monitoring");
@@ -924,6 +937,76 @@ describe("Studio", () => {
     expect(mockHandleTableClick).not.toHaveBeenCalled();
   });
 
+  /**
+   * A key activated in the key browser.
+   *
+   * The TYPE arrives with the key, from the page that described it, so what this opens is a READ —
+   * no probe, and no request of its own. The carrier column travels through `handleTableClick`'s
+   * override because a key is not a schema node: the cache that hook looks objects up in holds prefix
+   * groups, and there is no key in it to read a type off.
+   */
+  test("a key activated in the key browser opens the read its type calls for", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("videobackend:login:refreshToken:1", "hash", null));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["videobackend:login:refreshToken:1"], mockExecuteQuery, [
+      { name: "type", type: "hash", nullable: false, isPrimary: false },
+    ]);
+  });
+
+  /**
+   * The walked database, handed over with the key (the #1095 review).
+   *
+   * The panel walked ONE numbered database, and the statement that reads the key cannot say which:
+   * Redis has no database-qualified key syntax, so `GET report:daily` run on the session's database
+   * answers `(nil)` for a key that was just on screen. The number must therefore reach the TAB, and
+   * the fourth argument is where this shell hands it over - the third stays the type carrier, so an
+   * activation that walked nothing is the call it has always been.
+   */
+  test("a key from a walked database opens its tab in that database", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("report:daily", "string", 3));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(
+      ["report:daily"],
+      mockExecuteQuery,
+      [{ name: "type", type: "string", nullable: false, isPrimary: false }],
+      3,
+    );
+  });
+
+  /**
+   * `null` is the panel saying "the engine's own session database", which is not a database to
+   * override: that activation stays the three-argument call it was before the number existed.
+   */
+  test("a key from the session's own database carries no override", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("report:daily", "string", null));
+
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["report:daily"], mockExecuteQuery, [
+      { name: "type", type: "string", nullable: false, isPrimary: false },
+    ]);
+    expect((mockHandleTableClick.mock.calls.at(-1) as unknown[]).length).toBe(3);
+  });
+
+  test("a key no page described is handed over with no type at all", () => {
+    render(<Studio />);
+    const fn = capturedSidebarProps.onOpenKey as (key: string, type: string | null, database: number | null) => void;
+
+    act(() => fn("videobackend:login:refreshToken:1", null, null));
+
+    // Not a guess and not the commonest type: NO columns is what sends the generator to its own
+    // unknown branch, and the editor opens on `TYPE <key>` — a command that reports what the key is
+    // rather than opening a read nobody chose.
+    expect(mockHandleTableClick).toHaveBeenCalledWith(["videobackend:login:refreshToken:1"], mockExecuteQuery, []);
+  });
+
   // --- objectActions: the row menu's six, restored (U22, #789) ---
   //
   // WHICH of them a row is offered is the provider's declaration and is asserted against
@@ -943,6 +1026,9 @@ describe("Studio", () => {
 
     act(() => actions.onGenerateSelect?.(usersObject));
     expect(mockHandleGenerateSelect).toHaveBeenCalledWith(["app", "users"]);
+
+    act(() => actions.onGenerateCount?.(usersObject));
+    expect(mockHandleGenerateCount).toHaveBeenCalledWith(["app", "users"]);
 
     act(() => actions.onProfileObject?.(usersObject));
     expect(queryByTestId("dataprofiler")).not.toBeNull();
@@ -1057,11 +1143,11 @@ describe("Studio", () => {
   });
 
   // --- onEditConnection ---
-  test("onEditConnection opens connection modal with connection", () => {
+  test("onEditConnection opens connection modal with connection", async () => {
     render(<Studio />);
     const fn = capturedSidebarProps.onEditConnection as (c: unknown) => void;
     act(() => fn(pgConn));
-    expect(capturedConnectionModalProps.isOpen).toBe(true);
+    await waitFor(() => expect(capturedConnectionModalProps.isOpen).toBe(true));
     expect(capturedConnectionModalProps.editConnection).toEqual(pgConn);
   });
 
@@ -1175,18 +1261,21 @@ describe("Studio", () => {
     },
   );
 
-  test("onAddConnection opens connection modal", () => {
+  test("onAddConnection opens connection modal", async () => {
     render(<Studio />);
     const fn = capturedSidebarProps.onAddConnection as () => void;
     act(() => fn());
-    expect(capturedConnectionModalProps.isOpen).toBe(true);
+    await waitFor(() => expect(capturedConnectionModalProps.isOpen).toBe(true));
   });
 
   // --- ConnectionModal onConnect ---
-  test("ConnectionModal onConnect saves and activates connection", () => {
+  test("ConnectionModal onConnect saves and activates connection", async () => {
     const newConns = [pgConn];
     mockStorageGetConnections.mockReturnValue(newConns);
     render(<Studio />);
+    // Open the modal first: it is `React.lazy`, so it only mounts once asked for.
+    act(() => (capturedSidebarProps.onAddConnection as () => void)());
+    await waitFor(() => expect(capturedConnectionModalProps.onConnect).toBeDefined());
     const onConnect = capturedConnectionModalProps.onConnect as (c: unknown) => void;
     act(() => onConnect(pgConn));
     expect(mockStorageSaveConnection).toHaveBeenCalledWith(pgConn);
@@ -1195,16 +1284,18 @@ describe("Studio", () => {
   });
 
   // --- ConnectionModal onClose ---
-  test("ConnectionModal onClose resets editing and closes modal", () => {
+  test("ConnectionModal onClose resets editing and closes modal", async () => {
     render(<Studio />);
-    // Open the modal
-    const addFn = capturedSidebarProps.onAddConnection as () => void;
-    act(() => addFn());
-    expect(capturedConnectionModalProps.isOpen).toBe(true);
-    // Close the modal
-    const closeFn = capturedConnectionModalProps.onClose as () => void;
-    act(() => closeFn());
-    expect(capturedConnectionModalProps.isOpen).toBe(false);
+    // Open in EDIT mode, so there is an edit to reset.
+    act(() => (capturedSidebarProps.onEditConnection as (c: unknown) => void)(pgConn));
+    await waitFor(() => expect(capturedConnectionModalProps.isOpen).toBe(true));
+    expect(capturedConnectionModalProps.editConnection).toEqual(pgConn);
+    // Close it: this unmounts the lazy modal (isOpen && edit both become false/null).
+    act(() => (capturedConnectionModalProps.onClose as () => void)());
+    // Reopen on a plain add: the edit must have been cleared, so it is not carried over.
+    act(() => (capturedSidebarProps.onAddConnection as () => void)());
+    await waitFor(() => expect(capturedConnectionModalProps.isOpen).toBe(true));
+    expect(capturedConnectionModalProps.editConnection).toBeNull();
   });
 
   // --- exportResults ---
@@ -1965,6 +2056,45 @@ describe("Studio", () => {
     expect(queryByTestId("schemadiagram")).not.toBeNull();
   });
 
+  // A split view whose chunk never arrives must not take the shell down with it (X5).
+  describe("a split view that cannot be loaded", () => {
+    test("the diagram says so in place, and Close takes it away", async () => {
+      failingSplitViews.add("diagram");
+      const { findByText, getByText, getByTestId, queryByTestId } = render(<Studio />);
+      await act(async () => (capturedSidebarProps.onShowDiagram as () => void)());
+
+      expect(await findByText("The diagram could not be loaded.")).toBeTruthy();
+      expect(getByTestId("sidebar")).toBeTruthy();
+      expect(getByTestId("query-editor")).toBeTruthy();
+
+      fireEvent.click(getByText("Close"));
+      expect(queryByTestId("chunk-error")).toBeNull();
+    });
+
+    test("the connection dialog says so over the shell, and Close takes it away", async () => {
+      failingSplitViews.add("connection-dialog");
+      const { findByText, getByText, getByTestId, queryByTestId } = render(<Studio />);
+      act(() => (capturedSidebarProps.onAddConnection as () => void)());
+
+      expect(await findByText("The connection dialog could not be loaded.")).toBeTruthy();
+      expect(getByTestId("chunk-error").className).toContain("fixed");
+      expect(getByTestId("sidebar")).toBeTruthy();
+
+      fireEvent.click(getByText("Close"));
+      expect(queryByTestId("chunk-error")).toBeNull();
+    });
+
+    test("the schema explorer says so inside its tab", async () => {
+      failingSplitViews.add("schema-explorer");
+      connMgrOverride = { activeConnection: pgConn };
+      const { findByText, getByTestId } = render(<Studio />);
+      act(() => (capturedMobileNavProps.onTabChange as (tab: string) => void)("schema"));
+
+      expect(await findByText("The schema explorer could not be loaded.")).toBeTruthy();
+      expect(getByTestId("sidebar")).toBeTruthy();
+    });
+  });
+
   // --- MobileHeader callbacks ---
   test("MobileHeader onSaveQuery opens save modal", () => {
     const { queryByTestId } = render(<Studio />);
@@ -2155,6 +2285,16 @@ describe("Studio", () => {
     const genFn = capturedSchemaExplorerProps.onGenerateSelect as (name: string) => void;
     act(() => genFn("users"));
     expect(mockHandleGenerateSelect).toHaveBeenCalledWith("users");
+    expect(queryByTestId("schema-explorer")).toBeNull();
+  });
+
+  test("mobile schema count returns to the editor with the complete object address", () => {
+    connMgrOverride = { activeConnection: pgConn };
+    const { queryByTestId } = render(<Studio />);
+    act(() => (capturedMobileNavProps.onTabChange as (tab: string) => void)("schema"));
+    act(() => (capturedSchemaExplorerProps.onGenerateCount as (path: readonly string[]) => void)(["app", "users"]));
+    expect(mockHandleGenerateCount).toHaveBeenCalledWith(["app", "users"]);
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
     expect(queryByTestId("schema-explorer")).toBeNull();
   });
 
@@ -2388,9 +2528,10 @@ describe("Studio", () => {
   });
 
   /**
-   * The handover the answer's `auto-executed` outcome names (§2.1 of
-   * `docs/AGENT_ANALYST_DESIGN.md`). The shell does both halves — the statement goes
-   * into the editor AND is run there — through the hook's own capped entry point,
+   * The handover the answer's `auto-executed` outcome names (see the "Handing the answer
+   * to the editor (auto-execute)" section of `docs/AGENT.md`). The shell does both
+   * halves — the statement goes into the editor AND is run there — through the hook's
+   * own capped entry point,
    * which is what keeps the run's answer off the tab's widened execution options.
    */
   test("a statement the run handed over is shown in the editor and run through the run's own route", async () => {
@@ -2418,6 +2559,59 @@ describe("Studio", () => {
 
     expect(mockUpdateCurrentTab).toHaveBeenCalledWith({ query: "SELECT 2" });
     expect(mockExecuteHandedOverStatement).not.toHaveBeenCalled();
+  });
+
+  /**
+   * X5: a keystroke writes the tab and nothing else, so a memoized child that does not
+   * show the query must not be handed a new prop because of it. The hooks are stubbed
+   * here, so the stub does what the real ones do on a keystroke: new `tabs` and
+   * `currentTab`, and a new identity for each hook function whose dependencies include
+   * the tabs (`handleTableClick`, `openSourceTab`, `closeTab`,
+   * `executeHandedOverStatement`, `handleLoadMore`).
+   */
+  test("a keystroke hands the sidebar, the rail and the toolbar the props they already had", async () => {
+    mockAgentConfig(true);
+    // `servedSeeds` is state in the real hook; the stub would mint one per call.
+    connMgrOverride = {
+      activeConnection: managedConn,
+      connections: [managedConn],
+      servedSeeds: { loaded: true, seeds: [] },
+    };
+    const typed = (query: string) => {
+      const tab = { id: "tab-1", name: "Query 1", query, result: null, isExecuting: false, type: "sql" };
+      tabMgrOverride = {
+        tabs: [tab],
+        currentTab: tab,
+        handleTableClick: (...args: unknown[]) => (mockHandleTableClick as (...a: unknown[]) => void)(...args),
+        openSourceTab: () => {},
+        closeTab: () => {},
+      };
+      queryExecOverride = {
+        executeHandedOverStatement: (...args: unknown[]) =>
+          (mockExecuteHandedOverStatement as (...a: unknown[]) => void)(...args),
+        handleLoadMore: () => {},
+      };
+    };
+    const changed = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+      Object.keys({ ...a, ...b }).filter((key) => !Object.is(a[key], b[key]));
+
+    typed("SELECT 1");
+    const { findByTestId, rerender } = render(<Studio />);
+    await findByTestId("agent-rail");
+    const sidebar = { ...capturedSidebarProps };
+    const rail = { ...capturedAgentRailProps };
+    const toolbar = { ...capturedQueryToolbarProps };
+
+    typed("SELECT 12");
+    // The real hook holds metadata in state; this stub mints a new object per call.
+    metadataOverride = { metadata: sidebar.metadata };
+    rerender(<Studio />);
+
+    // The control: the shell did re-render with the new text.
+    expect(capturedQueryEditorProps.value).toBe("SELECT 12");
+    expect(changed(sidebar, capturedSidebarProps)).toEqual([]);
+    expect(changed(rail, capturedAgentRailProps)).toEqual([]);
+    expect(changed(toolbar, capturedQueryToolbarProps)).toEqual([]);
   });
 
   test("below md the mobile nav opens the rail as a sheet", async () => {

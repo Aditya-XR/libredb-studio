@@ -63,6 +63,8 @@ const COMPOSE_SERVICE_BY_ENGINE: Readonly<Record<string, string>> = {
   Garnet: "garnet",
   FerretDB: "ferretdb",
   ScyllaDB: "scylla",
+  VictoriaMetrics: "victoriametrics",
+  Redpanda: "redpanda",
 };
 
 describe("wire-compatibility registry", () => {
@@ -290,6 +292,77 @@ describe("wire-compatibility registry", () => {
     expect(caveats).toContain("information_schema.tables");
   });
 
+  test("VictoriaMetrics is a Prometheus relative, recorded at the tier its gate-4 probe measured", () => {
+    // Probed 2026-09-23 against `victoriametrics/victoria-metrics:v1.152.0`, a single node scraping
+    // the compose fixture's targets, through `createDatabaseProvider({ type: "prometheus" })`, with
+    // Prometheus 3.13.3 probed in the same pass as the baseline (#1085 section 7, #424 Phase 6). A
+    // surface counted as answered only where it passed AND held data wherever Prometheus did, the
+    // ScyllaDB rule, so an empty folder is not a folder that works, nor is a monitoring read or an
+    // object count with a failed panel or count, and by that rule 20 of the 36 surfaces outside the
+    // editor that the baseline answered answer here. The advertised 2.24.0 is in the probed version and in no caveat,
+    // because the overview, the one panel that shows a version, fails there. The relative is
+    // claimed for PromQL only: nothing written in MetricsQL, its own query language, was measured.
+    expect(SHIPPED_DATABASE_TYPES).toContain("prometheus");
+    const relatives = compatibleEnginesFor("prometheus");
+    expect(relatives.map((engine) => engine.name)).toEqual(["VictoriaMetrics"]);
+    const victoria = relatives[0];
+    expect(victoria?.via).toBe("prometheus");
+    expect(victoria?.tier).toBe("partial");
+    expect(victoria?.probedVersion).toBe("VictoriaMetrics v1.152.0 (advertises Prometheus 2.24.0)");
+    // One pin per caveat the probe earned, so a caveat cannot be dropped or reworded away silently.
+    const caveats = victoria?.caveats.join(" ") ?? "";
+    expect(caveats).toContain("unsupported path requested");
+    expect(caveats).toContain("does not serve the path");
+    // The Tables tab lists up to fifty there too, since the TSDB read sends topN beside limit.
+    expect(caveats).not.toContain("its own top ten");
+    expect(caveats).toContain("shows its type and help");
+    expect(caveats).toContain("has no scrapeInterval or scrapeTimeout");
+    expect(caveats).toContain("1970-01-01T00:00:00Z");
+    expect(caveats).toContain("-vmalert.proxyURL");
+    expect(caveats).toContain("empty vector");
+    expect(caveats).toContain("31 points");
+    expect(caveats).toContain("PromQL info");
+    // A metadata entry, a target and the TSDB status each lack a member Prometheus sends, and each
+    // is read without it, so the Tables tab, a metric's Source tab and the Targets folder answer.
+    // The message shown for a path the server does not serve names that path and its status, and
+    // no longer says a proxy or a login page answered. None of those old claims may come back.
+    for (const resolved of [
+      "Tables tab of the monitoring dashboard fails",
+      "Source tab fails",
+      "Targets folder fails",
+      "suggests a proxy or a login page",
+      "expected text at",
+      "expected an object at",
+    ]) {
+      expect(caveats).not.toContain(resolved);
+    }
+  });
+
+  test("Redpanda is a full Kafka relative, recorded at the tier its live read-only check measured", () => {
+    // Probed 2026-09-25 against `redpandadata/redpanda:v26.2.2`, a single node seeded by
+    // docker/kafka/seed.sh and docker/kafka/seed-binary.ts, through a real KafkaProvider run by
+    // tests/live/kafka-read-only.ts --redpanda, with the single Apache Kafka 4.3.1 node as the
+    // baseline in the same pass (#1088 section 8). Every surface answered, with data wherever Kafka
+    // held data: the counts, the three listings and sources, a read in every `from` form, the four
+    // codecs, the transactional topic, the refusals, the three panels, the group listing and each
+    // group's lag against rpk's own, the forwarder and IPv6 checks, and the unchanged broker
+    // snapshot. So the tier is full, and the caveats name what reads differently from Kafka.
+    expect(SHIPPED_DATABASE_TYPES).toContain("kafka");
+    const relatives = compatibleEnginesFor("kafka");
+    expect(relatives.map((engine) => engine.name)).toEqual(["Redpanda"]);
+    const redpanda = relatives[0];
+    expect(redpanda?.via).toBe("kafka");
+    expect(redpanda?.tier).toBe("full");
+    expect(redpanda?.probedVersion).toBe("Redpanda v26.2.2");
+    // One pin per caveat the probe earned, so a caveat cannot be dropped or reworded away silently.
+    const caveats = redpanda?.caveats.join(" ") ?? "";
+    expect(caveats).toContain("max.connections");
+    expect(caveats).toContain("nine");
+    expect(caveats).toContain("usage percentage");
+    expect(caveats).toContain("ListGroups up to v4");
+    expect(redpanda?.caveats).toHaveLength(4);
+  });
+
   test("every entry names a driver we actually ship", () => {
     for (const engine of WIRE_COMPATIBLE_ENGINES) {
       expect(SHIPPED_DATABASE_TYPES).toContain(engine.via);
@@ -357,8 +430,8 @@ describe("wire-compatibility registry", () => {
   });
 
   test("a query-only engine always carries a caveat saying so", () => {
-    // The live probes forced this distinction: Materialize and RisingWave answer
-    // SQL and nothing else, while Citus matches PostgreSQL surface for surface.
+    // The live probes forced this distinction: Databend answers SQL and nothing else
+    // through the provider, while Citus matches PostgreSQL surface for surface.
     // Publishing both as "compatible" is exactly the overclaim #424 forbids, so a
     // query-only tier is not allowed to be silent about it.
     for (const engine of WIRE_COMPATIBLE_ENGINES.filter((e) => e.tier === "query-only")) {

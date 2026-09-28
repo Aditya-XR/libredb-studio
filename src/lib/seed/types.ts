@@ -42,57 +42,98 @@ const SeedDatabaseType = z.enum([
   "cassandra",
   "libsql",
   "duckdb",
+  "prometheus",
+  "kafka",
 ]);
 
 export const SeedDefaultsSchema = z.object({
   managed: z.boolean().optional(),
   environment: ConnectionEnvironmentSchema.optional(),
   ssl: SSLConfigSchema,
+  // Refused rather than stripped (#246): a default would opt every later connection in to MCP.
+  mcp: z
+    .never({
+      error:
+        "mcp is set per connection and never in defaults: add mcp: true to each seed connection an MCP client may use",
+    })
+    .optional(),
 });
 
-export const SeedConnectionSchema = z.object({
-  id: z
-    .string()
-    .min(1)
-    .max(64)
-    .regex(/^[a-z0-9-]+$/, "ID must be lowercase alphanumeric with hyphens"),
-  name: z.string().min(1).max(128),
-  type: SeedDatabaseType,
-  host: z.string().optional(),
-  port: z.number().int().min(1).max(65535).optional(),
-  database: z.string().optional(),
-  user: z.string().optional(),
-  password: z.string().optional(),
-  connectionString: z.string().optional(),
-  environment: ConnectionEnvironmentSchema.optional(),
-  group: z.string().max(64).optional(),
-  color: z
-    .string()
-    .regex(/^#[0-9A-Fa-f]{6}$/)
-    .optional(),
-  roles: z.array(AllowedRoleSchema).min(1, "At least one role is required"),
-  managed: z.boolean().optional(),
-  ssl: SSLConfigSchema,
-  serviceName: z.string().optional(),
-  instanceName: z.string().optional(),
-  // Cassandra only, and REQUIRED by that driver rather than optional to it: a seeded
-  // Cassandra connection without it cannot open at all. Optional here because the
-  // other thirteen type-ids have no use for the field; the provider is what refuses a
-  // connection that omits it.
-  localDataCenter: z.string().optional(),
-  // MongoDB only: the database its credentials live in (`admin` in the ordinary
-  // deployment). Optional because the driver falls back to the database being opened,
-  // which is right only when the two are the same.
-  authSource: z.string().optional(),
-  schema: z.string().optional(),
-  // Read no catalog when this connection opens (#765). Declarable in the seed file
-  // because the deployment that ships a 40,000-object owner is the one that knows, and
-  // a managed connection is read-only in the UI, so nobody could tick the box there.
-  // Unlike the maps in `connection-secrets.ts` and `use-connection-payload.ts`, this
-  // schema fails SILENTLY when a field is missing: zod strips an unknown key, so a seed
-  // file setting it would round-trip as `undefined` with no error anywhere.
-  skipObjectScan: z.boolean().optional(),
-});
+export const SeedConnectionSchema = z
+  .object({
+    id: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9-]+$/, "ID must be lowercase alphanumeric with hyphens"),
+    name: z.string().min(1).max(128),
+    type: SeedDatabaseType,
+    host: z.string().optional(),
+    port: z.number().int().min(1).max(65535).optional(),
+    database: z.string().optional(),
+    user: z.string().optional(),
+    password: z.string().optional(),
+    connectionString: z.string().optional(),
+    environment: ConnectionEnvironmentSchema.optional(),
+    group: z.string().max(64).optional(),
+    color: z
+      .string()
+      .regex(/^#[0-9A-Fa-f]{6}$/)
+      .optional(),
+    roles: z.array(AllowedRoleSchema).min(1, "At least one role is required"),
+    managed: z.boolean().optional(),
+    ssl: SSLConfigSchema,
+    serviceName: z.string().optional(),
+    instanceName: z.string().optional(),
+    // Cassandra only, and REQUIRED by that driver rather than optional to it: a seeded
+    // Cassandra connection without it cannot open at all. Optional here because the
+    // other type-ids have no use for the field; the provider is what refuses a
+    // connection that omits it.
+    localDataCenter: z.string().optional(),
+    // MongoDB only: the database its credentials live in (`admin` in the ordinary
+    // deployment). Optional because the driver falls back to the database being opened,
+    // which is right only when the two are the same.
+    authSource: z.string().optional(),
+    // Elasticsearch only (#708): an API key pair, preferred over user/password when both
+    // are set. Same silent-strip risk as every field on this schema - see the note below.
+    // The refine below is the type gate: without it an OpenSearch seed that carries the
+    // pair validates, is copied through, and the transport would have dropped it with
+    // no error. Refuse at parse instead.
+    apiKeyId: z.string().optional(),
+    apiKeySecret: z.string().optional(),
+    // Kafka only (#1088): which SASL mechanism checks `user` and `password`, absent meaning none.
+    // Declared, because zod strips an undeclared key and a seeded SCRAM connection would then reach
+    // the provider as a credential with no mechanism, which it refuses. Kept in step with the union
+    // on DatabaseConnection by hand, as the SSL modes above are. A mechanism names no credential
+    // and no address, so it is not a field a `${ENV}` or `${vault:...}` reference is resolved in
+    // (RESOLVABLE_FIELDS in credential-resolver.ts), and the file is validated before anything is
+    // resolved: this enum refuses a reference here at load, naming the field. No type refine: the
+    // field is inert on every other engine, and nothing falls back silently when it is absent.
+    saslMechanism: z.enum(["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"]).optional(),
+    schema: z.string().optional(),
+    // Read no catalog when this connection opens (#765). Declarable in the seed file
+    // because the deployment that ships a 40,000-object owner is the one that knows, and
+    // a managed connection is read-only in the UI, so nobody could tick the box there.
+    // Unlike the maps in `connection-secrets.ts` and `use-connection-payload.ts`, this
+    // schema fails SILENTLY when a field is missing: zod strips an unknown key, so a seed
+    // file setting it would round-trip as `undefined` with no error anywhere.
+    skipObjectScan: z.boolean().optional(),
+    // Visible to MCP clients (#246). Per connection and never a default, because a file-wide
+    // default would turn the opt-in into an opt-out for every connection the file later gains.
+    // Declared for the reason skipObjectScan is: zod strips an undeclared key silently, and a seed
+    // file's opt-in would validate and vanish. src/lib/seed/connection-filter.ts copies it.
+    mcp: z.boolean().optional(),
+  })
+  .superRefine((conn, ctx) => {
+    if (conn.type === "elasticsearch") return;
+    if (conn.apiKeyId === undefined && conn.apiKeySecret === undefined) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "apiKeyId and apiKeySecret are Elasticsearch-only. OpenSearch (and every other engine) refuses the pair: nothing here has measured whether OpenSearch's security plugin accepts Authorization: ApiKey, so a seed that carries it is rejected rather than listed as a connection that silently falls back to user/password.",
+      path: conn.apiKeyId !== undefined ? ["apiKeyId"] : ["apiKeySecret"],
+    });
+  });
 
 export const SeedConfigSchema = z
   .object({
@@ -112,4 +153,6 @@ export interface ManagedConnection extends DatabaseConnection {
   managed: boolean;
   roles: string[];
   seedId: string;
+  /** Visible to MCP clients (#246); absent on the built-in samples, which never opt in. */
+  mcp?: boolean;
 }

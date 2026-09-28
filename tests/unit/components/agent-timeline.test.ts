@@ -17,11 +17,12 @@ import { describe, test, expect } from "bun:test";
 import { foldLedgerEntries, parseLedgerLine } from "@/components/agent/timeline";
 import { AGENT_MAX_REPAIR_ATTEMPTS, AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { PLAN_NO_STATEMENT_MARKER } from "@/lib/agent/plan-draft";
-import type { AgentLedgerEntry } from "@/lib/agent/run-store";
+import { nextStatus, type AgentLedgerEntry } from "@/lib/agent/run-store";
 import {
   DEFAULT_AGENT_WORKFLOW_READING,
   DEFAULT_AGENT_WORKFLOW_SOURCE,
   DEFAULT_AGENT_WORKFLOW_TYPE,
+  type AgentRunStatus,
 } from "@/lib/agent/types";
 
 const OPENED: AgentLedgerEntry = {
@@ -37,6 +38,32 @@ const OPENED: AgentLedgerEntry = {
 function event(event: AgentLedgerEntry & { kind: "event" }): AgentLedgerEntry {
   return event;
 }
+
+describe("the two status folds agree", () => {
+  test("run-store's nextStatus and the timeline fold answer the same status at every prefix", () => {
+    const entries: readonly AgentLedgerEntry[] = [
+      OPENED,
+      event({ kind: "event", event: { kind: "run-started", atMs: 2, mode: "agent" } }),
+      event({ kind: "event", event: { kind: "run-paused", atMs: 3 } }),
+      event({ kind: "event", event: { kind: "run-resumed", atMs: 4 } }),
+      event({
+        kind: "event",
+        event: { kind: "run-finished", atMs: 5, status: "succeeded", stopReason: "model-stopped" },
+      }),
+    ];
+
+    // Compared at EVERY prefix, not only after `run-finished`: both folds take the
+    // status from that event unconditionally, so a paused disagreement would be
+    // invisible if the check waited for the end. The run-paused arm is a prefix of
+    // its own, and this is what makes it load-bearing.
+    let status: AgentRunStatus = "queued";
+    for (let i = 0; i < entries.length; i += 1) {
+      const entry = entries[i];
+      if (entry.kind === "event") status = nextStatus(status, entry.event);
+      expect(foldLedgerEntries(entries.slice(0, i + 1)).status, `prefix ${i}`).toBe(status);
+    }
+  });
+});
 
 describe("parseLedgerLine", () => {
   test("reads a run-opened header", () => {
@@ -129,6 +156,25 @@ describe("foldLedgerEntries", () => {
     expect(finished.status).toBe("failed");
     expect(finished.items.at(-1)?.headline).toBe("Run failed");
     expect(finished.items.at(-1)?.tone).toBe("refused");
+  });
+
+  test("a paused run folds to paused, and a resumed one back to running", () => {
+    const paused = foldLedgerEntries([
+      OPENED,
+      event({ kind: "event", event: { kind: "run-started", atMs: 2, mode: "agent" } }),
+      event({ kind: "event", event: { kind: "run-paused", atMs: 3 } }),
+    ]);
+    expect(paused.status).toBe("paused");
+    expect(paused.items.at(-1)?.headline).toBe("Paused");
+
+    const resumed = foldLedgerEntries([
+      OPENED,
+      event({ kind: "event", event: { kind: "run-started", atMs: 2, mode: "agent" } }),
+      event({ kind: "event", event: { kind: "run-paused", atMs: 3 } }),
+      event({ kind: "event", event: { kind: "run-resumed", atMs: 4 } }),
+    ]);
+    expect(resumed.status).toBe("running");
+    expect(resumed.items.at(-1)?.headline).toBe("Resumed");
   });
 
   test("a run that failed before it could start carries why, in the entry's own words", () => {
@@ -1867,13 +1913,13 @@ describe("foldLedgerEntries — the budget meter", () => {
    * tell it apart from an interruption, so the fold declines to guess.
    */
   /**
-   * A ceiling is per drive (`docs/BACKLOG.md` B6) while the ledger spans every
-   * drive, so a resumed run legitimately folds to more than one drive's allowance.
-   * The fold does NOT clamp it: clamping would hide that a run has cost more than
-   * its ceiling suggests, which is the direction that misleads. The rail's caveat
-   * is what says so, and this pins the behaviour that caveat describes.
+   * The fold reports what the ledger holds and does NOT clamp it to a ceiling:
+   * clamping would hide that a run has cost more than its ceiling suggests, which
+   * is the direction that misleads. What the tracker enforces and what the ledger
+   * records are measured differently (the rail's caveat says so), so the two can
+   * disagree, and this pins which of them the fold answers with.
    */
-  test("a run resumed past a per-drive ceiling folds to what it actually spent", () => {
+  test("a run whose ledger holds more than a ceiling folds to what it actually spent", () => {
     const failed = (stepId: string): AgentLedgerEntry =>
       event({
         kind: "event",

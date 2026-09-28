@@ -473,6 +473,9 @@ describe("capabilities", () => {
     // amount = 1 WHERE customer_id = 3` - a plausible guess on a real table - is
     // "Some partition key parts are missing: id".
     expect(capabilities.supportsInlineRowEdit).toBe(false);
+    // CQL has no OFFSET clause and `prepareQuery` throws on a positive offset, so the
+    // control that would provoke that refusal is never rendered (#816).
+    expect(capabilities.supportsResultPagination).toBe(false);
     // CQL has no transaction; BATCH is not one (#464).
     expect(capabilities.supportsTransactions).toBe(false);
   });
@@ -2109,7 +2112,7 @@ describe("the object surface declaration", () => {
    * The source declaration, both directions (#789).
    *
    * `sql` and NOT `cql` on every one of the six. MEASURED in this epic's Monaco census: the
-   * installed monaco-editor 0.56.0 bundle registers 89 language ids and `cql` is not among
+   * installed monaco-editor 0.57.0 bundle registers 89 language ids and `cql` is not among
    * them, and an unregistered id degrades to plain text with no throw and nothing observable.
    * `docs/providers/cassandra.md` states that as a limitation rather than hiding it.
    *
@@ -2140,6 +2143,36 @@ describe("the object surface declaration", () => {
         .map((kind) => kind.id)
         .sort(),
     ).toEqual(["trigger"]);
+  });
+
+  /**
+   * `hasColumns` against what `describeObject` really answers, kind by kind (#789).
+   *
+   * Three kinds declare it and the third is the one that refutes `role === "relation"` as a
+   * gate: `type` is `role: "config"` and `typeDetail` maps the UDT's `field_names` and
+   * `field_types` into columns (`cassandra/objects.ts:867-886`). `index` is `config` too and
+   * does NOT declare, because `indexDetail` answers `columns: []` and puts the whole content
+   * of an index into `indexes` (`cassandra/objects.ts:892-894`) - a twisty there would open on
+   * nothing. `function`, `aggregate` and `trigger` have no columns at all and take the
+   * undeclared default, which reads as false.
+   */
+  test("declares columns on exactly the kinds describeObject answers columns for", () => {
+    const kinds = new CassandraProvider(makeConnection()).getCapabilities().objectKinds ?? [];
+
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["materialized_view", "table", "type"]);
+    // ABSENT rather than `false`: an undeclared kind abstains, and writing the default out
+    // would make the two spellings look like two different facts.
+    expect(kinds.filter((kind) => kind.hasColumns !== true).map((kind) => [kind.id, kind.hasColumns])).toEqual([
+      ["index", undefined],
+      ["function", undefined],
+      ["aggregate", undefined],
+      ["trigger", undefined],
+    ]);
   });
 
   test("only a table takes a row write, and only a trigger hangs off one", () => {
@@ -2367,6 +2400,43 @@ describe("the object surface, against the committed fixture", () => {
 
     expect(detail.columns).toEqual([]);
     expect(detail.indexes).toEqual([{ name: "orders_by_amount", columns: ["amount"], unique: false }]);
+  });
+
+  test("every kind declaring hasColumns answers a column a reader can be shown", async () => {
+    const { provider } = await connectedProvider(objectReplies());
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    const sample: Record<string, readonly string[]> = {
+      table: [KEYSPACE, "customers"],
+      materialized_view: [KEYSPACE, "customers_by_city"],
+      type: [KEYSPACE, "address"],
+    };
+
+    for (const kind of kinds.filter((candidate) => candidate.hasColumns === true)) {
+      const detail = await provider.describeObject!(sample[kind.id]!, kind.id);
+
+      expect(detail.columns.length).toBeGreaterThan(0);
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(column.type).not.toBe("");
+      }
+    }
+  });
+
+  test("every kind declaring nothing answers columns: [], so no twisty is withheld", async () => {
+    const { provider } = await connectedProvider(objectReplies());
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    const sample: Record<string, readonly string[]> = {
+      index: [KEYSPACE, "orders_by_amount"],
+      function: [KEYSPACE, "render(int)"],
+      aggregate: [KEYSPACE, "total(int)"],
+      trigger: [KEYSPACE, "customers", "probe_audit"],
+    };
+
+    for (const kind of kinds.filter((candidate) => candidate.hasColumns !== true)) {
+      expect((await provider.describeObject!(sample[kind.id]!, kind.id)).columns).toEqual([]);
+    }
   });
 
   test("a routine and a trigger describe without a round trip", async () => {

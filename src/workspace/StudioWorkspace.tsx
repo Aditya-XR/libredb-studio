@@ -30,7 +30,7 @@ import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ChunkBoundary, ViewLoading } from "@/components/LazyView";
 import { lazyRetry } from "@/lib/lazy";
-import { editorLanguageForTabType } from "@/lib/editor/tab-language";
+import { editorLanguageForTabType, resolveTabType } from "@/lib/editor/tab-language";
 import { buildResultExport, type ResultExportFormat } from "@/lib/export/result-export";
 import { writeToClipboard } from "@/components/copy-button";
 import { downloadText } from "@/lib/export/download";
@@ -230,6 +230,34 @@ export function StudioWorkspace({
     // trigger this effect always meant — the active connection actually changing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conn.activeConnection?.id]);
+
+  /*
+   * Every open tab takes the type the connection's declared language asks for (#1085).
+   *
+   * The tab manager starts from one SQL tab and types only the tabs it creates afterwards, so a
+   * host connection declaring `queryLanguage: "promql"` opened Query 1 as an SQL tab: SQL
+   * highlighting, SQL completions, and a Format button whose SQL formatter rewrote `up == 0` as
+   * `up = = 0`. The same SQL Query 1 met every Redis, LibreDB and MongoDB host.
+   * `src/components/Studio.tsx` retypes the open tabs in its connection-change effect, and this
+   * is the same rule.
+   *
+   * Keyed on the id and the resolved type, not on the objects, for the reason the effect above
+   * gives: both are rebuilt from the host's `connections` prop, so a host passing a fresh array
+   * on every render would otherwise write the tabs on every render. Declared after
+   * `useTabManager`, so a connection switch types the tabs that hook restores for the new
+   * connection. And the updater hands back the same list when no tab differs, so a connection
+   * whose tabs already carry its type costs no state change and nothing to persist.
+   */
+  const tabType = resolveTabType(conn.metadata?.capabilities);
+  useEffect(() => {
+    if (!conn.activeConnection) return;
+    tabMgr.setTabs((previous) =>
+      previous.some((tab) => tab.type !== tabType)
+        ? previous.map((tab) => (tab.type === tabType ? tab : { ...tab, type: tabType }))
+        : previous,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conn.activeConnection?.id, tabType]);
 
   // === Modal / overlay state ===
   const [showDiagram, setShowDiagram] = useState(false);
@@ -600,6 +628,9 @@ export function StudioWorkspace({
    * deleting the counter killed one. What announces the re-read here is the pane's own
    * `object-source-loading` region, which is an `output` element carrying an implicit
    * `role="status"`, so a screen reader is told the same thing by the surface that knows it.
+   * A failed query run follows the same rule: `useQueryAdapter` still raises its toast, and what a
+   * host's user actually sees is the results panel's own `run-failure` block, rendered from the
+   * tab's `runError` in place of the previous run's rows.
    *
    * The DRAFT is not dropped here either. The pane drops it itself, keyed on the part its plan
    * was built for, which is a key this shell does not hold and must not guess.
@@ -744,6 +775,10 @@ export function StudioWorkspace({
       if (refuseWhileApplying()) return;
       tabMgr.handleGenerateSelect(object.path);
     },
+    onGenerateCount: (object) => {
+      if (refuseWhileApplying()) return;
+      tabMgr.handleGenerateCount(object.path);
+    },
     onProfileObject: features.codeGenerator ? (object) => setProfilerPath(object.path) : undefined,
     onGenerateCode: features.codeGenerator ? (object) => setCodeGenPath(object.path) : undefined,
     onGenerateTestData: features.testDataGenerator ? (object) => setTestDataPath(object.path) : undefined,
@@ -804,6 +839,7 @@ export function StudioWorkspace({
                 objectScanDeferred={conn.objectScanDeferred}
                 onLoadObjects={conn.loadObjects}
                 objectSource={conn.objectSource}
+                objectReadsColumns={conn.readsColumns}
               />
             </ResizablePanel>
             <ResizableHandle className="w-1 bg-transparent hover:bg-brand-tint/30 transition-colors" />

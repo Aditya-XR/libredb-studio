@@ -27,6 +27,135 @@ export function startupUrl(hostname, port) {
 }
 
 /**
+ * The canonical MCP address the launcher hands the server when the operator set none (#246): the
+ * startup URL of the address and port the server binds, plus /api/mcp. Every MCP token is bound to
+ * it, so a changed --host or --port invalidates the tokens minted before. A prebuilt payload
+ * cannot be relocated under a basePath at runtime, so none is added.
+ *
+ * @param {string | null | undefined} hostname
+ * @param {string | number | null | undefined} port
+ * @returns {string}
+ */
+export function mcpUrlFor(hostname, port) {
+  return `${startupUrl(hostname, port)}/api/mcp`;
+}
+
+/**
+ * The environment variables the server reads as a filesystem path. The launcher spawns server.js
+ * with its cwd in the payload cache, so a relative value would resolve against
+ * ~/.libredb-studio/<version>/payload instead of the directory the operator ran the command from:
+ * SEED_CONFIG_PATH=./seed-connections.yaml used to skip the seed connections as "not found".
+ * Each entry was checked where it is read:
+ *
+ * - SEED_CONFIG_PATH: src/lib/seed/config-loader.ts
+ * - STORAGE_SQLITE_PATH: src/lib/data-dir.ts and the sqlite storage provider
+ * - SQLITE_EMBEDDED_SAMPLE_PATH, SQLITE_EMBEDDED_SAMPLE_TEMPLATE: src/lib/seed/sqlite-sample.ts
+ * - LIBREDB_EMBEDDED_SAMPLE_PATH: src/lib/seed/libredb-sample.ts
+ * - VAULT_K8S_TOKEN_PATH: src/lib/seed/vault-client.ts
+ * - WORKFLOW_LOCAL_DATA_DIR, AGENT_MODEL_TUNING_PATH: src/lib/agent/config.ts
+ * - ORACLE_CLIENT_LIB_DIR: src/lib/db/providers/sql/oracle.ts (Thick mode libDir)
+ * - NODE_EXTRA_CA_CERTS: read by Node itself when server.js starts (docs/OIDC.md)
+ *
+ * The guard in tests/unit/launcher-utils.test.ts fails when .env.example documents a *_PATH, *_DIR
+ * or *_FILE variable that is in neither this list nor URL_PATH_VARIABLES.
+ */
+export const PATH_VARIABLES = Object.freeze([
+  "SEED_CONFIG_PATH",
+  "STORAGE_SQLITE_PATH",
+  "SQLITE_EMBEDDED_SAMPLE_PATH",
+  "SQLITE_EMBEDDED_SAMPLE_TEMPLATE",
+  "LIBREDB_EMBEDDED_SAMPLE_PATH",
+  "VAULT_K8S_TOKEN_PATH",
+  "WORKFLOW_LOCAL_DATA_DIR",
+  "AGENT_MODEL_TUNING_PATH",
+  "ORACLE_CLIENT_LIB_DIR",
+  "NODE_EXTRA_CA_CERTS",
+]);
+
+/**
+ * Variables whose name looks like a filesystem path but whose value is a URL path, with the reason
+ * each must never be resolved against a directory.
+ */
+export const URL_PATH_VARIABLES = Object.freeze({
+  BASE_PATH: "the URL prefix the app is served under behind a reverse proxy",
+  NEXT_PUBLIC_MONACO_VS_PATH: "the URL the browser loads the Monaco editor from",
+});
+
+/**
+ * A copy of `env` in which every relative value of a PATH_VARIABLES entry is resolved against
+ * `cwd`, the directory the launcher was run from. Absolute and empty (or whitespace-only) values
+ * are left as they are, so the server's own default still applies to an empty one.
+ *
+ * @param {Record<string, string | undefined>} env
+ * @param {string} cwd
+ * @returns {Record<string, string | undefined>}
+ */
+export function resolvePathVariables(env, cwd) {
+  const resolved = { ...env };
+  for (const name of PATH_VARIABLES) {
+    const value = resolved[name];
+    if (value === undefined || value.trim() === "" || path.isAbsolute(value)) continue;
+    resolved[name] = path.resolve(cwd, value);
+  }
+  return resolved;
+}
+
+/**
+ * An environment value as a trimmed string, so `undefined`, an empty value and
+ * whitespace are one case rather than three at each call site.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function envText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * The address `node server.js` is bound to (issue #813).
+ *
+ * Precedence, and the reason for each step:
+ *
+ * 1. `--host` wins outright. It is the argument on THIS invocation, and an
+ *    exported variable cannot know which command is running - so the flag the
+ *    operator just typed outranks anything ambient.
+ * 2. `LIBREDB_BIND` is the unambiguous override, and reading it here is what
+ *    makes the native channels uniform: the `.deb`/`.rpm` and Homebrew wrappers
+ *    resolve it (`packaging/linux/libredb-studio`, the Homebrew template) and
+ *    `docker/bind-address.mjs` reads it before `HOSTNAME`. It is also the way
+ *    out of the one case step 3 costs - a container named after itself, below.
+ * 3. `HOSTNAME` counts only when it differs from this machine's own hostname.
+ *    Shells export `HOSTNAME=<machine name>`, and a container runtime injects the
+ *    container id (Docker) or the pod name (a kubelet) - all three are, from
+ *    inside, equal to `os.hostname()`. So an inherited value is nearly always
+ *    "nobody chose", and honouring it binds the server where loopback clients
+ *    cannot reach it: measured in `node:24-alpine` on Docker 29.2.1,
+ *    `curl http://localhost:3000/login` answered 000 while the container address
+ *    answered 200 (issue #813). This is the rule `docker/bind-address.mjs`
+ *    already applies to the image (#432).
+ * 4. Otherwise loopback - the local-first default every native channel states.
+ *
+ * One cost, stated rather than hidden: a host named after the address it also
+ * pins (`--hostname 0.0.0.0` together with `HOSTNAME=0.0.0.0`) is
+ * indistinguishable from an injected value at step 3, so that pin is dropped.
+ * Step 2 is the answer - `LIBREDB_BIND` carries no second meaning - and `--host`
+ * is unambiguous for a single run.
+ *
+ * Pure: the machine hostname is passed in, never read here.
+ *
+ * @param {{ host?: string | null, libredbBind?: string | undefined, hostnameEnv?: string | undefined, systemHostname?: string | undefined }} [options]
+ * @returns {string}
+ */
+export function resolveBindAddress({ host, libredbBind, hostnameEnv, systemHostname } = {}) {
+  if (host) return host;
+  const chosen = envText(libredbBind);
+  if (chosen !== "") return chosen;
+  const inherited = envText(hostnameEnv);
+  if (inherited !== "" && inherited !== envText(systemHostname)) return inherited;
+  return "127.0.0.1";
+}
+
+/**
  * Platform/arch pairs the release workflow builds standalone payloads for
  * (must mirror the build jobs in .github/workflows/release-artifacts.yml).
  */

@@ -4,10 +4,10 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
-import { callerBoundTruncationReason, isSourcePartUnavailable } from "@/lib/db/object-kinds";
+import { callerBoundTruncationReason, isSourcePartUnavailable, kindHasColumns } from "@/lib/db/object-kinds";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseConnection } from "@/lib/types";
+import type { ColumnSchema, DatabaseConnection } from "@/lib/types";
 import type { DatabaseProvider, ObjectKindSpec } from "@/lib/db/types";
 import { DatabaseConfigError } from "@/lib/db/errors";
 import { CACHE_HIT_RATIO_UNAVAILABLE } from "@/lib/monitoring-cache-ratio";
@@ -389,9 +389,30 @@ function defaultMockExecute(sql: string): Promise<[unknown[], unknown[]]> {
   if (normalized.includes("information_schema.columns")) {
     return Promise.resolve([
       [
-        { column_name: "id", data_type: "int", is_nullable: "NO", column_default: null, column_key: "PRI" },
-        { column_name: "name", data_type: "varchar", is_nullable: "YES", column_default: null, column_key: "" },
-        { column_name: "email", data_type: "varchar", is_nullable: "NO", column_default: null, column_key: "UNI" },
+        {
+          column_name: "id",
+          column_type: "int",
+          data_type: "int",
+          is_nullable: "NO",
+          column_default: null,
+          column_key: "PRI",
+        },
+        {
+          column_name: "name",
+          column_type: "varchar(100)",
+          data_type: "varchar",
+          is_nullable: "YES",
+          column_default: null,
+          column_key: "",
+        },
+        {
+          column_name: "email",
+          column_type: "varchar(255)",
+          data_type: "varchar",
+          is_nullable: "NO",
+          column_default: null,
+          column_key: "UNI",
+        },
       ],
       [],
     ]);
@@ -947,6 +968,8 @@ describe("MySQLProvider", () => {
       // `UPDATE t SET c = v WHERE pk = v` is core MySQL DML — the shape the inline
       // row editor builds (#269).
       expect(caps.supportsInlineRowEdit).toBe(true);
+      // `LIMIT n OFFSET m` from the shared limiter (#816).
+      expect(caps.supportsResultPagination).toBe(true);
       // One held connection carries the transaction, so the trio is offered (#464).
       expect(caps.supportsTransactions).toBe(true);
       // Inherited from the base capabilities: this engine declares foreign keys, so
@@ -1267,6 +1290,69 @@ describe("MySQLProvider", () => {
       expect(analyzeSql).toBeDefined();
       expect(analyzeSql).toContain("`users`");
       expect(analyzeSql).toContain("`orders`");
+    });
+
+    // #772: `schemaName` on MySQL is the DATABASE, so a container is honored only when it is
+    // a database OTHER than the connected one - a statement already resolves a bare table
+    // inside the connected database, and qualifying with the same name adds nothing.
+    test("a container naming another database qualifies the target", async () => {
+      const executedStatements: string[] = [];
+      mockExecuteFn = (sql: string) => {
+        executedStatements.push(sql);
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.runMaintenance("optimize", "users", "archive");
+
+      const optimizeSql = executedStatements.find((s) => s.startsWith("OPTIMIZE TABLE"));
+      expect(optimizeSql).toBe("OPTIMIZE TABLE `archive`.`users`");
+    });
+
+    test("a container naming the connected database stays unqualified", async () => {
+      const executedStatements: string[] = [];
+      mockExecuteFn = (sql: string) => {
+        executedStatements.push(sql);
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.runMaintenance("check", "users", "testdb");
+
+      const checkSql = executedStatements.find((s) => s.startsWith("CHECK TABLE"));
+      expect(checkSql).toBe("CHECK TABLE `users`");
+    });
+
+    test("a bare target with no container keeps the connected-database reading", async () => {
+      const executedStatements: string[] = [];
+      mockExecuteFn = (sql: string) => {
+        executedStatements.push(sql);
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.runMaintenance("analyze", "users");
+
+      const analyzeSql = executedStatements.find((s) => s.startsWith("ANALYZE TABLE"));
+      expect(analyzeSql).toBe("ANALYZE TABLE `users`");
+    });
+
+    test("quotes a database and a table that carry a backtick", async () => {
+      const executedStatements: string[] = [];
+      mockExecuteFn = (sql: string) => {
+        executedStatements.push(sql);
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.runMaintenance("optimize", "us`ers", "arch`ive");
+
+      const optimizeSql = executedStatements.find((s) => s.startsWith("OPTIMIZE TABLE"));
+      expect(optimizeSql).toBe("OPTIMIZE TABLE `arch``ive`.`us``ers`");
     });
 
     test("kill without target throws QueryError", async () => {
@@ -2298,6 +2384,155 @@ describe("MySQLProvider", () => {
   });
 
   // --------------------------------------------------------------------------
+  // Session time zone
+  // --------------------------------------------------------------------------
+
+  describe("timezone", () => {
+    /**
+     * Measured 2026-09-27 against MySQL 8.4 through this provider under TZ=Europe/Istanbul:
+     * the structured form read `DATE '2026-09-01'` as 2026-09-01T00:00:00.000Z, while the same
+     * server behind a pasted connection string answered 2026-08-31T21:00:00.000Z, the previous
+     * day, because only the structured form set `timezone` and mysql2 otherwise reads DATE and
+     * DATETIME in the Node process's local zone.
+     */
+    test("a pasted connection string reads dates in UTC, as the structured form does", async () => {
+      provider = new MySQLProvider(
+        makeMySQLConfig({ connectionString: "mysql://example-user:example-fake-db-pw@localhost:3306/testdb" }),
+      );
+      await provider.connect();
+      expect(lastPoolConfig.timezone).toBe("Z");
+    });
+
+    test("the structured form still defaults to UTC", async () => {
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      expect(lastPoolConfig.timezone).toBe("Z");
+    });
+
+    test("an explicit timezone option reaches both forms", async () => {
+      provider = new MySQLProvider(makeMySQLConfig(), { timezone: "+03:00" });
+      await provider.connect();
+      expect(lastPoolConfig.timezone).toBe("+03:00");
+      await provider.disconnect();
+      provider = new MySQLProvider(
+        makeMySQLConfig({ connectionString: "mysql://example-user:example-fake-db-pw@localhost:3306/testdb" }),
+        { timezone: "+03:00" },
+      );
+      await provider.connect();
+      expect(lastPoolConfig.timezone).toBe("+03:00");
+    });
+
+    /**
+     * The default must not beat a `?timezone=` the user wrote into the string. The recorded
+     * config alone cannot show that, because mysql2 resolves `uri` against the options inside
+     * its own `ConnectionConfig`, and there an OPTION wins over the same key in the uri. So the
+     * recorded config is handed to the REAL one (only `mysql2/promise` is mocked in this file).
+     */
+    test("a connection string's own ?timezone= still wins over the default", async () => {
+      const { ConnectionConfig } = (await import("mysql2")) as unknown as {
+        ConnectionConfig: new (options: Record<string, unknown>) => { timezone: string };
+      };
+      provider = new MySQLProvider(
+        makeMySQLConfig({
+          connectionString: "mysql://example-user:example-fake-db-pw@localhost:3306/testdb?timezone=%2B03:00",
+        }),
+      );
+      await provider.connect();
+      expect(new ConnectionConfig(lastPoolConfig).timezone).toBe("+03:00");
+      // Control: without the query parameter the same resolution lands on the default.
+      provider = new MySQLProvider(
+        makeMySQLConfig({ connectionString: "mysql://example-user:example-fake-db-pw@localhost:3306/testdb" }),
+      );
+      await provider.connect();
+      expect(new ConnectionConfig(lastPoolConfig).timezone).toBe("Z");
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Wide integers (BIGINT past 2^53)
+  // --------------------------------------------------------------------------
+
+  describe("wide integers", () => {
+    /**
+     * Measured end to end through the real hook before the fix: a table holding
+     * 9007199254740992 and 9007199254740993 sent BOTH rows to the browser as ...992. An
+     * inline edit of the row showing ...992 then asked the guard about ...992, was told
+     * one row matched, UPDATEd the NEIGHBOUR and reported success. `supportBigNumbers` is
+     * what stops the driver rounding; the pool config is the only place it is observable,
+     * because `buildPoolConfig` is private.
+     */
+    test("the structured configuration asks mysql2 not to round a BIGINT", async () => {
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      expect(lastPoolConfig.supportBigNumbers).toBe(true);
+      // Deliberately NOT set: `bigNumberStrings` would turn `SELECT 5` into `"5"` and
+      // `COUNT(*)` into a string, changing types that were never wrong.
+      expect(lastPoolConfig.bigNumberStrings).toBeUndefined();
+    });
+
+    test("a pasted connection string asks for the same thing", async () => {
+      provider = new MySQLProvider(
+        makeMySQLConfig({ connectionString: "mysql://example-user:example-fake-db-pw@localhost:3306/testdb" }),
+      );
+      await provider.connect();
+      expect(lastPoolConfig.supportBigNumbers).toBe(true);
+      expect(lastPoolConfig.bigNumberStrings).toBeUndefined();
+    });
+
+    /**
+     * The two tests above assert the OPTION; this one asserts the CONSEQUENCE, which is
+     * the part a caller can see. The rows below are what mysql2 actually hands back with
+     * `supportBigNumbers` on - measured 2026-09-18 against MySQL 8.4.11 through this very
+     * provider: a `BIGINT` past 2^53 arrives as a STRING, so two ids one apart stay two
+     * values. With the option off the same server sent BOTH rows as the number
+     * 9007199254740992, the key guard counted one match for the id the browser showed, and
+     * the UPDATE landed on the neighbour.
+     *
+     * It is here rather than left to the option assertion because the option only settles
+     * what the DRIVER does. A `Number()` anywhere on the provider's row path would round
+     * the string straight back and undo the repair with both option tests still green -
+     * this is the test that would go red for it.
+     */
+    test("two ids that differ only past 2^53 reach the caller as two values", async () => {
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      mockExecuteFn = () =>
+        Promise.resolve([
+          [
+            { id: "9007199254740992", label: "row-992" },
+            { id: "9007199254740993", label: "row-993" },
+          ],
+          [{ name: "id" }, { name: "label" }],
+        ]);
+
+      const result = await provider.query("SELECT id, label FROM wide_ids ORDER BY id");
+      const ids = result.rows.map((row) => (row as Record<string, unknown>).id);
+
+      expect(ids).toEqual(["9007199254740992", "9007199254740993"]);
+      expect(new Set(ids.map(String)).size).toBe(2);
+    });
+
+    /**
+     * The same two ids across the API boundary. The browser never sees the driver's value,
+     * it sees what came through `JSON.stringify`, and that is where the rounded NUMBER did
+     * its damage: `JSON.stringify(9007199254740993)` is `9007199254740992` and the two rows
+     * arrive identical. A string crosses unchanged, which is what makes the editor's guard
+     * able to tell the rows apart at all.
+     */
+    test("both ids survive the JSON the API response is made of", async () => {
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      mockExecuteFn = () =>
+        Promise.resolve([[{ id: "9007199254740992" }, { id: "9007199254740993" }], [{ name: "id" }]]);
+
+      const result = await provider.query("SELECT id FROM wide_ids ORDER BY id");
+      const overTheWire = JSON.parse(JSON.stringify(result.rows)) as Record<string, unknown>[];
+
+      expect(overTheWire.map((row) => row.id)).toEqual(["9007199254740992", "9007199254740993"]);
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // queryInTransaction()
   // --------------------------------------------------------------------------
 
@@ -3206,6 +3441,167 @@ function sourceReply(sql: string, mariadb: boolean): unknown[] {
 }
 
 /**
+ * The #795 measurement, as a column set both catalog surfaces answer with.
+ *
+ * Measured 2026-09-20 on MariaDB 12.3.2-MariaDB-ubu2404 and MySQL 26.7.0, one probe table
+ * per server, `HEX(COLUMN_DEFAULT)` read beside the text so no display layer could hide a
+ * byte. MySQL reports the VALUE and MariaDB the expression AS WRITTEN, so the same DDL
+ * arrives here as two different strings and has to leave as one.
+ *
+ * Two type fields, and they are the two catalog columns (#1033): `declared` is `COLUMN_TYPE`,
+ * the type as the DDL wrote it, and `type` is `DATA_TYPE`, the family. `declaredOn()` below
+ * applies the one per-server difference between them.
+ */
+const COLUMN_DEFAULT_MEASUREMENT = [
+  // DDL: `INT NULL`. MariaDB spells absence as the four-character keyword.
+  { name: "def_absent", declared: "int", type: "int", maria: "NULL", mysql: null, extra: "", expected: undefined },
+  // DDL: `VARCHAR(20) DEFAULT 'NULL'`. The four characters, as a value.
+  {
+    name: "def_null_string",
+    declared: "varchar(20)",
+    type: "varchar",
+    maria: "'NULL'",
+    mysql: "NULL",
+    extra: "",
+    expected: "NULL",
+  },
+  {
+    name: "def_text",
+    declared: "varchar(20)",
+    type: "varchar",
+    maria: "'abc'",
+    mysql: "abc",
+    extra: "",
+    expected: "abc",
+  },
+  { name: "def_empty", declared: "varchar(20)", type: "varchar", maria: "''", mysql: "", extra: "", expected: "" },
+  {
+    name: "def_quote",
+    declared: "varchar(20)",
+    type: "varchar",
+    maria: "'it''s'",
+    mysql: "it's",
+    extra: "",
+    expected: "it's",
+  },
+  // DDL: `DEFAULT 'a\\b'`, whose value is the three characters a, backslash, b. MariaDB
+  // doubles the backslash, exactly as `quoteLiteral` does for this family.
+  {
+    name: "def_backslash",
+    declared: "varchar(20)",
+    type: "varchar",
+    maria: "'a\\\\b'",
+    mysql: "a\\b",
+    extra: "",
+    expected: "a\\b",
+  },
+  {
+    name: "def_newline",
+    declared: "varchar(20)",
+    type: "varchar",
+    maria: "'a\\nb'",
+    mysql: "a\nb",
+    extra: "",
+    expected: "a\nb",
+  },
+  { name: "def_number", declared: "int", type: "int", maria: "42", mysql: "42", extra: "", expected: "42" },
+  // A generated column. MariaDB says the keyword, MySQL says SQL NULL, and neither has an
+  // insert default. `EXTRA` is the discriminator and both servers spell it the same way.
+  {
+    name: "def_generated",
+    declared: "int",
+    type: "int",
+    maria: "NULL",
+    mysql: null,
+    extra: "STORED GENERATED",
+    expected: undefined,
+  },
+] as const;
+
+/**
+ * The expression default, which is the one row whose ANSWER differs by server rather than
+ * only its raw form: MySQL evaluates `CURRENT_TIMESTAMP` to itself and MariaDB writes
+ * `current_timestamp()`. Its `EXTRA` differs too, and MySQL's `DEFAULT_GENERATED` is the
+ * trap a substring match on GENERATED would fall into.
+ */
+const EXPRESSION_DEFAULT = {
+  name: "def_expression",
+  declared: "timestamp",
+  type: "timestamp",
+  maria: { raw: "current_timestamp()", extra: "", expected: "current_timestamp()" },
+  mysql: { raw: "CURRENT_TIMESTAMP", extra: "DEFAULT_GENERATED", expected: "CURRENT_TIMESTAMP" },
+} as const;
+
+/**
+ * MariaDB still reports the integer display width that MySQL deprecated in 8.0.17 and stopped
+ * printing in 8.0.19, so ONE declaration has two spellings across the fleet. Measured
+ * 2026-09-22 on MySQL 26.7.0 and MariaDB 13.0.2: `INT` is `int` on the first and `int(11)` on
+ * the second, while `VARCHAR(20)`, `DECIMAL(12,2)` and `TIMESTAMP` are spelled alike on both.
+ *
+ * That is the reason `baseType` is carried beside the declaration rather than parsed back out
+ * of it: `int` and `int(11)` are one family under two names, and only the server knows which.
+ */
+function declaredOn(declared: string, mariadb: boolean): string {
+  return mariadb && declared === "int" ? "int(11)" : declared;
+}
+
+/** The catalog rows for the measurement, as the named server reports them. */
+function measuredDefaultRows(mariadb: boolean): Record<string, unknown>[] {
+  const expression = mariadb ? EXPRESSION_DEFAULT.maria : EXPRESSION_DEFAULT.mysql;
+  return [
+    ...COLUMN_DEFAULT_MEASUREMENT.map((column) => ({
+      column_name: column.name,
+      column_type: declaredOn(column.declared, mariadb),
+      data_type: column.type,
+      is_nullable: "YES",
+      column_default: mariadb ? column.maria : column.mysql,
+      column_key: "",
+      extra: column.extra,
+    })),
+    {
+      column_name: EXPRESSION_DEFAULT.name,
+      column_type: declaredOn(EXPRESSION_DEFAULT.declared, mariadb),
+      data_type: EXPRESSION_DEFAULT.type,
+      is_nullable: "YES",
+      column_default: expression.raw,
+      column_key: "",
+      extra: expression.extra,
+    },
+  ];
+}
+
+/**
+ * What those rows must become, on either server.
+ *
+ * MariaDB carries the catalog text on as `defaultExpression` because it measured that the
+ * text is valid SQL there, and MySQL carries none: `abc` is a value rather than SQL, `b'1'`
+ * and `0x616263` are SQL, and EXTRA is empty for all three, so that server cannot tell them
+ * apart and must not claim to.
+ */
+function measuredDefaultColumns(mariadb: boolean): ColumnSchema[] {
+  const expression = mariadb ? EXPRESSION_DEFAULT.maria : EXPRESSION_DEFAULT.mysql;
+  return [
+    ...COLUMN_DEFAULT_MEASUREMENT.map((column) => ({
+      name: column.name,
+      type: declaredOn(column.declared, mariadb),
+      ...(declaredOn(column.declared, mariadb) === column.type ? {} : { baseType: column.type }),
+      nullable: true,
+      isPrimary: false,
+      defaultValue: column.expected,
+      defaultExpression: mariadb && column.expected !== undefined ? column.maria : undefined,
+    })),
+    {
+      name: EXPRESSION_DEFAULT.name,
+      type: declaredOn(EXPRESSION_DEFAULT.declared, mariadb),
+      nullable: true,
+      isPrimary: false,
+      defaultValue: expression.expected,
+      defaultExpression: mariadb ? expression.raw : undefined,
+    },
+  ];
+}
+
+/**
  * The fixture the two `docker/*-init/01-object-fixture.sql` files build, answered from the
  * mock so the contract can be driven without a server in the loop.
  *
@@ -3278,16 +3674,19 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
         {
           object_name: "customers",
           column_name: "id",
+          column_type: declaredOn("int", options.mariadb),
           data_type: "int",
           is_nullable: "NO",
           column_default: null,
           column_key: "PRI",
         },
+        ...measuredDefaultRows(options.mariadb).map((row) => ({ object_name: "customers", ...row })),
       ],
       order_archive: [
         {
           object_name: "order_archive",
           column_name: "id",
+          column_type: declaredOn("int", options.mariadb),
           data_type: "int",
           is_nullable: "NO",
           column_default: null,
@@ -3298,6 +3697,7 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
         {
           object_name: "orders",
           column_name: "id",
+          column_type: declaredOn("int", options.mariadb),
           data_type: "int",
           is_nullable: "NO",
           column_default: null,
@@ -3306,6 +3706,7 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
         {
           object_name: "orders",
           column_name: "total",
+          column_type: "decimal(12,2)",
           data_type: "decimal",
           is_nullable: "YES",
           column_default: "0.00",
@@ -3316,6 +3717,7 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
         {
           object_name: "order_audit",
           column_name: "id",
+          column_type: declaredOn("int", options.mariadb),
           data_type: "int",
           is_nullable: "NO",
           column_default: null,
@@ -3326,6 +3728,7 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
         {
           object_name: "order_summary",
           column_name: "customer",
+          column_type: "varchar(100)",
           data_type: "varchar",
           is_nullable: "YES",
           column_default: null,
@@ -3336,6 +3739,7 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
         {
           object_name: "invoice_number_seq",
           column_name: "next_not_cached_value",
+          column_type: "bigint(21)",
           data_type: "bigint",
           is_nullable: "NO",
           column_default: null,
@@ -3513,19 +3917,15 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
       return [[{ name: "orders_nightly" }], []];
     }
     if (normalized.includes("information_schema.columns")) {
-      return [
-        [
-          { column_name: "id", data_type: "int", is_nullable: "NO", column_default: null, column_key: "PRI" },
-          {
-            column_name: "total",
-            data_type: "decimal",
-            is_nullable: "YES",
-            column_default: "0.00",
-            column_key: "MUL",
-          },
-        ],
-        [],
-      ];
+      // The bulk read's rows carry `object_name`, which the single-object read does not
+      // project. Dropping it here keeps ONE measured column set behind both surfaces, which
+      // is the property the two reads exist to preserve.
+      const named = String((params ?? [])[1]);
+      const rows = (columnsByObject[named] ?? []).map((row) => {
+        const { object_name: _objectName, ...rest } = row as Record<string, unknown>;
+        return rest;
+      });
+      return [rows, []];
     }
     if (normalized.includes("key_column_usage")) {
       return [
@@ -4189,6 +4589,69 @@ describe("MySQL object listing and detail", () => {
     await provider.disconnect();
   });
 
+  test("a MariaDB column default reads back as the value the column defaults to (#795)", async () => {
+    const provider = await connectedTo(true);
+
+    const detail = await provider.describeObject(["app", "customers"], "table");
+
+    expect(detail.columns.slice(1)).toEqual(measuredDefaultColumns(true));
+    await provider.disconnect();
+  });
+
+  test("a MySQL column default is already the value, and is not decoded (#795)", async () => {
+    const provider = await connectedTo(false);
+
+    const detail = await provider.describeObject(["app", "customers"], "table");
+
+    // Including the expression default, whose EXTRA is DEFAULT_GENERATED on this server: a
+    // rule matching the substring GENERATED would erase a default the user really set.
+    expect(detail.columns.slice(1)).toEqual(measuredDefaultColumns(false));
+    await provider.disconnect();
+  });
+
+  test("a MySQL column carries no defaultExpression, because the catalog text is not SQL (#795)", async () => {
+    const provider = await connectedTo(false);
+
+    const detail = await provider.describeObject(["app", "customers"], "table");
+
+    // Every column, not only the interesting ones: the claim is that this server declares no
+    // SQL text at all. `abc` is a value and is not valid after DEFAULT, while `b'1'` and
+    // `0x616263` are SQL, and all three arrive with an empty EXTRA, so nothing in the row
+    // tells the two apart. An absent field is the honest answer.
+    for (const column of detail.columns) {
+      expect(Object.hasOwn(column, "defaultExpression")).toBe(false);
+    }
+    await provider.disconnect();
+  });
+
+  test("a MariaDB column carries the catalog text as the SQL that produces its default (#795)", async () => {
+    const provider = await connectedTo(true);
+
+    const detail = await provider.describeObject(["app", "customers"], "table");
+    const byName = new Map(detail.columns.map((column) => [column.name, column]));
+
+    // The two readings of one column: `abc` is what a display shows, `'abc'` is what a
+    // reader emitting SQL must write after DEFAULT.
+    expect(byName.get("def_text")).toMatchObject({ defaultValue: "abc", defaultExpression: "'abc'" });
+    expect(byName.get("def_empty")).toMatchObject({ defaultValue: "", defaultExpression: "''" });
+    // A column with no default declares neither field, so no DEFAULT clause can be built from it.
+    expect(Object.hasOwn(byName.get("def_absent") ?? {}, "defaultExpression")).toBe(false);
+    expect(Object.hasOwn(byName.get("def_absent") ?? {}, "defaultValue")).toBe(false);
+    await provider.disconnect();
+  });
+
+  test("the bulk read decodes defaults the same way the single read does (#795)", async () => {
+    for (const mariadb of [true, false]) {
+      const provider = await connectedTo(mariadb);
+
+      const batch = await provider.describeObjects(["app"], "table");
+      const customers = batch.details.find((detail) => detail.path[1] === "customers");
+
+      expect(customers?.columns.slice(1)).toEqual(measuredDefaultColumns(mariadb));
+      await provider.disconnect();
+    }
+  });
+
   test("a table's detail carries its columns, primary key, foreign keys and indexes", async () => {
     const provider = await connectedTo(false);
     const bound: unknown[][] = [];
@@ -4203,7 +4666,17 @@ describe("MySQL object listing and detail", () => {
     expect(detail.path).toEqual(["app", "orders"]);
     expect(detail.columns).toEqual([
       { name: "id", type: "int", nullable: false, isPrimary: true, defaultValue: undefined },
-      { name: "total", type: "decimal", nullable: true, isPrimary: false, defaultValue: "0.00" },
+      // `decimal(12,2)` is the DECLARED type and `decimal` the family beside it (#1033): the
+      // fixture's DDL is `DECIMAL(12, 2)`, and a migration generated from a bare `decimal` is
+      // rejected by both servers.
+      {
+        name: "total",
+        type: "decimal(12,2)",
+        baseType: "decimal",
+        nullable: true,
+        isPrimary: false,
+        defaultValue: "0.00",
+      },
     ]);
     // One entry per index with its columns in SEQ_IN_INDEX order, and NON_UNIQUE negated:
     // 0 is a unique index. GROUP_CONCAT is deliberately not used - group_concat_max_len is
@@ -4221,6 +4694,127 @@ describe("MySQL object listing and detail", () => {
     // Three reads, each narrowed to ONE database and ONE object.
     expect(bound).toHaveLength(3);
     for (const params of bound) expect(params).toEqual(["app", "orders"]);
+    await provider.disconnect();
+  });
+
+  /**
+   * The #1033 measurement: what each of the two type columns of `information_schema.COLUMNS`
+   * carries for one declaration.
+   *
+   * Measured 2026-09-22 on MySQL 26.7.0 and MariaDB 13.0.2, `SELECT COLUMN_NAME, DATA_TYPE,
+   * COLUMN_TYPE` over the `app.column_types` that `docker/mysql-init/01-object-fixture.sql`
+   * and `docker/mariadb-init/01-object-fixture.sql` create. `DATA_TYPE` is the FAMILY and
+   * drops the length, the precision and scale, the value list of an `ENUM` or a `SET`, and the
+   * `unsigned` attribute. `COLUMN_TYPE` is the type AS DECLARED and drops none of them.
+   *
+   * `varchar` with no length is not a type on either server - `CREATE TABLE t (note varchar)`
+   * is error 1064 - so the family is what a reader DISPLAYS at its peril and what a reader
+   * emitting DDL cannot use at all.
+   *
+   * The two servers agree on every row but `c_unsigned`, and `maria` is that disagreement
+   * measured rather than guessed: MariaDB still reports the integer display width MySQL stopped
+   * printing in 8.0.19, so `INT UNSIGNED` is `int unsigned` on MySQL and `int(10) unsigned` on
+   * MariaDB. One family, two declarations, and only the server knows which - which is why the
+   * family rides beside the declaration rather than being parsed back out of it.
+   */
+  const COLUMN_TYPE_MEASUREMENT = [
+    { name: "c_varchar", declared: "varchar(20)", family: "varchar" },
+    { name: "c_decimal", declared: "decimal(12,2)", family: "decimal" },
+    { name: "c_char", declared: "char(2)", family: "char" },
+    { name: "c_enum", declared: "enum('x','y')", family: "enum" },
+    { name: "c_set", declared: "set('a','b')", family: "set" },
+    { name: "c_unsigned", declared: "int unsigned", maria: "int(10) unsigned", family: "int" },
+    // The row where the two columns AGREE, and it is not decoration: a provider that copied
+    // the family into `baseType` unconditionally would claim a distinction this column does
+    // not have, which is the thing `ColumnSchema.baseType` says an absent field means.
+    { name: "c_text", declared: "text", family: "text" },
+  ] as const;
+
+  /** What the named server declares, which is `declared` except where `maria` overrides it. */
+  const declaredBy = (column: (typeof COLUMN_TYPE_MEASUREMENT)[number], mariadb: boolean): string =>
+    mariadb && "maria" in column ? column.maria : column.declared;
+
+  /** Those rows as the catalog answers them, for either column read. */
+  const columnTypeRows = (mariadb: boolean) =>
+    COLUMN_TYPE_MEASUREMENT.map((column) => ({
+      object_name: "column_types",
+      column_name: column.name,
+      column_type: declaredBy(column, mariadb),
+      data_type: column.family,
+      is_nullable: "YES",
+      column_default: null,
+      column_key: "",
+      extra: "",
+    }));
+
+  /** And what they must become: the declaration to SEE, the family to DECIDE on. */
+  const columnTypeColumns = (mariadb: boolean) =>
+    COLUMN_TYPE_MEASUREMENT.map((column) => ({
+      name: column.name,
+      type: declaredBy(column, mariadb),
+      ...(declaredBy(column, mariadb) === column.family ? {} : { baseType: column.family }),
+      nullable: true,
+      isPrimary: false,
+      defaultValue: undefined,
+    }));
+
+  test("a column's type is the type AS DECLARED, with the family beside it (#1033)", async () => {
+    // Both flavours, because one provider file serves both type ids and the issue names both.
+    for (const mariadb of [true, false]) {
+      const provider = await connectedTo(mariadb);
+      mockExecuteFn = async (sql: string) => {
+        const normalized = sql.trim().toLowerCase();
+        // The bulk TARGET read is the only statement ordered by TABLE_NAME that does not also
+        // project `object_name`; the bulk column read embeds the target as a subquery.
+        if (normalized.includes("order by table_name") && !normalized.includes("object_name")) {
+          return [[{ name: "column_types" }], []];
+        }
+        if (!normalized.includes("information_schema.columns")) return [[], []];
+        return [columnTypeRows(mariadb), []];
+      };
+
+      const single = await provider.describeObject(["app", "column_types"], "table");
+      expect(single.columns).toEqual(columnTypeColumns(mariadb));
+
+      // The SAME answer through the bulk read: two mappings would be two chances to disagree
+      // about the same table, and nothing downstream could tell which one was right.
+      const batch = await provider.describeObjects(["app"], "table");
+      expect(batch.details).toHaveLength(1);
+      expect(batch.details[0]?.columns).toEqual(columnTypeColumns(mariadb));
+
+      // `toEqual` ignores an undefined property, so the absent case is asserted by hand: a
+      // column whose declaration IS its family declares no `baseType` at all.
+      const plain = single.columns.find((column) => column.name === "c_text");
+      expect(Object.hasOwn(plain ?? {}, "baseType")).toBe(false);
+      await provider.disconnect();
+    }
+  });
+
+  test("both column reads select COLUMN_TYPE beside DATA_TYPE (#1033)", async () => {
+    // The statements themselves, because a mock answers whatever its author wrote: a read
+    // that stopped selecting `COLUMN_TYPE` would still pass the mapping test above.
+    const provider = await connectedTo(false);
+    const statements: string[] = [];
+    mockExecuteFn = async (sql: string) => {
+      statements.push(sql);
+      const normalized = sql.trim().toLowerCase();
+      // The bulk read skips its three detail statements when the target names nothing, so the
+      // target has to answer for the column read to be issued at all.
+      if (normalized.includes("order by table_name") && !normalized.includes("object_name")) {
+        return [[{ name: "orders" }], []];
+      }
+      return [[], []];
+    };
+
+    await provider.describeObject(["app", "orders"], "table");
+    await provider.describeObjects(["app"], "table");
+
+    const columnReads = statements.filter((sql) => sql.includes("information_schema.COLUMNS"));
+    expect(columnReads).toHaveLength(2);
+    for (const sql of columnReads) {
+      expect(sql).toContain("COLUMN_TYPE AS column_type");
+      expect(sql).toContain("DATA_TYPE AS data_type");
+    }
     await provider.disconnect();
   });
 
@@ -4265,6 +4859,7 @@ describe("MySQL object listing and detail", () => {
         [
           {
             column_name: "next_not_cached_value",
+            column_type: "bigint(21)",
             data_type: "bigint",
             is_nullable: "NO",
             column_default: null,
@@ -4277,8 +4872,60 @@ describe("MySQL object listing and detail", () => {
 
     const detail = await provider.describeObject(["app", "invoice_number_seq"], "sequence");
     expect(detail.columns).toEqual([
-      { name: "next_not_cached_value", type: "bigint", nullable: false, isPrimary: false, defaultValue: undefined },
+      {
+        name: "next_not_cached_value",
+        type: "bigint(21)",
+        baseType: "bigint",
+        nullable: false,
+        isPrimary: false,
+        defaultValue: undefined,
+      },
     ]);
+    await provider.disconnect();
+  });
+
+  test("hasColumns is declared exactly on the kinds the column dictionary answers for (#789)", async () => {
+    // The declaration is a CLIENT gate: the tree draws a twisty on a kind that declares it and
+    // asks `describeObject` when the row opens, so a kind declaring it and answering nothing is
+    // a twisty that opens on nothing. Derived at the declaration from the same `hasColumns()`
+    // predicate both read methods gate on (`mysql.ts:1860-1862`), and asserted here against the
+    // literal set, which is the only thing that can catch the derivation widening.
+    //
+    // MariaDB, because it is the flavour that has every kind: the MySQL six plus `package` and
+    // `sequence`. The sequence is the entry `role === "relation"` would have got wrong.
+    const provider = await connectedTo(true);
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    expect(
+      kinds
+        .filter((kind) => kindHasColumns(kind))
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["sequence", "table", "view"]);
+    for (const kind of kinds) {
+      // Absent, never `false`. Both read as false through `kindHasColumns`, and only the absence
+      // says the provider abstained rather than measured a negative.
+      if (!["sequence", "table", "view"].includes(kind.id)) expect(kind.hasColumns).toBeUndefined();
+    }
+    await provider.disconnect();
+  });
+
+  test("a declared kind answers a column a reader can be shown, and an abstaining kind answers none (#789)", async () => {
+    // Both fields are checked because the tree renders both, and `name` feeds `pathKey`, which
+    // calls `segment.replaceAll(...)`: a non-string name throws inside the walk and unmounts the
+    // whole tree rather than failing one row.
+    const provider = await connectedTo(false);
+
+    const table = await provider.describeObject(["app", "customers"], "table");
+    expect(table.columns.length).toBeGreaterThan(0);
+    for (const column of table.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+
+    expect((await provider.describeObject(["app", "touch_order"], "procedure")).columns).toEqual([]);
     await provider.disconnect();
   });
 
@@ -4543,7 +5190,17 @@ describe("MySQL bulk column read", () => {
     const orders = batch.details[2];
     expect(orders.columns).toEqual([
       { name: "id", type: "int", nullable: false, isPrimary: true, defaultValue: undefined },
-      { name: "total", type: "decimal", nullable: true, isPrimary: false, defaultValue: "0.00" },
+      // `decimal(12,2)` is the DECLARED type and `decimal` the family beside it (#1033): the
+      // fixture's DDL is `DECIMAL(12, 2)`, and a migration generated from a bare `decimal` is
+      // rejected by both servers.
+      {
+        name: "total",
+        type: "decimal(12,2)",
+        baseType: "decimal",
+        nullable: true,
+        isPrimary: false,
+        defaultValue: "0.00",
+      },
     ]);
     expect(orders.indexes).toEqual([
       { name: "PRIMARY", columns: ["id"], unique: true },
@@ -4597,7 +5254,7 @@ describe("MySQL bulk column read", () => {
     await provider.disconnect();
   });
 
-  test("a bounded read binds one row more than the bound and reports its own truncation", async () => {
+  test("a bounded read asks for one row more than the bound and reports its own truncation", async () => {
     const provider = await connectedTo(false);
     protocolCalls = [];
 
@@ -4605,10 +5262,27 @@ describe("MySQL bulk column read", () => {
 
     // limit + 1, which is how a saturated read is told from an exact one with no second
     // count. The bound is the caller's and is reported as the caller's.
-    expect(protocolCalls[0].params).toEqual(["app", "BASE TABLE", "SYSTEM VERSIONED", 2]);
-    expect(protocolCalls[0].sql).toContain("LIMIT ?");
+    expect(protocolCalls[0].params).toEqual(["app", "BASE TABLE", "SYSTEM VERSIONED"]);
     expect(batch.details.map((detail) => detail.path)).toEqual([["app", "customers"]]);
     expect(batch.truncated).toEqual({ limit: 1, reason: callerBoundTruncationReason(1) });
+    await provider.disconnect();
+  });
+
+  test("the bound is spelled into the statement, because two MySQL-wire engines refuse to bind one", async () => {
+    const provider = await connectedTo(false);
+    protocolCalls = [];
+
+    await provider.describeObjects(["app"], "table", 1);
+
+    // Measured 2026-09-22 through mysql2 against Apache Doris 4.1.3-rc02 and StarRocks
+    // 3.3.22-753696f: `execute()` with a literal LIMIT answers, `execute()` with `LIMIT ?`
+    // does not. Doris calls it `mismatched input 'LIMIT' expecting {<EOF>, ';'}` and
+    // StarRocks says it outright, `using parameter(?) as limit or offset not supported`.
+    // Stock MySQL 8 binds it happily, so this is the relatives' constraint and not the
+    // driver's. The value is the caller's `limit + 1`, already validated as a positive
+    // whole number above, which is why spelling it in cannot carry anything but digits.
+    expect(protocolCalls[0].sql).toContain("LIMIT 2");
+    expect(protocolCalls[0].sql).not.toContain("LIMIT ?");
     await provider.disconnect();
   });
 
@@ -4651,7 +5325,14 @@ describe("MySQL bulk column read", () => {
       {
         path: ["app", "invoice_number_seq"],
         columns: [
-          { name: "next_not_cached_value", type: "bigint", nullable: false, isPrimary: false, defaultValue: undefined },
+          {
+            name: "next_not_cached_value",
+            type: "bigint(21)",
+            baseType: "bigint",
+            nullable: false,
+            isPrimary: false,
+            defaultValue: undefined,
+          },
         ],
         indexes: [],
         foreignKeys: [],

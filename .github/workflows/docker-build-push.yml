@@ -23,6 +23,16 @@ on:
         required: false
         default: false
         type: boolean
+      variant:
+        description: 'Rebuild one image variant instead of all three. Use this when a single leg failed beside two that already published: re-running all of them would re-push version tags the Docker Hub mirror has frozen, and buildx exports every tag in one step, so one rejected tag fails the whole job.'
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - debian
+          - alpine
+          - alpine-slim
 
 # Cancel an in-progress build when a newer commit is pushed to the same ref,
 # so rapid pushes to a feature/fix branch don't stack multi-arch builds.
@@ -35,26 +45,27 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/${{ github.event.repository.name }}
 
 jobs:
-  build-and-push:
+  # Everything that is the same for all three image variants, resolved once:
+  # the gates, the version, the platform list and whether the Docker Hub mirror
+  # is in play. The build job below fans out over the variants and would
+  # otherwise run ESLint and tsc three times on one commit and ask
+  # distribution/channels.yaml the same question three times.
+  prepare:
     # Product releases only: chart releases (libredb-studio-<chart-version>)
-    # are published by helm-release.yml and must not feed this pipeline.
+    # are published by helm-release.yml and must not feed this pipeline. On the
+    # first job, so a chart release skips the whole graph rather than each job.
     if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'libredb-studio-')
-    name: Build and Push Docker Image
+    name: Prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     permissions:
       contents: read
-      packages: write
-      # SLSA build provenance for the image (issue #123). Separate from the
-      # inline provenance buildx attaches to the manifest: that one is
-      # unsigned, this one is signed with the job's GitHub OIDC identity and
-      # verifiable with `gh attestation verify oci://...`.
-      id-token: write
-      attestations: write
     outputs:
       version: ${{ steps.extract-version.outputs.version }}
-      image: ${{ steps.meta.outputs.tags }}
-    
+      platforms: ${{ steps.platforms.outputs.list }}
+      dockerhub: ${{ steps.dockerhub.outputs.enabled }}
+      variants: ${{ steps.variants.outputs.matrix }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -121,19 +132,36 @@ jobs:
             echo "list=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up QEMU for multi-platform builds
-        if: contains(steps.platforms.outputs.list, 'arm64')
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+      # The image variants, and the one place they are listed (#840). The build
+      # and Channel E2E jobs both consume this output, so they cannot drift into
+      # "built three, browser-tested one".
+      #
+      # A table in a script rather than a literal `strategy.matrix`, for one
+      # reason: a workflow_dispatch may ask for a single variant, and GitHub
+      # cannot filter a literal matrix by an input.
+      # tests/unit/packaging-image-variants.test.ts reads this table back out and
+      # checks it against the Dockerfiles at the repo root.
+      - name: Resolve the variant matrix
+        id: variants
+        env:
+          # Empty on every event except workflow_dispatch, where the input
+          # defaults to "all".
+          REQUESTED: ${{ inputs.variant }}
+        run: |
+          set -euo pipefail
+          VARIANTS='[{"variant":"debian","dockerfile":"Dockerfile","suffix":""},{"variant":"alpine","dockerfile":"Dockerfile.alpine","suffix":"-alpine"},{"variant":"alpine-slim","dockerfile":"Dockerfile.alpine-slim","suffix":"-alpine-slim"}]'
+          if [ -z "${REQUESTED:-}" ] || [ "$REQUESTED" = "all" ]; then
+            selected="$VARIANTS"
+          else
+            selected=$(printf '%s' "$VARIANTS" | jq -c --arg v "$REQUESTED" '[.[] | select(.variant == $v)]')
+            # A typo must stop the run rather than build nothing and report success.
+            if [ "$(printf '%s' "$selected" | jq 'length')" -ne 1 ]; then
+              echo "Unknown variant '$REQUESTED' - expected all, debian, alpine or alpine-slim" >&2
+              exit 1
+            fi
+          fi
+          printf 'matrix={"include":%s}\n' "$selected" >> "$GITHUB_OUTPUT"
+          echo "Building: $(printf '%s' "$selected" | jq -r '[.[].variant] | join(", ")')"
 
       # Docker Hub is an optional secondary mirror for discoverability. It is
       # only used when DOCKER_HUB_TOKEN is configured (so forks without the
@@ -145,7 +173,7 @@ jobs:
         run: |
           # Two gates: the secret says CI *can* push, update.ci_enabled in
           # distribution/channels.yaml says it *should*. Read here rather than
-          # in a separate job because this one already has the dependencies
+          # in the build job because this one already has the dependencies
           # installed - and an unreadable inventory leaves the mirror off
           # instead of failing the canonical GHCR publish alongside it.
           ci_enabled=$(node scripts/distribution-check.mjs --ci-enabled docker-hub-mirror 2>/dev/null || echo unresolved)
@@ -158,8 +186,59 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # One job per published variant, in parallel (issue #840). Three files rather
+  # than one ARG-interpolated FROM: Dependabot's docker ecosystem cannot follow
+  # an interpolated base tag, and the Alpine variants exist for their CVE
+  # posture, so losing base bumps would cost them the reason they are here.
+  #
+  # `fail-fast: false` on purpose: an -alpine-slim that will not build must not
+  # cancel the default image every user pulls.
+  #
+  # The matrix comes from `prepare` so that a workflow_dispatch can rebuild one
+  # variant on its own; tests/unit/packaging-image-variants.test.ts asserts the
+  # table it is built from lists every Dockerfile at the repo root, so a fourth
+  # variant cannot land unpublished.
+  build-and-push:
+    needs: prepare
+    name: Build and Push (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      # SLSA build provenance for the image (issue #123). Separate from the
+      # inline provenance buildx attaches to the manifest: that one is
+      # unsigned, this one is signed with the job's GitHub OIDC identity and
+      # verifiable with `gh attestation verify oci://...`.
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ needs.prepare.outputs.version }}
+      image: ${{ steps.meta.outputs.tags }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.variants) }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up QEMU for multi-platform builds
+        if: contains(needs.prepare.outputs.platforms, 'arm64')
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+
       - name: Log in to Docker Hub
-        if: steps.dockerhub.outputs.enabled == 'true'
+        if: needs.prepare.outputs.dockerhub == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ vars.DOCKER_HUB_USERNAME }}
@@ -187,7 +266,7 @@ jobs:
         env:
           GHCR_IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
           REPO_NAME: ${{ steps.image.outputs.name }}
-          DH_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+          DH_ENABLED: ${{ needs.prepare.outputs.dockerhub }}
           DH_ORGANIZATION: ${{ vars.DOCKER_HUB_ORGANIZATION }}
         run: |
           IMAGES="$GHCR_IMAGE"
@@ -208,8 +287,12 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ steps.images.outputs.list }}
+          # The variant suffix is written into each tag rather than set through
+          # the action's `flavor`, which would have to carry an empty suffix for
+          # the default image. `:0.16.2`, `:0.16.2-alpine`, `:0.16.2-alpine-slim`
+          # and the same three for latest/main/dev and the immutable sha- tag.
           tags: |
-            type=raw,value=${{ steps.extract-version.outputs.version }},enable=${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ needs.prepare.outputs.version }}${{ matrix.suffix }},enable=${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
             # latest moves on a real release event, or on the release chain's
             # dispatch (publish_latest=true, pinned to the release tag ref).
             # A plain manual dispatch (backfilling an old version) must never
@@ -218,22 +301,26 @@ jobs:
             # Keep this "release context" condition in step with the
             # dispatch-helm-release job's if: below - if they drift, the
             # chart dispatch and the latest tag disagree on what a release is.
-            type=raw,value=latest,enable=${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_latest == true) }}
-            type=raw,value=main,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            type=raw,value=dev,enable=${{ github.event_name == 'push' && github.ref != 'refs/heads/main' }}
-            type=sha,prefix=sha-
+            type=raw,value=latest${{ matrix.suffix }},enable=${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_latest == true) }}
+            type=raw,value=main${{ matrix.suffix }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=dev${{ matrix.suffix }},enable=${{ github.event_name == 'push' && github.ref != 'refs/heads/main' }}
+            type=sha,prefix=sha-,suffix=${{ matrix.suffix }}
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: ${{ steps.platforms.outputs.list }}
+          # Scoped per variant: the three builds share almost no layers (glibc
+          # against musl, three different runner bases), so one scope would have
+          # them evicting each other's cache on every run.
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+          platforms: ${{ needs.prepare.outputs.platforms }}
           build-args: |
             JWT_SECRET_BUILD=build-time-placeholder-secret-32ch
             ADMIN_PASSWORD_BUILD=build
@@ -263,9 +350,10 @@ jobs:
           echo "## 🚀 Docker Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${{ steps.extract-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Docker Hub mirror:** ${{ steps.dockerhub.outputs.enabled }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Platforms:** ${{ steps.platforms.outputs.list }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Variant:** ${{ matrix.variant }} (${{ matrix.dockerfile }})" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ needs.prepare.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Docker Hub mirror:** ${{ needs.prepare.outputs.dockerhub }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** ${{ needs.prepare.outputs.platforms }}" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** ${{ steps.image.outputs.name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Tags:" >> $GITHUB_STEP_SUMMARY
@@ -278,11 +366,21 @@ jobs:
   # (docker channel of scripts/channel-embedded-sample-e2e.sh). The image is
   # already on GHCR - this cannot un-push it - but a red run blocks the
   # release chain below and flags broken packaging on branch builds.
+  #
+  # ONE RUN PER VARIANT, and that is the point of the matrix rather than a
+  # convenience. `e2e/embedded-samples.spec.ts` waits on `.monaco-editor`, and
+  # the first -alpine-slim build shipped an image that booted, served /login and
+  # seeded its sample database with no query editor at all: every check a
+  # single-image pipeline runs was green. A packaging trade only stays a trade
+  # if a browser confirms what survived it.
   channel-e2e:
-    name: Channel E2E (docker)
-    needs: build-and-push
+    name: Channel E2E (docker, ${{ matrix.variant }})
+    needs: [prepare, build-and-push]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.variants) }}
     # Deliberately NOT run inside Playwright's container image (unlike the two
     # jobs in ci.yml): this channel drives `docker pull` / `docker run`, and a
     # container job has no daemon. scripts/channel-embedded-sample-e2e.sh would
@@ -325,9 +423,11 @@ jobs:
         env:
           REGISTRY_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           COMMIT_SHA: ${{ github.sha }}
+          VARIANT_SUFFIX: ${{ matrix.suffix }}
         run: |
-          # Same immutable tag the metadata step publishes (type=sha,prefix=sha-).
-          IMAGE="$(echo "$REGISTRY_IMAGE" | tr '[:upper:]' '[:lower:]'):sha-$(printf '%s' "$COMMIT_SHA" | cut -c1-7)"
+          # Same immutable tag the metadata step publishes
+          # (type=sha,prefix=sha-,suffix=<variant>).
+          IMAGE="$(echo "$REGISTRY_IMAGE" | tr '[:upper:]' '[:lower:]'):sha-$(printf '%s' "$COMMIT_SHA" | cut -c1-7)${VARIANT_SUFFIX}"
           docker pull "$IMAGE"
           bash scripts/channel-embedded-sample-e2e.sh docker "$IMAGE"
 
@@ -347,7 +447,14 @@ jobs:
     # fails the packaged-artifact browser test must not fan out to the chart.
     name: Dispatch Helm chart release
     needs: [build-and-push, channel-e2e]
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_latest == true)
+    # The variant clause is the recovery path's guard, not part of the release
+    # condition: a dispatch that rebuilt ONE leg beside two that already
+    # published must not re-release a chart whose contents did not change, and
+    # #167 then blocks the retry a real chart change needs.
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_latest == true &&
+       (inputs.variant == '' || inputs.variant == 'all'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -362,3 +469,62 @@ jobs:
           set -euo pipefail
           gh workflow run helm-release.yml --ref "$REF"
           echo "Dispatched helm-release on ${REF}."
+
+  # DOCKERHUB.md is the Docker Hub listing text. The repo keeps it current - the
+  # release checklist asks for the engine list to be checked in it alongside
+  # README.md - but nothing ever pushed it to the registry, so the listing sat
+  # on whatever was there when the repository was created: on 20 Sep 2026 it
+  # still advertised `docker pull libredb/libredb-studio:0.12.0` as the
+  # pin-an-exact-version example, nine releases after that tag.
+  #
+  # Same two gates as the mirror push itself: the token says CI *can* reach
+  # Docker Hub, update.ci_enabled in distribution/channels.yaml says it
+  # *should*. Release context only, so a branch build never rewrites the public
+  # page. Not continue-on-error: by the time this runs the images are published
+  # and a red job unpublishes nothing, so the only thing a swallowed failure
+  # buys is another listing that silently falls behind. The full_description cap
+  # (25000 BYTES, measured against the live API, not characters) is held by
+  # tests/unit/dockerhub-listing.test.ts, which fails the PR that
+  # crosses it rather than the release that follows it.
+  sync-dockerhub-description:
+    name: Sync Docker Hub description
+    needs: [prepare, build-and-push]
+    if: >-
+      needs.prepare.outputs.dockerhub == 'true' &&
+      vars.DOCKER_HUB_ORGANIZATION != '' &&
+      (github.event_name == 'release' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish_latest == true))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      # The npm package headline, so the listing's one-liner and the package's
+      # cannot drift apart. Docker Hub caps it at 100 characters; the same test
+      # holds that end.
+      - name: Read the short description
+        id: short
+        run: |
+          set -euo pipefail
+          {
+            echo "description<<EOF"
+            jq -r '.description' package.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push DOCKERHUB.md to the listing
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ vars.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+          repository: ${{ vars.DOCKER_HUB_ORGANIZATION }}/${{ github.event.repository.name }}
+          readme-filepath: ./DOCKERHUB.md
+          short-description: ${{ steps.short.outputs.description }}
+          # Every link in DOCKERHUB.md is already absolute, and the test above
+          # keeps it that way, so there is nothing for url completion to rewrite
+          # - and its known failure modes on code spans cannot bite.
+          enable-url-completion: false

@@ -55,8 +55,8 @@ const WORKFLOWS = [
 ] as const satisfies readonly AgentRunWorkflowType[];
 
 const samplingSchema = z.strictObject({
-  temperature: z.number().min(0).max(2),
-  topP: z.number().min(0).max(1),
+  temperature: z.number().min(0).max(2).optional(),
+  topP: z.number().min(0).max(1).optional(),
 });
 
 /*

@@ -30,6 +30,7 @@ import type {
   ObjectKindSpec,
   ObjectSourceDocument,
   ObjectSourcePart,
+  ProviderCapabilities,
 } from "@/lib/db/types";
 import {
   DatabaseError,
@@ -163,6 +164,7 @@ const VIEW_KIND: ObjectKindSpec = { id: "view", role: "relation", label: "View",
 interface ProviderShape {
   type?: DatabaseProvider["type"];
   containerLevels?: ContainerLevels;
+  containerPathShapes?: ProviderCapabilities["containerPathShapes"];
   objectKinds?: readonly ObjectKindSpec[];
   listContainers?: DatabaseProvider["listContainers"];
   countObjects?: DatabaseProvider["countObjects"];
@@ -178,6 +180,7 @@ function objectProvider(shape: ProviderShape = {}): DatabaseProvider {
     type: shape.type,
     capabilities: {
       containerLevels: shape.containerLevels ?? [SCHEMA_LEVEL],
+      ...(shape.containerPathShapes === undefined ? {} : { containerPathShapes: shape.containerPathShapes }),
       objectKinds: shape.objectKinds ?? [TABLE_KIND, VIEW_KIND],
     },
   });
@@ -403,6 +406,45 @@ describe("POST /api/db/objects/containers", () => {
       '"parent" must be an array of path segments',
     );
   });
+
+  test("a parent AT the declared depth reaches the provider", async () => {
+    // On one level both rules accept `["app"]`, so this proves only that the route lets it through;
+    // the test below is the one that tells the depth ceiling from the address rule.
+    const listContainers = mock(async (): Promise<Container[]> => []);
+    activeProvider = objectProvider({ listContainers });
+
+    const response = await containersRoute.POST(
+      createMockRequest("/api/db/objects/containers", {
+        method: "POST",
+        body: { connection, parent: ["app"] },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await parseResponseJSON<Container[]>(response)).toEqual([]);
+    expect(listContainers).toHaveBeenCalledWith(["app"]);
+  });
+
+  test("a parent SHORTER than an exact engine's address still passes", async () => {
+    // The address rule would refuse `["main"]` on this declaration, so a 200 here proves `parent`
+    // is checked by the depth ceiling and not by the address shapes.
+    const listContainers = mock(async (): Promise<Container[]> => []);
+    activeProvider = objectProvider({
+      containerLevels: [CATALOG_LEVEL, SCHEMA_LEVEL],
+      containerPathShapes: "exact",
+      listContainers,
+    });
+
+    const response = await containersRoute.POST(
+      createMockRequest("/api/db/objects/containers", {
+        method: "POST",
+        body: { connection, parent: ["main"] },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(listContainers).toHaveBeenCalledWith(["main"]);
+  });
 });
 
 // ============================================================================
@@ -439,7 +481,9 @@ describe("POST /api/db/objects/counts", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(await parseResponseJSON(response)).toMatchObject({ error: expect.stringContaining("container depth") });
+    expect(await parseResponseJSON<{ error: string }>(response)).toEqual({
+      error: 'postgres accepts "container" as [schema], received ["app","nested"]',
+    });
     expect(countObjects).toHaveBeenCalledTimes(0);
   });
 
@@ -476,11 +520,163 @@ describe("POST /api/db/objects/counts", () => {
 
     expect(response.status).toBe(400);
     // The exact message, not just the word: a string container has a `.length` of its own, so
-    // dropping the shape check would still produce a 400 from the DEPTH check and a loose
+    // dropping the shape check would still produce a 400 from the ADDRESS check and a loose
     // assertion would not notice.
     expect((await parseResponseJSON<{ error: string }>(response)).error).toBe(
       '"container" must be an array of path segments',
     );
+  });
+
+  test("refuses a container SHORTER than an exact engine accepts, at the edge and with no code", async () => {
+    const countObjects = mock(async () => ({}));
+    activeProvider = objectProvider({ countObjects });
+
+    const response = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", {
+        method: "POST",
+        body: { connection, container: [] },
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    expect(await parseResponseJSON<{ error: string }>(response)).toEqual({
+      error: 'postgres accepts "container" as [schema], received []',
+    });
+    expect(countObjects).toHaveBeenCalledTimes(0);
+  });
+
+  test("a too-short and a too-long container meet one sentence and one wire shape", async () => {
+    const countObjects = mock(async () => ({}));
+    activeProvider = objectProvider({ countObjects });
+    const post = async (container: readonly string[]) => {
+      const response = await countsRoute.POST(
+        createMockRequest("/api/db/objects/counts", { method: "POST", body: { connection, container } }) as never,
+      );
+      return { status: response.status, body: await parseResponseJSON<Record<string, string>>(response) };
+    };
+
+    const short = await post([]);
+    const long = await post(["app", "nested"]);
+
+    expect(short.status).toBe(400);
+    expect(long.status).toBe(400);
+    expect(Object.keys(short.body)).toEqual(["error"]);
+    expect(Object.keys(long.body)).toEqual(["error"]);
+    const opening = (body: Record<string, string>) => body.error.replace(/received .*$/, "");
+    expect(opening(short.body)).toBe(opening(long.body));
+    expect(opening(short.body)).toBe('postgres accepts "container" as [schema], ');
+    expect(countObjects).toHaveBeenCalledTimes(0);
+  });
+
+  test("on a prefixes engine an outer-level container reaches the provider", async () => {
+    const countObjects = mock(async () => ({}));
+    activeProvider = objectProvider({
+      type: "trino",
+      containerLevels: [CATALOG_LEVEL, SCHEMA_LEVEL],
+      containerPathShapes: "prefixes",
+      countObjects,
+    });
+
+    const outer = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", {
+        method: "POST",
+        body: { connection, container: ["memory"] },
+      }) as never,
+    );
+    expect(outer.status).toBe(200);
+    expect(countObjects).toHaveBeenCalledWith(["memory"]);
+
+    const full = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", {
+        method: "POST",
+        body: { connection, container: ["memory", "app"] },
+      }) as never,
+    );
+    expect(full.status).toBe(200);
+    expect(countObjects).toHaveBeenCalledWith(["memory", "app"]);
+  });
+
+  test("on a prefixes engine the empty and the too-long container are refused naming every shape", async () => {
+    const countObjects = mock(async () => ({}));
+    activeProvider = objectProvider({
+      type: "trino",
+      containerLevels: [CATALOG_LEVEL, SCHEMA_LEVEL],
+      containerPathShapes: "prefixes",
+      countObjects,
+    });
+
+    const empty = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", { method: "POST", body: { connection, container: [] } }) as never,
+    );
+    expect(empty.status).toBe(400);
+    expect(await parseResponseJSON<{ error: string }>(empty)).toEqual({
+      error: 'trino accepts "container" as [catalog] or [catalog, schema], received []',
+    });
+
+    const long = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", {
+        method: "POST",
+        body: { connection, container: ["memory", "app", "x"] },
+      }) as never,
+    );
+    expect(long.status).toBe(400);
+    expect(await parseResponseJSON<{ error: string }>(long)).toEqual({
+      error: 'trino accepts "container" as [catalog] or [catalog, schema], received ["memory","app","x"]',
+    });
+    expect(countObjects).toHaveBeenCalledTimes(0);
+  });
+
+  test("an engine with no container level accepts only the empty container", async () => {
+    const countObjects = mock(async () => ({}));
+    activeProvider = objectProvider({ type: "sqlite", containerLevels: [], countObjects });
+
+    const named = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", {
+        method: "POST",
+        body: { connection, container: ["main"] },
+      }) as never,
+    );
+    expect(named.status).toBe(400);
+    expect(await parseResponseJSON<{ error: string }>(named)).toEqual({
+      error: 'sqlite accepts "container" as empty, received ["main"]',
+    });
+    expect(countObjects).toHaveBeenCalledTimes(0);
+
+    const empty = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", { method: "POST", body: { connection, container: [] } }) as never,
+    );
+    expect(empty.status).toBe(200);
+    expect(countObjects).toHaveBeenCalledWith([]);
+  });
+
+  test("the route spells a shape by the lowercased LABEL, whatever the provider spells", async () => {
+    activeProvider = objectProvider({
+      containerLevels: [{ id: "schema", label: "Namespace", labelPlural: "Namespaces" }],
+    });
+
+    const response = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", { method: "POST", body: { connection, container: [] } }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    expect(await parseResponseJSON<{ error: string }>(response)).toEqual({
+      error: 'postgres accepts "container" as [namespace], received []',
+    });
+  });
+
+  test("a prefixes declaration with no level accepts no container at all", async () => {
+    const countObjects = mock(async () => ({}));
+    activeProvider = objectProvider({ containerLevels: [], containerPathShapes: "prefixes", countObjects });
+
+    const response = await countsRoute.POST(
+      createMockRequest("/api/db/objects/counts", { method: "POST", body: { connection, container: [] } }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    expect(await parseResponseJSON<{ error: string }>(response)).toEqual({
+      error: 'postgres accepts "container" as nothing: this declaration carries no container level, received []',
+    });
+    expect(countObjects).toHaveBeenCalledTimes(0);
   });
 });
 
@@ -519,7 +715,9 @@ describe("POST /api/db/objects/list", () => {
     );
 
     expect(response.status).toBe(400);
-    expect((await parseResponseJSON<{ error: string }>(response)).error).toContain("container depth");
+    expect((await parseResponseJSON<{ error: string }>(response)).error).toBe(
+      'postgres accepts "container" as [schema], received ["app","nested"]',
+    );
     expect(listObjects).toHaveBeenCalledTimes(0);
   });
 
@@ -563,6 +761,44 @@ describe("POST /api/db/objects/list", () => {
     );
 
     expect(listObjects).toHaveBeenCalledWith(["app"], "table");
+  });
+
+  test("refuses a container SHORTER than an exact engine accepts", async () => {
+    const listObjects = mock(async () => []);
+    activeProvider = objectProvider({ listObjects });
+
+    const response = await listRoute.POST(
+      createMockRequest("/api/db/objects/list", {
+        method: "POST",
+        body: { connection, container: [], kind: "table" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    expect(await parseResponseJSON<{ error: string }>(response)).toEqual({
+      error: 'postgres accepts "container" as [schema], received []',
+    });
+    expect(listObjects).toHaveBeenCalledTimes(0);
+  });
+
+  test("on a prefixes engine an outer-level container reaches the provider", async () => {
+    const listObjects = mock(async () => []);
+    activeProvider = objectProvider({
+      type: "trino",
+      containerLevels: [CATALOG_LEVEL, SCHEMA_LEVEL],
+      containerPathShapes: "prefixes",
+      listObjects,
+    });
+
+    const response = await listRoute.POST(
+      createMockRequest("/api/db/objects/list", {
+        method: "POST",
+        body: { connection, container: ["memory"], kind: "table" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(listObjects).toHaveBeenCalledWith(["memory"], "table");
   });
 });
 
@@ -621,6 +857,110 @@ describe("POST /api/db/objects/describe", () => {
 
     expect(response.status).toBe(400);
     expect((await parseResponseJSON<{ error: string }>(response)).error).toContain("kind");
+  });
+
+  test("answers the provider's ObjectDetail verbatim, indexes and foreign keys included", async () => {
+    // The object tree reads only the COLUMNS out of this answer, and the route still hands the
+    // whole detail over unreshaped, which is what lets a later phase draw the indexes and the
+    // foreign keys with no second round trip. Asserted with all three arrays non-empty rather
+    // than with the columns alone: a route that dropped either of the other two would still pass
+    // the column-only comparison above.
+    const detail: ObjectDetail = {
+      path: ["app", "orders"],
+      columns: [
+        { name: "id", type: "integer", nullable: false, isPrimary: true },
+        { name: "total", type: "numeric(12,2)", nullable: true, isPrimary: false, defaultValue: "0" },
+      ],
+      indexes: [{ name: "orders_pkey", columns: ["id"], unique: true }],
+      foreignKeys: [{ columnName: "customer_id", referencedTable: "customers", referencedColumn: "id" }],
+    };
+    activeProvider = objectProvider({ describeObject: mock(async () => detail) });
+
+    const response = await describeRoute.POST(
+      createMockRequest("/api/db/objects/describe", {
+        method: "POST",
+        body: { connection, path: ["app", "orders"], kind: "table" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await parseResponseJSON<ObjectDetail>(response)).toEqual(detail);
+  });
+
+  test("answers three empty arrays for a kind that has no columns, rather than refusing", async () => {
+    // A kind with nothing to describe is a 200 carrying three empty arrays, and that is a
+    // contract the tree depends on rather than an accident: the twisty is gated on the kind's own
+    // `hasColumns` declaration and never on the answer, so a caller that asks anyway must get an
+    // answer it can render as "none" instead of the engine's-fault path. Two providers reach this
+    // shape without touching the wire at all - oracle returns it for any kind whose role is not
+    // `relation` (`src/lib/db/providers/sql/oracle.ts:2015-2017`) and mysql for any kind its own
+    // `hasColumns` predicate rejects (`src/lib/db/providers/sql/mysql.ts:2518-2520`).
+    const describeObject = mock(async () => emptyDetail(["app", "order_total(integer)"]));
+    activeProvider = objectProvider({ describeObject });
+
+    const response = await describeRoute.POST(
+      createMockRequest("/api/db/objects/describe", {
+        method: "POST",
+        body: { connection, path: ["app", "order_total(integer)"], kind: "function" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await parseResponseJSON<ObjectDetail>(response)).toEqual({
+      path: ["app", "order_total(integer)"],
+      columns: [],
+      indexes: [],
+      foreignKeys: [],
+    });
+    expect(describeObject).toHaveBeenCalledWith(["app", "order_total(integer)"], "function");
+  });
+
+  // An object dropped between the listing and the expand has TWO answers in the shipped fleet, and
+  // the pair below is pinned so a later reader cannot assume either one is THE behaviour.
+  // PostgreSQL checks for a zero-row catalog answer and raises `No detail row for ...`
+  // (`src/lib/db/providers/sql/postgres.ts:3021`); oracle, mysql and couchbase have no such check
+  // and answer three empty arrays, couchbase because a rejected INFER is deliberately not an error
+  // (`src/lib/db/providers/document/couchbase/introspect.ts:206-215`). Both cases are driven
+  // through DOUBLES over one missing path and are never asserted as a count of engines.
+  const DROPPED_PATH = ["app", "orders_dropped"];
+
+  test("maps a provider that raises for a path it cannot find to 400 QUERY_ERROR", async () => {
+    activeProvider = objectProvider({
+      describeObject: mock(async () => {
+        throw new QueryError(`No detail row for ${DROPPED_PATH.join(".")}`, "postgres");
+      }),
+    });
+
+    const response = await describeRoute.POST(
+      createMockRequest("/api/db/objects/describe", {
+        method: "POST",
+        body: { connection, path: DROPPED_PATH, kind: "table" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    const body = await parseResponseJSON<{ error: string; code: string }>(response);
+    expect(body.error).toBe("No detail row for app.orders_dropped");
+    expect(body.code).toBe(ApiErrorCode.QUERY_ERROR);
+  });
+
+  test("answers 200 and three empty arrays for the SAME missing path when the provider does not check", async () => {
+    activeProvider = objectProvider({ describeObject: mock(async () => emptyDetail(DROPPED_PATH)) });
+
+    const response = await describeRoute.POST(
+      createMockRequest("/api/db/objects/describe", {
+        method: "POST",
+        body: { connection, path: DROPPED_PATH, kind: "table" },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await parseResponseJSON<ObjectDetail>(response)).toEqual({
+      path: DROPPED_PATH,
+      columns: [],
+      indexes: [],
+      foreignKeys: [],
+    });
   });
 });
 
@@ -1055,9 +1395,10 @@ describe("POST /api/db/objects/inventory", () => {
   });
 
   test("refuses a named container deeper than the engine declares", async () => {
+    const listObjects = mock(async () => []);
     activeProvider = objectProvider({
       listContainers: mock(async () => []),
-      listObjects: mock(async () => []),
+      listObjects,
     });
 
     const response = await inventoryRoute.POST(
@@ -1068,7 +1409,51 @@ describe("POST /api/db/objects/inventory", () => {
     );
 
     expect(response.status).toBe(400);
-    expect((await parseResponseJSON<{ error: string }>(response)).error).toContain("container depth");
+    expect((await parseResponseJSON<{ error: string }>(response)).error).toBe(
+      'postgres accepts "containers" as [schema], received ["app","nested"]',
+    );
+    expect(listObjects).toHaveBeenCalledTimes(0);
+  });
+
+  test("refuses a named container shorter than an exact engine accepts, before any listing", async () => {
+    const listObjects = mock(async () => []);
+    activeProvider = objectProvider({ listContainers: mock(async () => []), listObjects });
+
+    const response = await inventoryRoute.POST(
+      createMockRequest("/api/db/objects/inventory", {
+        method: "POST",
+        body: { connection, containers: [["app"], []] },
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    // The first entry is valid, so a check that ran inside the fan-out would have listed it first.
+    expect(await parseResponseJSON<{ error: string }>(response)).toEqual({
+      error: 'postgres accepts "containers" as [schema], received []',
+    });
+    expect(listObjects).toHaveBeenCalledTimes(0);
+  });
+
+  test("on a prefixes engine outer-level named containers reach the provider", async () => {
+    const listObjects = mock(async () => []);
+    activeProvider = objectProvider({
+      type: "trino",
+      containerLevels: [CATALOG_LEVEL, SCHEMA_LEVEL],
+      containerPathShapes: "prefixes",
+      objectKinds: [TABLE_KIND],
+      listObjects,
+    });
+
+    const response = await inventoryRoute.POST(
+      createMockRequest("/api/db/objects/inventory", {
+        method: "POST",
+        body: { connection, containers: [["memory"], ["memory", "app"]] },
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(listObjects).toHaveBeenCalledWith(["memory"], "table");
+    expect(listObjects).toHaveBeenCalledWith(["memory", "app"], "table");
   });
 
   test("refuses a containers value that is not a list of paths", async () => {

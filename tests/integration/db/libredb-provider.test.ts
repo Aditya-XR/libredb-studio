@@ -18,7 +18,7 @@ import type { DatabaseProvider } from "@/lib/db/types";
 import { open, kv, doc, table, CATALOG_PREFIX } from "@libredb/libredb";
 import { buildObjectFixture } from "../../../docker/libredb-init/01-object-fixture";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
-import { containerDepth, kindHasSource } from "@/lib/db/object-kinds";
+import { containerDepth, kindHasColumns, kindHasSource } from "@/lib/db/object-kinds";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -127,6 +127,9 @@ describe("LibreDBProvider — lifecycle & metadata", () => {
     // The query language is a small JSON command grammar, not SQL, so the inline
     // row editor's `UPDATE ... SET` cannot be expressed here (#269).
     expect(caps.supportsInlineRowEdit).toBe(false);
+    // No `prepareQuery` override here, so the base one echoes the requested offset back
+    // while applying nothing - the silent page-one answer #816 exists to prevent.
+    expect(caps.supportsResultPagination).toBe(false);
     // The command grammar has no transaction verb at all (#464).
     expect(caps.supportsTransactions).toBe(false);
     // The catalog declares namespaces and columns and nothing that references
@@ -550,6 +553,69 @@ describe("LibreDBProvider — monitoring", () => {
     await provider.disconnect();
   });
 
+  // `fileSizeBytes()` used to return 0 on any statSync failure - no dbPath, the
+  // file gone, a permission refusal, anything - so getOverview() published a
+  // measured-looking zero indistinguishable from an empty database (#546).
+  // `DatabaseOverview.databaseSizeBytes` is optional exactly so a failed read can
+  // say nothing instead (src/lib/db/types.ts); `StorageStats.sizeBytes` has no
+  // such escape (required number), so it keeps 0 as its own fallback.
+  describe("when the database file cannot be stat'd", () => {
+    test("getOverview omits databaseSizeBytes, and databaseSize reads N/A", async () => {
+      const provider = new LibreDBProvider(makeConn(tmpFile));
+      await provider.connect();
+
+      const spy = spyOn(fs, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+        // The catalog scan does not go through statSync, so the rest of the
+        // overview is unaffected by the mocked failure.
+        expect(overview.tableCount).toBe(3);
+      } finally {
+        spy.mockRestore();
+        await provider.disconnect();
+      }
+    });
+
+    test("getHealth reads N/A rather than a formatted zero", async () => {
+      const provider = new LibreDBProvider(makeConn(tmpFile));
+      await provider.connect();
+
+      const spy = spyOn(fs, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        expect((await provider.getHealth()).databaseSize).toBe("N/A");
+      } finally {
+        spy.mockRestore();
+        await provider.disconnect();
+      }
+    });
+
+    test("getStorageStats keeps sizeBytes at 0, its own required-field fallback", async () => {
+      const provider = new LibreDBProvider(makeConn(tmpFile));
+      await provider.connect();
+
+      const spy = spyOn(fs, "statSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied, stat");
+      });
+      try {
+        const storage = await provider.getStorageStats();
+        expect(storage[0].sizeBytes).toBe(0);
+        // The formatted string moves with the same absence getHealth/getOverview
+        // report, even though the byte figure itself is coerced back to 0 here.
+        expect(storage[0].size).toBe("N/A");
+      } finally {
+        spy.mockRestore();
+        await provider.disconnect();
+      }
+    });
+  });
+
   test("runMaintenance is unsupported", async () => {
     const provider = new LibreDBProvider(makeConn(tmpFile));
     await provider.connect();
@@ -623,7 +689,53 @@ describe("LibreDBProvider object surface (#789)", () => {
       containers: [],
       kinds: { table: 3, collection: 2, keyspace: 3 },
       sampleObject: { path: ["employees:*"], kind: "table" },
+      // Invariant 8's negative direction runs zero times here, and saying so is mandatory
+      // rather than polite: `columnsForGroup` (`libredb.ts:642-663`) has three arms and every
+      // one of them returns a non-empty list, so all three declared kinds declare columns and
+      // a silent zero-iteration loop would certify nothing (#789).
+      noAbstainingKinds: true,
     });
+  });
+
+  /**
+   * The `hasColumns` declaration against what the engine really answers, kind by kind (#789).
+   *
+   * Every kind this store has declares it, which is why the pair below is written as a whole
+   * population rather than a `some`: the negative half of invariant 8 has nothing to iterate
+   * here, so the only thing that can catch a kind quietly dropping its declaration is an
+   * assertion that names all three.
+   */
+  test("every declared kind declares hasColumns, because every one of them answers columns", () => {
+    const capabilities = provider.getCapabilities();
+    const kinds = capabilities.objectKinds ?? [];
+    expect(kinds.filter((kind) => kind.hasColumns === true).map((kind) => kind.id)).toEqual([
+      "table",
+      "collection",
+      "keyspace",
+    ]);
+    // Through the reader the tree walk actually calls, not the raw field alone.
+    expect(kinds.map((kind) => kindHasColumns(kind))).toEqual([true, true, true]);
+  });
+
+  test("describeObject answers a named, typed column for each of the three kinds", async () => {
+    // One object per kind, all three from the fixture: a cataloged table, a cataloged
+    // document collection and a derived raw grouping, which are exactly the three arms of
+    // `columnsForGroup`. Both fields are checked because the tree feeds `column.name` to
+    // `pathKey`, where a non-string throws inside the walk and unmounts the tree.
+    for (const [kind, objectPath] of [
+      ["table", ["employees:*"]],
+      ["collection", ["notes:*"]],
+      ["keyspace", ["cache:*"]],
+    ] as const) {
+      const detail = await provider.describeObject(objectPath, kind);
+      expect(detail.columns.length).toBeGreaterThan(0);
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name.trim()).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(String(column.type).trim()).not.toBe("");
+      }
+    }
   });
 
   /**
@@ -909,16 +1021,17 @@ describe("LibreDBProvider object surface (#789)", () => {
    * It STAYS true here, and it is asserted in the same test as the declaration so the
    * refusal cannot quietly disappear the day somebody edits `objectKinds`. The split is
    * the one `row-actions.ts` documents: no kind declares `acceptsRowWrites`, so Generate
-   * Test Data and the create item are withheld by the kinds; the single maintenance
-   * operation is `perEntity: false`, so `maintenanceControl` withholds the per-row links;
+   * Test Data and the create item are withheld by the kinds; the engine declares no
+   * maintenance operation (`supportsMaintenance: false`, asserted below), so
+   * `maintenanceControl` withholds the per-row links;
    * and Profile reads this engine-wide flag, which is the gate that has no kind-level
    * declaration behind it.
    *
    * The flag costs the two CATALOGED kinds their Profile item as well, and measured, that
-   * costs nothing: `POST /api/db/profile` has no arm for this engine. It branches on
-   * `queryLanguage === "sql"`, and this provider declares `json`, so a profile of a
-   * LibreDB table is sent as a MongoDB aggregate pipeline, which the grammar rejects with
-   * the message this test pins.
+   * costs nothing: `POST /api/db/profile` has no arm for this engine. It profiles SQL and a
+   * MongoDB `aggregate` document only, and since #1085 it refuses JSON in a dialect of its own
+   * before sending anything; the pipeline it sent a LibreDB table before that refusal existed
+   * is what the grammar rejects with the message this test pins.
    */
   test("the derived-grouping refusal survives the declaration, and Profile could not work anyway", async () => {
     expect(provider.getCapabilities().tablesAreDerivedGroupings).toBe(true);

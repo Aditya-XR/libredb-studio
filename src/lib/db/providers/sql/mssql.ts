@@ -5,7 +5,7 @@
 
 import mssql from "mssql";
 import { SQLBaseProvider } from "./sql-base";
-import { mssqlColumnTypes } from "./column-types";
+import { type MssqlColumnMetadata, mssqlColumnTypes } from "./column-types";
 import {
   type DatabaseConnection,
   type QueryResult,
@@ -13,6 +13,9 @@ import {
   type MaintenanceType,
   type MaintenanceResult,
   type ProviderOptions,
+  type ProviderExecutionContext,
+  type ReadOnlyStatementBudget,
+  type ReadOnlyStatementMode,
   type ProviderCapabilities,
   type ProviderLabels,
   type SlowQuery,
@@ -41,14 +44,23 @@ import {
 } from "../../types";
 import {
   applySourceBound,
+  assertContainerPathShape,
   callerBoundTruncationReason,
   containerDepth,
+  type ContainerPathShapeEngine,
   declaredKinds,
   findKind,
   requireSourceKind,
 } from "../../object-kinds";
 import { comparePaths } from "../../object-path";
-import { DatabaseConfigError, ConnectionError, QueryError, mapDatabaseError } from "../../errors";
+import {
+  DatabaseConfigError,
+  ConnectionError,
+  ExecutionProfileError,
+  QueryError,
+  mapDatabaseError,
+} from "../../errors";
+import { assertReadOnlyBudget, measureResultBytes } from "./read-only-budget";
 import { formatBytes } from "../../utils/pool-manager";
 import { analyzeQuery, DEFAULT_QUERY_LIMIT, MAX_UNLIMITED_ROWS } from "../../utils/query-limiter";
 import { measuredNullableAggregate } from "../../utils/measured-aggregate";
@@ -56,6 +68,18 @@ import { readLeadingKeyword } from "@/lib/sql/leading-keyword";
 import { resolveSqlGrammar, type SqlGrammar } from "@/lib/sql/grammar";
 import { readStatementEnd } from "@/lib/sql/statement-end";
 import { CACHE_HIT_RATIO_UNAVAILABLE, formatCacheHitRatio, measuredNumber } from "@/lib/monitoring-cache-ratio";
+
+/**
+ * SQL Server's identity for the shared container-path renderer.
+ *
+ * Which paths this engine accepts is not a field here: it is `containerPathShapes` in
+ * `getCapabilities()`, which the object routes read too (#1147).
+ */
+const MSSQL_CONTAINER_PATH_ENGINE: ContainerPathShapeEngine = {
+  code: "mssql",
+  label: "A SQL Server",
+  shapeNames: "label",
+};
 
 /**
  * `SELECT ... ` with `TOP n` spliced in where T-SQL wants it, or `null` when this
@@ -415,7 +439,7 @@ const TRIGGER_KIND = "trigger";
  * stopped highlighting.
  *
  * `sql` and NOT `tsql`. MEASURED in #789: `tsql` is not among the 89 language ids the
- * installed monaco-editor 0.56.0 bundle registers, and neither are `plsql` and `cql`, so
+ * installed monaco-editor 0.57.0 bundle registers, and neither are `plsql` and `cql`, so
  * the one id in the bundle that highlights this dialect is the generic one. T-SQL keywords
  * the generic grammar does not know (`OUTER APPLY`, `MERGE ... OUTPUT`) render as plain
  * identifiers, which is a compromise `docs/providers/mssql.md` records rather than hides.
@@ -708,7 +732,7 @@ function sourceTriggerSql(database: string, bySchema: boolean): string {
  */
 function objectColumnsSql(database: string): string {
   return `
-        SELECT c.name AS name, ty.name AS data_type, c.is_nullable, dc.definition AS default_definition
+        SELECT c.name AS name, ty.name AS data_type, TYPE_NAME(c.system_type_id) AS base_type, c.is_nullable, dc.definition AS default_definition
         FROM ${database}.sys.columns c
         JOIN ${database}.sys.objects o ON o.object_id = c.object_id
         JOIN ${database}.sys.schemas s ON s.schema_id = o.schema_id
@@ -845,7 +869,7 @@ function bulkDetailSql(
   const described = describedSql(database, types, bySchema, bounded);
   return {
     columns: `${described}
-        SELECT d.object_id, c.name AS name, ty.name AS data_type, c.is_nullable, dc.definition AS default_definition
+        SELECT d.object_id, c.name AS name, ty.name AS data_type, TYPE_NAME(c.system_type_id) AS base_type, c.is_nullable, dc.definition AS default_definition
         FROM described d
         JOIN ${database}.sys.columns c ON c.object_id = d.object_id
         JOIN ${database}.sys.types ty ON ty.user_type_id = c.user_type_id
@@ -927,6 +951,14 @@ interface TriggerRow {
 interface ColumnRow {
   name: string;
   data_type: string;
+  /**
+   * `TYPE_NAME(system_type_id)`: the type the declared one is BUILT ON, which for an alias
+   * type is not the declared name. NULL for the system CLR types, which all share
+   * `system_type_id` 240 - measured, `Person.Address.SpatialLocation` answers NULL for the
+   * base and `geography` for the declared name - so the reader falls back rather than
+   * reporting an absence it would have to invent.
+   */
+  base_type: string | null;
   is_nullable: boolean;
   default_definition: string | null;
 }
@@ -1001,28 +1033,7 @@ function requiredSegment(
   return segment;
 }
 
-/**
- * The container paths this engine accepts, outermost first, as segment NAMES.
- *
- * Every prefix of the declared levels, which on a two-level engine means a database alone
- * or a database and a schema. Both are real containers here: the tree only ever draws
- * folders at the deepest level (`src/components/object-tree/flatten.ts`), but
- * `assertContainerDepth` in `src/lib/api/object-route.ts` admits any path down to the
- * declared depth and `assertObjectSurface` reads counts at the OUTER one, so a database
- * holding twelve tables across three schemas is a question with a true answer rather than
- * a caller mistake.
- *
- * The names in the message are the declared LABELS, which is the engine's own word for a
- * person reading a refusal; the code addresses the same segments by `ContainerLevelSpec.id`
- * through `containerSegments()`. The depth behind both is `containerDepth()`, so the check
- * and the sentence it raises cannot disagree.
- */
-function containerShapes(capabilities: ProviderCapabilities): readonly string[][] {
-  const names = declaredLevels(capabilities).map((level) => level.label.toLowerCase());
-  return names.map((_, index) => names.slice(0, index + 1));
-}
-
-/** The shapes above, spelled for a message: `[database] or [database, schema]`. */
+/** A kind's path shapes, spelled for the message in `objectAddress()`. */
 function shapeList(shapes: readonly string[][]): string {
   return shapes.map((shape) => `[${shape.join(", ")}]`).join(" or ");
 }
@@ -1038,13 +1049,7 @@ function containerTarget(
   capabilities: ProviderCapabilities,
   container: readonly string[],
 ): Partial<Record<ContainerLevelSpec["id"], string>> {
-  const shapes = containerShapes(capabilities);
-  if (!shapes.some((shape) => shape.length === container.length)) {
-    throw new QueryError(
-      `A SQL Server container path is ${shapeList(shapes)}, received ${JSON.stringify(container)}`,
-      "mssql",
-    );
-  }
+  assertContainerPathShape(capabilities, container, MSSQL_CONTAINER_PATH_ENGINE);
   return containerSegments(capabilities, container);
 }
 
@@ -1411,7 +1416,10 @@ function objectDetailFromRows(path: readonly string[], schema: string, rows: Det
   const primaryKey = new Set(rows.primaryKey.map((row) => row.name));
   const columns: ColumnSchema[] = rows.columns.map((row) => ({
     name: row.name,
+    // What a person reads is the DECLARED type, alias and all: SSMS shows `Phone`, and so
+    // does this browser. What a reader DECIDES on is `baseType` - see `ColumnSchema`.
     type: row.data_type,
+    ...(row.base_type === null || row.base_type === row.data_type ? {} : { baseType: row.base_type }),
     nullable: row.is_nullable,
     isPrimary: primaryKey.has(row.name),
     defaultValue: row.default_definition ?? undefined,
@@ -1457,6 +1465,75 @@ function byObjectId<T extends BulkRow>(rows: readonly T[]): Map<number, T[]> {
   return grouped;
 }
 
+/**
+ * The declarations whose `Date` is NOT the honest shape of the value (#1132).
+ *
+ * `time` is a time-of-day on an invented 1970-01-01, `date` a calendar day at UTC midnight
+ * and `datetime2` a wall-clock reading with no zone, so an ISO instant reports a moment
+ * none of them holds - and the format cuts a `time(7)` from seven digits to three.
+ * `datetimeoffset` is deliberately absent: it IS an instant, so its ISO shape is right.
+ */
+const ZONELESS_VALUE_DECLARATIONS = new Set(["time", "date", "datetime2"]);
+
+/** Two digits, the width every part of a date or time text carries except the year. */
+function pad2(value: number): string {
+  return value.toString().padStart(2, "0");
+}
+
+/** `2026-09-01` - the calendar day, from the UTC-midnight `Date` the driver reads. */
+function dateText(value: Date): string {
+  return `${value.getUTCFullYear().toString().padStart(4, "0")}-${pad2(value.getUTCMonth() + 1)}-${pad2(value.getUTCDate())}`;
+}
+
+/**
+ * `10:30:00.1234567` - the time-of-day text, carrying the `scale` digits the column declared.
+ *
+ * The driver's `Date` holds the millisecond part and keeps the REST of the seven digits a
+ * `time(7)` can carry beside it, as a non-enumerable `nanosecondsDelta` (`tedious`
+ * `value-parser.js` sets it on every one of these reads), so the fraction is reconstructed
+ * exactly rather than rounded to milliseconds: 123 and 4567, not 1230000.
+ */
+function timeText(value: Date, scale: number | undefined): string {
+  const base = `${pad2(value.getUTCHours())}:${pad2(value.getUTCMinutes())}:${pad2(value.getUTCSeconds())}`;
+  const digits = scale ?? 0;
+  if (digits <= 0) return base;
+  const milliseconds = value.getUTCMilliseconds().toString().padStart(3, "0");
+  const remainder = Math.round(((value as { nanosecondsDelta?: number }).nanosecondsDelta ?? 0) * 1e7)
+    .toString()
+    .padStart(4, "0");
+  return `${base}.${`${milliseconds}${remainder}`.slice(0, digits)}`;
+}
+
+/**
+ * Rewrites, in place, every value whose declaration is one of those, into its text (#1132).
+ *
+ * Keyed on `recordset.columns` - the map `mssqlColumnTypes` reads - because a value cannot
+ * be told from its own shape: `time` and `datetimeoffset` arrive as the same kind of
+ * `Date`, and only the column says which one holds an instant. A result without the map is
+ * left exactly as the driver built it.
+ *
+ * All three query paths call it as the recordset is taken, before anything measures or
+ * shapes the result.
+ */
+function convertZonelessValues(recordset: Record<string, unknown>[]): void {
+  const columns = (recordset as { columns?: Record<string, MssqlColumnMetadata> }).columns;
+  if (!columns) return;
+  for (const [name, column] of Object.entries(columns)) {
+    const declaration = (column.type as { declaration?: unknown } | undefined)?.declaration;
+    if (typeof declaration !== "string" || !ZONELESS_VALUE_DECLARATIONS.has(declaration)) continue;
+    for (const row of recordset) {
+      const value = row[name];
+      if (!(value instanceof Date)) continue;
+      row[name] =
+        declaration === "date"
+          ? dateText(value)
+          : declaration === "time"
+            ? timeText(value, column.scale)
+            : `${dateText(value)} ${timeText(value, column.scale)}`;
+    }
+  }
+}
+
 // ============================================================================
 // MSSQL Provider
 // ============================================================================
@@ -1471,8 +1548,15 @@ export class MSSQLProvider extends SQLBaseProvider {
   // Track running requests for cancellation
   private runningRequests = new Map<string, mssql.Request>();
 
-  constructor(config: DatabaseConnection, options: ProviderOptions = {}) {
+  /** True when this instance was opened under the agent read-only profile. */
+  private readonly readOnlyProfile: boolean;
+
+  constructor(config: DatabaseConnection, options: ProviderOptions = {}, execution: ProviderExecutionContext = {}) {
     super(config, options);
+    // Server-injected only (see ProviderExecutionContext): the editor path builds
+    // providers from caller-supplied ProviderOptions, which has no route to this
+    // flag in either direction.
+    this.readOnlyProfile = execution.readOnly === true;
     this.validate();
   }
 
@@ -1489,6 +1573,12 @@ export class MSSQLProvider extends SQLBaseProvider {
       supportsExplain: false,
       supportsConnectionString: true,
       supportsInlineRowEdit: true,
+      // `OFFSET m ROWS FETCH NEXT n ROWS ONLY`, built by this provider's own
+      // `prepareQuery` override. Page one is `SELECT TOP n`, so the two pages are
+      // structurally different statements, and page two carries the `ORDER BY (SELECT
+      // NULL)` T-SQL demands before `OFFSET` - which promises nothing about order, the
+      // condition the grid states for itself.
+      supportsResultPagination: true,
       // The mssql package's Transaction object over one held pool connection.
       supportsTransactions: true,
       maintenanceOperations: ["analyze", "check", "optimize", "kill"],
@@ -1513,6 +1603,9 @@ export class MSSQLProvider extends SQLBaseProvider {
         { id: "catalog", label: "Database", labelPlural: "Databases" },
         { id: "schema", label: "Schema", labelPlural: "Schemas" },
       ],
+      // A database alone is an address as well as a database and a schema, so every depth up to the
+      // declaration is accepted and a longer path is refused (`acceptedContainerShapes()`, #1147).
+      containerPathShapes: "prefixes",
       // Seven kinds. Six are `sys.objects.type` spellings (`MSSQL_OBJECT_TYPES`) and the
       // seventh, the trigger, is read from `sys.triggers` because `sys.objects` holds no
       // DDL trigger at all (#789).
@@ -1526,12 +1619,42 @@ export class MSSQLProvider extends SQLBaseProvider {
       // VIEW with a clustered index on it, so it is already in the `view` folder with its
       // index in the detail row, and declaring a kind for it would draw a folder for a
       // concept the engine does not have.
+      // `hasColumns` on the two relation kinds and on nothing else (#789). It is written
+      // out rather than derived from the role, because the role is not the fact: Oracle's
+      // `sequence` is `config` with no columns and PostgreSQL's is `config` with three, so a
+      // rule above the providers is wrong for one of them whichever way it is written. Here
+      // the two agree, and what pins that agreement is the engine's own answer rather than
+      // this comment: `describeObject` below returns three empty arrays for every
+      // non-relation kind, and invariant 8 of `tests/helpers/object-surface-conformance.ts`
+      // asks this provider's `describeObject` about an object its own `listObjects`
+      // produced, in both directions. Measured on the fixture server, `sys.objects` left
+      // joined to `sys.columns` over `is_ms_shipped = 0`: of the types a person writes, a
+      // procedure, a scalar function, a synonym, a SEQUENCE and a trigger have no
+      // `sys.columns` rows, while `U` and `V` have them and so does a TABLE-VALUED function
+      // (`IF` and `TF`, 2 rows each on the fixture, both inside
+      // `MSSQL_OBJECT_TYPES.function`). So `function` abstains here as a SCOPE call and not
+      // because the engine is silent: reporting a routine's result shape belongs to the phase
+      // that renders a routine, which is where `describeObjects` below leaves it too.
       objectKinds: [
-        { id: "table", role: "relation", label: "Table", labelPlural: "Tables", acceptsRowWrites: true },
+        {
+          id: "table",
+          role: "relation",
+          label: "Table",
+          labelPlural: "Tables",
+          acceptsRowWrites: true,
+          hasColumns: true,
+        },
         // No `acceptsRowWrites` on a view. SQL Server takes an UPDATE against a view over
         // exactly one base table and refuses one over a join without an INSTEAD OF trigger,
         // which is a per-OBJECT fact this per-kind declaration cannot state.
-        { id: "view", role: "relation", label: "View", labelPlural: "Views", ...MSSQL_SOURCE_DECLARATION },
+        {
+          id: "view",
+          role: "relation",
+          label: "View",
+          labelPlural: "Views",
+          hasColumns: true,
+          ...MSSQL_SOURCE_DECLARATION,
+        },
         {
           id: "procedure",
           role: "routine",
@@ -1684,9 +1807,29 @@ export class MSSQLProvider extends SQLBaseProvider {
       // Test the connection
       await this.pool.request().query("SELECT 1 AS test");
 
+      // Under the profile the principal itself is the first layer of the boundary
+      // (`queryReadOnly` argues why), so it is verified before the provider is
+      // handed out rather than per statement.
+      if (this.readOnlyProfile) {
+        const principal = await this.pool.request().query(MSSQLProvider.AGENT_PRINCIPAL_SQL);
+        MSSQLProvider.assertAgentPrincipalIsUnprivileged(principal.recordset ?? []);
+      }
+
       this.setConnected(true);
     } catch (error) {
       this.setError(error instanceof Error ? error : new Error(String(error)));
+      // The pool is built before anything that can fail here: the connect, the probe,
+      // and under the profile the principal verification. `acquireExecutionProfileProvider`
+      // drops a provider whose connect threw WITHOUT calling disconnect(), so a pool left
+      // open here leaks its idle socket and timers with no reference left to close them.
+      const failedPool = this.pool;
+      this.pool = null;
+      await failedPool?.close().catch(() => {});
+      // A typed profile refusal keeps its identity: wrapping it would strip the deny
+      // reason code that callers branch on.
+      if (error instanceof ExecutionProfileError) {
+        throw error;
+      }
       throw new ConnectionError(
         `Failed to connect to SQL Server: ${error instanceof Error ? error.message : error}`,
         "mssql",
@@ -1741,6 +1884,7 @@ export class MSSQLProvider extends SQLBaseProvider {
       });
 
       const recordset = result.recordset || [];
+      convertZonelessValues(recordset);
       const fields = recordset.columns
         ? Object.keys(recordset.columns)
         : recordset.length > 0
@@ -1755,6 +1899,614 @@ export class MSSQLProvider extends SQLBaseProvider {
         ...mssqlColumnTypes(recordset.columns),
       };
     });
+  }
+
+  // ============================================================================
+  // Agent Read-Only Execution Profile (#328)
+  // ============================================================================
+
+  /**
+   * What the profile asks SQL Server about the principal its own session runs as.
+   *
+   * SQL Server has no `BEGIN TRANSACTION READ ONLY`. There is no session-level
+   * read-only switch of any kind, so, unlike PostgreSQL, where the transaction
+   * itself refuses the write, the FIRST layer of this engine's boundary is the
+   * principal's permissions, and a write is refused because the principal may not
+   * make one. That makes verifying the principal load-bearing rather than advisory,
+   * and it is verified at open rather than assumed from configuration, for the
+   * reason `assertAgentRoleIsUnprivileged` gives in `postgres.ts`: an admin can
+   * point `agentUser` at a privileged login, and a connection's own user very often
+   * is one.
+   *
+   * Measured on SQL Server 2022 (16.0.4265.3) as a `db_datareader` with
+   * `VIEW DEFINITION`, `VIEW DATABASE STATE` and `SHOWPLAN`: every write to the
+   * connected database was refused by the server (INSERT/UPDATE/DELETE msg 229,
+   * CREATE msg 262, DROP msg 3701), and so were `xp_cmdshell`, `sp_OACreate`,
+   * `OPENROWSET(BULK …)`, `sp_execute_external_script`, `xp_regread`,
+   * `sp_configure` + `RECONFIGURE`, `EXECUTE AS`, `ALTER SERVER ROLE` and every
+   * read of another user database. `sa` is the positive control: it did all of them.
+   *
+   * `SHOWPLAN` is REQUIRED rather than forbidden, and that is not an oddity: the
+   * admission step below is the engine's own parser, and a principal that cannot ask
+   * for a plan cannot be admitted through it. A profile that could not run its own
+   * admission would fall back to sending the statement unexamined, which is the one
+   * thing this path must never do.
+   *
+   * `ISNULL(…, 1)` on every forbidden answer is the fail-closed half. `IS_SRVROLEMEMBER`
+   * and `IS_ROLEMEMBER` answer NULL rather than 0 for a principal or role name the
+   * server cannot resolve, measured. So a typo in this list, or a contained-database
+   * user whose server principal cannot be resolved, reads as HELD and the profile is
+   * refused. `SHOWPLAN` takes the opposite default for the same reason: `ISNULL(…, 0)`
+   * makes an unreadable answer mean "not granted".
+   */
+  private static readonly AGENT_PRINCIPAL_SQL = `SELECT
+      CAST(ISNULL(IS_SRVROLEMEMBER('sysadmin'), 1) AS int) AS srv_sysadmin,
+      CAST(ISNULL(IS_SRVROLEMEMBER('securityadmin'), 1) AS int) AS srv_securityadmin,
+      CAST(ISNULL(IS_SRVROLEMEMBER('serveradmin'), 1) AS int) AS srv_serveradmin,
+      CAST(ISNULL(IS_SRVROLEMEMBER('setupadmin'), 1) AS int) AS srv_setupadmin,
+      CAST(ISNULL(IS_SRVROLEMEMBER('processadmin'), 1) AS int) AS srv_processadmin,
+      CAST(ISNULL(IS_SRVROLEMEMBER('diskadmin'), 1) AS int) AS srv_diskadmin,
+      CAST(ISNULL(IS_SRVROLEMEMBER('dbcreator'), 1) AS int) AS srv_dbcreator,
+      CAST(ISNULL(IS_SRVROLEMEMBER('bulkadmin'), 1) AS int) AS srv_bulkadmin,
+      CAST(ISNULL(IS_ROLEMEMBER('db_owner'), 1) AS int) AS db_owner,
+      CAST(ISNULL(IS_ROLEMEMBER('db_accessadmin'), 1) AS int) AS db_accessadmin,
+      CAST(ISNULL(IS_ROLEMEMBER('db_securityadmin'), 1) AS int) AS db_securityadmin,
+      CAST(ISNULL(IS_ROLEMEMBER('db_ddladmin'), 1) AS int) AS db_ddladmin,
+      CAST(ISNULL(IS_ROLEMEMBER('db_backupoperator'), 1) AS int) AS db_backupoperator,
+      CAST(ISNULL(IS_ROLEMEMBER('db_datawriter'), 1) AS int) AS db_datawriter,
+      CAST(ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'CONTROL SERVER'), 1) AS int) AS control_server,
+      CAST(ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'ADMINISTER BULK OPERATIONS'), 1) AS int) AS bulk_operations,
+      CAST(ISNULL(HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'SHOWPLAN'), 0) AS int) AS showplan`;
+
+  /** The answers that must ALL be 0. Named so the refusal can say which one was held. */
+  private static readonly AGENT_FORBIDDEN_PRIVILEGES = [
+    "srv_sysadmin",
+    "srv_securityadmin",
+    "srv_serveradmin",
+    "srv_setupadmin",
+    "srv_processadmin",
+    "srv_diskadmin",
+    "srv_dbcreator",
+    "srv_bulkadmin",
+    "db_owner",
+    "db_accessadmin",
+    "db_securityadmin",
+    "db_ddladmin",
+    "db_backupoperator",
+    "db_datawriter",
+    "control_server",
+    "bulk_operations",
+  ] as const;
+
+  /**
+   * The statement classes the admission step admits, in the optimizer's own words.
+   *
+   * These are values of the `Type` column of `SET SHOWPLAN_ALL`, which is SQL Server
+   * naming the class of each statement it just compiled. `SELECT WITHOUT QUERY` is
+   * what a SELECT with no table reference compiles to (`SELECT 1`); `SELECT` is
+   * everything else, including a `WITH … SELECT … ORDER BY`, which compiles to ONE
+   * root and not to one per common table expression, measured.
+   *
+   * Everything else is refused, and the list of what "everything else" turned out to
+   * be is why this is an allowlist rather than a denylist: measured on SQL Server 2022,
+   * `INSERT`/`UPDATE`/`DELETE` compile to their own names, `SELECT … INTO` to
+   * `SELECT INTO`, `EXEC sp_executesql` to `EXECUTE PROC`, `EXEC('…')` to
+   * `EXECUTE STRING`, a smuggled `COMMIT` to `COMMIT TRANSACTION`. A denylist would
+   * have had to name every one of those and would still be wrong about the next one.
+   */
+  private static readonly AGENT_ADMITTED_STATEMENT_TYPES: ReadonlySet<string> = new Set([
+    "SELECT",
+    "SELECT WITHOUT QUERY",
+  ]);
+
+  /**
+   * The two read classes that are REFUSED, and the only ones refused for a reason that is
+   * not about what they do to the database.
+   *
+   * `SELECT … FOR JSON` and `SELECT … FOR XML` are pure reads, and an earlier version of
+   * this list admitted them for exactly that reason. They cannot be ROW-bounded, and this
+   * profile's row bound is a server-side `SET ROWCOUNT`: the clause serialises the rows the
+   * statement produced into ONE result row, so `SET ROWCOUNT` cuts the rows UNDERNEATH the
+   * serialiser and the document that comes back is complete-looking and short.
+   *
+   * Measured on AdventureWorks2022, with the budget's 200-row cap:
+   * `SELECT TOP 5000 SalesOrderID, OrderQty FROM Sales.SalesOrderDetail FOR JSON PATH`
+   * returned ONE row holding well-formed JSON with 201 objects in it, and `FOR XML PATH`
+   * returned 201 `<row>` elements. Both parse. Neither budget check can fire, because the
+   * result really is one row and 7 KB. A model handed that document reports 201 where the
+   * answer is 5000, and nothing anywhere says otherwise.
+   *
+   * So they are refused rather than silently bounded, and the refusal names the clause so
+   * the model can drop it and ask for the rows: a wrong answer nobody can detect is worse
+   * than a refusal that says what to do instead.
+   */
+  private static readonly AGENT_SERIALISING_STATEMENT_TYPES: ReadonlySet<string> = new Set([
+    "JSON SELECT",
+    "XML SELECT",
+  ]);
+
+  /**
+   * The one root row that is NOT a statement: the header SQL Server emits for an
+   * inlined module's body.
+   *
+   * A read over a multi-statement table-valued function compiles to TWO rows with
+   * `Parent = 0`: the caller's `SELECT`, and a `TEXT` row reading
+   * `UDF: [db].[dbo].[fn]` whose children are the function's own body, INSERTs into
+   * its table variable included. Measured on AdventureWorks2022:
+   * `SELECT TOP 5 * FROM dbo.ufnGetContactInformation(1)` gives roots
+   * `[SELECT, TEXT]`, both carrying `StmtId` 1. So a root COUNT is not a statement
+   * count, and counting roots refused that read outright.
+   *
+   * `StmtId` is what separates the two cases, because SQL Server numbers the
+   * STATEMENTS of a batch: the same read with `; EXEC master.dbo.xp_cmdshell 'id'`
+   * appended gives roots `[SELECT(1), TEXT(1), EXECUTE PROC(12)]`, two distinct
+   * ids, and `SELECT 1; SELECT 2` gives ids 1 and 2. `TEXT` is therefore admissible
+   * only ALONGSIDE an admitted statement of the same id, never as one in its own right.
+   */
+  private static readonly AGENT_MODULE_BODY_TYPE = "TEXT";
+
+  /**
+   * Refuses a principal whose privileges reach past what a permission boundary can
+   * contain, and one that cannot run this profile's own admission step.
+   *
+   * Fails closed on anything it cannot read as an explicit set of integers: a server
+   * that answers nothing, or answers something else, leaves the boundary unproven.
+   */
+  private static assertAgentPrincipalIsUnprivileged(rows: readonly unknown[]): void {
+    const row = rows[0] as Record<string, unknown> | undefined;
+    const held = MSSQLProvider.AGENT_FORBIDDEN_PRIVILEGES.filter((name) => row?.[name] !== 0);
+    if (held.length > 0) {
+      throw new ExecutionProfileError(
+        `The agent read-only execution profile requires a least-privilege SQL Server principal; this principal is unverified or too broad (${held.join(", ")}). SQL Server has no read-only transaction, so its permissions are the boundary.`,
+        "PROFILE_PRIVILEGES_TOO_BROAD",
+      );
+    }
+    if (row?.showplan !== 1) {
+      throw new ExecutionProfileError(
+        "The agent read-only execution profile requires SHOWPLAN on this database: the profile admits a statement by asking the optimizer to compile it without running it, and a principal that cannot ask for a plan cannot be admitted. GRANT SHOWPLAN TO <agent principal>.",
+        // NOT the too-broad code beside it, and the difference is the whole point of the
+        // pair: this principal is too NARROW, and the two are repaired in opposite
+        // directions. Under one code the advice a run reports told an operator whose agent
+        // principal simply lacked one grant to narrow it instead.
+        "PROFILE_PRIVILEGES_TOO_NARROW",
+      );
+    }
+  }
+
+  /**
+   * Runs EXACTLY ONE read statement, on a connection this call holds for its whole
+   * duration, inside a transaction that is always rolled back.
+   *
+   * The DATABASE is the boundary in four independent places, none of which is a text
+   * match on the statement:
+   *
+   * 1. **The principal may not write** (`assertAgentPrincipalIsUnprivileged`, verified
+   *    at open). This is the layer PostgreSQL gets from `BEGIN READ ONLY` and SQL
+   *    Server has no equivalent of, so it is established once, at the session.
+   * 2. **The optimizer admits the statement, having executed nothing.** `SET
+   *    SHOWPLAN_ALL ON` makes SQL Server compile the batch and return one row per plan
+   *    node instead of running it. The call is refused unless the batch compiled to
+   *    exactly one STATEMENT, counted by distinct `StmtId` among the root rows rather
+   *    than by root count, and unless every class SQL Server named for it is a read.
+   *    This is what PostgreSQL gets from the extended query protocol's refusal of a
+   *    multi-command string, and it is stronger in one way and weaker in another: it
+   *    refuses the whole batch rather than running its head, and it is a second
+   *    compilation rather than a property of the wire. Measured: a `DROP TABLE` sent
+   *    under SHOWPLAN left the table in place.
+   * 3. **The server stops the result at the row budget.** `SET ROWCOUNT` is set to ONE
+   *    MORE than the budget allows, so a statement that would stream past it is halted
+   *    by the server and the extra row is the signal to refuse. This is not a nicety:
+   *    measured on this fixture, an unbounded 20-million-row cross join took the Node
+   *    process down with an out-of-memory crash BEFORE any result-side cap could look
+   *    at it, and `requestTimeout` did not prevent it; tedious stops the request timer
+   *    on the first data packet, so it bounds time-to-first-row and not total time.
+   * 4. **The transaction is never committed.** Anything transactional that reached the
+   *    server anyway is undone; SQL Server rolls DDL back too.
+   *
+   * WHAT IT DOES NOT BOUND, stated rather than implied: what a single admitted SELECT
+   * may READ. A least-privilege principal cannot reach another user database or the
+   * file system, but server-level metadata readable by `public` (`master.sys.databases`,
+   * `sys.server_principals`) is inside the boundary, exactly as it is on the other
+   * engines (see `docs/BACKLOG.md`, A3).
+   *
+   * EVERY SESSION MODE THIS SETS LEAKS, and that is measured, not feared: `SET
+   * ROWCOUNT`, `SET SHOWPLAN_ALL` and `SET LOCK_TIMEOUT` all survive the ROLLBACK and
+   * reach the next borrower of the pooled connection, because node-mssql's pool
+   * validates a connection without resetting its session. So each is reset on the same
+   * pinned connection in a `finally`, and a reset that FAILS ends the pool rather than
+   * returning a connection whose next statement would answer with a query plan where
+   * the caller expects rows.
+   */
+  public async queryReadOnly(
+    sql: string,
+    budget: ReadOnlyStatementBudget,
+    mode: ReadOnlyStatementMode = "execute",
+  ): Promise<QueryResult> {
+    this.ensureConnected();
+    assertReadOnlyBudget(budget, "mssql");
+    if (!this.readOnlyProfile) {
+      // A provider opened outside the profile has had no principal verification, so
+      // its session may be able to write. Refuse rather than serve agent semantics
+      // without the layer that makes them true.
+      throw new QueryError(
+        "Read-only execution requires a provider opened under the agent read-only profile",
+        "mssql",
+        sql,
+      );
+    }
+
+    return this.trackQuery(async () => {
+      const { result, executionTime } = await this.measureExecution(async () => {
+        const transaction = new mssql.Transaction(this.pool!);
+        await transaction.begin();
+        try {
+          // Bounds WAITING for a lock (error 1222). It does not bound HOLDING one:
+          // that is the shared statement guard's job, which refuses the T-SQL table
+          // hints that hold one, for the reason written there.
+          await new mssql.Request(transaction).batch(`SET LOCK_TIMEOUT ${budget.statementTimeoutMs}`);
+          // The agent yields rather than wins: if its read deadlocks with a user's
+          // write, SQL Server chooses this session as the victim.
+          await new mssql.Request(transaction).batch("SET DEADLOCK_PRIORITY LOW");
+
+          const plan = await this.admitReadStatement(transaction, sql, budget.statementTimeoutMs);
+          MSSQLProvider.assertSingleReadStatement(plan, sql);
+          await this.assertPlanModeIsOff(transaction, sql);
+
+          // The admission compiled the statement, so the ESTIMATING plan is already in
+          // hand: on this engine the plan a caller asks for IS the plan that admitted
+          // the statement, which is a stronger pairing than composing a second one.
+          if (mode === "estimate-plan") return plan;
+
+          // One more than the budget: SQL Server stops the result there, and the extra
+          // row is what distinguishes "the statement returned exactly the budget" from
+          // "the server cut it off". Without it an unbounded read is materialised in
+          // full before any result-side cap can look at it. Measured: a 20-million-row
+          // cross join took the Node process down with an out-of-memory crash.
+          await new mssql.Request(transaction).batch(
+            `SET ROWCOUNT ${MSSQLProvider.sessionCeiling(budget.maxResultRows)}`,
+          );
+          // The BYTE half of the same bound, and it is server-side for the same reason the row
+          // half is: a row budget bounds how MANY rows arrive and says nothing about how big
+          // one is. Measured, `SELECT REPLICATE(CAST('a' AS varchar(max)), 700000000)` is one
+          // row of one column that the optimizer classifies as a plain read, and it arrives in
+          // full before any result-side cap can look at it.
+          //
+          // One MORE byte than the budget allows, exactly as the row bound takes one more row:
+          // `SET TEXTSIZE` TRUNCATES rather than refusing, so the `+ 1` is what makes a
+          // truncation detectable instead of silent. It is detectable through the cap that
+          // follows rather than by inspecting values: a value the server cut is
+          // `maxResultBytes + 1` bytes on its own, which already exceeds the whole result's
+          // byte budget, so the refusal below fires for every truncation there can be.
+          const valueCeiling = MSSQLProvider.sessionCeiling(budget.maxResultBytes);
+          await new mssql.Request(transaction).batch(`SET TEXTSIZE ${valueCeiling}`);
+          const executed = await this.runWithDeadline(transaction, sql, budget.statementTimeoutMs);
+          MSSQLProvider.assertNoValueWasCut(executed, valueCeiling, sql);
+          return executed;
+        } catch (error) {
+          throw error instanceof QueryError ? error : mapDatabaseError(error, "mssql", sql);
+        } finally {
+          const sessionIsClean = await this.resetProfiledSession(transaction);
+          // Ordering: the statement is always settled by the time this runs (the
+          // deadline CANCELS and awaits the rejection rather than abandoning the
+          // promise), because `rollback()` called with a request in flight throws
+          // "There is a request in progress", leaves the transaction OPEN and does not
+          // stop the statement (measured).
+          //
+          // A rollback on a transaction the server has already aborted also throws, and
+          // @@TRANCOUNT is 0 afterwards (measured), so that throw is swallowed. What is
+          // never swallowed is a session whose modes are still set: the connection goes
+          // back to a pool that does not reset it, and its next statement would answer
+          // with a query plan where the caller expects rows. That is a WRONG ANSWER
+          // rather than an error, so the pool is ended instead.
+          await transaction.rollback().catch(() => {});
+          if (!sessionIsClean) {
+            await this.disconnect().catch(() => {});
+          }
+        }
+      });
+
+      const recordset = result.recordset || [];
+      convertZonelessValues(recordset);
+      // The ROW budget bounds DATA rows, and a plan's rows are not data: they are the
+      // optimizer's nodes, one per operator. Measured on AdventureWorks2022, an ordinary
+      // `SELECT TOP 10 *` over one shipped view compiles to 170 of them and the same view
+      // unioned with itself to 340, so judging a plan by a 200-row DATA budget refuses the
+      // plans an optimization run exists to read - and refuses them with a sentence about
+      // row counts, which sends a model to narrow a statement that was never wide.
+      // PostgreSQL never meets this because its `EXPLAIN (FORMAT JSON)` is ONE row whatever
+      // the plan holds; the difference is the shape of the answer, not the size of it.
+      //
+      // `SET ROWCOUNT` cannot help here either way: measured, it does not bound SHOWPLAN
+      // output at all (340 rows with `SET ROWCOUNT 50`), so a plan is bounded by the
+      // statement's own complexity and then by the byte cap below, which is exactly how
+      // PostgreSQL's one-row plan is bounded.
+      if (mode !== "estimate-plan" && recordset.length > budget.maxResultRows) {
+        throw new QueryError(
+          `Read-only execution exceeded the row budget: ${recordset.length} rows > ${budget.maxResultRows} allowed`,
+          "mssql",
+          sql,
+        );
+      }
+      const resultBytes = measureResultBytes(recordset as unknown[]);
+      if (resultBytes > budget.maxResultBytes) {
+        throw new QueryError(
+          mode === "estimate-plan"
+            ? `Read-only execution could not hold this query plan: ${resultBytes} bytes > ${budget.maxResultBytes} allowed. The plan is this statement's own shape, so a narrower statement is what makes it readable.`
+            : `Read-only execution exceeded the byte budget: ${resultBytes} bytes > ${budget.maxResultBytes} allowed`,
+          "mssql",
+          sql,
+        );
+      }
+
+      const fields = recordset.columns
+        ? Object.keys(recordset.columns)
+        : recordset.length > 0
+          ? Object.keys(recordset[0])
+          : [];
+
+      return {
+        rows: recordset as Record<string, unknown>[],
+        fields,
+        rowCount: recordset.length,
+        executionTime,
+        ...mssqlColumnTypes(recordset.columns),
+      };
+    });
+  }
+
+  /**
+   * Compiles `sql` without running it and returns the optimizer's plan rows.
+   *
+   * `SET SHOWPLAN_ALL OFF` is issued in a `finally` because the failure this method
+   * most often sees is the candidate failing to COMPILE (an invalid object name, a
+   * syntax error), and that is a message the model can repair, not a reason to leave
+   * the session in plan-emitting mode. Measured: the OFF succeeds after such a
+   * failure and the next borrow of the connection is clean.
+   */
+  private async admitReadStatement(
+    transaction: mssql.Transaction,
+    sql: string,
+    deadlineMs: number,
+  ): Promise<mssql.IResult> {
+    await new mssql.Request(transaction).batch("SET SHOWPLAN_ALL ON");
+    let compiled: mssql.IResult | undefined;
+    let compileError: unknown;
+    try {
+      // Under the SAME deadline as the execution, because compiling is not free: the
+      // optimizer takes locks of its own on the objects it resolves, and a candidate whose
+      // compilation blocks would otherwise sit on the pinned connection unbounded while
+      // every other layer waited behind it.
+      compiled = await this.runWithDeadline(transaction, sql, deadlineMs);
+    } catch (error) {
+      compileError = error;
+    }
+    // The OFF cannot be a bare `finally`, because its own failure would REPLACE the
+    // reason the candidate was refused. Measured: a batch-aborting error dooms the
+    // transaction (`OPENROWSET(BULK …)`, Msg 4834 "You do not have permission to use
+    // the bulk load statement"), the OFF then fails with ENOTBEGUN, and a `finally`
+    // that throws hands the caller "Transaction has not begun" instead: a message
+    // about this provider's plumbing, offered to a model as the reason ITS statement
+    // was refused. An ordinary compile error (Msg 208) does not doom the transaction,
+    // so the OFF succeeds and this branch never fires; the session is left dirty only
+    // on the doomed path, which `resetProfiledSession` re-asserts and, failing that,
+    // answers by ending the pool.
+    try {
+      await new mssql.Request(transaction).batch("SET SHOWPLAN_ALL OFF");
+    } catch (offError) {
+      if (compileError === undefined) throw offError;
+    }
+    if (compileError !== undefined) throw compileError;
+    // Non-null: the only path that leaves it unset is the one that just threw.
+    return compiled!;
+  }
+
+  /**
+   * `SET ROWCOUNT` and `SET TEXTSIZE` both take a SIGNED 32-BIT integer, and the budget does
+   * not: `assertReadOnlyBudget` admits anything up to `Number.MAX_SAFE_INTEGER`. Measured,
+   * `SET ROWCOUNT 9007199254740991` answers "The integer value 9007199254740991 is out of
+   * range" and so does the TEXTSIZE form, which would fail every call a generous budget was
+   * meant to widen.
+   *
+   * Clamped rather than refused, because a ceiling of two billion rows is a budget that
+   * means "do not bound this", and the result-side caps still enforce the real number. The
+   * `+ 1` is what makes a server-side cut detectable, so it is applied first and the clamp
+   * only ever takes effect where no honest result could reach it anyway.
+   */
+  private static sessionCeiling(budgetValue: number): number {
+    return Math.min(budgetValue + 1, 2_147_483_647);
+  }
+
+  /**
+   * Refuses a result holding a value the SERVER cut, which the byte budget cannot see.
+   *
+   * `SET TEXTSIZE` counts WIRE bytes, and the wire encoding is not the one the byte budget
+   * measures. Measured with the ceiling at 262145: a `varchar(max)` of two million
+   * characters came back as 262145 characters, which the budget refuses; the same value as
+   * `nvarchar(max)` came back as 131072 characters, because nvarchar travels as UTF-16 at
+   * two bytes each, and 131072 ASCII characters are 131072 UTF-8 bytes, which is HALF the
+   * budget and passes. The caller would have been handed a silently truncated string.
+   *
+   * So the cut is detected in the server's own unit instead. A cut value is exactly the
+   * ceiling in wire bytes, which is `ceiling` characters for a single-byte type and
+   * `floor(ceiling / 2)` for a Unicode one, and a Buffer is `ceiling` bytes. Nothing else is
+   * refused: a value that merely happens to be one of those two lengths is astronomically
+   * unlikely and would be refused fail-closed, which is the right way round for a check
+   * whose alternative is a wrong answer nobody can detect.
+   */
+  private static assertNoValueWasCut(result: mssql.IResult, ceiling: number, sql: string): void {
+    const unicodeCut = Math.floor(ceiling / 2);
+    for (const row of (result.recordset ?? []) as Record<string, unknown>[]) {
+      for (const [column, value] of Object.entries(row)) {
+        const size = typeof value === "string" ? value.length : Buffer.isBuffer(value) ? value.length : -1;
+        if (size !== ceiling && size !== unicodeCut) continue;
+        throw new QueryError(
+          `Read-only execution refused a value the server cut at the byte budget: ${column} came back at exactly the ${ceiling}-byte ceiling, so what it holds cannot be told from the whole value. Project fewer or smaller columns.`,
+          "mssql",
+          sql,
+        );
+      }
+    }
+  }
+
+  /**
+   * Proves the session is answering with DATA before the statement is sent.
+   *
+   * The failure this closes is silent: a connection still carrying `SET SHOWPLAN_ALL
+   * ON` answers every statement with optimizer rows instead of rows, and the caller
+   * cannot tell: a plan IS a result set. So the mode is not assumed to be off because
+   * an OFF was issued; it is read back, the way the SQLite profile reads back
+   * `PRAGMA query_only` rather than assuming it from having set it.
+   *
+   * A sentinel with a name nothing else can produce, so the check cannot be satisfied
+   * by the statement's own shape.
+   */
+  private async assertPlanModeIsOff(transaction: mssql.Transaction, sql: string): Promise<void> {
+    const probe = await new mssql.Request(transaction).batch("SELECT 1 AS libredb_plan_mode_probe");
+    const row = (probe.recordset ?? [])[0] as Record<string, unknown> | undefined;
+    if (row?.libredb_plan_mode_probe !== 1) {
+      throw new QueryError(
+        "Read-only execution refused: this session is still in plan mode, so a result could not be distinguished from a query plan",
+        "mssql",
+        sql,
+      );
+    }
+  }
+
+  /**
+   * Sends the statement and ends it at the budget, by CANCELLING it rather than by
+   * abandoning the promise.
+   *
+   * node-mssql's own `requestTimeout` cannot be used for this. tedious stops the
+   * request timer on the first data packet (`connection.js`, "request timer is stopped
+   * on first data package"), so it bounds time-to-FIRST-ROW and not statement time:
+   * measured, a 20-million-row read whose first row arrived in 4ms ran for 9564ms
+   * against a 3000ms budget and was never cancelled. A timer this method owns does not
+   * disarm, and `request.cancel()` ends the request server-side. Measured: the SPID
+   * held no running request afterwards and the connection stayed reusable.
+   *
+   * The rejection is AWAITED rather than raced, which is what lets the caller's
+   * `finally` roll back: a rollback issued while the request is still in flight throws
+   * and leaves the transaction open.
+   */
+  private async runWithDeadline(
+    transaction: mssql.Transaction,
+    sql: string,
+    deadlineMs: number,
+  ): Promise<mssql.IResult> {
+    const request = new mssql.Request(transaction);
+    // The timer records that IT fired, because tedious words every cancel the same way:
+    // a statement this deadline ended arrives as `Canceled.`, which is also what a user
+    // pressing stop produces, and a model told only that is given nothing to repair. The
+    // flag is what lets the refusal name the budget it overran.
+    let deadlineFired = false;
+    const deadline = setTimeout(() => {
+      deadlineFired = true;
+      request.cancel();
+    }, deadlineMs);
+    try {
+      return await request.batch(sql);
+    } catch (error) {
+      if (!deadlineFired) throw error;
+      throw new QueryError(
+        `Read-only execution exceeded its time budget: the statement was cancelled after ${deadlineMs} ms`,
+        "mssql",
+        sql,
+      );
+    } finally {
+      clearTimeout(deadline);
+    }
+  }
+
+  /**
+   * Puts every session mode this profile sets back to its default, and says whether
+   * it succeeded. The caller ends the pool when it did not: a connection returned to
+   * the pool with `SHOWPLAN_ALL` still on answers the NEXT statement with a query
+   * plan where its caller expects rows, which is a wrong answer rather than an error.
+   */
+  private async resetProfiledSession(transaction: mssql.Transaction): Promise<boolean> {
+    try {
+      // SHOWPLAN first, and on its own: while it is on, a `SET` is COMPILED rather than
+      // run, so every reset after it would be a no-op that looked like a success. It is
+      // re-asserted here rather than trusted from `admitReadStatement`'s own finally,
+      // because that finally does not always run: a batch-aborting error (measured with
+      // `OPENROWSET(BULK …)`, Msg 4834) dooms the transaction, and the OFF then fails
+      // with ENOTBEGUN while the connection still carries the mode.
+      await new mssql.Request(transaction).batch("SET SHOWPLAN_ALL OFF");
+      await new mssql.Request(transaction).batch("SET ROWCOUNT 0");
+      // The driver's own default, read back from a fresh session rather than assumed: tedious
+      // opens at `@@TEXTSIZE` 2147483647, measured, so this is a restore and not a widening.
+      await new mssql.Request(transaction).batch("SET TEXTSIZE 2147483647");
+      await new mssql.Request(transaction).batch("SET LOCK_TIMEOUT -1");
+      await new mssql.Request(transaction).batch("SET DEADLOCK_PRIORITY NORMAL");
+      return true;
+    } catch (error) {
+      // The caller answers this by ending the pool, which is a loud enough event that the
+      // reason must not be the one thing nobody can see. An operator reading "the agent's
+      // pool keeps restarting" has no other place to learn why.
+      console.error("[MSSQL] Read-only session reset failed; ending the pool:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Refuses anything the optimizer did not compile to exactly one read statement.
+   *
+   * `Parent` is 0 on a plan's ROOT row and on nothing else, so counting those counts
+   * statements. One caveat is measured and deliberately left: a `DECLARE` compiles to
+   * no root row at all, so `DECLARE @v int; SELECT 1` counts as one. It is refused
+   * before it reaches here (the shared statement guard answers `MULTIPLE_STATEMENTS`
+   * for anything past a terminator), and it is harmless in itself, because every
+   * statement class that DOES anything emits a root of its own.
+   */
+  private static assertSingleReadStatement(plan: mssql.IResult, sql: string): void {
+    const rows = (plan.recordsets as unknown as Record<string, unknown>[][]).flat();
+    const roots = rows.filter((row) => row?.Parent === 0);
+    if (roots.length === 0) {
+      throw new QueryError(
+        "Read-only execution could not be admitted: SQL Server compiled no statement from this text",
+        "mssql",
+        sql,
+      );
+    }
+    // Statements, counted the way SQL Server numbers them. See AGENT_MODULE_BODY_TYPE
+    // for why this is not `roots.length`.
+    const statementIds = new Set(roots.map((row) => String(row.StmtId)));
+    if (statementIds.size > 1) {
+      throw new QueryError(
+        `Read-only execution admits exactly one statement; SQL Server compiled ${statementIds.size} (${roots.map((row) => String(row.Type)).join(", ")})`,
+        "mssql",
+        sql,
+      );
+    }
+    const classes = roots.map((row) => String(row.Type));
+    const serialising = classes.filter((type) => MSSQLProvider.AGENT_SERIALISING_STATEMENT_TYPES.has(type));
+    if (serialising.length > 0) {
+      throw new QueryError(
+        `Read-only execution cannot bound a serialised result: SQL Server compiled this as ${serialising.join(", ")}, and the row budget would silently cut the rows underneath the FOR JSON or FOR XML clause. Ask for the rows themselves instead.`,
+        "mssql",
+        sql,
+      );
+    }
+    const refused = classes.filter(
+      (type) =>
+        !MSSQLProvider.AGENT_ADMITTED_STATEMENT_TYPES.has(type) && type !== MSSQLProvider.AGENT_MODULE_BODY_TYPE,
+    );
+    if (refused.length > 0) {
+      throw new QueryError(
+        `Read-only execution admits read statements only; SQL Server compiled this one as ${refused.join(", ")}`,
+        "mssql",
+        sql,
+      );
+    }
+    // A batch whose only root is the module-body header is not a statement anybody
+    // sent: admitting it would admit a shape the allowlist never classified.
+    if (!classes.some((type) => MSSQLProvider.AGENT_ADMITTED_STATEMENT_TYPES.has(type))) {
+      throw new QueryError(
+        "Read-only execution could not be admitted: SQL Server compiled no read statement from this text",
+        "mssql",
+        sql,
+      );
+    }
   }
 
   public async cancelQuery(queryId: string): Promise<boolean> {
@@ -1910,6 +2662,7 @@ export class MSSQLProvider extends SQLBaseProvider {
       });
 
       const recordset = result.recordset || [];
+      convertZonelessValues(recordset);
       const fields = recordset.length > 0 ? Object.keys(recordset[0]) : [];
 
       return {
@@ -2467,7 +3220,19 @@ export class MSSQLProvider extends SQLBaseProvider {
   // Maintenance Operations
   // ============================================================================
 
-  public async runMaintenance(type: MaintenanceType, target?: string): Promise<MaintenanceResult> {
+  /**
+   * A maintenance target as a schema-qualified identifier, using the `[bracket]` quoting this
+   * provider already escapes with. A container is honoured when the caller sends one; a bare
+   * name keeps the previous reading, where the connected default schema applies.
+   */
+  private qualifyMaintenanceTarget(target: string, container?: string): string {
+    if (container) {
+      return `${this.escapeIdentifier(container)}.${this.escapeIdentifier(target)}`;
+    }
+    return this.escapeIdentifier(target);
+  }
+
+  public async runMaintenance(type: MaintenanceType, target?: string, container?: string): Promise<MaintenanceResult> {
     this.ensureConnected();
 
     const { result, executionTime } = await this.measureExecution(async () => {
@@ -2477,7 +3242,7 @@ export class MSSQLProvider extends SQLBaseProvider {
         switch (type) {
           case "analyze":
             if (target) {
-              sql = `UPDATE STATISTICS [${target.replace(/\]/g, "]]")}]`;
+              sql = `UPDATE STATISTICS ${this.qualifyMaintenanceTarget(target, container)}`;
             } else {
               sql = `EXEC sp_updatestats`;
             }
@@ -2487,7 +3252,7 @@ export class MSSQLProvider extends SQLBaseProvider {
             break;
           case "optimize":
             if (target) {
-              sql = `ALTER INDEX ALL ON [${target.replace(/\]/g, "]]")}] REBUILD`;
+              sql = `ALTER INDEX ALL ON ${this.qualifyMaintenanceTarget(target, container)} REBUILD`;
             } else {
               sql = REBUILD_ALL_INDEXES_SQL;
             }

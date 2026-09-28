@@ -167,6 +167,16 @@ export type ExecutionProfileDenyCode =
   | "PROFILE_UNSUPPORTED_TARGET"
   /** The role the profile would run as holds privileges no read-only boundary can contain. */
   | "PROFILE_PRIVILEGES_TOO_BROAD"
+  /**
+   * The role the profile would run as is missing a privilege the BOUNDARY ITSELF needs.
+   *
+   * The opposite of the code above, and its own because the two are repaired in opposite
+   * directions. SQL Server is where they came apart: its admission step asks the optimizer
+   * to compile a candidate without running it, which needs `SHOWPLAN`, so a principal that
+   * is merely a reader cannot be admitted at all. Reported as `PROFILE_PRIVILEGES_TOO_BROAD`
+   * it told an operator to narrow a principal that needed one more grant.
+   */
+  | "PROFILE_PRIVILEGES_TOO_NARROW"
   | "AGENT_CREDENTIAL_UNRESOLVABLE"
   | "AGENT_CREDENTIAL_WITH_CONNECTION_STRING";
 
@@ -408,6 +418,19 @@ export function mapDatabaseError(error: unknown, provider: DatabaseType, query?:
     message.includes("permission denied")
   ) {
     return new AuthenticationError(`Authentication failed: ${error.message}`, provider);
+  }
+
+  // PostgreSQL preemption vs. operator cancel (#1145). Both a `statement_timeout`
+  // and a `lock_timeout` are reported as `canceling statement due to <statement|lock>
+  // timeout`, sharing the `canceling statement` prefix an operator cancel
+  // (`pg_cancel_backend`, `due to user request`) uses. Both are TIMEOUTS — a time
+  // budget elapsed and the statement never ran to completion — so they map to
+  // TimeoutError carrying the engine's own text, exactly as every other engine's
+  // query timeout does. This MUST run before the cancellation branch below, which
+  // would otherwise match `canceling statement` first and discard the wording that
+  // tells a timeout apart from a cancel.
+  if (message.includes("canceling statement due to statement timeout") || message.includes("due to lock timeout")) {
+    return new TimeoutError(error.message, provider, undefined, query);
   }
 
   // Query cancellation (must check before timeout — 'canceling statement' is cancellation, not timeout)

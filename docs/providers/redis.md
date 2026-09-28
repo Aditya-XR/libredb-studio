@@ -204,6 +204,12 @@ keys with `TYPE` until it has observed up to **3 distinct** value-types — it m
 3 keys when they share a type — to populate the synthetic column metadata. The resulting
 object list is sorted by descending key count so the busiest prefixes surface first.
 
+That read is BOUNDED and one-shot: it stops at 1,000 keys and discards its cursor, so what it
+answers is a floor rather than a total. The keyspace walk below
+([§6.2](#62-the-key-space-walk-panel)) is the same grouping problem asked a different way — one the
+caller drives, one batch at a time, with the cursor kept. Both are bounded alike, which is why the
+walk's `maxCount` is the same 1,000 that `KEY_SCAN_LIMIT` puts on this one.
+
 ### 3.3 Generic command dispatch via `call()`
 
 Rather than hand-coding a method per Redis command, `runCommand()`
@@ -274,7 +280,10 @@ on a leading `{` as §3.4 does, and asks before running any command in its Redis
 vocabulary - key, expiry, string, hash, list, set, sorted-set and stream writes, the scripting
 entry points, and the server and access commands, with container commands such as `CONFIG SET`
 matched on their two-token spelling - while a body it cannot read (broken JSON, a JSON body whose
-`command` is not a string) asks rather than staying silent.
+`command` is not a string) asks rather than staying silent. The vocabulary names only commands the
+provider runs: the blocking list and sorted-set pops are refused before they reach the server
+([§5.2b](#52b-commands-that-would-change-the-shared-connection-1107)), so their non-blocking
+forms are the ones the gate asks about.
 
 ### 3.5 Reply normalisation into the shared grid
 
@@ -304,7 +313,7 @@ Redis uses the discrete-field form of `DatabaseConnection` (not `connectionStrin
 | `port` | — | Defaults to `6379` |
 | `user` | — | The **Redis 6 ACL user**, sent as ioredis's `username`; empty means `default` ([§4.1a](#41a-acl-users-d29)) |
 | `password` | — | Sent as `password`; omit for unauthenticated instances |
-| `database` | — | Logical DB index, parsed as int; defaults to `0` |
+| `database` | — | Logical DB index, a run of digits; defaults to `0` when empty. Anything else is refused at connect with `A Redis database is a number, received "<value>"` rather than read as `0` |
 | `ssl` | — | `SSLConfig`; becomes the ioredis `tls` option ([§4.3](#43-ssl--tls)) |
 
 ```ts
@@ -532,6 +541,56 @@ opened before any scope was recorded still has no owner.
 The same argument applies to `sqlite` and `duckdb`, which likewise hold one handle for every
 concurrent request and ignore the scope for the same reason.
 
+### 5.2b Commands that would change the shared connection (#1107)
+
+`query()` refuses three kinds of command before they reach the server.
+The reason is the one §5.2a gives for `MULTI`: the provider is cached per connection for the whole process and runs every statement on ONE client (§3.6), so whatever a statement leaves on that client is what every later request on the connection gets, whoever sends it.
+Measured on redis 8.10.2 through ioredis 5.11.1, on a connection configured for database `2`: the first table as an ACL user with `+@read` on 2026-09-25, the rest as `default` on 2026-09-28.
+
+**Commands that change what later requests read, or who they run as.**
+The refusal reads `<COMMAND> is not run here: it would change the shared connection for every later request.`, and for `SELECT` it adds where to pick a database instead.
+
+| Command | What it did to the shared client |
+|---------|----------------------------------|
+| `SELECT 0` | Every later `GET` read database 0 instead of the configured `database` |
+| `MULTI` / `SELECT 0` / `EXEC` | The same, which is why the refusal is by command name and not by reply |
+| `RESET` | Moved the client to database 0 AND logged it back in as `default`: the read-only user could `SET` |
+| `AUTH default <anything>` | The same against a stock `default nopass` server |
+| `HELLO 3` | Switched the reply protocol; ioredis then failed with `Protocol error, got "%"` |
+
+**Commands after which the connection stops answering.**
+The refusal reads `<COMMAND> is not run here: the shared connection would stop answering later requests.`
+
+| Command | What it did to the shared client |
+|---------|----------------------------------|
+| `SUBSCRIBE`, `PSUBSCRIBE`, `SSUBSCRIBE` | Never answered; ioredis threw an uncaught `TypeError`, and every later command failed `Connection in subscriber mode`. Through `POST /api/db/query`, one `SUBSCRIBE` from a `user` session failed the connection for every user, admin included, until the idle sweep evicted the provider |
+| `QUIT` | Closed the socket for good: every later command failed `Connection is closed.`, while `isConnected()` still said true, so the provider cache kept serving it |
+| `MONITOR` | Turned the connection into a feed of every command the server runs, which ioredis read as replies to later commands |
+| `CLIENT REPLY OFF`, `CLIENT REPLY SKIP` | Stopped the server replying, so every later command waited for an answer that never came |
+
+**Commands that hold the connection until data or a timeout arrives.**
+The refusal reads `<COMMAND> is not run here: every other request on the shared connection would wait until it returns.`
+They are `BLPOP`, `BRPOP`, `BRPOPLPUSH`, `BLMOVE`, `BLMPOP`, `BZPOPMIN`, `BZPOPMAX`, `BZMPOP`, `WAIT`, `WAITAOF`, and `XREAD` / `XREADGROUP` with `BLOCK`.
+With a timeout of 0 each one never returned, and neither did any later command.
+A `GET` sent while `BLPOP queue 3` waited answered after 3 seconds, so the refusal does not depend on the timeout.
+Only a `BLOCK` before `STREAMS` is the option, and `GROUP`'s two names are skipped, so a stream key or a group named `BLOCK` still runs.
+The non-blocking forms, such as `LPOP`, `LMOVE`, `ZPOPMIN` and `XREAD` without `BLOCK`, run as before.
+
+**Every command word is compared up to its first NUL.**
+The server can match a name that way: it reuses the previous command's lookup when the next name matches it as a C string.
+On a raw socket `SELECT\0 0` answered `OK` right after `SELECT 2` and `unknown command` right after `PING`.
+The provider sends `SELECT <db>` on connect, so a byte-exact check let the first statement on a fresh provider, `SELECT\0 0`, move it to database 0 through `POST /api/db/query`.
+
+**Measured, and still run.**
+`SWAPDB`, `MOVE` and a script's `redis.call('SELECT', n)` leave the client's database and user where they were.
+`UNSUBSCRIBE`, `PUNSUBSCRIBE` and `SUNSUBSCRIBE` outside subscriber mode answer 0 and change nothing.
+`CLIENT SETNAME`, `SETINFO`, `NO-EVICT`, `NO-TOUCH` and `TRACKING` set attributes and flags of the connection, not its database, user or replies.
+`SYNC` and `PSYNC` ended in an ioredis protocol error, and the next request was answered normally in the configured database.
+
+To read another database, pick it in the Keys panel (§6.2): a key opened from there runs under the
+per-run `database` field of `POST /api/db/query`, on a provider of its own, and the shared one is not
+touched. To change the database a connection reads by default, change its **Database** field (§4.1).
+
 ### 5.3 Schema-explorer menu actions
 
 Right-clicking a node in the schema tree (or its `⋮` menu) offers commands generated for that node,
@@ -632,12 +691,16 @@ keywords, argument words such as `MATCH` / `COUNT` / `WITHSCORES` as functions, 
 Before #427 a Redis tab was typed `mongodb` and highlighted as JSON, which flagged every command as
 a syntax error.
 
-Four menu actions are **not offered** on Redis, all for the same reason: they address the row as an
+Five menu actions are **not offered** on Redis, all for the same reason: they address the row as an
 object, and a `user:*` row is this server's grouping of a key prefix, not an object any command can
 be given.
 
-- `Profile Table` and `Generate Test Data` profile an object and insert rows into it. Both are
-  hidden wherever `tablesAreDerivedGroupings` is true rather than left to answer HTTP 400 (#427).
+- `Profile Table` and `Generate Test Data` profile an object and insert rows into it, and neither is offered on a `user:*` row rather than left to answer HTTP 400 (#427).
+  Profile is hidden wherever `tablesAreDerivedGroupings` is true, and since #1085 by the language gate `offersColumnProfiling` as well, because the profile route refuses JSON in a dialect of its own.
+  Generate Test Data is withheld by the row-write rule, which the desktop tree has always asked and the mobile menu asks instead of the flag since #1085 (decision D-M), because `keyspace` declares no `acceptsRowWrites` and the engine declares `supportsInlineRowEdit: false`.
+- `Generate Count Query` is withheld by `offersCountQuery`, which both row menus and the generator ask (#702).
+  The command grammar has no count statement to write, the JSON carries a dialect of its own, and a derived grouping has nothing to count.
+  The row's badge is absent as well, because the object surface reports no `rowCount` for a prefix.
 - **Redis offers no per-row maintenance action at all** — neither *"Key Info"* nor *"Memory
   Doctor"*. Both items call `onOpenMaintenance("tables", <row>)`, which opens the admin Operations
   tab against a named table; there is no such table here, so the item was a dead end even for the
@@ -647,6 +710,13 @@ be given.
 `Generate Code` stays — it names the row, it does not address it, and it sanitises the name into an
 identifier that is legal in every target language (`user:*` → `User`), keeping Unicode letters
 intact so a non-ASCII key prefix does not collide with another one.
+
+`Browse Keys` is offered on the same rows, and it is the only menu item on this engine that opens a
+SURFACE rather than a statement: it switches the sidebar to the keys panel with the row's own name as
+the `MATCH` pattern ([§6.2](#62-the-key-space-walk-panel)). It is gated on `keyScan` beside the
+`tablesAreDerivedGroupings` the other items above read — a panel to show it in, and rows that are
+prefixes rather than objects — so it is offered here and nowhere else: a catalog-backed engine's
+`orders` row is an object, not a glob.
 
 ---
 
@@ -835,6 +905,23 @@ this engine a prefix disappears the moment its last key is deleted.
 A function library answers three empty arrays with **no round trip**. That is a true fact about the
 kind rather than a failed read — a library has no columns, no indexes and no foreign keys.
 
+**`keyspace` is the only kind here that declares `hasColumns`**, so it is the only object row the
+desktop object tree gives a twisty to; `function` declares nothing, `describeObject()` answers it
+`columns: []`, and it stays a leaf. A `keyspace` row's three columns are SYNTHETIC, derived from the
+types sampled by the scan walk rather than read from a catalog, and they are declared because that
+grouping is what this provider models a key pattern as.
+
+**Expanding a key pattern re-walks the keyspace, and above the scan bound it can fail.**
+`describeObject()` does not reuse the walk the listing ran: it calls `scanKeyGroups()` itself, which
+is its own bounded `SCAN` capped at `KEY_SCAN_LIMIT` (1,000 keys), and raises when the grouping the
+listing produced is absent from that second walk. `SCAN` guarantees no order, so on a database
+holding more than 1,000 keys the two walks are different samples, a listed key pattern can fail to
+expand with `No key under "session:*" was found in the 1000-key SCAN of database 0`, and collapsing
+and re-expanding the row may or may not repair it: it is a fresh sample each time. This is a measured
+limit of a bounded walk over an unordered keyspace, not a bug with a fix pending here. The refusal
+itself is deliberate and is argued two paragraphs down: a grouping ceases to exist when its last key
+is deleted, so an empty shape would claim a grouping that is gone.
+
 **The two kinds are therefore asymmetric about EXISTENCE, on purpose.** `describeObject()` answers a
 valid detail for ANY `function` name, a library that was never loaded included, because nothing there
 reads the catalog; a `keyspace` whose grouping the current scan no longer holds raises. Existence is
@@ -942,7 +1029,7 @@ reach this arm is a declaration somebody removed.
 |---|---|---|
 | `id` | `definition` | one part, always: a library has one Lua text |
 | `label` | `Definition` | rendered as-is |
-| `language` | the kind's declared `sourceLanguage`, which is `lua` | `lua` IS a Monaco language id the installed 0.56.0 bundle registers, unlike `plsql`, `tsql` and `cql` |
+| `language` | the kind's declared `sourceLanguage`, which is `lua` | `lua` IS a Monaco language id the installed 0.57.0 bundle registers, unlike `plsql`, `tsql` and `cql` |
 | `form` | `complete` | the text runs as given: it is what `FUNCTION LOAD` was handed |
 | `origin` | `stored` | the author's own bytes. Measured on Redis 8.10.0: `WITHCODE` answers the shebang line and the body exactly as they were loaded, with no reformatting |
 
@@ -1224,11 +1311,264 @@ A sentinel planted in the submitted Lua appears in neither event and nowhere in 
 
 #### Reads go to the CONTAINER's database, never the session's
 
-Every object read opens its own short-lived connection with `db` set, rather than issuing `SELECT` on
-the shared client: a `SELECT` there would decide which database a concurrent query in the same session
-ran against. Nothing in the object surface ever sends `SELECT`.
+Every object read opens its own short-lived connection and selects the database on it, rather than
+issuing `SELECT` on the shared client: a `SELECT` there would decide which database a concurrent query
+in the same session ran against. Nothing in the object surface ever sends `SELECT` on the shared client.
+
+A DATABASE THE SERVER DOES NOT HAVE IS REFUSED, NOT READ AS 0. The `SELECT` is sent by the provider
+rather than handed to ioredis as its `db` option, because ioredis does not fail a connect on that option.
+Measured 2026-09-24 on redis 8.10.0 through ioredis 5.11.1 with `db: 99`: `connect()` resolved,
+"ERR DB index is out of range" arrived only as an unhandled `error` event, and every later command ran
+in database 0. Now the session connection, each object read, the key walk and a run carrying
+`database` all fail with `Redis refused database 99: ERR DB index is out of range`, a 400.
 
 ---
+
+### 6.2 The key-space walk (panel)
+
+The object surface above answers "what is here" in one bounded read, and a catalog-backed engine can
+answer that way because a stored definition is enumerable in full. A key space cannot be: there is no
+prefix index to enumerate from, so the only way to learn what exists is `SCAN`, and `SCAN` answers a
+cursor rather than a listing. That is a different contract, so it is a different surface — a
+capability, an optional provider method, one route and a panel — rather than a flag on the object
+routes. (Flag-shaped options on those routes are how a whole-database eager read got built once
+before; see the `includeColumns` history in [§6.1](#61-the-object-surface-789).)
+
+| Piece | Where |
+|-------|-------|
+| `keyScan` | the declaration; absent on the catalog-backed engines ([§9](#9-capabilities--labels)) |
+| `scanKeysPage()` | `DatabaseProvider`'s optional method, implemented by this provider ([`redis.ts`](../../src/lib/db/providers/keyvalue/redis.ts)) |
+| `POST /api/db/keys/scan` | the route, gated on the declaration |
+| `KeyBrowser` | the sidebar panel, offered only where the declaration is present |
+
+One page carries four fields in and four out:
+
+```jsonc
+// in
+{ "cursor": "0", "pattern": "app:cache:*", "count": 500, "database": 0 }
+// out
+{
+  "keys": ["app:cache:ttl", "app:cache:user:1"],
+  "cursor": "17",
+  "total": 31,
+  "types": { "app:cache:ttl": "string", "app:cache:user:1": "hash" }
+}
+```
+
+- **The caller owns the cursor.** Nothing is held between two calls, so a page is a round trip rather
+  than a session — and a cursor that arrives after a reconnect is still valid, because it is a
+  position in a hash table and not a handle.
+- **`DBSIZE` travels with every page** as `total`. It is O(1) on the server, and it is the only
+  denominator a progress indicator can divide by: a `SCAN` cursor says nothing about how much is
+  left, so no total can be computed from the batches a caller has already seen. It counts **every key
+  in the database**, so with a `pattern` in hand it is a denominator for the database rather than for
+  the walk, and the panel's wording says which.
+- **The deployment's shape travels with that count** as `clustered`, read from the server's own
+  `INFO cluster` in the same pipeline round trip as `DBSIZE` rather than in a call of its own. It is
+  present and `true` only when the reply says `cluster_enabled:1`, which is what lets the panel say
+  the keys and the count are one node's; a plain server says `cluster_enabled:0`, and a reply that is
+  missing or cannot be read leaves the field absent rather than guessed
+  (see [the clustered-deployment limitation](#64-known-limitation-clustered-deployments)).
+- **Each key's type travels with the page** as `types`, keyed by name. `TYPE` takes one key and Redis
+  publishes no batch form, so the provider pipelines one call per key of the batch: a page costs one
+  extra round trip whatever it holds, never one per key. A key absent from the map is one no page
+  could describe, and the panel draws nothing for it rather than guessing; a key that vanished
+  between the walk and that read keeps the server's own `none`.
+- **`database` is the numbered database to walk, and absent means the session's own.** The field is
+  optional rather than defaulted to `0` for exactly that reason: the engine answers with the database
+  the connection is already in, which is a different fact from "database zero".
+- **No deduplication and no ordering.** `SCAN` promises neither — a key present for the whole walk is
+  returned at least once and may be returned twice while the table rehashes, and the order is the
+  hash table's. The panel merges what it receives into a tree by key name, while `scanned` counts what
+  the walk was handed, repeats included, because that is the number the progress line measures.
+- **A failure does not advance the cursor.** The position already held is the last one the server
+  acknowledged, so a retry re-asks the batch that failed rather than silently skipping it.
+- **The separator is fixed at `:`**, in `keyGrouping()`'s own sense. A configurable one would be a
+  choice this provider made and then had to keep consistent across a tree, a `MATCH` pattern and this
+  document, for a setting nothing else in the product has a use for.
+
+#### What the panel does
+
+- `Database N` — the tree's ROOT ROW, carrying the server's own `DBSIZE` for the database the walk is
+  reading. A key space belongs to one numbered database, so the tree is drawn under it rather than
+  beginning at `app:*` and leaving the reader to guess which. Folding it hides the rows and asks the
+  server nothing.
+- A **database dropdown**, populated from `listContainers()` — the engine's own container level, the
+  same read the object tree's top level comes from, never a hardcoded 16 ([§6.1](#61-the-object-surface-789)).
+  Choosing one re-walks that database from cursor `"0"`; **nothing is sent while the session's own
+  database is the one being read**, because the engine already answers with it and a request naming it
+  would be a second question with the same answer. A refused list is a banner, not a dead panel: the
+  walk continues in the session's database.
+- `Scanned n/m`, or `Matched n of m` once a pattern is in hand. The two numbers are of different
+  kinds: `n` is what the walk was HANDED (with `MATCH`, only the keys that passed it) and `m` is every
+  key the database holds. A finished `user:*` walk reporting `137/1531` is not a stuck walk, so the
+  word follows the question rather than inviting the reader to wait for a walk that is already over.
+  `n` is **held to the panel's 10,000-key budget**, because a page is counted whole even when that
+  budget truncates the tail of the last one: printed raw, the numerator would read a few keys above
+  the limit the panel states two lines below it, and invite a question whose answer is no.
+- **Rescan** — the same question asked again from cursor `"0"`. A key space changes under a sample, so
+  this is an ordinary gesture rather than a recovery: it is the only way to see a key somebody else
+  wrote. A page still in the air is dropped rather than mixed into the new walk.
+- **Scan more** — one more batch from wherever the walk stands, refused while a page is in flight so
+  that two answers cannot advance from the position only one of them earned.
+- **Scan all** — pages until the cursor comes back `"0"`, **capped at 10,000 keys** and cancellable
+  between pages. The cap is a client budget and the panel says so in its own words when it ends a
+  walk: `SCAN` is O(N) over the whole keyspace, so an unbounded "all" against a key space of millions
+  is a request that never returns and a server that is busy while it does not.
+- **A second bound: the keys the tree HOLDS.** That budget is per press, and a reader can press more
+  than once — so the panel also refuses past **10,000 keys held**, across every page and every press
+  of every prefix, with its own sentence (`Holding 10,000 keys, which is this panel's limit…`). When
+  it is reached **Scan more and Scan all are disabled and no `Click to load more` row is offered**,
+  because a page bought for a tree that cannot take it is work thrown away. Both bounds are the same
+  number on purpose: one budget, stated once, and the two sentences say which one was met. A full tree
+  is not a spent one — the cursor is still live — so narrowing the pattern starts a fresh walk from
+  cursor `"0"` and the keys come back.
+- **The tree is WINDOWED.** Rows are drawn at a fixed height and only the ones the scroll box can
+  show are mounted, the way `ObjectTree` already does it: a prefix holding six thousand keys costs a
+  few dozen DOM nodes, not six thousand, and `aria-setsize`/`aria-posinset` are taken from the FULL
+  level so a screen reader is told how long the list really is while the window hides most of it. A
+  row the reader has focus on is kept in the window rather than unmounted, because focus cannot move
+  to a node that is not in the DOM. The database row scrolls with the rest of them — a row pinned over
+  a scrolling slice of prefixes would disagree with it about where the list starts.
+- **Click to load more**, under an open folder — one page of a walk **scoped to that prefix**
+  ([§6.3](#63-the-prefix-scoped-walk-load-more)). It is the one control that can find keys the global
+  sample never happened to include. The row carries **how many keys are loaded under that prefix** in
+  the same right-hand column every other row keeps its number in, and reports what the last press DID
+  (`+12 new`, or `nothing new in that page`) — because a scoped page is filtered by the server and
+  then deduplicated here, so it can legitimately add nothing, and that true answer is otherwise
+  indistinguishable from a dead button.
+- **A key's type, beside its name** — `string`, `hash`, `list`, `set` or `zset`, in the same
+  right-hand column a folder uses for its key count, so one edge answers "what is this row" for
+  every row. It arrives ON THE PAGE (see the contract above). A key no page described draws an
+  empty cell rather than a guess, and a key that vanished between the walk and that read draws the
+  server's own `none`.
+- **Activating a key** opens the statement that reads it — `GET`, `HGETALL`, `LRANGE 0 -1`,
+  `SMEMBERS` or `ZRANGE 0 -1 WITHSCORES`, chosen by the type the page carried — in a query tab and
+  runs it, so the value lands in the results grid the reader already uses. **There is no separate
+  detail panel**: the statement is generated by the same type-aware generator the object tree's rows
+  go through ([§5.3](#53-schema-explorer-menu-actions), #427), which is why a `hash` key opens on
+  `HGETALL <key>` and not on a probe. Because the type is already in hand, an activation costs no
+  request of its own. A key no page described opens `TYPE <key>` instead: that reports what the key
+  is, which is the honest answer when nobody knows, rather than running a read nobody chose.
+  The type carrier is handed to the generator rather than looked up, because a KEY IS NOT A SCHEMA
+  NODE — the cache the generator's other callers read types from holds prefix groups, and no key is
+  in it.
+
+  THE READ RUNS IN THE DATABASE THE WALK WAS READING, not the connection's own. A key lives in one
+  numbered database and `GET <key>` cannot name it, so the number travels with the run as its own
+  field beside the connection — which is what makes it reach a **managed** connection too, where
+  anything attached to the connection object is discarded on the way in (`resolveConnection`, and
+  with it the session's database while the panel claims a different one). Every run of that tab
+  follows the number — the initial read, a re-run, a selection, an inline edit and the next page —
+  and a restored tab keeps it after a reload.
+- **Browse Keys**, in the row menu of a key-pattern row in the OBJECT tree — the one action that
+  opens this panel instead of acting on the object. It switches the sidebar to Keys and hands the
+  row's name over as the `MATCH` pattern, escaped in its prefix half by the same helper the Load more
+  row uses: `a[b:*` arrives as `a\[b:*`, because a key prefix is data that may contain a glob
+  metacharacter while the `*` the row is advertised with is the one the pattern exists for. The item
+  is offered where the engine declares BOTH `keyScan` and `tablesAreDerivedGroupings` — a surface to
+  show it in, and rows that are prefixes rather than objects — and asks `role === "relation"` as
+  well, so a routine row is never offered a walk of a prefix it does not name. **The row's own
+  DATABASE travels with it**: the item is offered on the key-pattern rows of every database the object
+  tree lists, and an object's path starts with its container's path, so the panel is pointed at the
+  database the row was under rather than whichever one it happened to be in — and it waits for the
+  container list before walking, because a page taken before the list answered is a page thrown away.
+  The panel applies the pattern once and then owns it: the reader can edit or clear it, and the same
+  row asked for twice is not re-imposed on the box.
+- **Filter** — narrows the tree the walk has ALREADY collected, client-side and without a request. The
+  box takes two kinds of answer, because a reader has two: a **word** (`cache`, `123`, `HEALTH`) names a
+  segment and keeps that segment's WHOLE subtree — somebody who typed a branch name is asking for
+  everything under it — and **the rest of a name** (`queue:jobs:failed:2026:09:23`, `123:k`) names a
+  path, matched anywhere inside the full key name. A segment-only test answered "no match" for the most
+  specific input there is, which is the one a person types when they already know what they are looking
+  for. The tree's own advertised form is accepted too: a folder is drawn `app:*`, so that one trailing
+  `:*` is dropped from the term (a `*` anywhere else stays literal, because a real key segment may
+  contain one), and the folders that lead to a match are opened, because a match left collapsed looks
+  like no match at all.
+- **Pattern** — forwarded as `MATCH`, and a new pattern starts a NEW walk rather than appending to
+  the old one, whose keys are not answers to the question now being asked. The page in the air when
+  the question changes is dropped with it, so a sample can never hold two questions' keys.
+
+The panel is MOUNTED FOR THE CONNECTION, not for the tab: switching the sidebar to Objects and back
+finds the walk where it was left, because a `SCAN` sample costs round trips over the whole key space
+and losing it to a glance at the tree is the difference between a panel and a toy. Changing the
+connection drops it, because a hidden panel still walks and that walk would be of a server nobody is
+looking at.
+
+A FOLDER'S BADGE IS THE KEYS LOADED UNDER IT, and a leaf carries no number at all. It is the number
+that MOVES as pages arrive — the global walk's and one press of that prefix's own Load more — which is
+why it is the number a reader in front of a folder is asking about: how much is in here. It is a
+SAMPLE's count and says so on its tooltip, which also carries the other half of the fact: the number of
+ROWS the folder opens to, which is smaller. That number used to be the badge, and reading it as the
+amount of data is how a prefix holding 670 keys came to wear a `2`.
+
+A LEAF DRAWS ITS FULL NAME. `app:env` rather than `env`, since the name is what a key is identified
+by and the depth already says where the tree put it. Folders keep the `prefix:*` form they are
+advertised under, because a prefix is not a key and has no name of its own.
+
+Every refusal is 400 and in the route's own words: a `count` outside `[1, keyScan.maxCount]`
+(refused rather than clamped, because a silent clamp answers a request for 10,000 with 1,000 and says
+nothing), a `count` that is not a positive integer, a non-decimal `cursor`, an empty `pattern`, a
+negative `database`, a `database` the server does not have (the server's own sentence, see above), and
+any engine declaring no `keyScan` at all. A provider that declares the
+capability and implements no method is a distinct 500 — the state an external implementer of the
+published interface can genuinely be in — rather than a `TypeError` that reads as a crash.
+
+A FAILED PAGE IS A BANNER AND NOT A REPLACEMENT. The keys already in the tree are answers the server
+really gave, so a page that could not be taken does not take them away — which matters most for a
+scoped walk, where one prefix refusing is no reason to blank the panel. It also does not end a
+`Scan all` in progress: the loop's failure flag belongs to the walk that started at the database
+level, and a prefix that refused is not a reason to end it. The empty state, which is a claim about
+the DATABASE rather than about one read, is the one thing the banner suppresses.
+
+### 6.3 The prefix-scoped walk (Load more)
+
+The global walk is a sample, so a prefix's contents in the tree are whatever that sample happened to
+include — and a deep prefix can be entirely absent from a thousand keys out of a million. The Load
+more row asks the server about ONE prefix directly, which is the only honest way to answer "is there
+more under here".
+
+- **It is the same route**, with `pattern` built from the prefix (`app:cache` → `app:cache:*`) and a
+  cursor that belongs to that prefix. No second endpoint, no second contract.
+- **It asks for the largest batch the engine declares**, `maxCount` rather than the global walk's
+  `defaultCount`. `COUNT` is a hint about how many hash buckets the server visits, and `MATCH` is not
+  indexed, so a smaller batch does not make a press cheaper — it makes MORE presses for the same
+  answer, which is the thing a reader is already waiting on. The global walk keeps the default
+  because `Scan more` there is a deliberate step somebody is watching.
+- **Each prefix keeps its own cursor**, so pressing the row twice continues that prefix rather than
+  restarting it, and `"0"` from a prefix proves there is nothing more under it — which is what
+  retires the row.
+- **It reports what the press did.** The row shows how many keys are loaded under that prefix, and
+  the last page's own contribution: deduplication happens on this side, so a page can come back
+  holding only keys the tree already had. `+12 new` and `nothing new in that page` are both answers,
+  and the second one is the reason this exists — without it a true answer reads as a dead button.
+- **It costs what a page of the main walk costs, and answering it completely costs a pass.** `MATCH`
+  is applied per batch server-side and is not indexed, so one press visits one batch of hash buckets
+  and returns the keys under the prefix that happened to fall in them — the same O(1)-per-page work
+  `Scan more` does, and a full pass over the keyspace only once the prefix's own cursor comes back
+  `"0"`. That is why it is a row a person presses and not something the panel does for every open
+  folder.
+- **Its keys do not touch the walk's progress.** `scanned` and `total` are the global walk's numbers;
+  a scoped page hands back keys the global walk may already have counted, and adding them would push
+  the progress line past its own denominator.
+- **Its answer is filtered client-side.** `MATCH` is a glob with no escape and a real key segment can
+  contain `*`, `?` or `[`, so the server can return keys that are not under the prefix asked about.
+  `isUnderPrefix()` keeps only the ones that are, compared segment by segment — `app:envelope` is not
+  under `app:env`, whatever a character comparison of the joined names would say.
+- **The row is not offered when the answer is already known.** A spent cursor at the DATABASE level
+  means the sample IS the key space, so every prefix in it is complete; a prefix whose own walk came
+  back `"0"` is complete too; and while a filter is on the view is of what is held, so a row that
+  pulled more into it would make the visible set depend on clicks the filter's term does not explain.
+  A fourth reason is the tree's own limit: at 10,000 keys held the panel takes no more pages of any
+  kind, and a row that could not deliver one is not an offer (§6.2, the held bound).
+
+### 6.4 Known limitation: clustered deployments
+
+`SCAN` walks one node's slots and `DBSIZE` counts one node's keys, and neither has a cluster-wide
+form. On `--cluster-enabled yes` the panel therefore walks and reports **the node the connection
+reached**, which is also why its database selector offers only database `0` there — cluster mode has
+no others ([§4.1](#41-configuration-fields)). A cluster-wide walk would need a cursor per node, which
+is deliberately not attempted: a partial answer labelled as partial beats a total nobody can compute.
 
 ## 7. Monitoring & health
 
@@ -1314,11 +1654,14 @@ no control offers it.
 | `supportsExternalQueryLimiting` | `false` |
 | `supportsCreateTable` | `false` |
 | `supportsInlineRowEdit` | `false` — Redis commands are not SQL, so there is no `UPDATE ... SET` for the results grid's inline editor to emit |
+| `supportsResultPagination` | `false` — `prepareQuery` pins both `limit` and `offset`: a Redis read is a command, not a statement whose bound this layer can advance (#816) |
 | `supportsTransactions` | `false` — `MULTI`/`EXEC` exists in Redis and is not exposed through this provider, so the transaction trio and SANDBOX are not offered (#464). A `MULTI` a script sends anyway is ended by `endOpenQueryTransaction()`, which BOTH query routes now call in a `finally`, `POST /api/db/multi-query` and `POST /api/db/query`, so an editor run ends its own too (D74, D87) ([§5.2a](#52a-a-multi-a-statement-left-open-d75)) |
 | `declaresForeignKeys` | `false` — Redis has no constraints at all, and the "tables" here are key prefixes this provider grouped rather than objects anyone declared |
 | `tablesAreDerivedGroupings` | `true` — the object surface SCANs a bounded slice of the keyspace and groups the real key names it found by their prefix, so a `user:*` row is this server's own summary and not a key any command can be given. The agent layer states this to a plan run, in one sentence, so a grounded run does not draft a command against a grouping. In the object tree it is what withholds Profile from a `keyspace` row ([§6.1](#61-the-object-surface-789)) |
 | `containerLevels` | one level, `schema`, labelled Database ([§6.1](#61-the-object-surface-789)) |
+| `containerPathShapes` | `exact`: only `[database]` addresses a container, so a shorter or a longer path is refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
 | `objectKinds` | `keyspace` (relation) and `function` (routine, `hasSource`, `sourceLanguage: "lua"`). `function` is the only kind in this engine with a definition text, read through `FUNCTION LIST ... WITHCODE` ([§6.1](#61-the-object-surface-789)). Three further candidates are absent rather than declared and zero |
+| `keyScan` | `{ defaultCount: 500, maxCount: 1000 }` — the batch sizes this provider forwards for a resumable walk of the keyspace, and the declaration that gates the Keys panel ([§6.2](#62-the-key-space-walk-panel)). Declared here rather than defaulted at the call site so a panel and its provider cannot disagree about what a batch is |
 | `supportsMaintenance` | `true` |
 | `maintenanceOperations` | `['analyze']` |
 | `supportsConnectionString` | `false` |
@@ -1510,6 +1853,24 @@ docker run --rm -d --name libredb-redis-cluster -p 6400:6379 redis:latest redis-
 docker exec libredb-redis-cluster redis-cli CONFIG GET databases   # -> 1
 ```
 
+### 11.6 The key-space walk tests
+
+Six files, and each one covers a seam the others cannot:
+
+| File | Covers |
+|------|--------|
+| `tests/integration/db/redis-provider.test.ts` | `scanKeysPage()` against the driver double: the cursor it sends, `MATCH` forwarded and omitted, the database it opens, the refusal it passes through, and the pairing of the `keyScan` declaration with the method that implements it |
+| `tests/api/db-keys-scan.test.ts` | the route: the capability gate, the declaration-without-a-method 500, and every parameter refusal |
+| `tests/hooks/use-key-scan.test.ts` | the walk: paging, the in-flight guard, the cap, Stop, a failure that must not be re-asked forever, a page landing after unmount, and a page whose walk was thrown away mid-flight |
+| `tests/hooks/use-key-databases.test.ts` | the container list the walk can be pointed at: the request, the session default, a refusal, a body that cannot be rendered, and an answer that lands after the connection moved |
+| `tests/unit/components/key-browser-tree.test.ts` + `tests/components/key-browser/KeyBrowser.test.tsx` | the tree (`buildKeyTree()`, `flattenKeyTree()`, `filterKeyTree()` and their edge cases) and the panel that draws it: the database root, the choice that restarts the walk, Rescan, Load more, the type column and the pattern a row menu hands over |
+| `tests/components/sidebar/Sidebar.test.tsx` + `tests/unit/components/object-tree-row-actions.test.ts` | the two halves of the handover: the sidebar keeps the panel mounted for the connection and owns the `Browse Keys` handler, and the row menu decides which rows may offer it |
+
+The tree's own suite pins the cases a naive builder gets wrong: a key that is also a prefix of
+another (`app` beside `app:env`), a key returned twice across two batches, empty segments (`:foo`,
+`foo:` and `a::b` are three distinct keys), and the numeric collation that puts `user:2` before
+`user:10`.
+
 ---
 
 ## 12. Usage examples
@@ -1549,6 +1910,7 @@ request/response contract.
   node presents a self-signed one, which a verifying mode would refuse. Verification therefore stays
   an explicit choice in the SSL panel; the URL alone never turns it on.
 - **No Cluster / Sentinel support.** Only a single standalone node is supported.
+- **No pub/sub, `MONITOR` or blocking reads in the editor.** Each would change or hold the one client every request on the connection shares, so `query()` refuses them ([§5.2b](#52b-commands-that-would-change-the-shared-connection-1107)).
 - **`SCAN` is capped at 1000 keys** for schema discovery — prefixes that only appear beyond the cap
   won't show as "tables". This is a deliberate bound, not a bug. The object surface shares the same
   walk and the same bound, so on a keyspace larger than it the `keyspace` folder's badge and its rows

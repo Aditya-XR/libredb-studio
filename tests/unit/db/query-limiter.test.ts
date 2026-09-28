@@ -536,6 +536,33 @@ describe("applyQueryLimit", () => {
       expect(result.appliedLimit).toBe(50);
     });
 
+    /**
+     * The diagnosis behind #816, pinned so the design above it cannot be undone quietly.
+     *
+     * A statement that carries its own bound is returned untouched, and the offset the
+     * CALLER asked for is discarded with it: `appliedOffset` is the statement's own 0,
+     * not the 50 that was requested. That is why the route may not offer page two on a
+     * `wasLimited: false` result — the second click would re-run page one — and why the
+     * preview cap had to leave the generated SQL text rather than the limiter learn to
+     * read intent out of it.
+     */
+    test("a statement carrying its own bound discards the offset it was asked for", () => {
+      const result = applyQueryLimit("SELECT * FROM public.orders LIMIT 50;", 500, 50, {}, "postgres");
+
+      expect(result.sql).toBe("SELECT * FROM public.orders LIMIT 50;");
+      expect(result.wasLimited).toBe(false);
+      expect(result.appliedLimit).toBe(50);
+      expect(result.appliedOffset).toBe(0);
+    });
+
+    test("the same statement WITHOUT its own bound takes both clauses", () => {
+      const result = applyQueryLimit("SELECT * FROM public.orders;", 500, 50, {}, "postgres");
+
+      expect(result.sql).toBe("SELECT * FROM public.orders LIMIT 500 OFFSET 50;");
+      expect(result.wasLimited).toBe(true);
+      expect(result.appliedOffset).toBe(50);
+    });
+
     test("preserves existing LIMIT OFFSET", () => {
       const result = applyQueryLimit("SELECT * FROM users LIMIT 50 OFFSET 10", 100);
       expect(result.wasLimited).toBe(false);

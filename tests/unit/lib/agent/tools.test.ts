@@ -2658,13 +2658,12 @@ describe("runReadQueryTool — a database error is repairable, bounded, and neve
     ['invalid input syntax for type integer: "abc"', "postgres"],
     ["function nosuch(integer) does not exist", "postgres"],
     ["division by zero", "postgres"],
-    // The one this layer causes ITSELF, and the reason the classification is by
-    // phase rather than by class. `postgres.ts` issues `SET LOCAL statement_timeout`
-    // with the clamped budget, and when it fires PostgreSQL says "canceling
-    // statement due to statement timeout" — which `mapDatabaseError` matches on
-    // `canceling statement` BEFORE its timeout branch, so it arrives as a
-    // `QueryCancelledError` and never as a `TimeoutError`. Narrowing the read is
-    // exactly the repair that helps, so this must not leave the layer as a throw.
+    // The one this layer causes ITSELF via `SET LOCAL statement_timeout`. Since
+    // #1145, PostgreSQL's "canceling statement due to statement timeout" is
+    // recognised by `mapDatabaseError` BEFORE its cancellation branch and arrives as
+    // a `TimeoutError` carrying the engine's text — still repairable at this phase,
+    // because narrowing the read is exactly the repair that helps, so this must not
+    // leave the layer as a throw.
     ["canceling statement due to statement timeout", "postgres"],
     // A least-privilege `agentUser` with per-table grants (the deployment
     // `execution-policy.ts` and postgres.md §12.3 recommend) makes this the model's
@@ -2684,8 +2683,9 @@ describe("runReadQueryTool — a database error is repairable, bounded, and neve
       throw new Error(`expected a repairable database error, got ${JSON.stringify(outcome)}`);
     }
     // The MAPPED message, not the raw engine text: `mapDatabaseError` rewrites some of
-    // them (a cancel collapses to "Query was cancelled", losing the distinguishing
-    // wording — see `docs/BACKLOG.md` B4), and what the model sees is the mapped one.
+    // them (an operator cancel collapses to "Query was cancelled"), and what the model
+    // sees is the mapped one. A PostgreSQL statement timeout, by contrast, keeps the
+    // engine's own wording since #1145.
     expect(outcome.refusal.message).toBe(mapped.message);
     expect(outcome.refusal.statementFingerprint).toBe(fingerprintStatement("SELECT * FROM ordrs"));
     // It cost an attempt and is now unrepeatable — the whole point of being repairable.
@@ -3180,15 +3180,57 @@ describe("inspectPlanTool — the estimating variant only", () => {
     expect(h.queryReadOnly.mock.calls[0][0]).toBe("EXPLAIN QUERY PLAN SELECT id FROM orders");
   });
 
-  test("a provider without EXPLAIN support is denied on the capability stage", async () => {
+  /**
+   * What bounds this tool is the DIALECT, not the editor's Explain capability, and the
+   * two came apart on SQL Server: it has a verified estimating plan for the agent
+   * (`SET SHOWPLAN_ALL`, which its read-only profile compiles for every statement it
+   * admits) and no editor Explain at all, so `supportsExplain` is honestly false. While
+   * the descriptor required that flag, a `query-optimization` run there had
+   * `inspect_plan` denied `CAPABILITY_UNSUPPORTED` and finished `unanswered` with
+   * `no-plan-evidence`, measured on SQL Server 2022 before the descriptor was changed.
+   */
+  test("the editor's EXPLAIN capability does not bound this tool, because the agent composes its own", async () => {
     const h = harness({ capabilities: { ...capabilities, supportsExplain: false } });
 
     const outcome = await inspectPlanTool(h.context, { sql: "SELECT 1" });
 
-    if (outcome.kind !== "refused") throw new Error("expected refused");
-    expect(outcome.refusal).toEqual({ class: "policy-denied", reasonCode: "CAPABILITY_UNSUPPORTED" });
-    expect(h.queryReadOnly).not.toHaveBeenCalled();
+    expect(outcome.kind).not.toBe("refused");
+    expect(h.queryReadOnly).toHaveBeenCalled();
+  });
+
+  test("a dialect with no verified estimating form is refused before any provider is acquired", async () => {
+    const h = harness({ connection: { ...connection, type: "mysql" } });
+
+    const outcome = await inspectPlanTool(h.context, { sql: "SELECT 1" });
+
+    if (outcome.kind !== "unavailable") throw new Error("expected unavailable");
+    expect(outcome.reasonCode).toBe("INVALID_TOOL_INPUT");
+    expect(outcome.detail).toBe("UNSUPPORTED_DIALECT");
     expect(h.acquireProvider).not.toHaveBeenCalled();
+  });
+
+  /**
+   * SQL Server composes NO prefix and asks for the plan as a session mode instead, so
+   * the statement reaching the provider is the model's own and the MODE is what says
+   * what to do with it. A test that only looked at the statement could not tell this
+   * apart from an engine that was sent no plan request at all.
+   */
+  test("SQL Server sends the statement unprefixed and asks for the plan as a mode", async () => {
+    const h = harness({ connection: { ...connection, type: "mssql" } });
+
+    await inspectPlanTool(h.context, { sql: "SELECT id FROM orders" });
+
+    expect(h.queryReadOnly.mock.calls[0][0]).toBe("SELECT id FROM orders");
+    expect(h.queryReadOnly.mock.calls[0][2]).toBe("estimate-plan");
+  });
+
+  test("the prefix engines are sent no mode, because their prefix is the request", async () => {
+    const h = harness();
+
+    await inspectPlanTool(h.context, { sql: "SELECT id FROM orders" });
+
+    expect(h.queryReadOnly.mock.calls[0][0]).toBe("EXPLAIN (FORMAT JSON) SELECT id FROM orders");
+    expect(h.queryReadOnly.mock.calls[0][2]).toBe("execute");
   });
 
   test("a write smuggled into a plan request is refused at the input stage", async () => {
@@ -5190,6 +5232,29 @@ describe("inspectOperationsTool — what the engine says about ITSELF", () => {
     // Rows are database content and reach the model fenced, like every other result.
     expect(outcome.modelText).toContain(UNTRUSTED_CONTENT_BEGIN);
     expect(outcome.modelText).toContain(UNTRUSTED_CONTENT_END);
+  });
+
+  test("a table-stats reading says what its rows are when the provider declares they are only part of the database", async () => {
+    // Prometheus lists the metrics with the most head series, so 50 rows carried as
+    // "table statistics, 50 row(s)" read as the count of every table: a cap read as a count,
+    // the defect #513 closed for this tool's own bounds (#1085 6.2).
+    const caption = "The metrics with the most head series, at most 50";
+    const h = curatedHarness({ labels: { ...TABLE_LABELS, tableStatsCaption: caption } });
+
+    const scoped = await inspectOperationsTool(h.context, { kind: "table-stats" });
+
+    if (scoped.kind !== "completed") throw new Error("expected completed");
+    expect(scoped.modelText).toContain(`table statistics (${caption}), 1 row(s)`);
+
+    // The controls. Another reading on the same engine keeps its header, and so does the same
+    // reading on an engine that declares nothing, which is every engine whose list is whole.
+    const other = await inspectOperationsTool(h.context, { kind: "index-stats" });
+    const whole = await inspectOperationsTool(curatedHarness().context, { kind: "table-stats" });
+
+    if (other.kind !== "completed" || whole.kind !== "completed") throw new Error("expected completed");
+    expect(other.modelText).toContain("index statistics, 1 row(s)");
+    expect(other.modelText).not.toContain(caption);
+    expect(whole.modelText).toContain("table statistics, 1 row(s)");
   });
 
   test("the tool tells the model, in its own description, that a reading is a moment", async () => {

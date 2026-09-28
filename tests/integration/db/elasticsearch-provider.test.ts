@@ -992,6 +992,10 @@ describe("ElasticsearchProvider metadata", () => {
       supportsExternalQueryLimiting: true,
       supportsCreateTable: false,
       supportsInlineRowEdit: false,
+      // Elasticsearch SQL has no `OFFSET` clause: `prepareQuery` THROWS rather than
+      // answer page two with page one, and this hides the control that would
+      // provoke it. OpenSearch, the same implementation, declares true (#816).
+      supportsResultPagination: false,
       supportsTransactions: false,
       declaresForeignKeys: false,
       supportsMaintenance: false,
@@ -1015,9 +1019,16 @@ describe("ElasticsearchProvider metadata", () => {
       // itself. The roles are asserted where they were measured.
       containerLevels: [],
       objectKinds: [
-        { id: "index", role: "relation", label: "Index", labelPlural: "Indices", acceptsRowWrites: true },
-        { id: "alias", role: "relation", label: "Alias", labelPlural: "Aliases" },
-        { id: "stream", role: "relation", label: "Data Stream", labelPlural: "Data Streams" },
+        {
+          id: "index",
+          role: "relation",
+          label: "Index",
+          labelPlural: "Indices",
+          acceptsRowWrites: true,
+          hasColumns: true,
+        },
+        { id: "alias", role: "relation", label: "Alias", labelPlural: "Aliases", hasColumns: true },
+        { id: "stream", role: "relation", label: "Data Stream", labelPlural: "Data Streams", hasColumns: true },
         {
           id: "pipeline",
           role: "config",
@@ -1047,7 +1058,8 @@ describe("ElasticsearchProvider metadata", () => {
     const capabilities = new ElasticsearchProvider(makeConnection()).getCapabilities();
 
     expect(capabilities.statementTerminator).toBe("none");
-    expect(generateTableQuery(["orders"], capabilities)).toBe("SELECT * FROM orders LIMIT 50");
+    // No row bound since #816: the preview cap rides the `limit` execution option.
+    expect(generateTableQuery(["orders"], capabilities)).toBe("SELECT * FROM orders");
   });
 
   test("declares no explain format at all, which is what hides the button and the tab", () => {
@@ -1223,6 +1235,80 @@ describe("ElasticsearchProvider validation", () => {
 
     const header = sent[0].auth ?? "";
     expect(Buffer.from(header.replace("Basic ", ""), "base64").toString()).toBe("reader:");
+    await provider.disconnect();
+  });
+
+  // #708. Not a live-cluster measurement: `Authorization: ApiKey base64(id:secret)` is
+  // Elasticsearch's published wire contract for its own auth scheme (elastic.co/docs/
+  // deploy-manage/api-keys/elasticsearch-api-keys), the same status the Basic-auth
+  // tests above are in - they assert what THIS CODE sends, not what a server does with
+  // it. OpenSearch refuses the pair rather than dropping it: see the sibling file.
+  //
+  // The halves read as fixtures rather than as a realistic key on purpose. A
+  // base64-shaped literal of that length trips gitleaks' `generic-api-key` rule, and
+  // the only way to keep one is a `.gitleaksignore` fingerprint, which is pinned to a
+  // commit SHA: it covers the commit that introduced the literal and nothing else, so
+  // the same literal re-added later, or carried into a squashed commit, is a finding
+  // again. What this test asserts is the ENCODING, which does not care what the halves
+  // look like. Do not "restore realism" here.
+  test("sends an API key pair as an ApiKey header, in preference to user/password", async () => {
+    const provider = await connectProvider({
+      apiKeyId: "elastic-api-key-id-fixture",
+      apiKeySecret: "elastic-api-key-secret-fixture",
+      user: "reader",
+      password: "s3cret",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("ApiKey ")).toBe(true);
+    expect(Buffer.from(header.replace("ApiKey ", ""), "base64").toString()).toBe(
+      "elastic-api-key-id-fixture:elastic-api-key-secret-fixture",
+    );
+    await provider.disconnect();
+  });
+
+  test("trims both API key halves before the half-filled guard and the encode", async () => {
+    // A trailing newline in either half measured as HTTP 401 on a key that works
+    // once the whitespace is gone. Trim has to happen before the truthiness check,
+    // otherwise `"id\\n"` plus `""` would look complete and encode the newline.
+    const provider = await connectProvider({
+      apiKeyId: "seed-key-id\n",
+      apiKeySecret: " seed-key-secret ",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("ApiKey ")).toBe(true);
+    expect(Buffer.from(header.replace("ApiKey ", ""), "base64").toString()).toBe("seed-key-id:seed-key-secret");
+    await provider.disconnect();
+  });
+
+  test("whitespace-only halves are empty, not a shorter key", async () => {
+    const provider = await connectProvider({
+      apiKeyId: "  \n",
+      apiKeySecret: "seed-key-secret",
+      user: "reader",
+      password: "s3cret",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("Basic ")).toBe(true);
+    expect(Buffer.from(header.replace("Basic ", ""), "base64").toString()).toBe("reader:s3cret");
+    await provider.disconnect();
+  });
+
+  // A half-configured pair is not a shorter key, it is a broken one - falls back to
+  // Basic/none exactly as a plain `user`/`password` connection would, rather than
+  // sending `ApiKey base64("id:")` for a secret that was never actually set.
+  test("falls back to user/password when the API key pair is only half set", async () => {
+    const provider = await connectProvider({
+      apiKeyId: "EWkMhKACjF5eHMlg6Car",
+      user: "reader",
+      password: "s3cret",
+    });
+
+    const header = sent[0].auth ?? "";
+    expect(header.startsWith("Basic ")).toBe(true);
+    expect(Buffer.from(header.replace("Basic ", ""), "base64").toString()).toBe("reader:s3cret");
     await provider.disconnect();
   });
 
@@ -2428,6 +2514,43 @@ describe("object surface", () => {
         .map((kind) => kind.id)
         .sort(),
     ).toEqual(["alias", "index", "stream"]);
+  });
+
+  test("declares columns on exactly the kinds that resolve to a mapping", async () => {
+    const provider = await connectProvider();
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    // The three kinds `describeObject` reads `_mapping` for (`search/index.ts:1251`,
+    // gated on `SEARCH_MAPPED_KINDS` at `:478`). The declaration is written as a literal
+    // beside each kind because that constant is declared AFTER the kind array, so
+    // referencing it there would be a temporal dead zone throw at module init.
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["alias", "index", "stream"]);
+    // The other direction, so a kind added later cannot quietly gain a twisty. A pipeline
+    // and a template are JSON documents with no field list at all.
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["pipeline", "template"]);
+
+    // The declaration against the engine's own answer, one kind each way. An alias row's
+    // columns are the mapping of ONE backing index, which is what the transport takes
+    // (`search/http-transport.ts:1266`).
+    const alias = await provider.describeObject(["probe_orders_alias"], "alias");
+    expect(alias.columns.length).toBeGreaterThan(0);
+    for (const column of alias.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+    expect((await provider.describeObject(["probe_pipeline"], "pipeline")).columns).toEqual([]);
   });
 });
 

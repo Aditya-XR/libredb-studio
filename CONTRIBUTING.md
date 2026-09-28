@@ -14,6 +14,8 @@ This applies to the conversation, not to the repository. Everything that lands i
 
 If you are updating a translated README, note that `bun run readme:check` enforces that its engine table and install commands match [README.md](README.md). Translations may cover fewer install channels, but a command must never be paraphrased - a reader copy-pastes it.
 
+Each translated README also carries a translation-lag banner: a blockquote above its first heading, in that file's own language, linking to [README.md](README.md) as the version that wins when the two disagree. `readme:check` enforces its presence, because the guard's other invariants cover the engine table, the install commands and one warning only - a translation can be stale in ways nothing in CI will report.
+
 ## How Can I Contribute?
 
 ### Reporting Bugs
@@ -285,9 +287,9 @@ the password once to the dev-server output. Set them to pin known values instead
 (`USER_PASSWORD` additionally creates the optional non-admin account, which is
 never generated):
 ```env
-ADMIN_PASSWORD=admin123
-USER_PASSWORD=user123
-JWT_SECRET=your_32_character_random_string_here
+ADMIN_PASSWORD=
+USER_PASSWORD=
+JWT_SECRET=
 ```
 
 Optional (for AI features):

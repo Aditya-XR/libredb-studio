@@ -38,6 +38,7 @@ import { logger } from "@/lib/logger";
 import { resolveConnection, SeedConnectionError } from "@/lib/seed/resolve-connection";
 import type { QueryResult } from "@/lib/types";
 import { AgentRunDeadline } from "./deadline";
+import { deriveDriveCeilings } from "./drive-budget";
 import { AGENT_WORKFLOW_BUDGETS } from "./execution-policy";
 import { type AgentInvestigationResult, runInvestigation } from "./investigation";
 import { createAgentModel } from "./model-adapter";
@@ -69,26 +70,19 @@ const AGENT_ARTIFACT_TTL_MS =
  *
  * What that product bounds is FOUR DRIVES, not four runs, and the distinction was
  * stated wrongly here until #373: this comment said "a run cannot produce more
- * artifacts than it is allowed statements", which is not true of a run. Every
- * ceiling in `AGENT_WORKFLOW_BUDGETS` is per drive (`docs/BACKLOG.md` B6) — the
- * budget tracker is built by the process that drives a run — while a resumed run
- * keeps its `runId` and its artifacts are keyed by it. So a run that is driven
- * three times may hold up to three times its statement ceiling in this store,
- * and one long-lived run can pass 180 on its own.
+ * artifacts than it is allowed statements", which is not true of a run. A resumed
+ * drive's statement, elapsed-time and artifact ceilings are now derived from the
+ * run's own ledger rather than handed to it fresh (#999), so a run driven three
+ * times no longer triples its statement budget or evicts the evidence an earlier
+ * drive cited. One ceiling is still per drive — the repair ledger is rebuilt by
+ * each drive (`docs/BACKLOG.md` B6) — so repair attempts do start over on resume.
  *
- * The behaviour when it does is worth knowing rather than guessing at. The cap is
+ * The behaviour at the cap is worth knowing rather than guessing at. The cap is
  * spent run-fairly (`ExecutionArtifactStore.put`): a store at the cap evicts the
  * OLDEST ARTIFACT OF THE RUN THAT IS STORING, so a busy run cannot make "Show
- * result" fail on a quieter one. Applied to a resumed run at the cap, that same
- * rule means the run evicts its OWN earliest evidence — the results its first
- * drive read, which its report may still cite. Nothing about the ledger is wrong
- * afterwards: the claim and its citation are durable, and the artifact route
- * already answers "the rows are not here" for the run-ended and TTL-expired cases.
- * This just adds a third way to reach that answer while
- * the run is still live. Recorded as `docs/BACKLOG.md` B35 rather than fixed
- * here: a bound that holds ACROSS drives is the same missing mechanism B6 names,
- * and inventing a second one for artifacts alone would be a second answer to one
- * question.
+ * result" fail on a quieter one. The artifact allowance a resumed drive receives
+ * is derived the same way (#999), so a long-lived run no longer evicts its own
+ * earliest evidence while it is still live.
  *
  * Sized for the ceiling rather than for what a policy enforces at any one moment,
  * so a statement budget lower than 45 leaves the cap correct and merely slack.
@@ -180,6 +174,16 @@ export async function driveAgentRun(runId: string): Promise<AgentInvestigationRe
     const capabilities = provider.getCapabilities();
     const labels = provider.getLabels();
 
+    // The ceilings a drive begins with are folded from the run's ledger, so a
+    // resumed drive inherits the spend its earlier drives recorded rather than
+    // starting each ceiling again.
+    const ceilings = deriveDriveCeilings(report.record, Date.now());
+    runResources().tracker.seedUsage(runId, {
+      executedStatements: ceilings.executedStatements,
+      totalElapsedMs: ceilings.executedMs,
+    });
+    runResources().artifacts.setRunAllowance(runId, ceilings.artifactAllowance);
+
     return await runInvestigation(runId, {
       service,
       model: await createAgentModel(),
@@ -194,7 +198,7 @@ export async function driveAgentRun(runId: string): Promise<AgentInvestigationRe
         // The run's own workflow decides its wall clock, the same way it decides its
         // statement budget and its turn ceiling. Read from the record the ledger
         // returned, so a resumed drive is bounded by what the run was opened as.
-        deadline: new AgentRunDeadline(AGENT_WORKFLOW_BUDGETS[report.record.workflowType].runDeadlineMs),
+        deadline: new AgentRunDeadline(ceilings.deadlineMs),
         repairs: new AgentRepairLedger(),
         acquireProvider: acquireExecutionProfileProvider,
       },
@@ -247,6 +251,20 @@ const AGENT_CREDENTIAL_DENY_CODES: ReadonlySet<ExecutionProfileDenyCode> = new S
 ]);
 
 /**
+ * The profile refusal that is about the database PRINCIPAL rather than about the
+ * engine or the credential field that names it.
+ *
+ * Kept beside the other set for the same reason: one error type, three things a user
+ * can do about it. This one is raised when the credential resolved and the provider
+ * exists, and the profile then refused the user it opened as, so neither of the other
+ * two labels is true of it.
+ */
+const PROFILE_PRINCIPAL_DENY_CODES: ReadonlySet<ExecutionProfileDenyCode> = new Set<ExecutionProfileDenyCode>([
+  "PROFILE_PRIVILEGES_TOO_BROAD",
+  "PROFILE_PRIVILEGES_TOO_NARROW",
+]);
+
+/**
  * Chooses the label a user sees from the error's TYPE.
  *
  * Never from its message: that text comes from a model provider, a driver or a
@@ -269,8 +287,24 @@ function classifyDriveFailure(error: unknown): AgentRunFailureReason {
   // error on ANY engine for a credential that cannot be applied, and calling that
   // "engine unsupported" told a PostgreSQL operator something false about their
   // database while saying nothing about the credential they could fix (B47).
+  //
+  // The principal codes are the third cause, split off the same way (the SQL Server
+  // work of 2026-09-18). They say the engine granted the profile and then refused the
+  // USER: `sa`, which is the only SQL Server credential this repository's own
+  // `database-compose.yml` ships, is refused by the profile while `libredb_agent`
+  // beside it is accepted. Reported as "engine unsupported", that told an operator to
+  // change engines when the fix is one CREATE LOGIN.
+  //
+  // TWO codes and one label, deliberately. A principal can be refused for holding too
+  // much or for holding too little - SQL Server's admission step needs `SHOWPLAN`, so a
+  // plain reader cannot be admitted - and the REPAIRS are opposite, which is why they are
+  // separate codes carrying opposite advice (`PROFILE_REFUSAL_ADVICE`). What a RUN ended
+  // as is the same fact either way: this connection's user is not one the profile will
+  // run as, which is what this label says and all it says.
   if (error instanceof ExecutionProfileError) {
-    return AGENT_CREDENTIAL_DENY_CODES.has(error.reasonCode) ? "agent-credential-unusable" : "engine-unsupported";
+    if (AGENT_CREDENTIAL_DENY_CODES.has(error.reasonCode)) return "agent-credential-unusable";
+    if (PROFILE_PRINCIPAL_DENY_CODES.has(error.reasonCode)) return "agent-principal-refused";
+    return "engine-unsupported";
   }
 
   /*

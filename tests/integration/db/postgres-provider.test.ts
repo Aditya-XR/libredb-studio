@@ -166,12 +166,20 @@ let lastPool: MockPool | undefined;
  */
 let lastPoolConfig: Record<string, unknown> = {};
 
+/**
+ * The REAL `pg-types` registry, taken before the mock replaces `pg`. The provider's per-pool
+ * parsers delegate every type they do not own to it, so a stub here would let the tests
+ * below agree with whatever the stub returns instead of with what `pg` really parses.
+ */
+const { types: realPgTypes } = await import("pg");
+
 mock.module("pg", () => ({
   Pool: function (config: Record<string, unknown>) {
     lastPoolConfig = config;
     lastPool = new MockPool();
     return lastPool;
   },
+  types: realPgTypes,
 }));
 
 // Dynamic import AFTER mock is installed
@@ -893,6 +901,73 @@ describe("PostgresProvider", () => {
   });
 
   // --------------------------------------------------------------------------
+  // Per-pool type parsers
+  // --------------------------------------------------------------------------
+
+  // `pg-types` turns `date` into a Date at LOCAL midnight of the server process and reads
+  // `timestamp` as local wall-clock time, so every value then serialised as ISO UTC moved with
+  // the process TZ: under Europe/Istanbul `DATE '2026-09-01'` answered 2026-08-31T21:00:00Z,
+  // and a SQL INSERT export replayed it as the previous day. The two zoneless types now arrive
+  // as the engine's own text. Both connection forms build the pool from one shared base, and
+  // each is checked because only the base carries the parsers.
+  describe.each([
+    ["discrete fields", makePgConfig()],
+    ["connection string", makePgConfig({ connectionString: "postgresql://postgres:secret@localhost:5432/testdb" })],
+  ])("pool type parsers (%s)", (_form, config) => {
+    type GetTypeParser = (oid: number, format?: string) => (value: string) => unknown;
+    const parserFor = async (): Promise<GetTypeParser> => {
+      provider = new PostgresProvider(config);
+      await provider.connect();
+      const types = lastPoolConfig.types as { getTypeParser: GetTypeParser } | undefined;
+      expect(types).toBeDefined();
+      return types!.getTypeParser;
+    };
+
+    test("date and timestamp arrive as the engine's own text", async () => {
+      const getTypeParser = await parserFor();
+      expect(getTypeParser(1082, "text")("2026-09-01")).toBe("2026-09-01");
+      expect(getTypeParser(1114, "text")("2026-09-01 10:30:00")).toBe("2026-09-01 10:30:00");
+      // `pg` passes the format, but `pg-types` treats an absent one as text, and so does this.
+      expect(getTypeParser(1082)("2026-09-01")).toBe("2026-09-01");
+      // The values a Date could not hold survive as written instead of Invalid Date or Infinity.
+      expect(getTypeParser(1082, "text")("infinity")).toBe("infinity");
+      expect(getTypeParser(1082, "text")("0044-03-15 BC")).toBe("0044-03-15 BC");
+    });
+
+    test("date[] and timestamp[] arrive as arrays of the engine's text, NULL kept", async () => {
+      const getTypeParser = await parserFor();
+      expect(getTypeParser(1182, "text")("{2026-09-01,2026-09-02}")).toEqual(["2026-09-01", "2026-09-02"]);
+      expect(getTypeParser(1182, "text")("{2026-09-01,NULL}")).toEqual(["2026-09-01", null]);
+      expect(getTypeParser(1115, "text")('{"2026-09-01 10:30:00","2026-09-02 11:00:00"}')).toEqual([
+        "2026-09-01 10:30:00",
+        "2026-09-02 11:00:00",
+      ]);
+    });
+
+    // Controls: without these, a parser that answered every OID with the raw text would pass
+    // the two tests above.
+    test("every other type is delegated to pg-types unchanged", async () => {
+      const getTypeParser = await parserFor();
+      expect(getTypeParser(23, "text")("5")).toBe(5);
+      // timestamptz names an instant, so it stays a Date and serialises as the same ISO UTC
+      // string in every process TZ.
+      const instant = getTypeParser(1184, "text")("2026-09-01 10:30:00+00");
+      expect(instant).toBeInstanceOf(Date);
+      expect((instant as Date).toISOString()).toBe("2026-09-01T10:30:00.000Z");
+      expect(getTypeParser(1185, "text")('{"2026-09-01 10:30:00+00"}')).toEqual([new Date("2026-09-01T10:30:00.000Z")]);
+      // The binary format carries no text to hand back, so it is pg's own parser.
+      expect(getTypeParser(1082, "binary")).toBe(realPgTypes.getTypeParser(1082, "binary"));
+    });
+
+    // A process-wide `pg.types.setTypeParser` would reach every other `pg` user in a host
+    // that embeds `@libredb/studio`. The global registry must still parse a date as a Date.
+    test("the global pg-types registry is left alone", async () => {
+      await parserFor();
+      expect(realPgTypes.getTypeParser(1082, "text")("2026-09-01")).toBeInstanceOf(Date);
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // Query execution
   // --------------------------------------------------------------------------
 
@@ -1466,10 +1541,9 @@ describe("PostgresProvider", () => {
   describe("the repair chain around an engine that rejects part of a catalog statement (#38680)", () => {
     /*
       Every object read goes through `queryWithMaterializedFallback()`, which recovers real
-      catalog data on four independent gaps rather than failing outright. The chain used to be
+      catalog data on independent gaps rather than failing outright. The chain used to be
       driven here through the flat schema reading; that reading is deleted (#789), so it is
-      driven through `describeObjects()`, which composes the same `json_agg` /
-      `json_build_object` CTEs.
+      driven through `describeObjects()`, which composes the same CTEs.
 
       Each repair is used AT MOST ONCE per statement, and a message no remaining repair
       recognises is mapped and rethrown rather than retried forever. That is the property
@@ -1500,19 +1574,153 @@ describe("PostgresProvider", () => {
     const detailStatements = (sent: readonly string[]): string[] =>
       sent.filter((sql) => sql.includes("described_columns"));
 
-    test("json_agg is swapped for jsonb_agg, which returns the same shape over the wire", async () => {
-      // Materialize has only the jsonb_ equivalents, and node-postgres parses both the json
-      // and the jsonb OID into the same plain JS value, so the swap is enough.
-      const sent = rejectFirst('function "json_agg" does not exist');
+    /*
+      RisingWave 3.0.4, measured live on 2026-09-24 (#1075). Each refusal below is the engine's
+      own text, and the double keys each one on the construct it refuses rather than on an
+      attempt count, so it answers the way the engine does whatever the chain rewrites first.
+      The first statement the engine can bind is the one it answers.
+    */
+    const RISINGWAVE_JSON_REFUSAL =
+      "Failed to prepare the statement Caused by these errors (recent errors listed first): " +
+      "1: Failed to bind expression: CAST(NULL AS json) 2: Feature is not yet implemented: unsupported data type: json";
+    const RISINGWAVE_CONSTRAINT_COLUMN_USAGE_REFUSAL =
+      "Failed to prepare the statement Caused by: Feature is not yet implemented: " +
+      "information_schema.constraint_column_usage is not supported, please use `SHOW` commands for now. " +
+      "`SHOW TABLES`, `SHOW MATERIALIZED VIEWS`, `DESCRIBE <table>`, `SHOW COLUMNS FROM [table]`";
+    const RISINGWAVE_AGGREGATE_REFUSAL =
+      "Failed to execute the statement Caused by: Feature is not yet implemented: subquery inside aggregation calls";
 
-      await describeTables();
+    /** True when some `<name>_agg(...)` call carries a SELECT among its arguments. */
+    function hasSubqueryInsideAggregate(sql: string): boolean {
+      for (const call of sql.matchAll(/\b\w+_agg\(/g)) {
+        const start = (call.index ?? 0) + call[0].length;
+        let depth = 1;
+        let cursor = start;
+        while (cursor < sql.length && depth > 0) {
+          if (sql[cursor] === "(") depth++;
+          else if (sql[cursor] === ")") depth--;
+          cursor++;
+        }
+        if (/\bSELECT\b/i.test(sql.slice(start, cursor))) return true;
+      }
+      return false;
+    }
 
-      const attempts = detailStatements(sent);
-      expect(attempts.length).toBe(2);
-      expect(attempts[0]).toContain("json_agg(");
-      expect(attempts[1]).toContain("jsonb_agg(");
-      expect(attempts[1]).toContain("jsonb_build_object(");
-      expect(attempts[1]).not.toContain(" json_agg(");
+    const RISINGWAVE_COLUMNS = [
+      { name: "zeta_id", type: "integer", nullable: false },
+      { name: "name", type: "character varying", nullable: false },
+    ];
+
+    function risingWave(sent: string[]): void {
+      mockQueryFn = (sql: string) => {
+        sent.push(sql);
+        if (/\bjson_agg\(|\bjson_build_object\(|::json\b/.test(sql)) {
+          return Promise.reject(new Error(RISINGWAVE_JSON_REFUSAL));
+        }
+        if (sql.includes("constraint_column_usage")) {
+          return Promise.reject(new Error(RISINGWAVE_CONSTRAINT_COLUMN_USAGE_REFUSAL));
+        }
+        if (hasSubqueryInsideAggregate(sql)) return Promise.reject(new Error(RISINGWAVE_AGGREGATE_REFUSAL));
+        // RisingWave publishes no column default: its pg_attrdef is empty, so the LEFT JOIN
+        // hands pg_get_expr() a NULL expression. PostgreSQL answers NULL for that and
+        // RisingWave answers '', so a call left unguarded reads as an empty default.
+        const defaultValue = /(?<!IS NOT NULL THEN )pg_get_expr\(ad\.adbin/.test(sql) ? "" : null;
+        const columns = RISINGWAVE_COLUMNS.map((column) => ({ ...column, defaultValue }));
+        const row = { pk_columns: ["zeta_id"], columns, foreign_keys: [], indexes: [] };
+        if (sql.includes("object_columns")) return Promise.resolve({ rows: [row] });
+        if (sql.includes("described_columns")) return Promise.resolve({ rows: [{ name: "customers", ...row }] });
+        return defaultMockQuery(sql);
+      };
+    }
+
+    test("RisingWave answers describeObject() with the table's columns (#1075)", async () => {
+      const sent: string[] = [];
+      risingWave(sent);
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      const detail = await provider.describeObject(["probe", "customers"], "table");
+
+      expect(detail.columns.map((column) => [column.name, column.type])).toEqual([
+        ["zeta_id", "integer"],
+        ["name", "character varying"],
+      ]);
+    });
+
+    test("RisingWave answers describeObjects() with each table's columns, bounded or not (#1075)", async () => {
+      const sent: string[] = [];
+      risingWave(sent);
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      for (const batch of [
+        await provider.describeObjects(["probe"], "table"),
+        await provider.describeObjects(["probe"], "table", 1),
+      ]) {
+        expect(batch.details.map((detail) => detail.columns.map((column) => column.name))).toEqual([
+          ["zeta_id", "name"],
+        ]);
+      }
+    });
+
+    test("a RisingWave column reads with no default rather than an empty one (#1075)", async () => {
+      // An empty string is a claim: the schema diagram shows it as "Default: '' (empty
+      // string)". RisingWave publishes no default at all, so the honest answer is none.
+      const sent: string[] = [];
+      risingWave(sent);
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      const detail = await provider.describeObject(["probe", "customers"], "table");
+      const batch = await provider.describeObjects(["probe"], "table");
+
+      for (const columns of [detail.columns, ...batch.details.map((entry) => entry.columns)]) {
+        expect(columns.map((column) => column.defaultValue)).toEqual([undefined, undefined]);
+      }
+    });
+
+    test("RisingWave's constraint_column_usage refusal is repaired on the first retry (#1075)", async () => {
+      // The refusal suggests `SHOW MATERIALIZED VIEWS`, which once read as the MATERIALIZED
+      // keyword collision and spent a retry resending an identical statement.
+      const sent: string[] = [];
+      risingWave(sent);
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      await provider.describeObject(["probe", "customers"], "table");
+      await provider.describeObjects(["probe"], "table");
+
+      for (const marker of ["object_columns", "described_columns"]) {
+        const attempts = sent.filter((sql) => sql.includes(marker));
+        expect(attempts).toHaveLength(2);
+        expect(attempts[0]).toContain("constraint_column_usage");
+        expect(attempts[1]).not.toContain("constraint_column_usage");
+      }
+    });
+
+    test("the object reads build their rows with jsonb and keep the column order (#1075)", async () => {
+      // jsonb because RisingWave has no json type at all, while every other engine measured
+      // has both. jsonb reorders an object's keys and drops duplicate ones, which is harmless
+      // here: each object has a fixed set of distinct keys and is read parsed, never as text.
+      // It keeps an array's order, and ORDER BY a.attnum is what makes that the table's order.
+      const sent: string[] = [];
+      mockQueryFn = (sql: string) => {
+        sent.push(sql);
+        return defaultMockQuery(sql);
+      };
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+
+      await provider.describeObject(["public", "users"], "table");
+      await provider.describeObjects(["public"], "table");
+      await provider.describeObjects(["public"], "table", 1);
+
+      const reads = sent.filter((sql) => sql.includes("object_columns") || sql.includes("described_columns"));
+      expect(reads).toHaveLength(3);
+      for (const sql of reads) {
+        expect(sql).not.toMatch(/\bjson_agg\(|\bjson_build_object\(|::json\b/);
+        expect(sql).toMatch(/jsonb_agg\(\s*jsonb_build_object\([^;]*?\)\s*ORDER BY a\.attnum\s*\)/);
+      }
     });
 
     test("a missing pg_total_relation_size() is recognised and the statement retried", async () => {
@@ -1553,7 +1761,8 @@ describe("PostgresProvider", () => {
       const sent: string[] = [];
       mockQueryFn = (sql: string) => {
         sent.push(sql);
-        if (sql.includes("described_columns")) return Promise.reject(new Error('function "json_agg" does not exist'));
+        if (sql.includes("described_columns"))
+          return Promise.reject(new Error('function "to_regclass" does not exist'));
         return defaultMockQuery(sql);
       };
       provider = new PostgresProvider(makePgConfig());
@@ -2065,6 +2274,48 @@ describe("PostgresProvider", () => {
       await provider.runMaintenance("reindex", "reporting.MonthlySummary");
       expect(capturedSql).toContain('"reporting"."MonthlySummary"');
       expect(capturedSql).not.toContain("public.");
+    });
+
+    // The container parameter exists because the name alone cannot say which schema it came
+    // from: `schemaName` is a schema for PostgreSQL, the database for MySQL, an owner for
+    // Oracle, and the monitoring page already renders it beside every table (#772). A name
+    // that carries a dot cannot stand in for it, since a container can contain one.
+    test("a container qualifies the target, and the name is not re-split", async () => {
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+      let capturedSql = "";
+      mockQueryFn = (sql: string) => {
+        capturedSql = sql;
+        return defaultMockQuery(sql);
+      };
+      await provider.runMaintenance("vacuum", "users", "reporting");
+      expect(capturedSql).toContain('"reporting"."users"');
+      expect(capturedSql).not.toContain("public.");
+    });
+
+    test("a container containing a dot survives the qualifier", async () => {
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+      let capturedSql = "";
+      mockQueryFn = (sql: string) => {
+        capturedSql = sql;
+        return defaultMockQuery(sql);
+      };
+      await provider.runMaintenance("analyze", "users", "my.schema");
+      expect(capturedSql).toContain('"my.schema"."users"');
+    });
+
+    test("without a container the old readings stay", async () => {
+      provider = new PostgresProvider(makePgConfig());
+      await provider.connect();
+      let capturedSql = "";
+      mockQueryFn = (sql: string) => {
+        capturedSql = sql;
+        return defaultMockQuery(sql);
+      };
+      await provider.runMaintenance("vacuum", "reporting.MonthlySummary");
+      expect(capturedSql).toContain('"reporting"."MonthlySummary"');
+      expect(capturedSql).not.toContain('"reporting.MonthlySummary"');
     });
 
     test("kill with valid PID returns success", async () => {
@@ -2735,6 +2986,8 @@ describe("PostgresProvider", () => {
       // `UPDATE t SET c = v WHERE pk = v` is core PostgreSQL DML — exactly the
       // statement shape the inline row editor builds (#269).
       expect(caps.supportsInlineRowEdit).toBe(true);
+      // `LIMIT n OFFSET m` from the shared limiter (#816).
+      expect(caps.supportsResultPagination).toBe(true);
       // BEGIN/COMMIT/ROLLBACK run over one held pool client here, so the toolbar's
       // transaction trio and the sandbox toggle are offered (#464).
       expect(caps.supportsTransactions).toBe(true);
@@ -3929,6 +4182,38 @@ describe("object surface", () => {
     ).toEqual(["materialized_view", "sequence", "table", "trigger", "view"]);
   });
 
+  /**
+   * The column declaration, both directions (#789, columns under an object row).
+   *
+   * DERIVED from `RELKIND_BY_KIND` rather than transcribed, so there is one writer: that map
+   * is what `describeObject` itself gates on (`postgres.ts:2970`), and a kind that is not a key
+   * in it returns three empty arrays without asking the server. The second assertion is the one
+   * that matters over time: a kind added to `objectKinds` later cannot quietly gain a twisty
+   * that opens on nothing.
+   *
+   * `sequence` is the interesting row and the reason this cannot be read off `role`. It is
+   * `role: "config"` and it DOES answer columns here - `last_value`, `log_cnt`, `is_called` out
+   * of `pg_attribute` - while Oracle's kind of the same id answers none.
+   */
+  test("declares columns on exactly the kinds a pg_class relation backs", () => {
+    const provider = makeProvider();
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["materialized_view", "sequence", "table", "view"]);
+    // The other direction. A routine and a trigger have no relation behind them, so
+    // `describeObject` answers them without a round trip at all (`postgres.ts:2969-2972`).
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["function", "procedure", "trigger"]);
+  });
+
   test("satisfies the shared object surface contract", async () => {
     // The relations each kind holds, one place, because the helper now reads the listing
     // and the bulk column read against each other: two lists that had to be kept in step
@@ -3993,7 +4278,7 @@ describe("object surface", () => {
       //
       // The rows are the DRIVER'S rows and the naming is left to `postgres.ts`, which is
       // the whole point: the provider spells a name schema-qualified except in `public`
-      // (`postgres.ts:2047`), so a fixture that returned finished names would assert the
+      // (`postgres.ts:2022`), so a fixture that returned finished names would assert the
       // fixture's spelling rather than the engine's. `public.audit_log` is the spelling
       // PostgreSQL NEVER produces, and this epic has already taken a Critical for writing
       // it, so the `public` row is here to be stripped: it reaches the reading as a bare
@@ -4031,6 +4316,22 @@ describe("object surface", () => {
             indexes: null,
             foreign_keys: null,
           })),
+        };
+      }
+      // The SINGLE-object detail read, which invariant 8 drives once per listed kind (#789).
+      // Checked BEFORE the container arm because `CTE_OBJECT_COLUMNS` also joins
+      // `pg_namespace` and also carries an `ORDER BY`, and that arm answering it was how this
+      // fixture used to report every relation as having no columns at all.
+      if (sql.includes("object_columns")) {
+        return {
+          rows: [
+            {
+              pk_columns: ["id"],
+              columns: [{ name: "id", type: "integer", nullable: false, defaultValue: null }],
+              indexes: null,
+              foreign_keys: null,
+            },
+          ],
         };
       }
       if (sql.includes("pg_namespace") && sql.includes("ORDER BY")) {
@@ -4303,6 +4604,40 @@ describe("PostgreSQL object listing and detail", () => {
     await provider.disconnect();
   });
 
+  test("a server whose pg_class has no reltuples loses the count, not the folder", async () => {
+    // RisingWave 3.0.4, measured: its pg_class carries oid, relname, relnamespace,
+    // relowner, relpersistence, relkind, relpages, relam, reltablespace, reloptions,
+    // relispartition and relpartbound - no reltuples, and no pg_total_relation_size()
+    // either, so this listing is refused twice for two different reasons. The engine
+    // reports an unbindable column as a missing FROM-clause entry for the alias, which
+    // reads like a join defect and is not one: the join binds, the column does not.
+    const asked: string[] = [];
+    mockQueryFn = async (sql) => {
+      if (!sql.includes("relkind")) return { rows: [] };
+      asked.push(sql);
+      if (sql.includes("pg_total_relation_size")) {
+        throw new Error("Failed to bind expression: pg_total_relation_size(c.oid)");
+      }
+      if (sql.includes("reltuples")) {
+        throw new Error(
+          'Failed to bind expression: c.reltuples: Item not found: missing FROM-clause entry for table "c"',
+        );
+      }
+      return { rows: [{ name: "orders" }] };
+    };
+    const provider = makeProvider();
+    await provider.connect();
+
+    expect(await provider.listObjects(["app"], "table")).toEqual([
+      // Neither number was measured, so neither is claimed. The folder still lists.
+      { path: ["app", "orders"], name: "orders", kind: "table", rowCount: undefined, sizeBytes: undefined },
+    ]);
+    expect(asked).toHaveLength(3);
+    expect(asked[2]).not.toContain("reltuples");
+    expect(asked[2]).not.toContain("pg_total_relation_size");
+    await provider.disconnect();
+  });
+
   test("the size retry's own failure leaves by the same door, quoting what the server received", async () => {
     mockQueryFn = async (sql) => {
       if (!sql.includes("relkind")) return { rows: [] };
@@ -4486,6 +4821,64 @@ describe("PostgreSQL object listing and detail", () => {
       indexes: [],
       foreignKeys: [],
     });
+    await provider.disconnect();
+  });
+
+  /**
+   * The `hasColumns` declaration against what this provider actually answers, positive
+   * direction (#789). `sequence` is the kind that carries it: `role: "config"`, and columns
+   * all the same, because `describeObject` gates on `RELKIND_BY_KIND` and 'S' is a key there.
+   * The rows are the three `pg_attribute` publishes for a sequence on postgres:18.
+   */
+  test("a kind declaring hasColumns answers columns with a name and a type a reader can be shown", async () => {
+    mockQueryFn = async (sql, params) => {
+      if (!sql.includes("object_columns")) return { rows: [] };
+      expect(params).toEqual(["app", "invoice_number_seq"]);
+      return {
+        rows: [
+          {
+            pk_columns: null,
+            columns: [
+              { name: "last_value", type: "bigint", nullable: false, defaultValue: null },
+              { name: "log_cnt", type: "bigint", nullable: false, defaultValue: null },
+              { name: "is_called", type: "boolean", nullable: false, defaultValue: null },
+            ],
+            indexes: null,
+            foreign_keys: null,
+          },
+        ],
+      };
+    };
+    const provider = makeProvider();
+    await provider.connect();
+
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    expect(kinds.find((kind) => kind.id === "sequence")?.hasColumns).toBe(true);
+    const detail = await provider.describeObject(["app", "invoice_number_seq"], "sequence");
+    expect(detail.columns.length).toBeGreaterThan(0);
+    for (const column of detail.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+    await provider.disconnect();
+  });
+
+  /**
+   * The same declaration, negative direction. A kind that declares nothing is a LEAF in the
+   * object tree, so an answer carrying columns would be columns no reader can ever reach.
+   * `procedure` has no relation behind it, so the answer costs no round trip.
+   */
+  test("a kind declaring no hasColumns answers no columns at all", async () => {
+    mockQueryFn = async () => ({ rows: [] });
+    const provider = makeProvider();
+    await provider.connect();
+
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    expect(kinds.find((kind) => kind.id === "procedure")?.hasColumns).toBeUndefined();
+    const detail = await provider.describeObject(["app", "archive_orders(integer)"], "procedure");
+    expect(detail.columns).toEqual([]);
     await provider.disconnect();
   });
 
@@ -4673,22 +5066,45 @@ describe("PostgreSQL bulk column read", () => {
   });
 
   test("a bounded read reports its own truncation", async () => {
-    let bound: unknown;
-    mockQueryFn = async (sql, params) => {
+    let asked: string | undefined;
+    mockQueryFn = async (sql) => {
       if (!sql.includes("described_columns")) return { rows: [] };
       expect(sql).toContain("LIMIT");
-      bound = params?.[1];
+      asked = sql;
       // The provider asks for one row more than the bound, which is how it can tell a
       // saturated read from an exact one without a second count.
-      return { rows: bulkRows().slice(0, Number(bound)) };
+      return { rows: bulkRows().slice(0, 2) };
     };
     const provider = makeProvider();
     await provider.connect();
 
     const batch = await provider.describeObjects(["app"], "table", 1);
-    expect(bound).toBe(2);
+    expect(asked).toContain("LIMIT 2");
     expect(batch.details).toHaveLength(1);
     expect(batch.truncated).toEqual({ limit: 1, reason: callerBoundTruncationReason(1) });
+    await provider.disconnect();
+  });
+
+  test("the bound is spelled into the statement, because RisingWave refuses to bind one", async () => {
+    let asked: string | undefined;
+    mockQueryFn = async (sql) => {
+      if (!sql.includes("described_columns")) return { rows: [] };
+      asked = sql;
+      return { rows: bulkRows() };
+    };
+    const provider = makeProvider();
+    await provider.connect();
+
+    await provider.describeObjects(["app"], "table", 2);
+
+    // Measured 2026-09-22 through `pg` against RisingWave 3.0.4: the same statement answers
+    // with the bound spelled in and fails with it bound, "Failed to prepare the statement
+    // ... expects an integer or expression". Stock PostgreSQL 17.11 binds it, so this is
+    // the relative's constraint and not the driver's, and it is the same trait
+    // `compatibility.ts` already records for RisingWave's monitoring reads. The value is
+    // the caller's `limit + 1`, validated as a positive whole number before it is spelled.
+    expect(asked).toContain("LIMIT 3");
+    expect(asked).not.toContain("LIMIT $2");
     await provider.disconnect();
   });
 
@@ -4730,6 +5146,36 @@ describe("PostgreSQL bulk column read", () => {
     await provider.connect();
 
     await expect(provider.describeObjects(["app"], "package")).rejects.toThrow(/declares no object kind "package"/);
+    await provider.disconnect();
+  });
+
+  /**
+   * The schema level is REQUIRED by this engine's readers, not just the depth.
+   *
+   * A declaration whose one level is called `catalog` has the depth the shared check wants,
+   * so the renderer accepts `["shop"]` here and the refusal has to come from this engine.
+   * PostgreSQL's readers do not read their segment by position: they look the `schema` level
+   * up and bind what they find, so with no such level the read would bind `undefined` where
+   * `$1` belongs and answer an empty folder that looks exactly like a schema holding
+   * nothing. Nothing else in this file covers it, because every other fixture declares a
+   * `schema` level.
+   */
+  test("a declaration with no schema level is refused even when the depth matches", async () => {
+    mockQueryFn = async () => ({ rows: [] });
+    const provider = makeProvider();
+    await provider.connect();
+    const spy = spyOn(provider, "getCapabilities").mockReturnValue({
+      ...provider.getCapabilities(),
+      containerLevels: [{ id: "catalog", label: "Catalog", labelPlural: "Catalogs" }],
+    });
+
+    try {
+      await expect(provider.describeObjects(["shop"], "table")).rejects.toThrow(
+        /A PostgreSQL path needs a "schema" container level and a segment for it; the declaration is \[catalog\] and the path is \["shop"\]/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
     await provider.disconnect();
   });
 
@@ -7090,8 +7536,8 @@ describe("PostgreSQL object edit (#789 Phase 3)", () => {
       // equals `plan.unit.steps[0].text`. That test PASSES against a design that rebuilds at apply
       // time, because nothing changed between the two calls, so it certifies nothing.
       //
-      // THE LIVE POPULATION THAT CONTAINS THE CASE: `objectKindsFor(version)` in
-      // `src/lib/db/providers/sql/mysql.ts` resolves from `measuredServerVersion`, set in
+      // THE LIVE POPULATION THAT CONTAINS THE CASE: `objectKindsFor(flavour)` in
+      // `src/lib/db/providers/sql/mysql.ts` resolves from `measuredFlavour`, set in
       // `connect()`, and `POST /api/db/provider-meta` reads capabilities off a provider it never
       // connects. That is the shipped mechanism by which two reads of one provider legitimately
       // answer differently, and it is measured end to end on a live MariaDB 12.3.2.

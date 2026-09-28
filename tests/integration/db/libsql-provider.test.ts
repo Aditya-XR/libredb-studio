@@ -30,6 +30,7 @@ import {
   containerDepth,
   isCountUnavailable,
   isSourcePartUnavailable,
+  kindHasColumns,
   sourceBoundTruncationReason,
 } from "@/lib/db/object-kinds";
 import { LibSQLProvider } from "@/lib/db/providers/sql/libsql";
@@ -305,7 +306,8 @@ describe("LibSQLProvider configuration", () => {
       connectionString: "libsql://libredb-probe-424-cevheri.aws-eu-west-1.turso.io?authToken=jwt-123",
     });
 
-    expect(calls[0]?.url).toBe("https://libredb-probe-424-cevheri.aws-eu-west-1.turso.io:443/v2/pipeline");
+    // Port 443 is the https default, which the URL leaves out of its serialization.
+    expect(calls[0]?.url).toBe("https://libredb-probe-424-cevheri.aws-eu-west-1.turso.io/v2/pipeline");
     await provider.disconnect();
   });
 
@@ -383,6 +385,17 @@ describe("LibSQLProvider capabilities", () => {
     expect(capabilities.defaultPort).toBe(8080);
   });
 
+  test("pages with LIMIT n OFFSET m, the grammar it shares with SQLite", () => {
+    // #816: declared true because `prepareQuery` really applies a positive offset.
+    // Measured across every type-id in tests/unit/db/result-pagination-capability.test.ts.
+    const provider = new LibSQLProvider(connection());
+    expect(provider.getCapabilities().supportsResultPagination).toBe(true);
+
+    const pageTwo = provider.prepareQuery("SELECT * FROM t", { limit: 50, offset: 50 });
+    expect(pageTwo.query).toBe("SELECT * FROM t LIMIT 50 OFFSET 50");
+    expect(pageTwo.wasLimited).toBe(true);
+  });
+
   test("declares no transaction, because the stream closes with each statement", () => {
     expect(new LibSQLProvider(connection()).getCapabilities().supportsTransactions).toBe(false);
   });
@@ -438,6 +451,43 @@ describe("LibSQLProvider query", () => {
 
     const sent = JSON.parse(calls[1]?.body ?? "{}") as { requests: { stmt?: { args?: unknown[] } }[] };
     expect(sent.requests[0]?.stmt?.args).toEqual([{ type: "text", value: "tr" }]);
+    await provider.disconnect();
+  });
+
+  test("hands a past-2^53 key back as its exact digits and binds those digits back as the integer", async () => {
+    // The whole inline-grid round trip through the real provider: read the key out
+    // of a row, then send that very value back in the WHERE clause. Measured against
+    // sqld 0.24.33 on 2026-09-18: bound as TEXT this matched 0 rows on a column with
+    // no affinity (BLOB or undeclared), so the editor reported nothing changed;
+    // bound as an integer it matches the one row, on every column declaration.
+    server = () => result([["id", null]], [[int("9007199254740993")]]);
+    const provider = await connected();
+
+    const read = await provider.query('SELECT id FROM "probe_orders"');
+    const key = read.rows[0]?.id;
+    expect(key).toBe("9007199254740993");
+
+    server = () => result([], [], { affected_row_count: 1 });
+    await provider.query('UPDATE "probe_orders" SET note = ? WHERE id = ?', ["duzenlendi", key]);
+
+    const sent = JSON.parse(calls.at(-1)?.body ?? "{}") as { requests: { stmt?: { args?: unknown[] } }[] };
+    expect(sent.requests[0]?.stmt?.args).toEqual([
+      { type: "text", value: "duzenlendi" },
+      { type: "integer", value: "9007199254740993" },
+    ]);
+    await provider.disconnect();
+  });
+
+  test("still binds an ordinary key that happens to be all digits as text", async () => {
+    const provider = await connected();
+
+    await provider.query('UPDATE "probe_customers" SET country = ? WHERE code = ?', ["tr", "007"]);
+
+    const sent = JSON.parse(calls.at(-1)?.body ?? "{}") as { requests: { stmt?: { args?: unknown[] } }[] };
+    expect(sent.requests[0]?.stmt?.args).toEqual([
+      { type: "text", value: "tr" },
+      { type: "text", value: "007" },
+    ]);
     await provider.disconnect();
   });
 
@@ -568,8 +618,11 @@ describe("LibSQLProvider runMaintenance", () => {
 
     expect(await provider.runMaintenance("reindex")).toMatchObject({ success: true });
     expect(await provider.runMaintenance("reindex", "probe_customers")).toMatchObject({ success: true });
+    // #772: a container is ignored - the connection resolves names against its one
+    // attached database, exactly as sqlite.ts does.
+    expect(await provider.runMaintenance("reindex", "probe_customers", "main")).toMatchObject({ success: true });
 
-    expect(sentStatements()).toEqual(["REINDEX", 'REINDEX "probe_customers"']);
+    expect(sentStatements()).toEqual(["REINDEX", 'REINDEX "probe_customers"', 'REINDEX "probe_customers"']);
     await provider.disconnect();
   });
 
@@ -864,6 +917,19 @@ const COLUMNS: Readonly<Record<string, ColumnRow[]>> = {
   order_summary: [column("name", "TEXT", 0, null, 0), column("total", "REAL", 0, null, 0)],
   legacy: [column("note", "TEXT", 0, null, 0)],
   legacy_ref: [column("id", "INTEGER", 0, null, 1), column("note", "TEXT", 0, null, 0)],
+  // #1029: one column per shape of catalog default. `dflt_value` is the expression AS
+  // WRITTEN, identical to SQLite's `PRAGMA table_info` on every row. Served only through
+  // `DEFAULTS_CATALOG`, so no FIXTURE-backed listing or count sees this table.
+  column_defaults: [
+    column("id", "INTEGER", 0, null, 1),
+    column("def_null_string", "TEXT", 0, "'NULL'", 0),
+    column("def_text", "TEXT", 0, "'abc'", 0),
+    column("def_empty", "TEXT", 0, "''", 0),
+    column("def_quote", "TEXT", 0, "'it''s'", 0),
+    column("def_backslash", "TEXT", 0, "'a\\b'", 0),
+    column("def_number", "INTEGER", 0, "42", 0),
+    column("def_expression", "TEXT", 0, "CURRENT_TIMESTAMP", 0),
+  ],
   archive: [column("id", "INTEGER", 0, null, 1), column("body", "TEXT", 0, null, 0)],
   sqliteXledger: [column("id", "INTEGER", 0, null, 1), column("note", "TEXT", 0, null, 0)],
   shipments: [
@@ -1621,13 +1687,18 @@ describe("LibSQLProvider object surface (#789)", () => {
     ]);
   });
 
-  test("a default value is the engine's own literal, and an absent one is absent", async () => {
+  test("a default value is the value the column defaults to, and an absent one is absent", async () => {
     objects = await connectedWithObjects();
 
     const customers = await objects.describeObject(["customers"], "table");
 
-    expect(customers.columns.find((column) => column.name === "country")?.defaultValue).toBe("'TR'");
-    expect(customers.columns.find((column) => column.name === "name")?.defaultValue).toBeUndefined();
+    // The catalog reports `'TR'`; the value is `TR`, and the text is kept as the expression (#1029).
+    const country = customers.columns.find((column) => column.name === "country");
+    expect(country?.defaultValue).toBe("TR");
+    expect(country?.defaultExpression).toBe("'TR'");
+    const name = customers.columns.find((column) => column.name === "name");
+    expect(name?.defaultValue).toBeUndefined();
+    expect(name?.defaultExpression).toBeUndefined();
   });
 
   test("describes a view, which has columns and neither indexes nor foreign keys", async () => {
@@ -1715,6 +1786,44 @@ describe("LibSQLProvider object surface (#789)", () => {
       "index_list",
       "foreign_key_list",
     ]);
+  });
+
+  test("hasColumns is declared on the two relation kinds, and describeObject backs the declaration", async () => {
+    // The declaration is a CLIENT GATE (#789): the tree draws a twisty only where a kind
+    // declares `hasColumns`, so a kind declaring it whose describe answers nothing opens
+    // on nothing, and a kind answering columns without declaring it hides them behind a
+    // leaf row. Both directions are asserted against this engine's own answer rather
+    // than against the role, which happens to coincide here and does not elsewhere:
+    // `describeLibSQLObject` in src/lib/db/providers/sql/libsql/objects.ts gates on
+    // `spec.role !== "relation"`, while a MariaDB sequence is declared `config` and still
+    // has columns.
+    objects = await connectedWithObjects();
+    const kinds = objects.getCapabilities().objectKinds ?? [];
+
+    expect(kinds.filter((kind) => kindHasColumns(kind)).map((kind) => kind.id)).toEqual(["table", "view"]);
+    // ABSENT rather than `false`, which is what the field's docblock asks of a provider
+    // that has no columns for a kind: absent and false read the same and one writer is
+    // enough.
+    expect(kinds.find((kind) => kind.id === "index")?.hasColumns).toBeUndefined();
+    expect(kinds.find((kind) => kind.id === "trigger")?.hasColumns).toBeUndefined();
+
+    const view = await objects.describeObject(["order_summary"], "view");
+
+    expect(view.columns.length).toBeGreaterThan(0);
+    for (const column of view.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+  });
+
+  test("a kind that declares no hasColumns answers no columns at all", async () => {
+    objects = await connectedWithObjects();
+    const index = (objects.getCapabilities().objectKinds ?? []).find((kind) => kind.id === "index");
+
+    expect(kindHasColumns(index)).toBe(false);
+    expect((await objects.describeObject(["idx_orders_customer"], "index")).columns).toEqual([]);
   });
 
   test("an index and a trigger describe as three empty arrays, without a round trip", async () => {
@@ -2770,5 +2879,61 @@ describe("endOpenQueryTransaction()", () => {
     expect(ABSENCES.filter((absence) => doc.includes(absence))).toEqual([
       "the engine has no transaction to leave open",
     ]);
+  });
+});
+
+/**
+ * Column defaults as libSQL's catalog reports them (#1029).
+ *
+ * The provider reads `pragma_table_xinfo`, whose `dflt_value` is the expression AS WRITTEN,
+ * identical to SQLite's: a string default arrives quoted with SQL standard doubling, a
+ * number or an expression arrives bare. `defaultValue` is the VALUE the column defaults to;
+ * `defaultExpression` keeps the text as the engine wrote it.
+ */
+describe("LibSQLProvider column defaults (#1029)", () => {
+  const DEFAULTS_CATALOG: Catalog = {
+    tableList: [...TABLE_LIST_ROWS, { schema: "main", name: "column_defaults", type: "table" }],
+    sqliteSchema: [...SQLITE_SCHEMA_ROWS, { type: "table", name: "column_defaults", tbl_name: "column_defaults" }],
+  };
+
+  const EXPECTED: Record<string, { defaultValue?: string; defaultExpression?: string }> = {
+    id: {},
+    def_null_string: { defaultValue: "NULL", defaultExpression: "'NULL'" },
+    def_text: { defaultValue: "abc", defaultExpression: "'abc'" },
+    def_empty: { defaultValue: "", defaultExpression: "''" },
+    def_quote: { defaultValue: "it's", defaultExpression: "'it''s'" },
+    def_backslash: { defaultValue: "a\\b", defaultExpression: "'a\\b'" },
+    def_number: { defaultValue: "42", defaultExpression: "42" },
+    def_expression: { defaultValue: "CURRENT_TIMESTAMP", defaultExpression: "CURRENT_TIMESTAMP" },
+  };
+
+  const defaultsOf = (columns: readonly { name: string; defaultValue?: string; defaultExpression?: string }[]) =>
+    Object.fromEntries(
+      columns.map((column) => [
+        column.name,
+        {
+          ...(column.defaultValue === undefined ? {} : { defaultValue: column.defaultValue }),
+          ...(column.defaultExpression === undefined ? {} : { defaultExpression: column.defaultExpression }),
+        },
+      ]),
+    );
+
+  let objects: LibSQLProvider;
+
+  afterEach(async () => {
+    if (objects?.isConnected()) await objects.disconnect();
+  });
+
+  test("a string default is reported as its value, with the catalog text kept alongside", async () => {
+    objects = await connectedWithObjects(DEFAULTS_CATALOG);
+
+    const single = await objects.describeObject(["column_defaults"], "table");
+    expect(defaultsOf(single.columns)).toEqual(EXPECTED);
+
+    // The bulk read goes through the same mapper; asserting it too is what catches a fix
+    // applied to one read and not the other, the mistake #795 had to correct.
+    const batch = await objects.describeObjects([], "table");
+    const bulk = batch.details.find((detail) => detail.path[0] === "column_defaults")!;
+    expect(defaultsOf(bulk.columns)).toEqual(EXPECTED);
   });
 });

@@ -323,12 +323,15 @@ const BARE_TYPE_FAMILY: Record<string, InferredKind> = {
  * it answers `Unknown type 'text'` to.
  *
  * The map is total, for the reason `BINARY_LITERAL` below is: a new provider must not
- * inherit a silently wrong answer. The seven dialects with NO row measured have an
- * empty one — Druid takes no INSERT at all without the MSQ extension, the two search
- * endpoints parse no CREATE TABLE, and the other four declare `queryLanguage: "json"`
- * so no statement is ever built for them to read. Their file is by definition meant to
- * run somewhere else, so every bare name in it is re-spelled portably rather than kept
- * as one engine's private word.
+ * inherit a silently wrong answer. The nine dialects with NO row measured have an
+ * empty one. Druid takes no INSERT at all without the MSQ extension. The two search
+ * endpoints and Couchbase parse no CREATE TABLE: a SQL++ collection is schemaless and
+ * `CREATE COLLECTION` takes no columns, which is why the Couchbase provider declares
+ * `supportsCreateTable: false`. MongoDB, Redis, Kafka and the embedded store declare
+ * `queryLanguage: "json"` and `prometheus` declares `"promql"`, so no SQL statement is
+ * ever built for those five to read. A file for any of the nine is by definition meant to
+ * run somewhere else, so every bare name in it is re-spelled portably rather than kept as
+ * one engine's private word.
  */
 const NOTHING_STANDS_ALONE: readonly string[] = [];
 
@@ -515,6 +518,8 @@ const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
   redis: NOTHING_STANDS_ALONE,
   libredb: NOTHING_STANDS_ALONE,
   couchbase: NOTHING_STANDS_ALONE,
+  prometheus: NOTHING_STANDS_ALONE,
+  kafka: NOTHING_STANDS_ALONE,
 };
 
 /**
@@ -639,11 +644,14 @@ const BINARY_LITERAL: Record<DatabaseType, BinaryLiteral> = {
   // for somewhere else; their SQL reads its literals the way MySQL's does.
   elasticsearch: "standard-hex",
   opensearch: "standard-hex",
-  // `queryLanguage: "json"` — no statement is ever built for these three to read, so
+  // `queryLanguage: "json"`: no statement is ever built for these four to read, so
   // the standard form is the only thing an export can claim (as in `values.ts`).
   mongodb: "standard-hex",
   redis: "standard-hex",
   libredb: "standard-hex",
+  kafka: "standard-hex",
+  // PromQL, not SQL (#1085): no statement is ever built for it either, so the same claim.
+  prometheus: "standard-hex",
   // Measured on SQL Server 2022: `SELECT CONVERT(varchar(64), 0x0102deadbeef, 2)`
   // answers `0102DEADBEEF`, `DATALENGTH(0x)` answers 0 — so the empty case is spelled
   // — and `SELECT X'0102'` is `Msg 207 … Invalid column name 'X'`.

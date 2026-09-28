@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { diffSchemas } from "@/lib/schema-diff/diff-engine";
 import type { StoredObject } from "@/lib/db/detailed-object";
+import type { ColumnSchema } from "@/lib/types";
 
 // ============================================================================
 // Helpers
@@ -243,6 +244,50 @@ describe("diffSchemas: modified columns", () => {
     expect(col.action).toBe("modified");
     expect(col.changes.some((c) => c.includes("Default changed"))).toBe(true);
   });
+
+  // The comparison must read the same quantity the migration generator emits, the SQL text,
+  // and must tell an EMPTY default apart from NO default. A MariaDB column declared
+  // `DEFAULT ''` reports the value "" and the expression "''"; a column with no default at
+  // all reports neither field. A truthiness fallback collapses those two onto the same
+  // string and reports no change for a difference that is really there.
+  function defaultChanges(source: Partial<ColumnSchema>, target: Partial<ColumnSchema>): string[] {
+    const base = { name: "note", type: "varchar(20)", nullable: true, isPrimary: false };
+    const result = diffSchemas(
+      [makeTable({ name: "users", columns: [{ ...base, ...source }] })],
+      [makeTable({ name: "users", columns: [{ ...base, ...target }] })],
+    );
+    const col = result.tables[0]?.columns.find((c) => c.columnName === "note");
+    return (col?.changes ?? []).filter((c) => c.startsWith("Default changed"));
+  }
+
+  test("adding an empty-string default is a change", () => {
+    expect(defaultChanges({}, { defaultValue: "", defaultExpression: "''" })).toEqual(["Default changed: none → ''"]);
+  });
+
+  test("dropping an empty-string default is a change", () => {
+    expect(defaultChanges({ defaultValue: "", defaultExpression: "''" }, {})).toEqual(["Default changed: '' → none"]);
+  });
+
+  test("a snapshot taken before the decoding compares equal to the unchanged table", () => {
+    // An old snapshot stored MariaDB's catalog text in `defaultValue`; a reading taken today
+    // decodes it there and keeps the text in `defaultExpression`. Same column, no change.
+    expect(defaultChanges({ defaultValue: "'abc'" }, { defaultValue: "abc", defaultExpression: "'abc'" })).toEqual([]);
+  });
+
+  test("a real default change is still reported", () => {
+    expect(
+      defaultChanges(
+        { defaultValue: "abc", defaultExpression: "'abc'" },
+        { defaultValue: "xyz", defaultExpression: "'xyz'" },
+      ),
+    ).toEqual(["Default changed: 'abc' → 'xyz'"]);
+  });
+
+  test("a provider that sets no expression is unaffected", () => {
+    const pg = "nextval('app.orders_id_seq'::regclass)";
+    expect(defaultChanges({ defaultValue: pg }, { defaultValue: pg })).toEqual([]);
+    expect(defaultChanges({ defaultValue: pg }, { defaultValue: "0" })).toEqual([`Default changed: ${pg} → 0`]);
+  });
 });
 
 // ============================================================================
@@ -458,5 +503,57 @@ describe("diffSchemas: the object model", () => {
     ];
 
     expect(diffSchemas(flat, kinded).hasChanges).toBe(false);
+  });
+});
+
+// ============================================================================
+// The SQL text of a default (#795)
+// ============================================================================
+
+describe("diffSchemas: a column's default carries both readings", () => {
+  // `defaultValue` is the value a display shows and `defaultExpression` is the SQL that
+  // produces it, so the diff has to carry both on to the generator: dropping the second
+  // would leave the generator interpolating a value where SQL belongs.
+  const withDefault = {
+    name: "note",
+    type: "varchar(20)",
+    nullable: true,
+    isPrimary: false,
+    defaultValue: "abc",
+    defaultExpression: "'abc'",
+  };
+
+  test("an added table's columns carry the SQL text", () => {
+    const diff = diffSchemas([], [makeTable({ name: "users", columns: [withDefault] })]);
+
+    expect(diff.tables[0].columns[0]).toMatchObject({ targetDefault: "abc", targetDefaultSql: "'abc'" });
+  });
+
+  test("a column added to an existing table carries the SQL text", () => {
+    const diff = diffSchemas(
+      [makeTable({ name: "users", columns: [] })],
+      [makeTable({ name: "users", columns: [withDefault] })],
+    );
+
+    expect(diff.tables[0].columns[0]).toMatchObject({ targetDefault: "abc", targetDefaultSql: "'abc'" });
+  });
+
+  test("a modified column carries the SQL text", () => {
+    const diff = diffSchemas(
+      [makeTable({ name: "users", columns: [{ ...withDefault, defaultValue: "xyz", defaultExpression: "'xyz'" }] })],
+      [makeTable({ name: "users", columns: [withDefault] })],
+    );
+
+    expect(diff.tables[0].columns[0]).toMatchObject({ targetDefault: "abc", targetDefaultSql: "'abc'" });
+  });
+
+  test("a provider that reports no expression leaves the field absent", () => {
+    const diff = diffSchemas(
+      [],
+      [makeTable({ name: "users", columns: [{ ...withDefault, defaultExpression: undefined }] })],
+    );
+
+    expect(diff.tables[0].columns[0].targetDefaultSql).toBeUndefined();
+    expect(diff.tables[0].columns[0].targetDefault).toBe("abc");
   });
 });

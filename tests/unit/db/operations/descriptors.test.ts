@@ -163,7 +163,13 @@ describe("plan inspection vs plan execution", () => {
     expect(sqlExplainEstimateDescriptor.riskClass).toBe(0);
     expect(sqlExplainEstimateDescriptor.accessLevel).toBe("metadata-read");
     expect(sqlExplainEstimateDescriptor.requiresApproval).toBe(false);
-    expect(sqlExplainEstimateDescriptor.requiredCapabilities).toContain("supportsExplain");
+    // No capability at all, and its docblock argues why: `supportsExplain` is the
+    // EDITOR's flag, the agent composes its own estimating form per dialect, and
+    // requiring the editor's flag denied `inspect_plan` on SQL Server (an engine with
+    // a verified agent plan and no editor Explain), so the workflow that needs a plan
+    // could not complete there. The executing variant below still declares it.
+    expect(sqlExplainEstimateDescriptor.requiredCapabilities).toEqual([]);
+    expect(sqlExplainAnalyzeDescriptor.requiredCapabilities).toContain("supportsExplain");
   });
 
   test("plan execution is default-denied: verified risk class 1 that always requires approval", () => {

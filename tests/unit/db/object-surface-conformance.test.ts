@@ -322,12 +322,16 @@ describe("assertObjectSurface", () => {
       kinds: { table: 2, view: 4 },
       sampleObject: { path: typed, kind: "view" },
     });
-    expect(asked).toHaveLength(1);
+    // TWO reads and not one: invariant 6 asks first, for the FOUND sample, and invariant 8
+    // then asks once per OTHER listed kind. It never asks a second time for the sample's
+    // kind, because that kind's answer is already in hand and re-asking would probe a
+    // different object of it than the one this expectation chose.
+    expect(asked).toHaveLength(2);
     expect(asked[0]).toBe(listed[0].path);
     expect(asked[0]).not.toBe(typed);
     // The kind travels with the path, so a provider never has to infer what it holds
     // from what the name happens to match.
-    expect(askedKinds).toEqual(["view"]);
+    expect(askedKinds).toEqual(["view", "table"]);
   });
 
   // A tree addresses by path, so two objects sharing one is two rows it cannot tell
@@ -1170,7 +1174,7 @@ describe("assertObjectSurface and the object source read", () => {
     ]);
   });
 
-  test("a provider that declares nothing and implements nothing passes, which is fourteen of seventeen", async () => {
+  test("a provider that declares nothing and implements nothing passes, which is every edit abstainer", async () => {
     // The zero-iteration case, asserted rather than assumed: this is the state of most of the
     // fleet, so if it threw, every abstaining provider's suite would be red. The positive test at
     // `:1005` already drives this double; this one names WHY it must keep passing.
@@ -1837,5 +1841,213 @@ describe("assertObjectSurface and the object source read", () => {
     await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
       /without naming "no_such_routine\(integer\)"/,
     );
+  });
+});
+
+/**
+ * The declaration half (#789, columns under an object row).
+ *
+ * Every double here is a DISAGREEMENT between a declaration and an answer, because that is
+ * the only thing invariant 8 can catch: a provider whose two halves already agree passes a
+ * helper that checks neither of them. The declaration is what decides and `role` never is:
+ * measured across the fleet, five `config` kinds do have columns (PostgreSQL and MariaDB
+ * `sequence`, ClickHouse `dictionary`, Cassandra `type`, Druid `lookup`) and Oracle's
+ * `sequence` declares the same id as PostgreSQL's and answers none.
+ *
+ * NO PROVIDER DECLARES `hasColumns` ON THE DAY THIS LANDS, so the POSITIVE direction is
+ * exercised by these doubles and by nothing else until each provider task lands its own
+ * declaration. That is why the doubles below carry the whole matrix rather than one case per
+ * throw: against the real fleet today the positive loop iterates zero times.
+ */
+describe("assertObjectSurface and the hasColumns declaration", () => {
+  const listed: Record<string, { path: readonly string[]; name: string; kind: string }[]> = {
+    table: [
+      { path: ["app", "orders"], name: "orders", kind: "table" },
+      { path: ["app", "products"], name: "products", kind: "table" },
+    ],
+    view: [{ path: ["app", "order_summary"], name: "order_summary", kind: "view" }],
+  };
+
+  const expectation = {
+    containers: [["app"]],
+    kinds: { table: 2, view: 4 },
+    sampleObject: { path: ["app", "order_summary"], kind: "view" },
+  };
+
+  /**
+   * `declares` and `columnsFor` are two independent parameters ON PURPOSE: the declaration
+   * and the answer are what invariant 8 compares, so a double that derived one from the
+   * other could not express a single case this block exists for.
+   */
+  function columnProvider(
+    declares: readonly string[],
+    columnsFor: (kind: string) => readonly { name: unknown; type: unknown }[] = () => [{ name: "id", type: "integer" }],
+    overrides: Record<string, unknown> = {},
+  ) {
+    return fakeProvider({
+      type: "postgres",
+      getCapabilities: () => ({
+        queryLanguage: "sql",
+        containerLevels: [{ id: "schema", label: "Schema", labelPlural: "Schemas" }],
+        // ABSENT rather than `false` on an abstaining kind, which is how the fleet writes it:
+        // `kindHasColumns()` reads absent and undeclared the same way, and a double carrying an
+        // explicit `false` would exercise a spelling no provider uses.
+        objectKinds: [
+          {
+            id: "table",
+            role: "relation",
+            label: "Table",
+            labelPlural: "Tables",
+            ...(declares.includes("table") ? { hasColumns: true } : {}),
+          },
+          {
+            id: "view",
+            role: "relation",
+            label: "View",
+            labelPlural: "Views",
+            ...(declares.includes("view") ? { hasColumns: true } : {}),
+          },
+        ],
+      }),
+      listObjects: async (_c: readonly string[], kind: string) => listed[kind] ?? [],
+      describeObject: async (path: readonly string[], kind: string) => ({
+        path,
+        columns: columnsFor(kind),
+        indexes: [],
+        foreignKeys: [],
+      }),
+      ...overrides,
+    });
+  }
+
+  // The positive control the eight refusals below are measured against: one kind declaring
+  // columns and answering some, one declaring nothing and answering none.
+  test("passes a provider whose declarations agree with what describeObject answers", async () => {
+    const provider = columnProvider(["view"], (kind) => (kind === "view" ? [{ name: "id", type: "integer" }] : []));
+    await expect(assertObjectSurface(provider as never, expectation)).resolves.toBeUndefined();
+  });
+
+  // The direction the client gate makes load-bearing: a kind declaring nothing is a LEAF in
+  // the object tree, so columns it answers reach no reader at all.
+  test("reports BY NAME a kind that declares no columns and answers one", async () => {
+    const provider = columnProvider(["view"]);
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /kind "table" declares no hasColumns and describeObject answered 1 column\(s\) for \["app","orders"\]/,
+    );
+  });
+
+  // The other direction, and the failure a reader actually meets: a twisty that opens on
+  // nothing, for every object of the kind.
+  test("reports BY NAME a kind that declares columns and answers none", async () => {
+    const provider = columnProvider(["view"], () => []);
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /kind "view" declares hasColumns and describeObject answered no column for \["app","order_summary"\]/,
+    );
+  });
+
+  // Three spellings in one test, in the shape the `emptyKinds` verdict guard already uses.
+  // A non-string `name` is not a cosmetic defect: the tree feeds it to `pathKey`, which
+  // calls `segment.replaceAll(...)`, so it throws inside the walk and unmounts the tree.
+  // The two fields are NOT held to the same bar and the fourth row here used to say they
+  // were: `name` is refused when it is empty, `type` is not, because an empty declared type
+  // is what SQLite answers for a virtual table. That row is now the passing case below.
+  test("a column with an unreadable name or type is refused, in all three spellings", async () => {
+    const unreadable: [{ name: unknown; type: unknown }, RegExp][] = [
+      [{ name: 7, type: "integer" }, /answered a column with no name a reader can be shown/],
+      [{ name: "   ", type: "integer" }, /answered a column with no name a reader can be shown/],
+      // Keeps the surviving `typeof column.type !== "string"` arm non-vacuous.
+      [{ name: "id", type: 7 }, /answered a column with no type a reader can be shown/],
+    ];
+    for (const [column, pattern] of unreadable) {
+      const provider = columnProvider(["view"], (kind) => (kind === "view" ? [column] : []));
+      await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(pattern);
+    }
+  });
+
+  // An EMPTY declared type is a real answer and not a defect, which is the one shape the
+  // refusal above used to get wrong. Measured with `bun:sqlite` against the statements
+  // the shipped fixture holds: `pragma_table_xinfo` answers `type: ""` for every column of
+  // `CREATE VIRTUAL TABLE notes USING fts5(body)` (`docker/sqlite-init/01-object-fixture.sql`)
+  // and for the expression column of `CREATE VIEW ... AS SELECT id, total * 2 AS doubled`.
+  // The renderer already draws that as an honest blank rather than a bug: `TreeRow` gates the
+  // type slot on `row.column.type !== ""`.
+  test("a column whose declared type is EMPTY is accepted, because SQLite answers exactly that", async () => {
+    const provider = columnProvider(["view"], (kind) => (kind === "view" ? [{ name: "body", type: "" }] : []));
+    await expect(assertObjectSurface(provider as never, expectation)).resolves.toBeUndefined();
+  });
+
+  // The fifth vacuity guard. A provider declaring `hasColumns` on every kind it lists runs
+  // the negative direction zero times, which certifies nothing, and this helper has shipped
+  // exactly that hole twice before.
+  test("a provider whose every listed kind declares columns is refused unless the expectation says so", async () => {
+    const provider = columnProvider(["table", "view"]);
+    await expect(assertObjectSurface(provider as never, expectation)).rejects.toThrow(
+      /listed no kind that abstains from hasColumns, so the negative direction of invariant 8 ran zero times/,
+    );
+  });
+
+  // Its positive control: druid, mongodb and libredb really are this provider, so the field
+  // has to be a way through and not only a message.
+  test("noAbstainingKinds passes the provider it is true of", async () => {
+    const provider = columnProvider(["table", "view"]);
+    await expect(
+      assertObjectSurface(provider as never, { ...expectation, noAbstainingKinds: true }),
+    ).resolves.toBeUndefined();
+  });
+
+  // And the other direction of the same field, so a task cannot silence the guard above by
+  // writing it on an engine it is false of.
+  test("noAbstainingKinds is refused when a listed kind does abstain", async () => {
+    const provider = columnProvider(["view"], (kind) => (kind === "view" ? [{ name: "id", type: "integer" }] : []));
+    await expect(assertObjectSurface(provider as never, { ...expectation, noAbstainingKinds: true })).rejects.toThrow(
+      /sets noAbstainingKinds and the listed kind\(s\) table declare no hasColumns/,
+    );
+  });
+
+  test("a columnlessSamples entry that IS exercised passes", async () => {
+    const provider = columnProvider(["view"], () => []);
+    await expect(
+      assertObjectSurface(provider as never, {
+        ...expectation,
+        columnlessSamples: { view: "the INFER over this collection is refused on a deployment with no sample rows" },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  // An exemption may not outlive the empty answer it was written about, for the reason
+  // `assertNoStaleReason` refuses a stale `emptyKinds` sentence: here `view` answers a
+  // column, so the sentence excuses nothing and would keep excusing it after a repair.
+  test("a columnlessSamples entry that was never exercised is refused", async () => {
+    const provider = columnProvider(["view"], (kind) => (kind === "view" ? [{ name: "id", type: "integer" }] : []));
+    await expect(
+      assertObjectSurface(provider as never, {
+        ...expectation,
+        columnlessSamples: { view: "stale: this kind answers a column" },
+      }),
+    ).rejects.toThrow(/columnlessSamples names "view", which excused nothing/);
+  });
+
+  // WHICH object each kind is probed at, pinned rather than assumed: the sample's kind is
+  // read once, by invariant 6, at the object the expectation named and the listing produced;
+  // every other listed kind is read at its FIRST listed object. A helper that composed a path
+  // of its own would certify a provider against an address nothing published.
+  test("probes the FOUND sample for its kind and the first listed object for every other", async () => {
+    const asked: { path: readonly string[]; kind: string }[] = [];
+    const provider = columnProvider(["view"], () => [{ name: "id", type: "integer" }], {
+      describeObject: async (path: readonly string[], kind: string) => {
+        asked.push({ path, kind });
+        return {
+          path,
+          columns: kind === "view" ? [{ name: "id", type: "integer" }] : [],
+          indexes: [],
+          foreignKeys: [],
+        };
+      },
+    });
+    await assertObjectSurface(provider as never, expectation);
+    expect(asked).toEqual([
+      { path: ["app", "order_summary"], kind: "view" },
+      { path: ["app", "orders"], kind: "table" },
+    ]);
   });
 });

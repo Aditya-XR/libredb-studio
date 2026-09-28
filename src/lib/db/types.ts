@@ -169,6 +169,76 @@ export function maintenanceControl(
   return { offered: spec[placement], label: spec.label };
 }
 
+/**
+ * Whether column profiling may be offered for this engine: the one gate both row menus
+ * (`src/components/object-tree/row-actions.ts` and the mobile
+ * `src/components/schema-explorer/TableItem.tsx`) and `POST /api/db/profile` ask, so that no
+ * menu offers an action the route refuses.
+ *
+ * The route writes exactly two statement shapes: SQL aggregates, and a MongoDB `aggregate`
+ * document with a `$sample` stage. So profiling is offered for `"sql"`, and for `"json"` only
+ * when no `queryDialect` says the JSON is some other grammar. Redis, LibreDB and Kafka declare
+ * `"json"` with a dialect of their own, a Kafka read request being JSON of this product's own
+ * schema (#1088), and `"promql"` is not JSON at all; before this gate the route sent Redis,
+ * LibreDB and Prometheus the MongoDB document, which only MongoDB reads (#1085).
+ *
+ * Unknown capabilities are not a permission, for the reason `maintenanceControl` gives:
+ * `/api/db/provider-meta` answers with nothing both while it is in flight and when it failed.
+ */
+export function offersColumnProfiling(capabilities: ProviderCapabilities | undefined): boolean {
+  if (capabilities === undefined) return false;
+  if (capabilities.queryLanguage === "sql") return true;
+  return capabilities.queryLanguage === "json" && capabilities.queryDialect === undefined;
+}
+
+/**
+ * Whether the code generator may be offered for this engine, asked by both row menus.
+ *
+ * `src/components/CodeGenerator.tsx` maps an object's columns onto a TypeScript interface, a Zod
+ * schema, a Prisma model, a Go struct, a Python dataclass and a Java POJO: the models an
+ * application writes over a table or a document collection. It is offered for `"sql"` and
+ * `"json"`, dialects included, because it names the row rather than addressing it, which is why
+ * Redis and LibreDB keep it (#427). A PromQL metric's columns are its label names, and a record
+ * type over them models nothing an application stores, so `"promql"` is not offered it (#1085).
+ * The two languages are named rather than `"promql"` excluded, so a language added later is not
+ * offered the generator until somebody decides that it should be.
+ *
+ * The `"kafka"` dialect is refused by an arm of its own, for the reason PromQL is (#1088): a topic's
+ * columns are the fixed shape of a read result, not a record an application stores, and the models
+ * written over them reject the rows a read returns, a `Date` for a timestamp that arrives as an ISO
+ * string and a record type for a value that arrives as text, base64 or a Confluent schema label.
+ *
+ * Unknown capabilities are not a permission, as for `offersColumnProfiling`.
+ */
+export function offersCodeGeneration(capabilities: ProviderCapabilities | undefined): boolean {
+  if (capabilities?.queryDialect === "kafka") return false;
+  return capabilities?.queryLanguage === "sql" || capabilities?.queryLanguage === "json";
+}
+
+/**
+ * Whether "Generate Count Query" may be offered for this engine, asked by both row menus and by
+ * `generateCountQuery` itself (#702).
+ *
+ * The generator writes two shapes: a SQL `SELECT COUNT(*)`, and a MongoDB `count` document. So
+ * it is offered for `"sql"` and `"json"`, and only when no `queryDialect` says the language is
+ * some other grammar. The dialect is read for both languages rather than for JSON alone, as
+ * `offersColumnProfiling` does, so that a dialect declared on a SQL engine later refuses the
+ * action until somebody writes its count. Redis and LibreDB have no count
+ * statement in their command grammars, Kafka's read request reads a topic's messages and counts
+ * none (#1088), and `"promql"` is not offered it either: `count()` in
+ * PromQL counts series at an instant, which is not the row count this action promises.
+ *
+ * A derived grouping is refused on top of the language, because a Redis `user:*` row is a
+ * summary this server built and there is no object to address (#427).
+ *
+ * Unknown capabilities are not a permission, as for `offersColumnProfiling`.
+ */
+export function offersCountQuery(capabilities: ProviderCapabilities | undefined): boolean {
+  if (capabilities === undefined) return false;
+  if (capabilities.queryDialect !== undefined || capabilities.tablesAreDerivedGroupings === true) return false;
+  return capabilities.queryLanguage === "sql" || capabilities.queryLanguage === "json";
+}
+
 // ============================================================================
 // Provider Capabilities & Labels
 // ============================================================================
@@ -207,19 +277,129 @@ export type ContainerLevels =
   | readonly [ContainerLevelSpec]
   | readonly [ContainerLevelSpec, ContainerLevelSpec];
 
-export interface ProviderCapabilities {
-  queryLanguage: "sql" | "json";
+/**
+ * Whether an engine can page a resumable walk of its own KEY SPACE, and the batch sizes it
+ * will accept.
+ *
+ * THE ENGINE THIS EXISTS FOR IS THE ONE WITH NO CATALOG. Sixteen engines answer
+ * `listObjects` from a stored definition — a table, a collection, an index — and a stored
+ * definition is enumerable in full. A Redis key is not: there is no prefix index and no
+ * directory, so the only way to learn what exists is `SCAN`, and `SCAN` is a CURSOR rather
+ * than a listing. A caller who stops at one batch holds a SAMPLE; a caller who wants the
+ * whole key space has to come back with the cursor it was handed.
+ *
+ * That difference is why this is a capability and not an object kind. `listObjects` answers
+ * "what is here" in one call and is allowed to be finite. This answers "here is the next
+ * batch and the cursor after it", which is a different contract, and expressing it as an
+ * object kind would have to lie about either the bound or the completeness.
+ *
+ * The declaration is STATIC, like `objectKinds` and for a related reason: it states what the
+ * PROVIDER can do, not what the connected server answered. A Redis-wire relative that
+ * refuses `SCAN` would be a different provider, not a different capability.
+ */
+export interface KeyScanCapability {
+  /** Batch size used when the caller names none. */
+  readonly defaultCount: number;
   /**
-   * Optional client-side query dialect. `queryLanguage` only says SQL vs JSON;
-   * for non-SQL providers the query generators otherwise assume MongoDB syntax.
+   * Largest batch this provider forwards. A caller asking for more is REFUSED rather than
+   * clamped: a silent clamp answers a request for 10,000 with a batch of 1,000 and says
+   * nothing, which is a wrong answer about what a batch is. The caller can ask again.
+   */
+  readonly maxCount: number;
+}
+
+export interface KeyScanOptions {
+  /** The cursor the previous page answered with; `"0"` starts a walk. */
+  readonly cursor: string;
+  /** A `MATCH` pattern, or omitted for every key. */
+  readonly pattern?: string;
+  /** Batch size, within `[1, maxCount]`. */
+  readonly count: number;
+  /** Which numbered database to walk, for an engine that has more than one. */
+  readonly database?: number;
+}
+
+export interface KeyScanPage {
+  /** The keys this batch returned. NOT deduplicated: `SCAN` may repeat a key. */
+  readonly keys: readonly string[];
+  /** The cursor for the next batch. `"0"` means this walk reached the end. */
+  readonly cursor: string;
+  /**
+   * Each key's value type, by key name.
+   *
+   * IT TRAVELS WITH THE PAGE RATHER THAN BEING ASKED FOR SEPARATELY, because the type is what makes
+   * a key row readable and a panel that fetched it afterwards would draw a list without it and then
+   * fill it in. `TYPE` is a single-key command — Redis publishes no batch form — so the provider
+   * pipelines one per key in the page: the cost is ONE extra round trip per page whatever the page
+   * holds, not one per key.
+   *
+   * A KEY ABSENT FROM THIS MAP IS ONE WHOSE TYPE COULD NOT BE READ, and the honest thing to draw is
+   * nothing. A key that vanished between the walk and this read is present, with the server's own
+   * answer for it (`"none"`): a row the sample says is there, beside a type that says it is not, is
+   * a true pair and a reader can act on it.
+   *
+   * WHAT IT DESCRIBES IS THE MOMENT IT WAS READ. The walk is a sample and so is this: a key whose
+   * type changed between two pages is described by the earlier page's answer for as long as that
+   * answer is what the caller holds.
+   */
+  readonly types: Readonly<Record<string, string>>;
+  /**
+   * The engine's own count of the keys in the database being walked — what a progress
+   * indicator divides by.
+   *
+   * SERVER-WIDE, NOT THE WALK'S OWN TOTAL, which is why it looks like a naive field. A
+   * `SCAN` cursor says nothing about how much is left, so no denominator can be computed
+   * from the batches a caller has already seen; this is the one number the engine publishes
+   * (`DBSIZE`, which is O(1)). On a clustered deployment it is the LOCAL node's key count,
+   * because `DBSIZE` has no cluster-wide form and `SCAN` walks one node's slots — a panel
+   * drawing 2000/6355 there is showing a fraction of one node and not of the cluster.
+   */
+  readonly total: number;
+  /**
+   * Whether this answer is about ONE NODE of a clustered deployment.
+   *
+   * `SCAN` and `DBSIZE` are per node and neither has a cluster-wide form, so on a cluster the keys
+   * and the count describe the node that answered and nothing else. Absent means the deployment
+   * does not say it is clustered, which is the ordinary server.
+   */
+  readonly clustered?: boolean;
+}
+
+export interface ProviderCapabilities {
+  /**
+   * The language this engine's statements are written in: what its editor tabs are typed and
+   * highlighted as (`src/lib/editor/tab-language.ts`), and the arm the query generators take for a
+   * tree click and for "Generate Query" (`src/lib/query-generators.ts`).
+   *
+   * A CLOSED union, and a member added to it is not neutral: a reader written `=== "json"` sends
+   * the new member into its SQL branch, and one written `!== "sql"` sends it into its JSON
+   * (MongoDB) branch. So a new member lands with an explicit arm in every reader, or with a test
+   * pinning that the branch it falls into is right for it. `"promql"` is the Prometheus provider's
+   * (#1085), and it declares no `queryDialect`, because PromQL is not a kind of JSON.
+   *
+   * Published through `src/exports/types.ts`, so widening it breaks a consumer's exhaustive
+   * switch over it; that ships with a release note, not a compatibility layer.
+   */
+  queryLanguage: "sql" | "json" | "promql";
+  /**
+   * Optional client-side query dialect, and only ever a kind of JSON. `queryLanguage`
+   * says SQL, JSON or PromQL; for a `"json"` provider the query generators otherwise
+   * assume MongoDB syntax.
    * A provider sets `queryDialect` to opt its tables into a custom client-side
    * generator (see `query-generators.ts`), and it is checked BEFORE
    * `queryLanguage` everywhere. Left undefined by SQL and MongoDB, so their
    * generation is unchanged; Redis declares `"redis"` because it too says
    * `queryLanguage: "json"` while speaking neither MongoDB JSON nor SQL, and
    * silently got MongoDB commands its own driver rejected (#427).
+   *
+   * `"kafka"` is the Kafka provider's (#1088): its editor text is JSON, a read request of this
+   * product's own schema, so it declares `"json"` with this dialect rather than a language of its
+   * own. A reader keyed on `"json"` alone treats that text as MongoDB, which is the #427 class, so
+   * the member lands with an explicit arm in every reader of either field, or with a test pinning
+   * that the branch it falls into is right for Kafka. Widening this published union breaks a
+   * consumer's exhaustive switch over it, which ships with a release note, as `queryLanguage`'s did.
    */
-  queryDialect?: "libredb" | "redis";
+  queryDialect?: "libredb" | "redis" | "kafka";
   supportsExplain: boolean;
   /**
    * Present iff supportsExplain is true (enforced by provider tests).
@@ -244,6 +424,30 @@ export interface ProviderCapabilities {
    * permissive default.
    */
   supportsInlineRowEdit?: boolean;
+  /**
+   * Whether this provider can be asked for the page AFTER the first one — whether
+   * `prepareQuery(sql, { limit, offset })` with a positive `offset` really applies it.
+   *
+   * It is NOT `supportsExternalQueryLimiting`, which answers whether a bound can be
+   * injected at all. Cassandra declares that one `true` and still throws on any
+   * `offset > 0`, because CQL has no `OFFSET` clause.
+   *
+   * False hides the Load More control entirely rather than offering one that can only
+   * re-fetch page one — issue #269's rule, applied to #816. Measured 2026-09-20 by
+   * calling each provider's own `prepareQuery` with `offset: 50`: Cassandra and
+   * Elasticsearch throw; MongoDB and Redis pin `offset` to 0 and return the statement
+   * untouched; LibreDB inherits `BaseDatabaseProvider.prepareQuery`, which echoes the
+   * offset back while applying nothing — the silent case the refusals exist to prevent.
+   * The other twelve emit a real offset clause. Pinned as a behaviour, not as a
+   * declaration, in `tests/unit/db/result-pagination-capability.test.ts`.
+   *
+   * Optional for the same published-interface reason as `supportsInlineRowEdit`
+   * (`src/exports/types.ts`): a required field added after the fact stops every external
+   * implementer compiling. Every provider in this repo declares it, and the UI gates on
+   * `=== true`, so an absent flag reads as unsupported rather than inheriting a
+   * permissive default.
+   */
+  supportsResultPagination?: boolean;
   /**
    * Whether THIS PROVIDER implements the interactive transaction session that
    * `POST /api/db/transaction` drives — `beginTransaction()` / `commitTransaction()`
@@ -275,13 +479,14 @@ export interface ProviderCapabilities {
    * and the reader cannot tell them apart. On PostgreSQL an empty list means this
    * schema declares none, or that the role this connection reads with cannot see the
    * ones it declares — an empty read cannot tell those two apart, which is why the
-   * agent's relations block reports neither of them as fact; on MongoDB, Redis, LibreDB, Druid, ClickHouse and Couchbase it means the
-   * engine has no such constraint in its model, so no reading of any kind could ever
-   * return one. A consumer that hedges between "the schema is like that" and "the
-   * application enforces them" is wrong in BOTH branches on those six, and #414 hit
-   * that when grounding reached them. Reading `connection.type` at the consumer was
-   * the alternative and is forbidden by `CLAUDE.md`: engine behaviour is declared by
-   * the provider that has it.
+   * agent's relations block reports neither of them as fact; on an engine that declares
+   * this `false`, such as MongoDB or Kafka, it means the engine has no such constraint in
+   * its model, so no reading of any kind could ever return one. A consumer that hedges
+   * between "the schema is like that" and "the application enforces them" is wrong in BOTH
+   * branches on every such engine, and #414 hit that when grounding reached the six that
+   * declared it first: MongoDB, Redis, LibreDB, Druid, ClickHouse and Couchbase. Reading
+   * `connection.type` at the consumer was the alternative and is forbidden by `CLAUDE.md`:
+   * engine behaviour is declared by the provider that has it.
    *
    * Optional for the same published-interface reason as `supportsInlineRowEdit`
    * (`src/exports/types.ts`): a required field added after the fact stops every
@@ -419,11 +624,11 @@ export interface ProviderCapabilities {
    * The container levels this engine nests its objects in, outermost first (#789).
    *
    * Absent or empty means the engine has none, and that is a claim about the engine
-   * rather than a gap in the declaration: SQLite, libSQL, Elasticsearch, OpenSearch and
-   * LibreDB address every object by a bare name, so the tree draws objects directly
-   * under the connection. One level is a database, a keyspace or a bucket; two is a
-   * catalog plus a schema. The per-engine inventory each provider declares from is on
-   * the epic, issue #789.
+   * rather than a gap in the declaration: SQLite, libSQL, Elasticsearch, OpenSearch,
+   * Prometheus, Kafka and LibreDB address every object by a bare name, so the tree draws
+   * objects directly under the connection. One level is a database, a keyspace or a
+   * bucket; two is a catalog plus a schema. The per-engine inventory each provider
+   * declares from is on the epic, issue #789.
    *
    * Read it through `containerDepth()` in `src/lib/db/object-kinds.ts` and never by
    * length here, so the empty and the absent cases cannot be answered differently by
@@ -434,6 +639,30 @@ export interface ProviderCapabilities {
    * implementer compiling.
    */
   containerLevels?: ContainerLevels;
+  /**
+   * Which container paths this engine accepts as an ADDRESS, beside `containerLevels` (#1147).
+   *
+   * `exact` accepts only the declared depth: every declared level is named, or the path is
+   * refused. `prefixes` accepts every depth from one level up to the declared one, because on
+   * those engines a container named by its outer levels alone is a real address: a catalog with no
+   * schema on Trino, a database with no schema on SQL Server and DuckDB, a bucket with no scope on
+   * Couchbase. Both refuse a path longer than the declaration.
+   *
+   * Absent reads as `exact`, the conservative answer. Read as `prefixes`, a provider that forgot
+   * the field would let a partial path reach a read that binds its segments by position, and
+   * `undefined` bound where a segment belongs answers an empty folder that looks exactly like a
+   * container holding nothing.
+   *
+   * Read it through `acceptedContainerShapes()` in `src/lib/db/object-kinds.ts` and never
+   * directly, so the provider's own refusal (`assertContainerPathShape`) and the HTTP object routes
+   * in `src/lib/api/object-route.ts` apply one rule to one declaration. It governs an address, the
+   * `container` a count or a listing names; the `parent` a container listing starts from is a tree
+   * cursor and keeps the depth ceiling on every engine.
+   *
+   * Optional for the same published-interface reason as `containerLevels` (`src/exports/types.ts`):
+   * a required field added after the fact stops every external implementer compiling.
+   */
+  containerPathShapes?: "exact" | "prefixes";
   /**
    * Every object kind this engine has, each declared in full by the provider that has
    * it (#789).
@@ -460,12 +689,25 @@ export interface ProviderCapabilities {
    * "the provider declares no object kinds, so there is nothing to list" as a
    * `CATALOG_READ_REFUSED` capture - so a run is never handed an empty inventory as
    * though it were an empty database. It is deliberately not a construction-time throw:
-   * every one of the seventeen shipped type ids declares kinds, so the shape is
+   * every shipped type id declares kinds, so the shape is
    * unreachable here, and refusing to CONNECT over it would take a connection away from
    * an implementer whose query editor works perfectly well while their catalog reading is
    * still being written (#789).
    */
   objectKinds?: readonly ObjectKindSpec[];
+  /**
+   * Present iff this engine can page a resumable key-space walk. See `KeyScanCapability`.
+   *
+   * OPTIONAL BECAUSE THIS INTERFACE IS PUBLISHED. A required field added after the fact stops
+   * every external implementer from compiling — the same reason `supportsInlineRowEdit` is
+   * optional. Absent reads as "no such walk", which is the honest answer for the other sixteen
+   * shipped type ids: they enumerate what they hold from a catalog, so there is nothing to page.
+   *
+   * Present IMPLIES `scanKeysPage` is implemented, and a provider test enforces that pair the
+   * way it already enforces `explainFormat` against `supportsExplain`. A declaration with no
+   * reader behind it would draw a panel whose every gesture fails.
+   */
+  keyScan?: KeyScanCapability;
   schemaRefreshPattern: string;
 }
 
@@ -586,6 +828,27 @@ export interface ProviderLabels {
    * `errors`), and an absence is not an error.
    */
   sessionsEmptyState?: string;
+
+  /**
+   * What the rows `getTableStats()` answers ARE, declared only by an engine whose list is a
+   * ranked subset of what the database holds rather than every table in it.
+   *
+   * Three readers. The monitoring `TablesTab` renders it above its cards and then counts the rows
+   * as listed rather than as the database's tables. The admin Operations list renders it above its
+   * rows, titles them "Listed (N)" rather than "Tables (N)", and answers a filter that matches none
+   * of them with "No listed table matches the filter.", because a table outside the list may match.
+   * The agent's table-stats reading puts it in the header a model reads the rows under. Neither list
+   * shows it where the read was refused or published no statistics: there is no list to scope.
+   * Without it both lists titled a cut list "Tables" and the tab summed it as the database:
+   * measured 2026-09-23 on the compose Prometheus, the 50 metrics with the most head series read
+   * "Tables 50, 858 rows" beside an Overview of 344 metrics and a head of 1,237 series (#1085 6.2
+   * frames the list as the top N).
+   *
+   * Every engine whose list is whole leaves this absent, and both lists then render as they always
+   * have. Optional, like every field added to this published interface after the fact, so an
+   * external implementer keeps compiling.
+   */
+  tableStatsCaption?: string;
 }
 
 /**
@@ -600,6 +863,25 @@ export interface ReadOnlyStatementBudget {
   maxResultRows: number;
   maxResultBytes: number;
 }
+
+/**
+ * What the caller wants out of the one statement it is sending: the statement's own
+ * result, or the engine's ESTIMATE of how it would be run.
+ *
+ * It exists because an estimating plan is not the same KIND of thing on every engine.
+ * On PostgreSQL, SQLite and DuckDB it is a statement prefix, so the agent composes
+ * `EXPLAIN …` and the provider never has to know; on SQL Server there is no prefix and
+ * no `EXPLAIN` keyword at all: the estimating plan is a SESSION MODE
+ * (`SET SHOWPLAN_ALL ON`), which must be its own batch and must be turned off again on
+ * the same connection. A prefix cannot express that, and a private marker smuggled
+ * inside the statement text would be a protocol between two modules that nothing checks.
+ * So the caller says which of the two it wants, and each provider answers it the way
+ * its engine can.
+ *
+ * `"execute"` is the default everywhere, including for a provider that ignores the
+ * argument entirely: a provider written before this existed keeps its behaviour.
+ */
+export type ReadOnlyStatementMode = "execute" | "estimate-plan";
 
 export interface PreparedQuery {
   query: string;
@@ -706,7 +988,7 @@ export interface DatabaseProvider {
    * (`acquireExecutionProfileProvider` in factory.ts) refuses provider types
    * that lack it rather than falling back to `query()` (fail closed).
    */
-  queryReadOnly?(sql: string, budget: ReadOnlyStatementBudget): Promise<QueryResult>;
+  queryReadOnly?(sql: string, budget: ReadOnlyStatementBudget, mode?: ReadOnlyStatementMode): Promise<QueryResult>;
 
   /**
    * End a transaction that a statement run through `query()` left open on the session
@@ -782,6 +1064,22 @@ export interface DatabaseProvider {
   countObjects(container: readonly string[]): Promise<Record<string, KindCount>>;
   /** Objects of one kind in one container. Names only: columns come from describeObject. */
   listObjects(container: readonly string[], kind: string): Promise<DatabaseObject[]>;
+  /**
+   * One page of a resumable walk of this engine's own KEY SPACE, for an engine that declares
+   * `getCapabilities().keyScan`.
+   *
+   * A different contract from `listObjects`, which is why it is not that method with a cursor
+   * bolted on. `listObjects` is finite by definition and answers a whole folder; this answers
+   * one batch of a walk with no end until the cursor returns `"0"`, and the CALLER holds the
+   * position between two calls. Nothing is retained on the provider side, so a page is a round
+   * trip rather than a session, and a cursor arriving after a reconnect is still valid: it is
+   * a position in a hash table, not a handle.
+   *
+   * The optional shape follows `endOpenQueryTransaction`: an engine with no key space of its
+   * own has nothing truthful to implement here. `keyScan` is the declaration a route checks
+   * first, so reaching this method at all means the capability was already claimed.
+   */
+  scanKeysPage?(options: KeyScanOptions): Promise<KeyScanPage>;
   /**
    * Columns, indexes and foreign keys for one object.
    *
@@ -969,8 +1267,13 @@ export interface DatabaseProvider {
    * Run maintenance operations
    * @param type - Type of maintenance operation
    * @param target - Optional target (table name or process ID)
+   * @param container - Optional namespace the target lives in. What a container means is
+   * per-engine and the provider decides: a schema for PostgreSQL, DuckDB and SQL Server, a
+   * database for MySQL and ClickHouse, an owner for Oracle, a bucket or scope for Couchbase,
+   * the attached database for SQLite and libSQL. Providers that cannot act on one ignore it
+   * rather than guessing a dialect from the target string.
    */
-  runMaintenance(type: MaintenanceType, target?: string): Promise<MaintenanceResult>;
+  runMaintenance(type: MaintenanceType, target?: string, container?: string): Promise<MaintenanceResult>;
 
   /**
    * Validate provider configuration
@@ -1019,9 +1322,14 @@ export interface ProviderOptions {
 export interface ProviderExecutionContext {
   /**
    * Open the connection under the database's own read-only enforcement.
-   * Only providers whose read-only boundary is established at OPEN time read
-   * this (SQLite); PostgreSQL establishes it per transaction inside
-   * `queryReadOnly` instead, so its provider ignores the context.
+   *
+   * Every provider that implements `queryReadOnly` reads it, and what each one
+   * ESTABLISHES with it differs: SQLite and DuckDB open the file read-only, so the
+   * boundary is the handle; PostgreSQL and SQL Server open an ordinary connection and
+   * use the flag to (a) verify at connect that the session's own role or principal is
+   * least-privilege and (b) refuse `queryReadOnly` outright on a provider that was not
+   * opened this way, so agent semantics are never served without the layer that makes
+   * them true.
    */
   readOnly?: boolean;
 }
@@ -1243,9 +1551,10 @@ export interface MonitoringData {
    * which is a different fact from an empty array or a zero - StarRocks 3.3 has no
    * `information_schema.PROCESSLIST`, so `activeSessions` is absent there while an idle
    * PostgreSQL answers `[]`. Rendering the first as the second would claim a measurement
-   * the engine refused to make (the very error QueriesTab.tsx:68 documents for
-   * `slowQueries`). A consumer therefore gates on the field being present, and shows the
-   * `errors` entry in place of that panel.
+   * the engine refused to make (the very error `QueriesTab` in
+   * `src/components/monitoring/tabs/QueriesTab.tsx` documents for `slowQueries`). A
+   * consumer therefore gates on the field being present, and shows the `errors` entry in
+   * place of that panel.
    */
   overview?: DatabaseOverview;
   performance?: PerformanceMetrics;
@@ -1321,6 +1630,46 @@ export interface ObjectKindSpec {
   /** Phase 2. The Monaco language id the source renders in. */
   readonly sourceLanguage?: string;
   /**
+   * Whether an object of THIS KIND has COLUMNS a reader can be shown (#789, and the restoration
+   * of what the flat explorer drew until 0.15.0).
+   *
+   * Absent and undeclared both read as FALSE, and the name states the scope, for the reason
+   * `acceptsRowWrites` states it: the permissive default is wrong when only the provider knows.
+   * Read through `kindHasColumns()`. The object tree draws a twisty on an object of a kind that
+   * declares this and asks `describeObject` when it is opened; a kind that declares nothing is a
+   * leaf, exactly as every object row was before this field existed, so no read is ever derived
+   * for it and no twisty opens on nothing.
+   *
+   * IT IS NOT `role === "relation"`, and that is measured rather than argued. Five declarations
+   * in the fleet disagree with the role, all one way: a `config` kind that DOES have columns.
+   * PostgreSQL `sequence` answers `last_value`, `log_cnt` and `is_called`, MariaDB `sequence`
+   * answers eight columns, a ClickHouse `dictionary` answers its structure out of
+   * `system.dictionaries`, a Cassandra `type` answers the UDT's fields, and a Druid `lookup`
+   * answers `k` and `v`. Nothing in the fleet declares `relation` and answers no columns, so the
+   * role would never withhold a twisty a relation deserved; it would withhold those five and
+   * grant one it should not. Oracle's `sequence` is that one, and it is the case that settles the
+   * whole question: same kind id as PostgreSQL's, opposite answer, because that provider gates on
+   * the role in `OracleProvider.describeObject()` (`src/lib/db/providers/sql/oracle.ts`) and
+   * PostgreSQL gates on `RELKIND_BY_KIND` in `PostgresProvider.describeObject()`
+   * (`src/lib/db/providers/sql/postgres.ts`).
+   * A rule written above the providers is wrong for at least one engine whichever way it is
+   * written, so the provider declares and nothing else decides.
+   *
+   * The declaration is pinned in BOTH directions, which is what `assertObjectSurface` already
+   * does for `hasSource` and what the first issue of this design left half done. Invariant 8 in
+   * `tests/helpers/object-surface-conformance.ts` asks the provider's own `describeObject`, for
+   * a sample object the provider's own `listObjects` produced: a kind declaring nothing must
+   * answer `columns: []`, and a kind declaring this must answer at least one column unless the
+   * expectation names it in `columnlessSamples` with the engine fact that makes an empty answer
+   * legal.
+   *
+   * It is a CLIENT GATE, unlike `acceptsSourceEdits`, and the MariaDB lever that field records
+   * cannot reach it: the client reads this off the same `ProviderCapabilities` copy that decides
+   * which folders draw at all, so a kind missing from that copy has no folder, no object rows and
+   * no column rows, and this field can never be wrong about a kind whose folder the reader sees.
+   */
+  readonly hasColumns?: boolean;
+  /**
    * Phase 3. Whether an object of THIS KIND can have its definition text edited and applied
    * back (#789, discussion #778).
    *
@@ -1351,8 +1700,9 @@ export interface ObjectKindSpec {
    * only the provider knows which.
    *
    * The engine-wide `supportsInlineRowEdit` stays, and it is a SEPARATE fact rather than
-   * the other half of a conjunction. It has one reader, `src/components/Studio.tsx:144`,
-   * where it gates the results grid's inline row editor and nothing else. MongoDB,
+   * the other half of a conjunction. It gates the results grid's inline row editor
+   * (`canEditRows` in `src/components/Studio.tsx`), and the two row menus, which need both
+   * facts for Generate Test Data, conjoin it with this field at the call site. MongoDB,
    * Couchbase and Cassandra declare it false, and #789 declares a kind that accepts row
    * writes on each of those three, so requiring both would refuse an import all three
    * engines do support.
@@ -1465,12 +1815,15 @@ export interface DatabaseObject {
  *
  * The fourth is `{ count, sampledFrom }`: a number that is REAL but BOUNDED, because the
  * provider counted what a capped read saw rather than what the engine holds. It is a
- * FLOOR, so the tree badges it `1,204+` and never `1,204`. Two engines answer this way
- * and neither does so for all of its kinds, which is why the state is per KIND and not a
- * provider-wide flag: Redis counts its key groupings from a 1000-key `SCAN` while
- * `FUNCTION LIST` is complete, and LibreDB counts `table` and `collection` from a
- * persisted catalog while `keyspace` comes from the bounded key walk. MongoDB is NOT one
- * of them: its `countObjects` tallies a complete `listCollections` (#789).
+ * FLOOR, so the tree badges it `1,204+` and never `1,204`. No engine that answers this way
+ * does so for all of its kinds, which is why the state is per KIND and not a provider-wide
+ * flag: Redis counts its key groupings from a 1000-key `SCAN` while `FUNCTION LIST` is
+ * complete, LibreDB counts `table` and `collection` from a persisted catalog while
+ * `keyspace` comes from the bounded key walk, Prometheus counts its metrics from one capped
+ * label-values read while its other kinds are counted whole, and Kafka counts its topics
+ * from one listing capped at 2,000 names while its consumer groups and brokers are counted
+ * whole. MongoDB is NOT one of them: its `countObjects` tallies a complete `listCollections`
+ * (#789).
  *
  * `sampledFrom` is the provider's own sentence for what bounded the read, phrased to
  * follow "counted from": `"one 1,000-key SCAN walk"`. It is the same discipline
@@ -1518,7 +1871,7 @@ export interface ObjectDetail {
  * cap somebody set: `reason` is the field that says WHICH bound bit, and it is the one to
  * show a person. Making the field optional was considered and refused: it is published
  * through `src/exports/types.ts`, every consumer compares against it, and an absent number
- * would buy accuracy on two engines by making the comparison conditional on all seventeen.
+ * would buy accuracy on two engines by making the comparison conditional on every engine.
  *
  * `reason` is ONE SENTENCE for one event across every engine, and that is a rule rather
  * than a convention: build the caller's half with `callerBoundTruncationReason()` in
@@ -1672,10 +2025,10 @@ export type ObjectPartEdit = { readonly offered: true } | { readonly offered: fa
  *
  * CLOSED rather than an open string, against this repository's own precedent for
  * `ObjectKindSpec.id`, and the cost is that a host whose engine has a seventh mechanism has
- * nothing to name. It is closed anyway because `src/lib/db/operations/execution.ts:21-26` states
- * the audit's rule, that "the audited action is the registry-RESOLVED descriptor id, never the
- * caller's raw operation string", and this value is what an apply's audit event carries in
- * `action`.
+ * nothing to name. It is closed anyway because the module docblock in
+ * `src/lib/db/operations/execution.ts` states the audit's rule, that "the audited action is the
+ * registry-RESOLVED descriptor id, never the caller's raw operation string", and this value is
+ * what an apply's audit event carries in `action`.
  *
  * NOTHING IN `src/lib/db` OR IN CORE MAY SWITCH ON IT. Three things read it: the preview
  * caption, the audit's `action`, and the census. A member with no producer is therefore not a
@@ -1906,14 +2259,14 @@ export interface ObjectEditPlan {
   /**
    * A digest of the SERVER this plan was built against, not of the connection's id.
    *
-   * MEASURED, `src/lib/seed/resolve-connection.ts:21-23` returns an inline connection object
-   * verbatim, `id` included, and the browser drove it: a made-up id with different credentials
-   * connected as them. So `connection.id` is a string the caller typed on the majority path, and
-   * binding to it would be vacuous for exactly the case the binding exists for. The fingerprint
-   * is a hash over a length-framed walk of the RESOLVED connection's `type`, `host`, `port`,
-   * `database` and `user`, which are the fields that decide which server and which principal.
-   * Stated as a limit rather than left to be discovered: it does not catch a different server
-   * that answers on the same host and port.
+   * MEASURED, `resolveConnection()` in `src/lib/seed/resolve-connection.ts` returns a non-seed
+   * inline connection object verbatim, `id` included, and the browser drove it: a made-up id with
+   * different credentials connected as them. So `connection.id` is a string the caller typed on the
+   * majority path, and binding to it would be vacuous for exactly the case the binding exists for.
+   * The fingerprint is a hash over a length-framed walk of the RESOLVED connection's `type`,
+   * `host`, `port`, `database` and `user`, which are the fields that decide which server and which
+   * principal. Stated as a limit rather than left to be discovered: it does not catch a different
+   * server that answers on the same host and port.
    */
   readonly connectionFingerprint: string;
   readonly type: DatabaseType;
@@ -2113,10 +2466,16 @@ export type ObjectEditOutcome =
    * wraps its own transaction. `"rolled-back"` may be claimed ONLY by a provider that opened and
    * closed the transaction itself, which is `transactional-replace`.
    *
-   * There is NO `retryable` field on this type and no retry advice in it. MEASURED: a PostgreSQL
-   * DDL timeout answers HTTP 499 `QUERY_CANCELLED` "Query was cancelled", and Trino mints a
-   * `TimeoutError` directly (`trino/index.ts:680`) which the generic mapper answers 408
-   * `retryable: true`. A client that retries an apply whose disposition is unknown applies twice.
+   * There is NO `retryable` field on this type and no retry advice in it. MEASURED on the general
+   * query path (`POST /api/db/query`), which routes through `mapDatabaseError`: since #1145 a
+   * PostgreSQL statement timeout answers HTTP 408 `TIMEOUT_ERROR` `retryable: true`, the same as
+   * Trino, which mints a `TimeoutError` directly (`TrinoProvider.mapTrinoError()` in
+   * `src/lib/db/providers/sql/trino/index.ts`). The apply route
+   * (`edit-apply/route.ts`) deliberately does NOT inherit that 408: it always answers 200 and never
+   * carries a `retryable` flag, because a client that retries an apply whose disposition is unknown
+   * applies twice. A PostgreSQL apply-time timeout does not even reach this `interrupted` arm —
+   * `classifyApplyFailure` reads its SQLSTATE `57014`, which is not in `APPLY_VERDICT_BY_SQLSTATE`,
+   * so `verdict` is `undefined` and the outcome is `refused` with the `definition` class.
    */
   | {
       readonly outcome: "interrupted";

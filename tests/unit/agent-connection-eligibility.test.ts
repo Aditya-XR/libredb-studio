@@ -21,6 +21,7 @@ import { describe, expect, test, beforeAll } from "bun:test";
 import type { DatabaseConnection } from "@/lib/types";
 import {
   buildConnectionPayload,
+  connectionResolutionKey,
   resolveAgentRunConnectionId,
   type ManagedConnectionPayload,
   type ServedSeeds,
@@ -117,6 +118,15 @@ describe("which connection a run may be started on", () => {
     const server = descriptor();
 
     expect(startableId(browserCopy(server, { password: "different" }), loaded(server))).toBeNull();
+  });
+
+  test("a Kafka copy that authenticates by another SASL mechanism is not startable by the seed id", () => {
+    // A broker keeps a SCRAM credential per mechanism, so the same user and password under another
+    // mechanism are another principal's secret (#1088): the mechanism is a resolution field.
+    const server = descriptor({ type: "kafka", port: 9092, database: undefined, saslMechanism: "SCRAM-SHA-512" });
+    expect(startableId(browserCopy(server), loaded(server))).toBe("seed:sales");
+    expect(startableId(browserCopy(server, { saslMechanism: "SCRAM-SHA-256" }), loaded(server))).toBeNull();
+    expect(startableId(browserCopy(server, { saslMechanism: undefined }), loaded(server))).toBeNull();
   });
 
   // The field a hand-written comparison forgets: it changes which role the agent
@@ -300,5 +310,80 @@ describe("what a request body says about a connection", () => {
     const conn = plain({ managed: true });
 
     expect(buildConnectionPayload(conn)).toEqual({ connection: conn });
+  });
+});
+
+describe("which database a connection would be read from", () => {
+  /** The smallest connection the type allows, so each test varies one field and nothing else. */
+  const base: DatabaseConnection = {
+    id: "c1",
+    name: "Sales",
+    type: "postgres",
+    host: "db.internal",
+    port: 5432,
+    database: "sales",
+    user: "reader",
+    createdAt: new Date(0),
+  };
+
+  test("a field that cannot move the database does not move the key", () => {
+    // Each of these is classified `cosmetic` in CONNECTION_RELEVANCE, and the reason the
+    // key exists is that a panel keyed on the connection OBJECT re-read whenever a parent
+    // rebuilt it. `queryTimeout` is the one that got past a hand-written list and destroyed
+    // a snapshot whose read was still in flight.
+    const same = connectionResolutionKey(base);
+
+    expect(connectionResolutionKey({ ...base, name: "Sales (prod)" })).toBe(same);
+    expect(connectionResolutionKey({ ...base, queryTimeout: 60_000 })).toBe(same);
+    expect(connectionResolutionKey({ ...base, id: "c2" })).toBe(same);
+    expect(connectionResolutionKey({ ...base, createdAt: new Date(1) })).toBe(same);
+    expect(connectionResolutionKey({ ...base, color: "red", group: "prod", environment: "production" })).toBe(same);
+  });
+
+  test("a field that moves the database moves the key", () => {
+    const same = connectionResolutionKey(base);
+
+    expect(connectionResolutionKey({ ...base, host: "elsewhere" })).not.toBe(same);
+    expect(connectionResolutionKey({ ...base, database: "other" })).not.toBe(same);
+    expect(connectionResolutionKey({ ...base, user: "someone-else" })).not.toBe(same);
+    expect(connectionResolutionKey({ ...base, port: 5433 })).not.toBe(same);
+  });
+
+  test("a container present on one side only is a difference, and so is a field inside it", () => {
+    // The nested tables are read the same way as the top one, and an absent container is
+    // not an empty one: adding SSL changes where and as whom the connection connects.
+    const plain = connectionResolutionKey(base);
+    const withSsl = connectionResolutionKey({ ...base, ssl: { mode: "require" } });
+
+    expect(withSsl).not.toBe(plain);
+    expect(connectionResolutionKey({ ...base, ssl: { mode: "disable" } })).not.toBe(withSsl);
+
+    const tunnel: DatabaseConnection = {
+      ...base,
+      sshTunnel: { enabled: true, host: "bastion", port: 22, username: "ops", authMethod: "password" },
+    };
+    expect(connectionResolutionKey(tunnel)).not.toBe(plain);
+    // ...but the fingerprint is classified cosmetic: pinning the bastion we were already
+    // going to use does not repoint anything.
+    expect(
+      connectionResolutionKey({ ...tunnel, sshTunnel: { ...tunnel.sshTunnel!, hostKeyFingerprint: "ab:cd" } }),
+    ).toBe(connectionResolutionKey(tunnel));
+  });
+
+  test("insertion order does not change the key", () => {
+    // Two builders producing the same connection in a different order must key the same,
+    // or the panel reads again for a difference that is not one.
+    const reordered: DatabaseConnection = {
+      createdAt: base.createdAt,
+      user: base.user,
+      database: base.database,
+      port: base.port,
+      host: base.host,
+      type: base.type,
+      name: base.name,
+      id: base.id,
+    };
+
+    expect(connectionResolutionKey(reordered)).toBe(connectionResolutionKey(base));
   });
 });

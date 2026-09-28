@@ -24,7 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildConnectionPayload } from "@/hooks/use-connection-payload";
 import { appFetch } from "@/lib/config/base-path";
 import { containerDepth, declaredKinds } from "@/lib/db/object-kinds";
-import type { Container, DatabaseObject, KindCount, ProviderCapabilities } from "@/lib/db/types";
+import type { Container, DatabaseObject, KindCount, ObjectDetail, ProviderCapabilities } from "@/lib/db/types";
 import type { DatabaseConnection } from "@/lib/types";
 import { containerRowId, flattenTree, pathKey, type TreeRowModel } from "./flatten";
 
@@ -41,7 +41,8 @@ type ConnectionPayload = ReturnType<typeof buildConnectionPayload>;
 export type ObjectReadRequest =
   | { readonly route: "containers"; readonly parent?: readonly string[] }
   | { readonly route: "counts"; readonly container: readonly string[] }
-  | { readonly route: "list"; readonly container: readonly string[]; readonly kind: string };
+  | { readonly route: "list"; readonly container: readonly string[]; readonly kind: string }
+  | { readonly route: "describe"; readonly path: readonly string[]; readonly kind: string };
 
 /**
  * Who answers this tree's reads (#789, B76).
@@ -83,7 +84,18 @@ export interface TreeReadFailure {
 type ReadSlot =
   | { readonly kind: "containers"; readonly key: string }
   | { readonly kind: "counts"; readonly key: string }
-  | { readonly kind: "objects"; readonly key: string };
+  | { readonly kind: "objects"; readonly key: string }
+  /**
+   * One object's detail, keyed by its OBJECT ROW ID.
+   *
+   * A fourth arm rather than a reuse of `objects`, because `slotKey` prefixes with the arm name
+   * and that prefix is the only thing keeping the key spaces disjoint. `pathKey(["app","orders",
+   * "table"])` is both the folder id of a container `orders` under catalog `app` on a two-level
+   * engine and the object id of table `orders` in schema `app` on a one-level engine; those two
+   * shapes never coexist on one connection, and a separate arm is what makes that argument
+   * unnecessary rather than load-bearing.
+   */
+  | { readonly kind: "details"; readonly key: string };
 
 interface TreeRead {
   readonly request: ObjectReadRequest;
@@ -105,6 +117,8 @@ interface TreeCache {
   readonly containersRead: ReadonlySet<string>;
   readonly counts: Readonly<Record<string, Record<string, KindCount>>>;
   readonly objects: Readonly<Record<string, readonly DatabaseObject[]>>;
+  /** `describeObject` answers, keyed by OBJECT row id. Absent is unread; `columns: []` is an answer. */
+  readonly details: Readonly<Record<string, ObjectDetail>>;
   readonly expanded: ReadonlySet<string>;
   /** Failures by slot key, so a retry clears exactly the read it re-issues. */
   readonly failures: Readonly<Record<string, TreeReadFailure>>;
@@ -145,6 +159,7 @@ function emptyCache(connectionId: string): TreeCache {
     containersRead: new Set(),
     counts: {},
     objects: {},
+    details: {},
     expanded: new Set(),
     failures: {},
   };
@@ -167,8 +182,17 @@ function rootRead(depth: 0 | 1 | 2): RootRead {
 /**
  * The read one open row wants, or nothing.
  *
- * An object row is a LEAF in Phase 1 (standing ruling 5d): the provider surface is
- * container-scoped, so nothing can list an object's children and nothing is asked for them.
+ * An object row wants its own detail, which is where the columns come from. That is a change to
+ * standing ruling 5d and not a hole in it: the ruling was about the LISTING surface, which is
+ * container-scoped and still cannot fill a kind's `childKinds`, while `describeObject` is
+ * object-scoped and already implemented by every provider.
+ *
+ * `row.expanded !== undefined` is in the object arm and is load-bearing. Two of the five callers
+ * filter on `expanded` (`pending` and `refresh`) and three do not (`isBusy`, `failureFor`,
+ * `toggle`), so without the test a PostgreSQL `function` row, a SQLite `trigger` row and an
+ * Oracle `package` row would each resolve a `details:<id>` slot no read can ever fill. It reads
+ * the fact the walk already computed rather than recomputing it, so this function stays free of
+ * the spec.
  */
 function readFor(row: TreeRowModel, depth: 0 | 1 | 2): TreeRead | undefined {
   // A folder row always carries its kind id (`flatten.ts` builds it from the kind's spec); the
@@ -180,12 +204,22 @@ function readFor(row: TreeRowModel, depth: 0 | 1 | 2): TreeRead | undefined {
       slot: { kind: "objects", key: row.id },
     };
   }
+  // An object row always carries its kind id, and reading it rather than asserting it is what
+  // keeps the request's `kind` a plain string, exactly as the folder arm above does.
+  if (row.kind === "object" && row.kindId !== undefined && row.expanded !== undefined) {
+    return {
+      request: { route: "describe", path: row.path, kind: row.kindId },
+      slot: { kind: "details", key: row.id },
+    };
+  }
   if (row.kind === "container") {
     // A container above the deepest level holds containers; only the deepest one holds folders.
     return row.path.length < depth
       ? { request: { route: "containers", parent: row.path }, slot: { kind: "containers", key: pathKey(row.path) } }
       : { request: { route: "counts", container: row.path }, slot: { kind: "counts", key: pathKey(row.path) } };
   }
+  // A COLUMN row, which is a leaf and asks for nothing. Stated rather than reached by falling off
+  // the end, so a later arm cannot silently start answering for it.
   return undefined;
 }
 
@@ -197,6 +231,11 @@ function isSlotFilled(cache: TreeCache, slot: ReadSlot): boolean {
       return cache.counts[slot.key] !== undefined;
     case "objects":
       return cache.objects[slot.key] !== undefined;
+    // A relation with no columns answers `{path, columns: [], indexes: [], foreignKeys: []}`,
+    // which is a PRESENT value, so absent-versus-empty needs no second set here the way
+    // `containersRead` was needed: the key is the answer.
+    case "details":
+      return cache.details[slot.key] !== undefined;
   }
 }
 
@@ -256,6 +295,8 @@ function store(cache: TreeCache, slot: ReadSlot, data: unknown): TreeCache {
       return { ...cache, counts: { ...cache.counts, [slot.key]: data as Record<string, KindCount> } };
     case "objects":
       return { ...cache, objects: { ...cache.objects, [slot.key]: data as readonly DatabaseObject[] } };
+    case "details":
+      return { ...cache, details: { ...cache.details, [slot.key]: data as ObjectDetail } };
   }
 }
 
@@ -290,6 +331,13 @@ function forgetRoot(cache: TreeCache, slot: RootSlot): TreeCache {
   return { ...emptied, counts };
 }
 
+/** Keeps exactly the detail slots `refresh` is re-issuing, so a collapsed object cannot go stale. */
+function withOnlyDetails(cache: TreeCache, keep: ReadonlySet<string>): TreeCache {
+  const details: Record<string, ObjectDetail> = {};
+  for (const [key, detail] of Object.entries(cache.details)) if (keep.has(key)) details[key] = detail;
+  return { ...cache, details };
+}
+
 class ObjectReadError extends Error {
   constructor(message: string) {
     super(message);
@@ -318,6 +366,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 function isRenderableShape(read: TreeRead, data: unknown): boolean {
   if (read.slot.kind === "counts") return isRecord(data) && Object.values(data).every(isRecord);
+  // What the walk DEREFERENCES, and both fields are dereferenced rather than merely read.
+  // `column.name` goes through `pathKey`, which calls `replaceAll` on it, so a non-string throws
+  // INSIDE the walk; `column.type` has `.split("(")` called on it in the row. Neither `isPrimary`
+  // nor `nullable` is checked: both are truthiness reads that are safe on anything, and this is
+  // not a schema check.
+  if (read.slot.kind === "details") {
+    return (
+      isRecord(data) &&
+      Array.isArray(data.columns) &&
+      data.columns.every(
+        (column) => isRecord(column) && typeof column.name === "string" && typeof column.type === "string",
+      )
+    );
+  }
   return Array.isArray(data) && data.every((entry) => isRecord(entry) && Array.isArray(entry.path));
 }
 
@@ -336,6 +398,8 @@ function requestBody(request: ObjectReadRequest): Record<string, unknown> {
       return { container: request.container };
     case "list":
       return { container: request.container, kind: request.kind };
+    case "describe":
+      return { path: request.path, kind: request.kind };
   }
 }
 
@@ -390,12 +454,18 @@ function toFailure(error: unknown): TreeReadFailure {
  * rows, so there is nothing else to ask for, and "nothing is read while deferred" is then
  * one line that a mutation can be pointed at instead of a property of two derivations
  * agreeing.
+ *
+ * `readsColumns` defaults to FALSE, and the default is for a caller that passes a SOURCE: the
+ * standalone shell passes none and `ObjectTree` resolves that case to true, because its own
+ * route always exists. A host that has not implemented `describeObject` gets no twisty rather
+ * than a twisty over a read that cannot succeed (B76).
  */
 export function useTreeNodes(
   connection: DatabaseConnection,
   capabilities: ProviderCapabilities,
   deferred = false,
   source?: ObjectSource,
+  readsColumns = false,
 ): TreeNodes {
   const connectionId = connection.id;
   const [stored, setStored] = useState<TreeCache>(() => emptyCache(connectionId));
@@ -469,9 +539,11 @@ export function useTreeNodes(
         expanded: cache.expanded,
         counts: cache.counts,
         objects: cache.objects,
+        details: cache.details,
+        readsColumns,
         containerDepth: depth,
       }),
-    [cache, depth, kinds],
+    [cache, depth, kinds, readsColumns],
   );
 
   const root = useMemo(() => rootRead(depth), [depth]);
@@ -517,6 +589,16 @@ export function useTreeNodes(
 
   const failureFor = useCallback(
     (row: TreeRowModel) => {
+      // A CLOSED object says nothing, which is the rule `flatten.ts` already holds for the slot
+      // beside this one: `unavailable` is derived from the detail and the detail is only read
+      // while the row is open, so a closed object never reports "No columns reported". This slot
+      // reached the render by another path. `readFor` answers for an object row whose `expanded`
+      // is merely DEFINED, and `false` is defined, so a table whose describe was refused kept the
+      // engine's sentence after the reader collapsed it, in the `ml-auto` space its row count
+      // wants, for the life of the connection. A folder and a container are NOT gated here and
+      // must not be: their read is about the row itself and is offered whether or not it is open,
+      // which is how they behaved before an object row had a read at all.
+      if (row.kind === "object" && row.expanded !== true) return undefined;
       const read = readFor(row, depth);
       return read === undefined ? undefined : cache.failures[slotKey(read.slot)];
     },
@@ -524,7 +606,12 @@ export function useTreeNodes(
   );
 
   const objectFor = useCallback(
-    (row: TreeRowModel) => objectIndex.get(objectKey(row.path, row.kindId ?? "")),
+    // A COLUMN row is not an object. The lookup below MISSES for one today, because a column row
+    // carries no kind id and its path names the column, but `ObjectKindSpec.id` is an OPEN string
+    // and a miss that rests on that is not a guarantee. Without this arm a row that ever did
+    // address itself like its parent would hand `TreeRow` the parent table, and every column row
+    // would draw the table's status icon and its row count.
+    (row: TreeRowModel) => (row.kind === "column" ? undefined : objectIndex.get(objectKey(row.path, row.kindId ?? ""))),
     [objectIndex],
   );
 
@@ -553,7 +640,8 @@ export function useTreeNodes(
    * exactly the set `pending` derives when a cache is empty. A container the reader has
    * COLLAPSED is not re-read; its cache is left alone and the next expansion shows what was
    * there before, which is the same staleness an unopened folder has always had and costs
-   * nothing until the reader asks.
+   * nothing until the reader asks. A collapsed OBJECT is the one exception, and the statement
+   * that drops its columns says why.
    *
    * WHY NOTHING IS DERIVED FROM THE STATEMENT, which is the interesting half. The caller is
    * the DDL refresh in `use-query-execution.ts`, and it holds a statement, not a container.
@@ -573,9 +661,13 @@ export function useTreeNodes(
    *
    * WHAT IT COSTS on a large schema, which is the question that makes the blunt answer
    * defensible. The bound is the TREE's expansion state, not the size of the database: one
-   * containers read, one counts read per open container, one listing per open folder. A
-   * reader with three schemas open and two folders expanded pays six reads, the same six
-   * first paint made. A 43,000-object catalog with everything collapsed pays one.
+   * containers read, one counts read per open container, one listing per open folder, and one
+   * describe per open OBJECT. A reader with three schemas open and two folders expanded pays six
+   * reads, the same six first paint made. A 43,000-object catalog with everything collapsed pays
+   * one. The describes are the new cost and are written down rather than argued away: a reader
+   * with thirty tables expanded pays thirty-six reads per DDL statement instead of six, into the
+   * 120-request-per-60-second `query` bucket `/api/db/objects/describe` shares with
+   * `/api/db/query`, and a 429 renders as that row's own failure sentence.
    *
    * The reads are ISSUED rather than the slots emptied, and that is deliberate: forgetting
    * first would leave the root slot unfilled for the length of one round trip, and
@@ -593,8 +685,16 @@ export function useTreeNodes(
       const read = readFor(row, depth);
       if (read !== undefined) reads.push(read);
     }
+    // Every detail this call is NOT re-reading is dropped. The rest of this function ISSUES over
+    // a filled slot so the stale rows stay on screen while the new answer is in flight, and that
+    // is right for a container, a count and a listing, whose rows are visible. A COLLAPSED
+    // object's columns are not on screen at all, so there is nothing to keep, and keeping them
+    // means a `CREATE TABLE`/`ALTER TABLE` leaves a wrong column list behind a twisty with
+    // nothing able to evict it.
+    const reread = new Set(reads.flatMap((read) => (read.slot.kind === "details" ? [read.slot.key] : [])));
+    apply((current) => withOnlyDetails(current, reread));
     for (const read of reads) void run(connectionId, connection, reader, read);
-  }, [connection, connectionId, deferred, depth, reader, root, rows, run]);
+  }, [apply, connection, connectionId, deferred, depth, reader, root, rows, run]);
 
   const loadContainers = useCallback(() => apply((current) => forgetRoot(current, root.slot)), [apply, root]);
 

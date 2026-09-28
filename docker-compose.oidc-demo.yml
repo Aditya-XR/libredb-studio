@@ -15,7 +15,8 @@
 #     when the container is removed.
 #   - TLS comes from Caddy's own local CA (`tls internal`): self-signed, and the
 #     leaf certificate is short-lived (12 hours by default).
-#   - The OIDC client secret and both user passwords are committed in this file.
+#   - The OIDC client secret, both user passwords, and the Keycloak admin account
+#     (`kcadmin` / `kcadmin`, which can change the realm) are committed in this file.
 #
 # Requirements: Docker with Compose v2.23.1 or newer (inline `configs` content),
 # network access to pull three images, and a DNS resolver that answers
@@ -37,7 +38,10 @@ services:
     image: caddy:2.10-alpine
     restart: unless-stopped
     ports:
-      - "8443:8443"
+      # Loopback only. `/auth/*` proxies to Keycloak, so publishing on every
+      # interface would also offer the admin console, whose password is in this file,
+      # to anything that can reach this host.
+      - "127.0.0.1:8443:8443"
     configs:
       - source: caddyfile
         target: /etc/caddy/Caddyfile

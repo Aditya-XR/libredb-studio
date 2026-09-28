@@ -436,12 +436,13 @@ a plausible, runnable `delete billing:2024` one **Run Selected** away (only `get
 `firstCommandLine()` takes the first line). Auto-executing the note alone runs nothing and reports
 *No command to run (only comments or blank lines)* (U11).
 
-Two menu actions are **not offered** on this provider. `Profile Table` and `Generate Test Data`
-address an object and insert rows into it; a `users:*` row is a prefix grouping this server derived
-from one bounded scan (`tablesAreDerivedGroupings`, see 9), not an object any command can be given,
-so both are hidden rather than left to answer HTTP 400 (#427). The per-row `Analyze` and `Vacuum`
-items are hidden for the same reason — they call `onOpenMaintenance("tables", <row>)` and there is no
-such row to name; the row menu reads no maintenance capability of its own. `Generate Code`
+Three menu actions are **not offered** on this provider.
+`Profile Table` and `Generate Test Data` address an object and insert rows into it; a `users:*` row is a prefix grouping this server derived from one bounded scan (`tablesAreDerivedGroupings`, see 9), not an object any command can be given, so both are hidden rather than left to answer HTTP 400 (#427).
+Since #1085 each is withheld by its own declaration: Profile by that flag and by the language gate `offersColumnProfiling`, because the profile route refuses JSON in a dialect of its own, and Generate Test Data by the row-write rule both row menus ask (decision D-M), because no kind here declares `acceptsRowWrites` and the engine declares `supportsInlineRowEdit: false`.
+`Generate Count Query` is the third, withheld by `offersCountQuery` (#702): the five-verb grammar has no count, and a derived grouping has nothing to count.
+The per-row `Analyze` and `Vacuum`
+items are hidden as well: they call `onOpenMaintenance("tables", <row>)` and there is no
+such row to name, and the engine declares no maintenance operation (`supportsMaintenance: false`), which `maintenanceControl` reads for both row menus. `Generate Code`
 stays: it names the row, it does not address it, and it sanitises the name into an identifier that
 is legal in every target language (`users:*` -> `User`), keeping Unicode letters intact.
 
@@ -694,6 +695,11 @@ than unfinished reads: the kernel is one ordered keyspace where a key's own byte
 only index there is, and the catalog records a namespace's lens and a table's columns and nothing
 that references another namespace (`declaresForeignKeys: false`).
 
+All three kinds declare `hasColumns`, so the object tree draws a column twisty on every object row
+this engine produces and no kind abstains, because `columnsForGroup()` has one arm per kind and none
+of them can answer an empty list; the conformance suite states that as `noAbstainingKinds`, since
+invariant 8's other direction has nothing to iterate here.
+
 An object the current read no longer holds **raises** rather than answering an empty shape, on
 all three kinds alike. Unlike Redis, where one kind can be described without asking, every kind
 here comes out of the same read, so checking costs nothing, and an empty shape would claim a
@@ -783,10 +789,10 @@ splits the same three ways Task 20 split it for Redis:
   exactly as the flat menu did. [`row-actions.ts`](../../src/components/object-tree/row-actions.ts)
   says so at the top of the file.
 
-**The flag costs the two CATALOGED kinds their Profile item too, and measured, that costs
-nothing.** `POST /api/db/profile` has no arm for this engine: it branches on
-`queryLanguage === "sql"` and this provider declares `json`, so a profile of a LibreDB table is
-sent as a MongoDB aggregate pipeline. Run against the fixture, the grammar answers:
+**The flag costs the two CATALOGED kinds their Profile item too, and measured, that costs nothing.**
+`POST /api/db/profile` has no arm for this engine: it profiles SQL and a MongoDB `aggregate` document only, and since #1085 it refuses JSON in a dialect of its own before sending anything, with a 400 that names the language.
+Both row menus read the same refusal through `offersColumnProfiling` in `src/lib/db/types.ts`, so the language withholds Profile here as well as the flag.
+The pipeline the route sent before that refusal existed is what the grammar answers, run against the fixture:
 
 ```
 Unknown command "{collection:employees,operation:aggregate,pipeline:[...]}".
@@ -877,12 +883,12 @@ There is no embedded stats API.
 
 | Method | Source | Returns |
 |--------|--------|---------|
-| `getHealth()` | `fs.statSync` | `activeConnections: 1`, file size as `databaseSize`, `cacheHitRatio: "N/A"` |
-| `getOverview()` | `fs.statSync` + schema scan | `version`, file size, namespace count as `tableCount`, `indexCount: 0` |
+| `getHealth()` | `fs.statSync` | `activeConnections: 1`, file size as `databaseSize` (`"N/A"` when unmeasurable — [§7.3](#73-when-the-file-size-is-not-measurable)), `cacheHitRatio: "N/A"` |
+| `getOverview()` | `fs.statSync` + schema scan | `version`, file size, namespace count as `tableCount`, `indexCount: 0`; `databaseSizeBytes` is **omitted** and `databaseSize` stays `"N/A"`, never a `0`, when the stat fails — [§7.3](#73-when-the-file-size-is-not-measurable) |
 | `getPerformanceMetrics()` | — | `{}` — nothing is measurable here |
 | `getSlowQueries()` | — | `[]`; the Queries panel renders `slowQueriesEmptyState` |
 | `getActiveSessions()` | — | **throws** `LIBREDB_ACTIVE_SESSIONS_REFUSAL` — no session registry exists |
-| `getStorageStats()` | `fs.statSync` | one entry: file path + size |
+| `getStorageStats()` | `fs.statSync` | one entry: file path + size; `sizeBytes` is a **required** number, so it stays `0` (never absent) when the stat fails — [§7.3](#73-when-the-file-size-is-not-measurable) |
 | `getTableStats()` | the schema tree's scan | one row per namespace: lens as `schemaName`, key count as `rowCount`, no bytes |
 | `getIndexStats()` | — | **throws** `LIBREDB_INDEX_STATS_REFUSAL` — no index object exists |
 
@@ -949,6 +955,30 @@ that request, so a throwing health check would lock the embedded engine out of t
 (the lesson of [#455](https://github.com/libredb/libredb-studio/issues/455)). A monitoring panel has
 the opposite obligation — it is the surface that must say what it could not read.
 
+### 7.3 When the file size is not measurable
+
+`fileSizeBytes()`, the one place every size figure in this file comes from, reads `fs.statSync(this.dbPath).size`.
+Through 0.16.2 it returned `0` both when there was no `dbPath` at all and when `statSync` threw for any
+reason, so `getOverview()` published a measured-looking zero indistinguishable from a genuinely empty
+database (#546). `DatabaseOverview.databaseSizeBytes` is optional precisely so this can be said instead
+— *"absence and zero are different facts"*, its docblock in
+[`src/lib/db/types.ts`](../../src/lib/db/types.ts) — and until now this provider could not say it.
+
+The monitoring **Storage** tab
+([`src/components/monitoring/tabs/StorageTab.tsx`](../../src/components/monitoring/tabs/StorageTab.tsx))
+is what the difference buys: it keys its whole breakdown off `databaseSizeBytes !== undefined`, so on
+the absence it renders "No storage size information available" instead of a breakdown drawn over a
+file this provider never measured. `getHealth()`'s `databaseSize` string moves with the same absence —
+`fileSizeHuman()` reads `"N/A"` rather than formatting a zero it was never given.
+
+**`StorageStats.sizeBytes` does not get the same treatment, because it cannot.** Unlike
+`DatabaseOverview.databaseSizeBytes` it is a *required* `number` with no optional counterpart
+(`src/lib/db/types.ts`), so `getStorageStats()` coerces `fileSizeBytes()`'s absence back to `0` at its
+own call site — the one place in this file that keeps the old fallback, because its type leaves it no
+other honest answer. `size`, the formatted string beside it, still reads `"N/A"` through the same
+`fileSizeHuman()` every other caller uses, so the row is not internally consistent between its two size
+fields on a failed read — a required-field limitation, not an oversight.
+
 ---
 
 ## 8. Maintenance
@@ -966,8 +996,8 @@ unsupported (issue #272) — and, on the same reading, its *Vacuum* summary card
 *Not supported* rather than the `0` over green **OK** that a bloat count over no rows produced, which
 was a clean bill of health for an operation this provider does not offer — and the admin
 **Operations** tab hides its whole Global Operations group and its per-table buttons (issue #282). Neither offers a control that could only
-answer HTTP 400. The schema explorer's own per-row `Analyze`/`Vacuum` items are hidden here too, but
-for a different reason — the rows are derived groupings, see 5.3.
+answer HTTP 400. The schema explorer's own per-row `Analyze`/`Vacuum` items are hidden here too, by this same declaration through `maintenanceControl`, and
+for a second reason: the rows are derived groupings, see 5.3.
 
 ---
 
@@ -983,6 +1013,7 @@ for a different reason — the rows are derived groupings, see 5.3.
 | `supportsExternalQueryLimiting` | `false` |
 | `supportsCreateTable` | `false` |
 | `supportsInlineRowEdit` | `false` — the command grammar (`get`/`put`/`delete`/`prefix`/`range`) has no `UPDATE ... SET` for the results grid's inline editor to emit |
+| `supportsResultPagination` | `false` — this provider adds no `prepareQuery` override, so it inherits the base one, which echoes the requested offset back while applying nothing. A `true` here would render a control whose every click re-reads page one (#816) |
 | `supportsTransactions` | `false` — the command grammar has no transaction verb at all, so the trio and SANDBOX are not offered (#464) |
 | `declaresForeignKeys` | `false` — the catalog declares namespaces and columns and nothing that references another namespace, so there is no foreign key to read |
 | `tablesAreDerivedGroupings` | `true` — the namespaces come from a bounded `kv.range` over 10000 keys, grouped by prefix, so they are this server's summary of what one scan reached rather than objects the engine declares. The agent layer states this to a plan run in one sentence |
@@ -992,6 +1023,8 @@ for a different reason — the rows are derived groupings, see 5.3.
 | `supportsConnectionString` | `false` |
 | `defaultPort` | `null` |
 | `schemaRefreshPattern` | `\\b(put\|delete)\\b` |
+| `containerPathShapes` | `exact`: the declaration names no container level (`containerLevels` is absent), so only the empty path `[]` addresses a container and any segment is refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
+| `objectKinds` | `table`, `collection`, `keyspace` ([§6.1](#61-the-object-surface-789)) |
 
 `schemaRefreshPattern` tells the UI which executed commands should trigger a schema (key-pattern)
 refresh — `put` and `delete` both add or remove keys.

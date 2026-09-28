@@ -1,5 +1,5 @@
 /**
- * Apache Trino Database Provider (issue #424, Phase 2)
+ * Trino Database Provider (issue #424, Phase 2)
  *
  * Standard SQL over Trino's client protocol with no runtime dependency: every
  * statement, catalog read and metric goes through the `TrinoTransport` seam, so
@@ -125,6 +125,7 @@ import {
   trinoBulkColumnsSql,
   trinoObjectTargetSql,
   containerRead,
+  parentCatalog,
   functionSegment,
   trinoCreateFunctionIdentity,
   listedObject,
@@ -355,6 +356,9 @@ export class TrinoProvider extends SQLBaseProvider {
       // primary key for any table in any catalog, so there is no column that
       // identifies one row - an edit would silently rewrite every row that matches.
       supportsInlineRowEdit: false,
+      // `OFFSET m LIMIT n`: Trino refuses the clauses in the other order, so this
+      // provider transposes what the shared limiter emitted (`prepareQuery` below).
+      supportsResultPagination: true,
       // Trino has START TRANSACTION, but a transaction lives in an HTTP session
       // header this provider does not carry between statements.
       supportsTransactions: false,
@@ -405,6 +409,9 @@ export class TrinoProvider extends SQLBaseProvider {
         { id: "catalog", label: "Catalog", labelPlural: "Catalogs" },
         { id: "schema", label: "Schema", labelPlural: "Schemas" },
       ],
+      // A catalog alone is an address as well as a catalog and a schema, so every depth up to the
+      // declaration is accepted and a longer path is refused (`acceptedContainerShapes()`, #1147).
+      containerPathShapes: "prefixes",
       // Four kinds (`objects.ts`), and the two connector-gated ones are declared because
       // the ENGINE has them rather than because every catalog does.
       //
@@ -413,6 +420,15 @@ export class TrinoProvider extends SQLBaseProvider {
       // `table_constraints` nor `key_column_usage` is among them, and there is no index
       // catalog at all (#414). A declared kind draws a folder, and a folder for something
       // the engine cannot have is a lie its zero badge makes look like a fact.
+      //
+      // `hasColumns` on the three RELATION kinds and on `function` never, which is what
+      // `describeObject` below already does: it gates on `spec.role !== "relation"` and
+      // answers a routine three empty arrays without a round trip. Written literally rather
+      // than derived from the role, because the role is the wrong rule for at least one
+      // engine (#789) and the conformance contract checks the literal against this
+      // provider's own answer instead. One `describeObject` here is the most expensive
+      // single read in the fleet at 25.8 ms (docs/providers/trino.md:812), which the tree
+      // pays once per row a reader actually expands.
       objectKinds: [
         // A row write reaches whatever the CONNECTOR allows - measured on 476, an INSERT
         // into `memory.app.customers` succeeds while `tpch` answers that its connector does
@@ -426,11 +442,20 @@ export class TrinoProvider extends SQLBaseProvider {
           acceptsRowWrites: true,
           hasSource: true,
           sourceLanguage: "sql",
+          hasColumns: true,
         },
         // No `acceptsRowWrites` on either view kind, measured on 476: an INSERT answers
         // "Inserting into views is not supported" and "Inserting into materialized views is
         // not supported" respectively, on every connector.
-        { id: "view", role: "relation", label: "View", labelPlural: "Views", hasSource: true, sourceLanguage: "sql" },
+        {
+          id: "view",
+          role: "relation",
+          label: "View",
+          labelPlural: "Views",
+          hasSource: true,
+          sourceLanguage: "sql",
+          hasColumns: true,
+        },
         // Supported by SOME connectors only, Iceberg among them, and declared anyway: the
         // kind exists in the engine's model and `system.metadata.materialized_views` is an
         // engine-level catalog, so a catalog holding none answers an honest 0 rather than a
@@ -443,6 +468,7 @@ export class TrinoProvider extends SQLBaseProvider {
           labelPlural: "Materialized Views",
           hasSource: true,
           sourceLanguage: "sql",
+          hasColumns: true,
         },
         // Catalog-stored SQL functions, from release 431 and on the Hive and Memory
         // connectors only. Declared because it was CONFIRMED on the build
@@ -613,7 +639,7 @@ export class TrinoProvider extends SQLBaseProvider {
     const mapped = this.mapTrinoError(error);
     // A refused credential is not a connectivity problem, and saying so would send
     // the user to check their host.
-    if (mapped instanceof AuthenticationError) return mapped;
+    if (mapped instanceof AuthenticationError || mapped instanceof DatabaseConfigError) return mapped;
 
     return new ConnectionError(
       `Failed to connect to ${this.dialect.displayName}: ${mapped.message}`,
@@ -834,7 +860,7 @@ export class TrinoProvider extends SQLBaseProvider {
     }
     if (level >= containerDepth(capabilities)) return [];
 
-    const { catalog } = containerRead(capabilities, parentPath);
+    const catalog = parentCatalog(capabilities, parentPath);
     const rows = await this.runObjectRows(trinoSchemaListSql(catalog));
     return rows.flatMap((row) => {
       const name = readObjectIdentifier(row.schemaName);
@@ -1982,8 +2008,11 @@ export class TrinoProvider extends SQLBaseProvider {
    * swallowed here, unlike in `cancelQuery`: a user who typed a query id into a
    * maintenance panel has asked a direct question, and "that statement is not
    * running" is the answer.
+   *
+   * `container` is deliberately ignored: the only operation this provider performs is
+   * `kill`, whose target is a query id rather than an object inside any namespace (#772).
    */
-  public async runMaintenance(type: MaintenanceType, target?: string): Promise<MaintenanceResult> {
+  public async runMaintenance(type: MaintenanceType, target?: string, _container?: string): Promise<MaintenanceResult> {
     const transport = this.requireTransport();
 
     if (type !== "kill") {

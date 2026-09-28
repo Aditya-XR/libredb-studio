@@ -63,6 +63,14 @@ const SHIPPED: Readonly<Record<DatabaseType, true>> = Object.freeze({
   mongodb: true,
   couchbase: true,
   redis: true,
+  // Prometheus (#1085): its own provider, doc and integration test, and the first member of
+  // the `timeseries/` family. A relative that speaks the same HTTP API is recorded below only
+  // once a gate-4 probe has measured one, never because the API answers.
+  prometheus: true,
+  // Apache Kafka (#1088): its own provider, doc and integration test, and the first member of the
+  // `stream/` family. A broker that speaks the same protocol is recorded below as a relative only
+  // once a gate-4 probe has measured one, never because the protocol answers.
+  kafka: true,
   libredb: true,
 });
 
@@ -79,10 +87,10 @@ export const SHIPPED_DATABASE_TYPES: readonly DatabaseType[] = Object.freeze(Obj
 /**
  * Which shipped ids are databases a user already runs, and which one is not.
  *
- * `libredb` is the embedded store this app carries with it; the other sixteen are
- * external engines you point the product at. Everything published as a database
- * count means the external sixteen - README.md's "sixteen drivers reach
- * forty-two named engines", the login hero's engine claim - so the split needs a
+ * `libredb` is the embedded store this app carries with it; every other id is an
+ * external engine you point the product at. Everything published as a database
+ * count means the external set - README.md's "<N> drivers reach <M> named
+ * engines", the login hero's engine claim - so the split needs a
  * definition somewhere, and it belongs beside `SHIPPED` rather than in the UI that
  * prints it. That is the same reason `SHIPPED` itself lives here.
  *
@@ -109,6 +117,10 @@ const EXTERNAL: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   mongodb: true,
   couchbase: true,
   redis: true,
+  // A server the user already runs, reached over its HTTP API.
+  prometheus: true,
+  // A cluster the user already runs, reached over the Kafka protocol.
+  kafka: true,
   // The one false entry. SQLite is a file rather than a server and is still
   // external: it is the user's file, opened from a path they give us. libredb is
   // ours, created by this app, so it is the only id that answers no here.
@@ -164,7 +176,9 @@ export interface WireCompatibleEngine {
  * AlloyDB Omni from a fourth run the same day, OceanBase Community Edition
  * and SingleStore from a fifth run the same day, ScyllaDB from a sixth run on
  * 2026-08-21/22, Apache Doris, Garnet and both Percona distributions from a seventh run
- * on 2026-08-26, and ParadeDB, OrioleDB and Databend from an eighth on 2026-08-27.
+ * on 2026-08-26, ParadeDB, OrioleDB and Databend from an eighth on 2026-08-27, and
+ * VictoriaMetrics, the first relative of the `prometheus` driver, from a ninth on 2026-09-23, and
+ * Redpanda, the first relative of the `kafka` driver, from a tenth on 2026-09-25.
  * The nine MySQL-wire relatives were re-measured together on 2026-09-06 for issues
  * #573 and #574, at the wire and then in a browser against the built app, and the
  * outcome per engine is recorded in `docs/providers/mysql.md` section 5.5 for the
@@ -214,7 +228,7 @@ export const WIRE_COMPATIBLE_ENGINES: readonly WireCompatibleEngine[] = [
     tier: "partial",
     probedVersion: "Materialize 26.40.0 (advertises PostgreSQL 9.5)",
     caveats: [
-      'The object browser lists tables and columns (previously nothing worked at all, #38680): the schema query recovers from four gaps by retrying without each - the reserved MATERIALIZED keyword, the missing pg_total_relation_size() builtin, json_agg()/json_build_object() (Materialize only has the jsonb_ equivalents), and information_schema.constraint_column_usage, which Materialize does not implement - its catalog ships fourteen information_schema views and that is not one of them, at HEAD as well as at the probed release, so this is not a version gap that will close. Foreign keys and primary keys are then empty for a reason that is not ours: Materialize has neither. CREATE TABLE refuses both, "a primary key or unique constraint is not supported" and "column constraint: REFERENCES ... not yet supported", and its table_constraints, key_column_usage and referential_constraints shims all answer zero rows because there is nothing to put in them. Indexes come back empty too. The \'[]\'::json casts in the same queries are left alone: the cast was measured working on a live instance even though Materialize documents no json type.',
+      'The object browser lists tables and columns (previously nothing worked at all, #38680). The object reads carry none of the constructs Materialize refuses or lacks - no MATERIALIZED CTE hint, no pg_total_relation_size(), and jsonb_agg()/jsonb_build_object() rather than the json_agg()/json_build_object() it does not have (#1075) - and they retry once without information_schema.constraint_column_usage, which Materialize does not implement - its catalog ships fourteen information_schema views and that is not one of them, at HEAD as well as at the probed release, so this is not a version gap that will close. Foreign keys and primary keys are then empty for a reason that is not ours: Materialize has neither. CREATE TABLE refuses both, "a primary key or unique constraint is not supported" and "column constraint: REFERENCES ... not yet supported", and its table_constraints, key_column_usage and referential_constraints shims all answer zero rows because there is nothing to put in them. An index made with CREATE INDEX is read with its columns, measured 2026-09-24.',
       "The monitoring dashboard loads with every statistic marked unavailable rather than erroring the whole page: Materialize has no pg statistics catalog and no size functions. All seven tabs render. Three panels - the Tables tab's breakdown and the Storage tab's tablespaces and largest-tables list - are absent rather than empty, each showing Materialize's own sentence under the heading \"This engine does not publish this\" rather than an error, because the message names a pg_ object that is simply not there.",
       "Materialized views are listed beside tables in the object browser, with their columns. Materialize reports them through information_schema.tables as table_type = 'MATERIALIZED VIEW' and they are what its users actually work with, so a browser that listed only BASE TABLE hid the product: revenue_by_region was invisible while the three plain tables showed.",
       "The Explain panel works. Materialize has no rule for EXPLAIN's parenthesised options at all - `(FORMAT JSON)` is refused the same way `(ANALYZE, BUFFERS, FORMAT JSON)` is, and the error names only the first token inside them - and no EXPLAIN ANALYZE either, so the grammar is measured at connect and this server gets the plain EXPLAIN, whose physical plan names the relations it reads, the join strategy and the filters it pushed down. The JSON form its docs publish is not used: it carries no relation names, only internal ids.",
@@ -224,11 +238,15 @@ export const WIRE_COMPATIBLE_ENGINES: readonly WireCompatibleEngine[] = [
   {
     name: "RisingWave",
     via: "postgres",
-    tier: "query-only",
-    probedVersion: "RisingWave 3.0.3 (advertises PostgreSQL 13.14.0)",
+    tier: "partial",
+    probedVersion: "RisingWave 3.0.4 (advertises PostgreSQL 13.14.0)",
     caveats: [
-      'The object browser is unavailable: the schema query\'s LEFT JOIN pg_class ON (...)::regclass fails to bind ("missing FROM-clause entry for table c") - a different gap than the MATERIALIZED keyword collision Materialize hits, and not yet worked around.',
+      'The object browser lists tables and materialized views. It was unavailable until the listing learned to drop pg_class.reltuples, which RisingWave has no column for. The earlier reading of this blamed the schema query\'s LEFT JOIN pg_class ON (...)::regclass, which measurement refuted: that join binds, and RisingWave simply reports an unbindable column as "missing FROM-clause entry for table c", so a column defect reads as a join defect.',
+      "Row counts and sizes are blank rather than zero: neither pg_class.reltuples nor pg_total_relation_size() exists to answer, and an unmeasured number is shown as absent rather than as 0.",
       "The monitoring dashboard now loads with every statistic marked unavailable rather than erroring the whole page: RisingWave has no pg statistics catalog at all. Slow-query and active-session panels stay empty (not merely unavailable) because RisingWave also rejects a parameterised LIMIT.",
+      "Expanding a table, a view or a materialized view shows its columns, with their types and in the table's own order, through describeObject() and describeObjects() alike, measured 2026-09-24 (#1075). This caveat used to call the gap the engine's, and it was ours: RisingWave has no json type and refused the json_agg(), json_build_object() and '[]'::json the reads were built with, while it answers every jsonb form, which is what the reads use now. It also refuses a subquery inside an aggregate call, which is how an index's column list was built; that is a LATERAL join now.",
+      "Nullability and defaults are read from the engine's catalog, which states neither: pg_attribute answers attnotnull false for every column, so a NOT NULL column and a primary key both read nullable, and pg_attrdef is empty, so no column shows a default, one declared with DEFAULT included. The nullability half is filed as D119.",
+      "Foreign keys are empty because RisingWave has none: CREATE TABLE refuses REFERENCES in both its column and its table form. The primary key is listed as an index named after its table, and an index lists every column pg_index.indkey names, which on RisingWave is the key columns followed by every column the index carries, the primary key always among them: an index on (amount, customer_id) of a four-column table reads as amount, customer_id, order_id, note.",
     ],
   },
   {
@@ -375,6 +393,7 @@ export const WIRE_COMPATIBLE_ENGINES: readonly WireCompatibleEngine[] = [
       "The health request and the active-session panel are unavailable: StarRocks has no information_schema.PROCESSLIST, which is the engine's own, and the health read still failed on it when it was re-measured in the browser on 2026-09-06. Every other monitoring panel is read independently, so the missing table costs only those two: getMonitoringData() answered overview, performance, slowQueries, tables, indexes and storage through the provider on 2026-08-24.",
       "A freshly loaded table's row count reads 0 until StarRocks' own background statistics collector catches up, not because the provider fails to read it: measured 2026-09-16, a 5-row table read 0 for 45s on StarRocks 4.1.4 and for roughly 4.5 minutes on 3.3.22 before both reported 5. Sizes used to read 0 regardless of that wait, for a different reason - StarRocks answers INDEX_LENGTH NULL for every BASE TABLE, never a real number the way Doris's 0 is, and DATA_LENGTH + INDEX_LENGTH in SQL is NULL-poisoned by that alone even once DATA_LENGTH itself is real. Fixed 2026-09-16 to DATA_LENGTH + COALESCE(INDEX_LENGTH, 0) everywhere this provider sums the two, so a table's size now tracks its row count on the same collector delay instead of staying absent.",
       "No index information at all: StarRocks exposes no secondary-index catalog, so the object browser and the index panel show none.",
+      "A parameter cannot sit in the LIMIT position under the binary prepared protocol, and this engine says so in as many words: measured 2026-09-22 through mysql2, LIMIT ? answers 'using parameter(?) as limit or offset not supported' while the identical statement with the number written in succeeds. Same constraint as Doris, which it is a fork of, and it cost the object browser the same 500 on every folder read until the bulk read wrote its bound in. Verified through the provider afterwards against a seeded database: describeObjects() reads 2 objects with 3 columns on the first, and a bound of 1 reads 1 object and reports its own truncation.",
       "The Explain panel renders StarRocks's own text plan: StarRocks does not parse EXPLAIN FORMAT='json', so the provider sends a plain EXPLAIN, which answered a 13-node tree for a constant SELECT (browser, 2026-09-06).",
     ],
   },
@@ -395,6 +414,7 @@ export const WIRE_COMPATIBLE_ENGINES: readonly WireCompatibleEngine[] = [
       "No index information at all: information_schema.statistics is empty on Doris, so the index panel and the object browser report none however many keys a table declares.",
       "A declared foreign key is invisible and unenforced: Doris accepts ADD CONSTRAINT ... FOREIGN KEY and lists it in SHOW CONSTRAINTS, but information_schema.KEY_COLUMN_USAGE is empty, so the ER diagram draws no relationship - and an orphan row inserts successfully, because the constraint is a planner hint there.",
       "Optimize and Check are unavailable: neither statement exists in the Doris grammar. Analyze works.",
+      "A parameter cannot sit in the LIMIT position under the binary prepared protocol: measured 2026-09-22 through mysql2, the identical statement answers with a literal LIMIT and fails with LIMIT ? on 'mismatched input LIMIT expecting {<EOF>, ;}', while the text protocol takes either. It cost the object browser a 500 on every folder read until the bulk read wrote its bound into the statement instead of binding it. Stock MySQL 8 binds it happily, so this is the relative's constraint and the same one StarRocks states outright.",
       "Row counts and sizes are correct but late: a table read 0 rows and 0 B immediately after a 2000-row insert and the true 2000 rows / 10187 bytes about a minute later, with an ANALYZE in between changing nothing. The lag is self-correcting, so a freshly loaded table looks empty for a while.",
       "A UNIQUE KEY table declares no primary key to the product: information_schema reports COLUMN_KEY as UNI rather than PRI, so the object browser marks no column primary.",
     ],
@@ -542,6 +562,47 @@ export const WIRE_COMPATIBLE_ENGINES: readonly WireCompatibleEngine[] = [
       "ScyllaDB 2025.1.14-0.20260612.103b84070f3b was probed in the 2026-08-21/22 pass and behaved identically on every surface, including the same verbatim refusal the fix keys on, so this entry describes both the 2025.1 and the 2026.2 line - but only these two builds, only a single-node container, and only 2026.2.4 was re-probed after the fix.",
     ],
   },
+  {
+    // The first relative of a driver whose query language is neither SQL-shaped nor JSON: it
+    // answers the Prometheus HTTP API, so the `prometheus` provider serves it unchanged. Probed as a
+    // single node scraping the compose fixture's targets, with Prometheus 3.13.3 as the baseline in
+    // the same pass (#1085 section 7). Claimed for PromQL only: nothing written in MetricsQL, its own
+    // query language, was measured, and one PromQL subquery answered different points here than on
+    // Prometheus, as a caveat says. The advertised 2.24.0 is in the version string and in no caveat:
+    // the overview, the one panel that shows a version, fails here, as the first caveat says.
+    name: "VictoriaMetrics",
+    via: "prometheus",
+    tier: "partial",
+    probedVersion: "VictoriaMetrics v1.152.0 (advertises Prometheus 2.24.0)",
+    caveats: [
+      "The Overview and Storage tabs of the monitoring dashboard fail, and so does the Scrape pools folder, whose count reads unavailable: VictoriaMetrics answers /api/v1/status/runtimeinfo, /api/v1/status/flags and /api/v1/scrape_pools with HTTP 400 and the text 'unsupported path requested', and the message shown names the path and the status, with a server that does not serve the path among the causes it offers.",
+      "A metric's Source tab shows its type and help and no unit: VictoriaMetrics' /api/v1/metadata entries carry no unit, and the provider leaves it out rather than inventing an empty one.",
+      "A target's Source tab has no scrapeInterval or scrapeTimeout: VictoriaMetrics' /api/v1/targets entries carry neither, and keep them as __scrape_interval__ and __scrape_timeout__ among the discovered labels, which the tab shows.",
+      "A target VictoriaMetrics has not scraped yet reads as down: VictoriaMetrics reports it with health down, no error and a last scrape of 1970-01-01T00:00:00Z, where Prometheus reports health unknown.",
+      "The Rule groups, Recording rules and Alerting rules folders are empty: a single-node server evaluates no rules, so its /api/v1/rules answered no group, and it answers that path from vmalert only when it is started with -vmalert.proxyURL.",
+      'A string expression such as "libredb" returns no rows: VictoriaMetrics answers it with an empty vector, where Prometheus answers a string.',
+      "A subquery's points are counted back from its evaluation time, both ends of its window kept: avg_over_time(up[5m])[30m:1m] answered 31 points ending at that time, where Prometheus 3.13.3 answers 30 on whole minutes.",
+      "PromQL infos and warnings do not appear beside a result: VictoriaMetrics answered rate(up[5m]) with no notice where Prometheus 3.13.3 attaches 'PromQL info: metric might not be a counter', and it sent none with any other answer measured.",
+    ],
+  },
+  {
+    // The first relative of the `kafka` driver: it answers the Kafka protocol, so the provider serves
+    // it unchanged. Probed as a single node seeded by the Kafka fixture's own scripts, through a real
+    // provider run by tests/live/kafka-read-only.ts, with Apache Kafka 4.3.1 as the baseline in the
+    // same pass (#1088 section 8). Every surface answered and the broker's state was unchanged by the
+    // run; the caveats name the figures Redpanda does not publish over the protocol, and the group
+    // type it cannot report, which is right there because it has no other kind of group.
+    name: "Redpanda",
+    via: "kafka",
+    tier: "full",
+    probedVersion: "Redpanda v26.2.2",
+    caveats: [
+      "Max connections reads 0, no limit published: Redpanda's DescribeConfigs answer for a broker holds no max.connections, and it keeps its connection limits in its cluster configuration, which the Kafka protocol does not read.",
+      "A broker's Source tab lists nine configs where Apache Kafka 4.3.1 lists 340: Redpanda answers DescribeConfigs for a broker with those nine entries only.",
+      "The Storage tab shows no usage percentage: Redpanda's DescribeLogDirs answer carries no total or usable bytes for its data directory, so only the size is shown.",
+      "Every consumer group reads as classic, which on Redpanda is always right: it answers ListGroups up to v4, which carries no group type, and it has no KIP-848 consumer group protocol at all.",
+    ],
+  },
 ];
 
 /** The verified relatives served by one shipped driver, in registry order. */
@@ -564,8 +625,9 @@ export function compatibleEnginesFor(type: DatabaseType): readonly WireCompatibl
  * app at it, so the embedded store is out of both halves of the sum.
  *
  * Still no runtime consumer: README.md and the docs table are markdown and quote the
- * number as prose, and the login hero prints the two halves separately - sixteen in
- * the proof row, twenty-six in the relatives line - rather than their sum. This exists
+ * number as prose, and the login hero prints the two halves separately - the external
+ * count in the proof row, the relatives count in the relatives line - rather than their
+ * sum. This exists
  * so the arithmetic has one definition, and the unit test pins it.
  */
 export function connectableProductCount(): number {

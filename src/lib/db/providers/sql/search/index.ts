@@ -378,9 +378,24 @@ const SEARCH_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     // an import into an index is an ordinary bulk document write. See
     // `kindAcceptsRowWrites()` in object-kinds.ts.
     acceptsRowWrites: true,
+    // The three kinds that resolve to a MAPPING, and therefore have columns a reader can
+    // be shown under the object row (#789). The fact is the one {@link SEARCH_MAPPED_KINDS}
+    // states and `describeObject` gates on; it is written out as a literal here rather
+    // than derived from that constant because the constant is declared BELOW this array,
+    // so reading it here would be a temporal dead zone throw at module init. Invariant 8
+    // in `tests/helpers/object-surface-conformance.ts` is what keeps the two in step: it
+    // asks this provider's own `describeObject` whether every declaring kind answers a
+    // column and every abstaining kind answers none.
+    hasColumns: true,
   },
-  { id: SEARCH_KIND_ALIAS, role: "relation", label: "Alias", labelPlural: "Aliases" },
-  { id: SEARCH_KIND_STREAM, role: "relation", label: "Data Stream", labelPlural: "Data Streams" },
+  { id: SEARCH_KIND_ALIAS, role: "relation", label: "Alias", labelPlural: "Aliases", hasColumns: true },
+  {
+    id: SEARCH_KIND_STREAM,
+    role: "relation",
+    label: "Data Stream",
+    labelPlural: "Data Streams",
+    hasColumns: true,
+  },
   {
     id: SEARCH_KIND_PIPELINE,
     role: "config",
@@ -474,6 +489,9 @@ const SEARCH_OBJECT_READERS: Readonly<
  * handles. A pipeline and a template are JSON documents with no field list at all, so
  * their detail carries no columns, exactly as a routine, a trigger and a sequence do
  * on the SQL engines.
+ *
+ * The same three kinds carry `hasColumns: true` in {@link SEARCH_OBJECT_KINDS}, spelled out
+ * there rather than read from here because this constant is declared after that array.
  */
 const SEARCH_MAPPED_KINDS: readonly string[] = Object.freeze([
   SEARCH_KIND_INDEX,
@@ -695,6 +713,13 @@ abstract class SearchProvider extends SQLBaseProvider {
       // the inline editor's statement could only ever produce an error. False hides
       // the affordance instead of offering it (#269).
       supportsInlineRowEdit: false,
+      // DERIVED, not restated: this is the same fact `prepareQuery` below enforces, and
+      // it is the one place the two products differ — OpenSearch SQL takes `OFFSET`,
+      // Elasticsearch SQL does not and the override throws. One directory serves two
+      // type-ids (#424), so reading the product's own measurement is what keeps the
+      // declaration and the refusal from drifting apart, and it is not a branch on a
+      // type id (#816).
+      supportsResultPagination: this.product.acceptsOffsetClause,
       // Neither grammar has BEGIN; both are reached over stateless HTTP.
       supportsTransactions: false,
       // The engine has no such constraint in its model: denormalization is the
@@ -896,7 +921,7 @@ abstract class SearchProvider extends SQLBaseProvider {
    */
   private describeConnectFailure(error: unknown): Error {
     const mapped = this.mapSearchError(error);
-    if (mapped instanceof AuthenticationError) return mapped;
+    if (mapped instanceof AuthenticationError || mapped instanceof DatabaseConfigError) return mapped;
 
     return new ConnectionError(
       `Failed to connect to ${this.product.label}: ${mapped.message}`,

@@ -3,7 +3,7 @@ import "../helpers/mock-navigation";
 
 import { mockToastError } from "../helpers/mock-sonner";
 
-import { mock } from "bun:test";
+import { mock, type Mock } from "bun:test";
 import React from "react";
 
 // ─── Module-level capture variables for mock editor callbacks ─────────────────
@@ -26,6 +26,13 @@ let capturedEditorProps: { value?: string; defaultValue?: string } | null = null
 // already holds is not free in real Monaco: it replaces the model's content, which drops
 // the undo stack and moves the caret, so "did not write" is worth asserting.
 let capturedSetValues: string[] = [];
+// Every language id the mock Monaco was asked to register before the editor mounted, in order
+// (#1085). The mock's `getLanguages` answers none, so each idempotent register call records.
+let capturedLanguageRegistrations: string[] = [];
+// When set, the mock <Editor> mounts only once a test calls `mountDeferredEditor`, the way the
+// real one mounts only after Monaco has loaded, which can be renders after the first (#1085).
+let deferEditorMount = false;
+let mountDeferredEditor: (() => void) | null = null;
 
 // ── Mock Monaco Editor with React.createElement (not plain objects) ─────────
 mock.module("@monaco-editor/react", () => ({
@@ -52,6 +59,14 @@ mock.module("@monaco-editor/react", () => ({
     const valueRef = React.useRef(value ?? defaultValue ?? "");
     const [textValue, setTextValue] = React.useState(value ?? defaultValue ?? "");
     const mountedRef = React.useRef(false);
+    // 4.7.0 keeps the first render's `beforeMount` and `onMount` in refs and calls each once, so
+    // a mount that `deferEditorMount` holds back still runs the handlers of the first render.
+    const firstMountHandlersRef = React.useRef({ beforeMount, onMount });
+    const [mountReleased, setMountReleased] = React.useState(!deferEditorMount);
+
+    React.useEffect(() => {
+      if (!mountReleased) mountDeferredEditor = () => setMountReleased(true);
+    }, [mountReleased]);
 
     React.useEffect(() => {
       // Real 4.7.0 controlled-value effect: `t === void 0` early-return, else overwrite the
@@ -65,7 +80,7 @@ mock.module("@monaco-editor/react", () => ({
     }, [value]);
 
     React.useEffect(() => {
-      if (mountedRef.current) return;
+      if (mountedRef.current || !mountReleased) return;
       mountedRef.current = true;
 
       const monacoMock = {
@@ -84,7 +99,9 @@ mock.module("@monaco-editor/react", () => ({
         },
         languages: {
           getLanguages: () => [] as { id: string }[],
-          register: mock(() => {}),
+          register: mock((language: { id: string }) => {
+            capturedLanguageRegistrations.push(language.id);
+          }),
           setMonarchTokensProvider: mock(() => {}),
           setLanguageConfiguration: mock(() => {}),
         },
@@ -145,9 +162,9 @@ mock.module("@monaco-editor/react", () => ({
         updateOptions: (...args: unknown[]) => mockUpdateOptions(...args),
       };
 
-      beforeMount?.(monacoMock);
-      onMount?.(editorMock, monacoMock);
-    }, [beforeMount, onMount]);
+      firstMountHandlersRef.current.beforeMount?.(monacoMock);
+      firstMountHandlersRef.current.onMount?.(editorMock, monacoMock);
+    }, [mountReleased]);
 
     return React.createElement("textarea", {
       "data-testid": "mock-monaco-editor",
@@ -195,8 +212,11 @@ let mockClipboardWriteText = mock((data: string) => {
 });
 
 // ── Mock sql-formatter ──────────────────────────────────────────────────────
+// Identity, so the buffer alone cannot tell whether the SQL formatter ran; a test that needs to
+// know asks this mock.
+const mockSqlFormat = mock((sql: string) => sql);
 mock.module("sql-formatter", () => ({
-  format: mock((sql: string) => sql),
+  format: mockSqlFormat,
 }));
 
 // ── Mock editor/sql-completions ─────────────────────────────────────────────
@@ -206,8 +226,16 @@ mock.module("@/lib/editor/sql-completions", () => ({
 }));
 
 // ── Mock editor/mongodb-completions ─────────────────────────────────────────
+// Named, so a test can read which editors register the MongoDB completion provider (#1088): each
+// registration answers its own dispose, so a test can also read that one was taken down.
+const mockMongoDBCompletionDisposals: Array<Mock<() => void>> = [];
+const mockRegisterMongoDBCompletionProvider = mock<(...args: unknown[]) => { dispose: () => void }>(() => {
+  const dispose = mock(() => {});
+  mockMongoDBCompletionDisposals.push(dispose);
+  return { dispose };
+});
 mock.module("@/lib/editor/mongodb-completions", () => ({
-  registerMongoDBCompletionProvider: mock(() => ({ dispose: mock(() => {}) })),
+  registerMongoDBCompletionProvider: mockRegisterMongoDBCompletionProvider,
 }));
 
 // ── Mock lucide-react icons ─────────────────────────────────────────────────
@@ -228,7 +256,9 @@ mock.module("lucide-react", () => {
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { render, cleanup, fireEvent, act, waitFor } from "@testing-library/react";
 import { QueryEditor } from "@/components/QueryEditor";
+import { parseReadRequest } from "@/lib/db/providers/stream/kafka/request";
 import type { MaintenanceType } from "@/lib/db/types";
+import { DEFAULT_QUERY_LIMIT } from "@/lib/db/utils/query-limiter";
 
 // =============================================================================
 // QueryEditor Tests
@@ -294,6 +324,9 @@ describe("QueryEditor", () => {
     mockUpdateOptions = mock((..._a: unknown[]) => {});
     capturedEditorProps = null;
     capturedSetValues = [];
+    capturedLanguageRegistrations = [];
+    deferEditorMount = false;
+    mountDeferredEditor = null;
     mockClipboardWriteText = mock((data: string) => {
       void data;
       return Promise.resolve();
@@ -622,6 +655,53 @@ describe("QueryEditor", () => {
     const editor = queryByTestId("mock-monaco-editor") as HTMLTextAreaElement;
     expect(editor.value).toContain('"collection"');
     expect(onChange).toHaveBeenCalled();
+  });
+
+  /*
+    #1088. A Kafka tab formats through the same JSON branch, and that is correct as is: Format
+    writes `JSON.stringify(JSON.parse(text), null, 2)` and the read request's parser reads nothing
+    but `JSON.parse`'s value, so a formatted request reads what the typed one reads. A digit-string
+    offset stays a string, and a JSON-number offset past 2^53, which the first parse has already
+    rounded, is refused before formatting and after it, with the advice to write it as a string.
+  */
+  describe("FORMAT on a Kafka read request (#1088)", () => {
+    const formatted = (typed: string): string => {
+      const { queryByText, queryByTestId } = render(
+        React.createElement(QueryEditor, createDefaultProps({ value: typed, language: "json" })),
+      );
+      fireEvent.click(queryByText("Format")!);
+      return (queryByTestId("mock-monaco-editor") as HTMLTextAreaElement).value;
+    };
+
+    test.each([
+      ['{"topic":"orders"}'],
+      ['{"topic":"orders","from":"earliest","limit":20}'],
+      ['{"topic":"orders","partition":0,"from":{"offset":120}}'],
+      ['{"topic":"orders","partition":2,"from":{"offset":"9007199254740993"}}'],
+      ['{"topic":"orders","from":{"timestamp":"2026-09-23T03:00:00+03:00"}}'],
+    ])("leaves %s a request the parser reads as the typed one", (typed) => {
+      const text = formatted(typed);
+      // It did format: the typed text is on one line, and Format writes two-space indentation.
+      expect(text).toBe(JSON.stringify(JSON.parse(typed), null, 2));
+      expect(text).not.toBe(typed);
+      expect(parseReadRequest(text, DEFAULT_QUERY_LIMIT)).toEqual(parseReadRequest(typed, DEFAULT_QUERY_LIMIT));
+    });
+
+    test("keeps a digit-string offset past 2^53 the offset it names", () => {
+      const text = formatted('{"topic":"orders","partition":0,"from":{"offset":"9007199254740993"}}');
+      expect(parseReadRequest(text, DEFAULT_QUERY_LIMIT).from).toEqual({
+        kind: "offset",
+        offset: BigInt("9007199254740993"),
+      });
+    });
+
+    test("cannot make a JSON-number offset past 2^53 readable: it is refused typed and formatted", () => {
+      const typed = '{"topic":"orders","partition":0,"from":{"offset":9007199254740993}}';
+      const text = formatted(typed);
+      expect(text).not.toBe(typed);
+      expect(() => parseReadRequest(typed, DEFAULT_QUERY_LIMIT)).toThrow("write it as a digit string");
+      expect(() => parseReadRequest(text, DEFAULT_QUERY_LIMIT)).toThrow("write it as a digit string");
+    });
   });
 
   test("FORMAT with invalid JSON does not crash", () => {
@@ -1441,6 +1521,73 @@ describe("QueryEditor", () => {
     unmount();
   });
 
+  /*
+    #1088. A Kafka tab renders in Monaco's json mode, and the MongoDB completion provider registers
+    for that mode: its snippets are MongoDB documents (`find`, `aggregate`, `insertOne`, keyed by
+    `collection` and `operation`), which the read request's parser refuses, and its field items
+    offer a topic's result columns as if they were keys of the request. So it registers only where
+    the declared capabilities name no JSON dialect, and, for the published component's callers,
+    where none are passed.
+  */
+  describe("the MongoDB completion provider registers for MongoDB's JSON only (#1088)", () => {
+    const jsonCapabilities = { ...defaultCapabilities, queryLanguage: "json" as const, supportsExplain: false };
+    const kafkaCapabilities = { ...jsonCapabilities, queryDialect: "kafka" as const };
+
+    beforeEach(() => {
+      mockUseMonacoReturn = { Range: class {} };
+      mockRegisterMongoDBCompletionProvider.mockClear();
+      mockMongoDBCompletionDisposals.length = 0;
+    });
+
+    test("a json editor on a Kafka connection registers none", () => {
+      render(
+        React.createElement(QueryEditor, createDefaultProps({ language: "json", capabilities: kafkaCapabilities })),
+      );
+      expect(mockRegisterMongoDBCompletionProvider).not.toHaveBeenCalled();
+    });
+
+    test("the control: a json editor on MongoDB's JSON, with no dialect, registers it", () => {
+      render(
+        React.createElement(QueryEditor, createDefaultProps({ language: "json", capabilities: jsonCapabilities })),
+      );
+      expect(mockRegisterMongoDBCompletionProvider).toHaveBeenCalledTimes(1);
+    });
+
+    test("a json editor handed no capabilities still registers it, as the published component always has", () => {
+      render(React.createElement(QueryEditor, createDefaultProps({ language: "json", capabilities: undefined })));
+      expect(mockRegisterMongoDBCompletionProvider).toHaveBeenCalledTimes(1);
+    });
+
+    test("the rule is any declared dialect, not Kafka's name: a json editor on another dialect registers none", () => {
+      // Reachable for a render while a tab is retyped after a connection switch, and the shape a
+      // JSON dialect added later arrives in: MongoDB's snippets are no more its grammar than Kafka's.
+      render(
+        React.createElement(
+          QueryEditor,
+          createDefaultProps({ language: "json", capabilities: { ...jsonCapabilities, queryDialect: "redis" } }),
+        ),
+      );
+      expect(mockRegisterMongoDBCompletionProvider).not.toHaveBeenCalled();
+    });
+
+    test("a sql editor registers none, whatever its capabilities", () => {
+      render(React.createElement(QueryEditor, createDefaultProps({ language: "sql", capabilities: jsonCapabilities })));
+      expect(mockRegisterMongoDBCompletionProvider).not.toHaveBeenCalled();
+    });
+
+    test("a switch from MongoDB to Kafka takes the registration down, and registers none in its place", () => {
+      const props = createDefaultProps({ language: "json", capabilities: jsonCapabilities });
+      const { rerender } = render(React.createElement(QueryEditor, props));
+      expect(mockRegisterMongoDBCompletionProvider).toHaveBeenCalledTimes(1);
+
+      rerender(React.createElement(QueryEditor, { ...props, capabilities: kafkaCapabilities }));
+
+      expect(mockMongoDBCompletionDisposals).toHaveLength(1);
+      expect(mockMongoDBCompletionDisposals[0]).toHaveBeenCalledTimes(1);
+      expect(mockRegisterMongoDBCompletionProvider).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // -----------------------------------------------------------------------
   // Context menu actions
   // -----------------------------------------------------------------------
@@ -1730,6 +1877,317 @@ describe("QueryEditor", () => {
 
     expect(eventDetail!.query).toBe('{"collection":"users","operation":"find"}');
     window.removeEventListener("execute-query", handler);
+  });
+
+  // -----------------------------------------------------------------------
+  // PromQL (#1085)
+  // -----------------------------------------------------------------------
+
+  test("registers the PromQL language before the editor mounts, beside LibreDB and Redis (#1085)", () => {
+    render(React.createElement(QueryEditor, createDefaultProps({ language: "promql", value: "up" })));
+
+    // The two command languages this mount registered before #1085 are the control: they reach the
+    // same capture, so a missing "promql" is the component and not the mock.
+    expect(capturedLanguageRegistrations).toContain("libredb");
+    expect(capturedLanguageRegistrations).toContain("redis");
+    expect(capturedLanguageRegistrations).toContain("promql");
+  });
+
+  test("a PromQL buffer runs whole, and draws no Format control and no SQL completions (#1085)", () => {
+    // A PromQL text is one expression and `#` starts a comment in it. Under a SQL grammar the `;`
+    // inside the comment below is a statement separator, which is what the control next door shows.
+    mockUseMonacoReturn = {
+      Range: class {
+        constructor(
+          public startLineNumber: number,
+          public startColumn: number,
+          public endLineNumber: number,
+          public endColumn: number,
+        ) {}
+      },
+    };
+    mockRegisterSQLCompletionProvider.mockClear();
+    let eventDetail: { query: string } | null = null;
+    const handler = ((e: CustomEvent) => {
+      eventDetail = e.detail;
+    }) as EventListener;
+    window.addEventListener("execute-query", handler);
+    const buffer = "# rate over five minutes; per second\nrate(prometheus_http_requests_total[5m])";
+
+    const { queryByText } = render(
+      React.createElement(
+        QueryEditor,
+        createDefaultProps({ value: buffer, language: "promql", databaseType: "postgres" }),
+      ),
+    );
+    act(() => {
+      capturedCommands[0].handler();
+    });
+    window.removeEventListener("execute-query", handler);
+
+    expect(eventDetail!.query).toBe(buffer);
+    expect(queryByText("Format")).toBeNull();
+    expect(mockRegisterSQLCompletionProvider).not.toHaveBeenCalled();
+  });
+
+  test("the control: the same buffer as SQL is cut at the semicolon, formats, and loads SQL completions", () => {
+    mockUseMonacoReturn = {
+      Range: class {
+        constructor(
+          public startLineNumber: number,
+          public startColumn: number,
+          public endLineNumber: number,
+          public endColumn: number,
+        ) {}
+      },
+    };
+    mockRegisterSQLCompletionProvider.mockClear();
+    let eventDetail: { query: string } | null = null;
+    const handler = ((e: CustomEvent) => {
+      eventDetail = e.detail;
+    }) as EventListener;
+    window.addEventListener("execute-query", handler);
+    const buffer = "# rate over five minutes; per second\nrate(prometheus_http_requests_total[5m])";
+
+    const { queryByText } = render(
+      React.createElement(
+        QueryEditor,
+        createDefaultProps({ value: buffer, language: "sql", databaseType: "postgres" }),
+      ),
+    );
+    act(() => {
+      capturedCommands[0].handler();
+    });
+    window.removeEventListener("execute-query", handler);
+
+    // Measured with the shared splitter under the postgres grammar: the first statement is the
+    // comment's first half, and the caret at offset 0 is inside it.
+    expect(eventDetail!.query).toBe("# rate over five minutes");
+    expect(queryByText("Format")).not.toBeNull();
+    expect(mockRegisterSQLCompletionProvider).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // What onMount registers reads the render it runs in (#1085)
+  //
+  // @monaco-editor/react 4.7.0 keeps `onMount` in `useRef(onMount)` and calls that first copy
+  // once, and the mock above does the same, so a command or an action registered there has to
+  // read the render in which it is INVOKED. Both shells render a connection's first tab as SQL
+  // and retype it in an effect, so the render the editor mounted in is the wrong one for a PromQL
+  // tab on every page load.
+  // -----------------------------------------------------------------------
+
+  /** Monaco's `Range`, the one member of the namespace these paths read. */
+  class MonacoRange {
+    constructor(
+      public startLineNumber: number,
+      public startColumn: number,
+      public endLineNumber: number,
+      public endColumn: number,
+    ) {}
+  }
+
+  /** Every query the editor dispatched while `run` ran, in order. */
+  function dispatchedQueries(run: () => void): string[] {
+    const queries: string[] = [];
+    const listener = ((e: CustomEvent<{ query: string }>) => {
+      queries.push(e.detail.query);
+    }) as EventListener;
+    window.addEventListener("execute-query", listener);
+    try {
+      run();
+    } finally {
+      window.removeEventListener("execute-query", listener);
+    }
+    return queries;
+  }
+
+  test("the format shortcut and Format SQL leave a tab retyped from SQL to PromQL as written (#1085)", () => {
+    // `up == 0` is valid PromQL that the SQL formatter rewrites as `up = = 0`, a parse error, and
+    // Monaco's setValue clears the undo history, so the rewrite could not be taken back.
+    mockSqlFormat.mockClear();
+    const props = createDefaultProps({ value: "up == 0", language: "sql", databaseType: "postgres" });
+    const { rerender, queryByTestId } = render(React.createElement(QueryEditor, props));
+    rerender(React.createElement(QueryEditor, { ...props, language: "promql", databaseType: "prometheus" }));
+    capturedSetValues = [];
+
+    act(() => {
+      capturedCommands[1].handler();
+    });
+    act(() => {
+      capturedActions.find((a) => a.id === "format-sql")!.run();
+    });
+
+    expect(mockSqlFormat).not.toHaveBeenCalled();
+    expect(capturedSetValues).toEqual([]);
+    expect((queryByTestId("mock-monaco-editor") as HTMLTextAreaElement).value).toBe("up == 0");
+  });
+
+  test("the control: on a tab that stays SQL the same two invocations run the SQL formatter", () => {
+    mockSqlFormat.mockClear();
+    const props = createDefaultProps({ value: "up == 0", language: "sql", databaseType: "postgres" });
+    const { rerender } = render(React.createElement(QueryEditor, props));
+    rerender(React.createElement(QueryEditor, { ...props }));
+    capturedSetValues = [];
+
+    act(() => {
+      capturedCommands[1].handler();
+    });
+    act(() => {
+      capturedActions.find((a) => a.id === "format-sql")!.run();
+    });
+
+    expect(mockSqlFormat).toHaveBeenCalledTimes(2);
+    expect(capturedSetValues).toEqual(["up == 0", "up == 0"]);
+  });
+
+  test("Format SQL is offered on an SQL tab only, and follows the tab's language after mount (#1085)", () => {
+    const props = createDefaultProps({ language: "sql" });
+    const { rerender } = render(React.createElement(QueryEditor, props));
+
+    // Monaco resolves an action's precondition when the context menu opens and when its
+    // keybinding fires, so this key alone decides where the entry is offered.
+    expect(capturedActions.find((a) => a.id === "format-sql")!.precondition).toBe("libredbCanFormatSql");
+    expect(capturedContextKeys["libredbCanFormatSql"]).toBe(true);
+
+    const steps = [
+      ["promql", false],
+      ["json", false],
+      ["redis", false],
+      ["libredb", false],
+      ["sql", true],
+    ] as const;
+    for (const [language, offered] of steps) {
+      rerender(React.createElement(QueryEditor, { ...props, language }));
+      expect(capturedContextKeys["libredbCanFormatSql"]).toBe(offered);
+    }
+  });
+
+  test("a tab that mounts as PromQL is never offered Format SQL (#1085)", () => {
+    render(React.createElement(QueryEditor, createDefaultProps({ language: "promql", value: "up" })));
+    expect(capturedContextKeys["libredbCanFormatSql"]).toBe(false);
+  });
+
+  test("an editor that mounts after its tab was retyped to PromQL offers no Format SQL and formats nothing (#1085)", () => {
+    // The order a fresh page load takes when the connection's capabilities answer before Monaco
+    // has loaded: the tab is PromQL by the time the editor mounts, and the onMount that runs is
+    // the one from the render in which the tab was still SQL.
+    deferEditorMount = true;
+    mockSqlFormat.mockClear();
+    const props = createDefaultProps({ value: "# alert when a target is down\nup == 0", language: "sql" });
+    const { rerender, queryByTestId } = render(React.createElement(QueryEditor, props));
+    rerender(React.createElement(QueryEditor, { ...props, language: "promql" }));
+    act(() => {
+      mountDeferredEditor!();
+    });
+
+    expect(capturedContextKeys["libredbCanFormatSql"]).toBe(false);
+    act(() => {
+      capturedActions.find((a) => a.id === "format-sql")!.run();
+    });
+    expect(mockSqlFormat).not.toHaveBeenCalled();
+    expect((queryByTestId("mock-monaco-editor") as HTMLTextAreaElement).value).toBe(
+      "# alert when a target is down\nup == 0",
+    );
+  });
+
+  test("a JSON tab is not offered Format SQL, and its shortcut still formats JSON", () => {
+    // The entry's label is fixed when it is registered, so on a MongoDB tab it read "Format SQL"
+    // over the JSON formatter. The toolbar button and the shortcut are what format JSON there.
+    const { queryByTestId } = render(
+      React.createElement(QueryEditor, createDefaultProps({ language: "json", value: '{"collection":"users"}' })),
+    );
+    expect(capturedContextKeys["libredbCanFormatSql"]).toBe(false);
+
+    act(() => {
+      capturedCommands[1].handler();
+    });
+    expect((queryByTestId("mock-monaco-editor") as HTMLTextAreaElement).value).toBe('{\n  "collection": "users"\n}');
+  });
+
+  test("Cmd+Enter and Run Query send a tab retyped from SQL to PromQL whole (#1085)", () => {
+    // Under the PostgreSQL grammar the `;` inside the `#` comment ends a statement, which is what
+    // the first dispatch shows while the tab is still SQL. As PromQL the text is one expression.
+    mockUseMonacoReturn = { Range: MonacoRange };
+    const buffer = "# rate over five minutes; per second\nrate(prometheus_http_requests_total[5m])";
+    const props = createDefaultProps({ value: buffer, language: "sql", databaseType: "postgres" });
+    const { rerender } = render(React.createElement(QueryEditor, props));
+
+    const sent = dispatchedQueries(() => {
+      act(() => {
+        capturedCommands[0].handler();
+      });
+      rerender(React.createElement(QueryEditor, { ...props, language: "promql", databaseType: "prometheus" }));
+      act(() => {
+        capturedCommands[0].handler();
+      });
+      act(() => {
+        capturedActions.find((a) => a.id === "run-query")!.run();
+      });
+    });
+
+    expect(sent).toEqual(["# rate over five minutes", buffer, buffer]);
+  });
+
+  test("Cmd+Enter cuts statements under the grammar of the connection the editor is on now", () => {
+    // MySQL reads everything after `#` as a comment, so this buffer is one statement there, while
+    // PostgreSQL reads `#` as an operator and ends the first statement at the `;`. The editor
+    // stays mounted across a connection switch, so the grammar is the one current when the
+    // shortcut fires.
+    mockUseMonacoReturn = { Range: MonacoRange };
+    const buffer = "SELECT 1 # one; SELECT 2";
+    const props = createDefaultProps({ value: buffer, language: "sql", databaseType: "mysql" });
+    const { rerender } = render(React.createElement(QueryEditor, props));
+
+    const sent = dispatchedQueries(() => {
+      act(() => {
+        capturedCommands[0].handler();
+      });
+      rerender(React.createElement(QueryEditor, { ...props, databaseType: "postgres" }));
+      act(() => {
+        capturedCommands[0].handler();
+      });
+    });
+
+    expect(sent).toEqual([buffer, "SELECT 1 # one"]);
+  });
+
+  test("Cmd+Enter runs the statement at the caret when Monaco's namespace arrives after the editor mounted", () => {
+    // A fresh page load: the namespace hook answers null on the first render and the namespace
+    // on a later one. A handler kept from the first render read null and sent the whole buffer.
+    mockUseMonacoReturn = null;
+    const props = createDefaultProps({ value: "SELECT 1; SELECT 2", databaseType: "postgres" });
+    const { rerender } = render(React.createElement(QueryEditor, props));
+    mockUseMonacoReturn = { Range: MonacoRange };
+    rerender(React.createElement(QueryEditor, { ...props }));
+
+    const sent = dispatchedQueries(() => {
+      act(() => {
+        capturedCommands[0].handler();
+      });
+    });
+
+    expect(sent).toEqual(["SELECT 1"]);
+  });
+
+  test("the run shortcut and the blur sync hand the text to the onChange of the current render", () => {
+    const first = mock(() => {});
+    const second = mock(() => {});
+    const props = createDefaultProps({ value: "SELECT 1", onChange: first });
+    const { rerender } = render(React.createElement(QueryEditor, props));
+    rerender(React.createElement(QueryEditor, { ...props, onChange: second }));
+
+    act(() => {
+      capturedCommands[0].handler();
+    });
+    act(() => {
+      capturedBlurCb!();
+    });
+
+    expect(second).toHaveBeenCalledTimes(2);
+    expect(second).toHaveBeenNthCalledWith(1, "SELECT 1");
+    expect(second).toHaveBeenNthCalledWith(2, "SELECT 1");
+    expect(first).not.toHaveBeenCalled();
   });
 
   test("getEffectiveQuery: whitespace-only selection falls through to full value", () => {

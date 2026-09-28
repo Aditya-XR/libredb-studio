@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { LoaderCircle, PencilLine, RotateCcw, Square, TriangleAlert } from "lucide-react";
 import { CopyButton } from "@/components/copy-button";
 import { renderProse } from "@/components/rich-text";
@@ -16,7 +16,7 @@ import {
   guardSummaryLine,
   HydrationControls,
   InfoNote,
-  LIVE_STATUSES,
+  OPEN_STATUSES,
   QuotedBlock,
 } from "./rail-parts";
 import {
@@ -98,6 +98,7 @@ const EYEBROWS: Readonly<Record<AnswerState, string>> = Object.freeze({
 const STATUS_TONES: Readonly<Record<AgentRunStatus, string>> = Object.freeze({
   queued: "bg-brand-tint/10 text-brand-bright",
   running: "bg-brand-tint/10 text-brand-bright",
+  paused: "bg-brand-tint/10 text-brand-bright",
   succeeded: "bg-success-tint/10 text-success-bright",
   failed: "bg-hue-rose-tint/10 text-hue-rose-alt",
   cancelled: "bg-warning-tint/10 text-warning-bright",
@@ -108,19 +109,25 @@ const STATUS_TONES: Readonly<Record<AgentRunStatus, string>> = Object.freeze({
  * `"unknown"` is this surface having nothing to go on, which is a different state from
  * every engine in the ladder and must not collapse into the first of them.
  */
-type StatementLanguage = "sql" | "json" | "libredb" | "redis" | "unknown";
+type StatementLanguage = "sql" | "json" | "libredb" | "redis" | "promql" | "unknown";
 
 /**
  * Identity, never status. The rail spends amber on "nobody established this", rose on a
  * failure and emerald on a clean verdict, so none of those three is in this map: a tint
  * that a reader could mistake for a verdict is worse than no tint at all. `"unknown"`
  * takes the hairline, which says nothing, because nothing is what is known.
+ *
+ * PromQL takes indigo rather than Prometheus's own orange (#1085): orange sits next to that
+ * amber, and a PromQL draft is always shown beside the amber "not checked" chip, because no
+ * guard here reads PromQL (`validatePlanStatement` declines it, so `guardReading` answers
+ * `unexamined`).
  */
 const LANGUAGE_ACCENTS: Readonly<Record<StatementLanguage, string>> = Object.freeze({
   sql: "border-hue-blue/40",
   json: "border-hue-cyan/40",
   redis: "border-hue-fuchsia/40",
   libredb: "border-hue-violet/40",
+  promql: "border-hue-indigo/40",
   unknown: "border-hairline-strong",
 });
 
@@ -455,14 +462,17 @@ function PlanChips({
  */
 export function answerCardState(timeline: AgentRunTimeline): AnswerState | null {
   if (timeline.items.length === 0) return null;
+  // A paused run is not finished: it holds its resources and will be driven again,
+  // so whatever it has composed so far is not yet "the answer".
+  if (timeline.status === "paused") return "running";
   if (timeline.items.some((item) => item.planStatement !== undefined)) return "plan";
   if (timeline.report !== null) return "report";
   if (timeline.items.some((item) => item.planRefusal === true)) return "refused";
   if (timeline.status === "failed") return "failed";
-  return LIVE_STATUSES.has(timeline.status) ? "running" : null;
+  return OPEN_STATUSES.has(timeline.status) ? "running" : null;
 }
 
-export function AnswerCard({
+export const AnswerCard = memo(function AnswerCard({
   timeline,
   capabilities,
   onApplyStatement,
@@ -517,7 +527,7 @@ export function AnswerCard({
       {state === "running" && <RunningAnswer timeline={timeline} onStop={onStop} />}
     </section>
   );
-}
+});
 
 /** How the run ended, for the endings the server calls failures. */
 function FailureNote({

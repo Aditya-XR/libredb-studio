@@ -87,6 +87,15 @@ requires `collection` and `operation`:
 { "collection": "users", "operation": "insertOne", "documents": [{"name": "John"}] }
 ```
 
+`database` names the database the command runs in, so `{ "database": "analytics", "collection": "events", "operation": "find" }` reads `analytics.events` and not the connected database's `events` (#843).
+It is optional: absent means the connected database, which is what every statement written before the key existed means, the editor's snippets included.
+A non-string or empty value is a `QueryError`, raised before any database is opened: `MongoClient.db()` opens any string it is given, and a database that does not exist answers every read with 0 rows.
+A database the credentials cannot read raises the server's own sentence (`not authorized on analytics to execute command ...`), never an empty result.
+
+Every statement the product writes for a collection carries the key: the tree click, Generate Query and the count query (`generateTableQuery`, `generateSelectQuery`, `generateCountQuery`), the profiler (`/api/db/profile`) and the test data generator.
+All five read it through `jsonCommandAddress()` in [`query-generators.ts`](../../src/lib/query-generators.ts), which takes the segment the declaration assigns to the `schema` level rather than `path[0]` (standing ruling 5g) and refuses a path that does not match the declared levels.
+Before #843 every one of them named the collection alone, so a collection outside the connected database read, profiled and was written as the connected database's same-named collection.
+
 `distinct` is the one operation with a key of its own: `field`, the driver's own parameter name, and
 it is **required**. The example above answers one row per category, shaped `{ "category": <value> }`.
 A missing or non-string `field` is a `QueryError` naming the key it wanted — it used to read the
@@ -146,11 +155,10 @@ A `find` with no explicit `options.limit` is capped at **100** documents
 `options` to the cursor** (no `limit`/`skip`) and has no default cap, so a pipeline without a
 `$limit` stage can return an unbounded result set.
 
-`prepareQuery()` does **not** modify the query (it injects no limit — the JSON is passed through
-unchanged), but it is **not** a true no-op: it returns `limit: options.limit || 100`, and the
-`/api/db/query` route uses that returned `limit`/`wasLimited` for pagination metadata
-(`hasMore = rows.length === prepared.limit`). The `unlimited` option is **not** honoured — see
-[Known limitations](#13-known-limitations--future-work).
+`prepareQuery()` does **not** modify the query (it injects no limit, and the JSON is passed through unchanged), but it is **not** a true no-op: it returns `limit: options.limit || 100` and `wasLimited: false`, and the `/api/db/query` route builds its pagination metadata from them.
+The route computes `hasMore = prepared.wasLimited && rows.length === prepared.limit`, so every MongoDB result answers `hasMore: false` and `wasLimited: false`, and the provider declares `supportsResultPagination: false`, so no Load More is offered.
+Measured 2026-09-27 on MongoDB 8.3 through the route: a `find` over 150 documents returned 100 rows with `hasMore: false` and `wasLimited: false`, so a result the 100 cap cut carries no "limited" badge.
+The `unlimited` option is **not** honoured; see [Known limitations](#13-known-limitations--future-work).
 
 ---
 
@@ -162,6 +170,7 @@ returns `config.connectionString` if present, else assembles
 `mongodb://<user>:<password>@<host>:<port>/<database>[?authSource=<authSource>]` (credentials and
 the auth database are URL-encoded; the `<user>:<password>@` segment is omitted when no credentials
 are set, and the query string when no `authSource` is).
+With no `database` the path is empty, `mongodb://<host>:<port>/`, and not a stand-in such as `/test`: the path database is also the driver's default auth database, so a stand-in would authenticate an `admin` user against it and fail as bad credentials.
 
 **`authSource` is the database the credentials live in, and it is not always the one being opened.**
 MongoDB creates users inside a database, and the driver checks them against whichever database the
@@ -188,7 +197,9 @@ const c = { id: 'mg-1', name: 'App', type: 'mongodb',
 ```
 
 `validate()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)) requires either a
-`connectionString` or both `host` and `database`. `connect()` builds a `MongoClient` whose built-in
+`connectionString` or a `host`.
+`database` is optional in both modes (#843): it is only the default for a statement that names no database, and every statement the product writes names its own.
+`connect()` builds a `MongoClient` whose built-in
 pool is configured from `ProviderOptions.pool`:
 
 | `MongoClient` option | Source |
@@ -199,8 +210,9 @@ pool is configured from `ProviderOptions.pool`:
 | `connectTimeoutMS` | `pool.acquireTimeout` |
 | `serverSelectionTimeoutMS` | `pool.acquireTimeout` |
 
-The database name comes from `config.database`, else it is parsed out of the connection string, else
-defaults to `test`. After connecting, a `{ ping: 1 }` command validates the connection.
+The database name comes from `config.database`, else from the connection string's path (after the authority, so `mongodb://host:27017` names none), else
+defaults to `test`, the driver's own default; it is the database a statement with no `database` key reads.
+After connecting, a `{ ping: 1 }` command validates the connection.
 
 ### 4.1 SSL / TLS
 
@@ -468,6 +480,11 @@ the catalog row to classify as the kind that was asked for, so `describeObject([
   already applies to the object surface.
 - **`foreignKeys`** is always `[]`, because MongoDB has no foreign key constraint at all. The same
   measurement is behind `declaresForeignKeys: false`.
+
+Both kinds this provider declares, `collection` and `view`, declare `hasColumns: true`, so every
+object row in the tree expands and none of them abstains; the fields behind that twisty are SAMPLED
+from up to 100 documents rather than read from a schema, so they are what the sample happened to
+carry and not a declaration the engine holds.
 
 A listed object carries **no `rowCount` and no `sizeBytes`**, and that is a bound rather than a gap:
 either would need `collStats` or `estimatedDocumentCount` **per collection**, one round trip each,
@@ -895,8 +912,14 @@ something was measured:
 
 ## 8. Maintenance
 
-`runMaintenance(type, target?)` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts))
+`runMaintenance(type, target?, container?)` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts))
 maps the generic operations onto MongoDB admin commands:
+
+A `container` is a DATABASE name (#772). The provider is bound to one database and no admin command
+can retarget mid-command, so the bound name is accepted and any OTHER name is refused with
+`bound to the database "<name>"` rather than quietly acted on against the wrong one. The comparison
+uses `getDatabaseName()`, the name `connect()` opened - a connection-string connection sets no
+`config.database`, and comparing with that alone refused the bound database itself.
 
 | Type | MongoDB action |
 |------|----------------|
@@ -945,6 +968,7 @@ request here.
 | `supportsExternalQueryLimiting` | `false` |
 | `supportsCreateTable` | `false` |
 | `supportsInlineRowEdit` | `false` — the query language is JSON commands, so there is no `UPDATE ... SET` for the results grid's inline editor to emit |
+| `supportsResultPagination` | `false` — `prepareQuery` pins `offset` to 0 and returns the command untouched, so page two would be page one. The find document's own `limit` stays the bound here (#816) |
 | `supportsTransactions` | `false` — multi-document transactions need a client session this provider does not hold, so BEGIN/COMMIT/ROLLBACK and SANDBOX are not offered; they used to be, and answered HTTP 400 (#464) |
 | `declaresForeignKeys` | `false` — MongoDB has no foreign key constraint at all, so an empty `foreignKeys` list here is the engine's model and not this database's shape |
 | `supportsMaintenance` | `true` |
@@ -953,6 +977,7 @@ request here.
 | `defaultPort` | `27017` |
 | `schemaRefreshPattern` | `"operation"\s*:\s*"(insert\|delete\|update)` |
 | `containerLevels` | one level, `{ id: 'schema', label: 'Database' }` — the object surface's container ([§6](#the-object-surface-789)) |
+| `containerPathShapes` | `exact`: only `[database]` addresses a container, so a shorter or a longer path is refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
 | `objectKinds` | `collection` (relation, `acceptsRowWrites`) and `view` (relation). No `index`, no routine kind, no `timeseries` kind; each absence is measured in [§6](#what-is-not-declared-and-why-each-absence-is-a-measurement) |
 
 `schemaRefreshPattern` matches write operations in the JSON query so the UI refreshes collections
@@ -1131,9 +1156,8 @@ Over the API: `POST /api/db/query` (JSON MQL in the `sql` field) and `POST /api/
   not an authenticated user. *Future:* map from `op.effectiveUsers`/`op.users` (MongoDB 5.0+).
 - **`getIndexStats().indexType` only distinguishes `text` vs `btree`** — `hashed`, geospatial
   (`2dsphere`/`2d`), wildcard (`$**`), and clustered indexes are all reported as `btree`.
-- **The `unlimited` query option is ignored.** `prepareQuery()` always returns `limit:
-  options.limit || 100`; combined with the route's `hasMore = rows.length === prepared.limit`, an
-  "unlimited" request can report an incorrect `hasMore`.
+- **The `unlimited` query option is ignored, and a `find` the 100 cap cut is not marked.** `prepareQuery()` always returns `limit: options.limit || 100` with `wasLimited: false`, so an "unlimited" `find` is still capped at 100 documents.
+  The route then answers `hasMore: false` and `wasLimited: false`, so the result strip shows no "limited" badge for a result the cap cut ([§3.4](#34-find-is-capped-at-100-aggregate-is-not)).
 - **A folder's columns are SAMPLED, and the sample is bounded per collection.** `describeObjects`
   reads a whole container-and-kind folder in one `$unionWith` chain rather than one call per
   collection, chunked at `SAMPLE_CHUNK_SIZE = 100` collections per pipeline so a wide folder cannot
@@ -1153,4 +1177,4 @@ Over the API: `POST /api/db/query` (JSON MQL in the `sql` field) and `POST /api/
 - Errors: [`src/lib/db/errors.ts`](../../src/lib/db/errors.ts)
 - Tests: [`tests/integration/db/mongodb-provider.test.ts`](../../tests/integration/db/mongodb-provider.test.ts)
 - API contract: [`docs/API_DOCS.md`](../API_DOCS.md) · query format also in [`CLAUDE.md`](../../CLAUDE.md)
-- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [Apache Trino](./trino.md) · [Redis](./redis.md)
+- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [Trino](./trino.md) · [Redis](./redis.md)

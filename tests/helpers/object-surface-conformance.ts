@@ -1,7 +1,7 @@
 /**
  * The assertions every provider's object surface must satisfy, in one place.
  *
- * Six invariants, each of which a provider has a real way to get wrong:
+ * Eight invariants, each of which a provider has a real way to get wrong:
  *   1. every declared kind appears in countObjects, so a folder never silently vanishes;
  *   2. countObjects never answers for a kind the provider did not declare;
  *   3. every kind counted non-empty LISTS something, so no folder opens onto nothing;
@@ -9,7 +9,9 @@
  *   5. no two objects of ONE kind share a path, so that kind's folder can address each;
  *   6. describeObject accepts a path listObjects ACTUALLY PRODUCED, with its kind;
  *   7. describeObjects, where a provider declares it, describes objects listObjects NAMED,
- *      matched on path, and reports its own truncation when a bound bites.
+ *      matched on path, and reports its own truncation when a bound bites;
+ *   8. what describeObject answers agrees with the kind's own `hasColumns` DECLARATION, in
+ *      both directions, for an object listObjects produced.
  *
  * **Invariant 5 stops at the kind boundary, and that is a decision rather than an
  * oversight.** A tree row is identified by path PLUS kind id, not by path alone, which is
@@ -23,9 +25,15 @@
  *
  * Invariant 6 is exactly that and nothing more: a routine, a trigger and a sequence
  * legitimately have no columns, so an assertion that `columns` is non-empty would fail
- * correct providers for every kind that is not a relation.
+ * correct providers for every kind that is not a relation. That is HALF a rule, and the
+ * other half is invariant 8: the KIND's own `hasColumns` declaration says which kinds have
+ * columns, so the bar is per kind rather than universal and it runs BOTH ways - a kind that
+ * declares nothing must answer none, and a kind that declares columns must answer some.
+ * `role === "relation"` is not that declaration and cannot be: five `config` kinds in the
+ * fleet do have columns and one `sequence` declaration answers none while another answers
+ * three, measured per engine in section 2.1 of this issue's design.
  *
- * **Four vacuity guards, because this helper twice certified a provider that answered
+ * **Five vacuity guards, because this helper twice certified a provider that answered
  * nothing.** Measured the first time: a provider declaring `view`, reporting
  * `{view: {count: 4}}` and returning `[]` from `listObjects` passed every check, because
  * the path loop iterated zero times and `describeObject` was handed
@@ -40,7 +48,11 @@
  * the two kind loops also iterate zero times. Both guards are derived from emptiness
  * rather than pinned to a number: a helper that asserted "seven kinds" would have to be
  * edited for every engine and would then be asserting the engine's inventory rather than
- * this contract.
+ * this contract. The fifth is invariant 8's own, and it is the same hole one direction
+ * narrower: a provider that declares `hasColumns` on every kind it listed runs the negative
+ * direction zero times, so its expectation must SAY so with `noAbstainingKinds`, and an
+ * expectation that says so while a listed kind does abstain is refused in the other
+ * direction. Exactly three engines are the former (druid, mongodb, libredb).
  *
  * Invariant 4 replaced an assertion that `name` equals the last path segment. That is no
  * longer true and must not be: `DatabaseObject.path` addresses, `DatabaseObject.name`
@@ -48,17 +60,19 @@
  * displayed as `order_total`. Uniqueness is what the old assertion was reaching for and
  * is the thing a tree actually needs.
  *
- * Invariant 7 is skipped entirely for a provider that does not declare `describeObjects`,
- * which is sixteen of the seventeen while the bulk read lands one family at a time. What it
+ * Invariant 7 is skipped entirely for a provider that does not declare `describeObjects`. What it
  * asserts, and why each part of it is not vacuous, is in `assertBulkColumnRead()` below.
  *
- * Two further checks guard the caller rather than the provider. An expectation naming a
+ * Three further checks guard the caller rather than the provider. An expectation naming a
  * kind countObjects never answered for is reported by name. That is a caller-side
  * mistake, a kind id written into the expectation that this engine never declares, and
  * without the explicit throw it surfaces as `Cannot use 'in' operator ... in undefined`,
  * which names neither the kind nor the expectation. And a source-bearing kind the
  * expectation counts at ZERO must carry a reason in `emptyKinds`, because a zero is the one
- * count this contract reads nothing for: see that field's docblock.
+ * count this contract reads nothing for: see that field's docblock. And a `columnlessSamples`
+ * entry that excused nothing is reported by name, for the reason `assertNoStaleReason()`
+ * refuses a stale `emptyKinds` sentence: an exemption may not outlive the empty answer it was
+ * written about, or it goes on excusing a kind long after the provider stopped needing it.
  */
 import { expect } from "bun:test";
 import { QueryError } from "@/lib/db/errors";
@@ -67,6 +81,7 @@ import type {
   DatabaseObject,
   DatabaseProvider,
   KindCount,
+  ObjectDetail,
   ObjectDetailBatch,
   ObjectSourceDocument,
   ObjectSourcePart,
@@ -78,6 +93,7 @@ import {
   isCountUnavailable,
   isSourcePartUnavailable,
   kindAcceptsSourceEdits,
+  kindHasColumns,
   relationKindIds,
   sourceBoundTruncationReason,
 } from "@/lib/db/object-kinds";
@@ -171,6 +187,16 @@ export interface ObjectSurfaceExpectation {
    * a sentence cannot outlive the absence it was written about.
    */
   readonly emptyKinds?: Readonly<Record<string, string>>;
+  /** Declared-with-columns kinds whose sample legitimately answers none, each with the engine fact. */
+  readonly columnlessSamples?: Readonly<Record<string, string>>;
+  /**
+   * This provider declares `hasColumns` on EVERY kind it has, so invariant 8's negative loop
+   * iterates zero times. Stated rather than silent, because a loop that runs zero times certifies
+   * nothing and this helper has shipped that hole twice. True of exactly three engines: druid
+   * (`datasource`, `lookup`, `system_table`), mongodb (`collection`, `view`) and libredb
+   * (`table`, `collection`, `keyspace`).
+   */
+  readonly noAbstainingKinds?: true;
 }
 
 function startsWith(path: readonly string[], prefix: readonly string[]): boolean {
@@ -330,14 +356,17 @@ export async function assertObjectSurface(
   expect(detail.path).toEqual([...sample.path]);
 
   await assertBulkColumnRead(provider, container, listings);
+  // The answer just read is handed on rather than asked for again: it is the sample's kind
+  // described at the object THIS EXPECTATION chose, which is the strongest object of that
+  // kind to hold the declaration against, and a second read would probe a different one.
+  await assertColumnDeclarations(provider, expected, listings, { object: sample, detail });
   await assertSourceSurface(provider, expected, container, listings);
 }
 
 /**
  * The fifth method, checked against the provider's OWN listing (#789).
  *
- * Skipped entirely when the provider does not declare it, which is where sixteen of the
- * seventeen are while the bulk read lands one family at a time. That skip is the reason
+ * Skipped entirely when the provider does not declare it. That skip is the reason
  * every assertion below is written against `listings`: the only thing that makes this
  * block non-vacuous is that it compares two answers the provider gave, never one the test
  * author typed.
@@ -511,6 +540,129 @@ async function assertBulkColumnRead(
 }
 
 /**
+ * Invariant 8: the `hasColumns` DECLARATION against the provider's own answer, both ways (#789).
+ *
+ * The declaration is the only thing that can decide this, and `role === "relation"` is not it.
+ * MEASURED across every declared kind in the fleet, the disagreements run one way and there are
+ * five of them: PostgreSQL `sequence`, MariaDB `sequence`, ClickHouse `dictionary`, Cassandra
+ * `type` and Druid `lookup` are all `role: "config"` and all answer columns. Oracle's `sequence`
+ * is the case that settles it: the same kind id as PostgreSQL's, the opposite answer, because
+ * that provider gates on the role and PostgreSQL gates on `RELKIND_BY_KIND`. A rule written above
+ * the providers is wrong for at least one engine whichever way it is written, so the provider
+ * declares and this checks the declaration.
+ *
+ * Driven by the provider's OWN listing, for the reason every other read here is: the only thing
+ * that makes an assertion about a read non-vacuous is that it compares two answers the provider
+ * gave. Each kind is probed at ONE object - the sample for its own kind, the first listed object
+ * for every other - which is the same bar `assertSourceSurface` sets, and it is a bar on the KIND
+ * rather than on the object: a kind declaring columns whose every object is empty is the twisty
+ * that opens on nothing, and one empty object among many is a fixture fact that `columnlessSamples`
+ * is where to write down.
+ *
+ * Both fields of a column are checked, and NOT to the same bar, which is measured rather than
+ * tidy. `name` is checked for being a string AND for being non-empty, because the tree feeds
+ * `column.name` to `pathKey`, which calls `segment.replaceAll(...)`: a non-string name throws
+ * inside the WALK and unmounts the whole tree rather than failing one row. `type` is checked for
+ * being a string and NOTHING MORE, because an EMPTY declared type is a real answer and refusing
+ * it would fail a correct provider. Measured with `bun:sqlite` on the statements the shipped
+ * fixture holds: `pragma_table_xinfo` answers `type: ""` for every column of
+ * `CREATE VIRTUAL TABLE notes USING fts5(body)` (`docker/sqlite-init/01-object-fixture.sql`,
+ * mirrored in the libSQL fixture) and for the expression column of
+ * `CREATE VIEW ... AS SELECT id, total * 2 AS doubled`; Cassandra answers it too, mapping a UDT
+ * field whose position has no entry in `field_types` to `type: types[index] ?? ""`
+ * (`sql/cassandra/objects.ts`). The renderer agrees: `TreeRow` gates the type slot on
+ * `row.column.type !== ""` and draws an empty type as an honest blank. This arm refused all of
+ * it until the #789 review, and reached no fixture only because each kind is probed at ONE
+ * object: point `sampleObject` at `notes` and a CORRECT provider goes red, told to stop
+ * declaring the kind, which is the wrong repair.
+ *
+ * The fifth vacuity guard is here, and it is symmetric. A provider that declares `hasColumns` on
+ * every kind it listed runs the negative direction zero times, which certifies nothing, so its
+ * expectation must SAY so with `noAbstainingKinds`; and an expectation that says so while a listed
+ * kind does abstain is refused in the other direction, so the field cannot be used to silence the
+ * first refusal. Exactly three engines are the former on the day this lands.
+ */
+async function assertColumnDeclarations(
+  provider: DatabaseProvider,
+  expected: ObjectSurfaceExpectation,
+  listings: ReadonlyMap<string, DatabaseObject[]>,
+  sampled: { readonly object: DatabaseObject; readonly detail: ObjectDetail },
+): Promise<void> {
+  const capabilities = provider.getCapabilities();
+  const exempt = expected.columnlessSamples ?? {};
+  const excused = new Set<string>();
+  const abstained: string[] = [];
+
+  for (const [kindId, objects] of listings) {
+    const isSampleKind = kindId === expected.sampleObject.kind;
+    const object = isSampleKind ? sampled.object : objects[0];
+    const detail = isSampleKind ? sampled.detail : await provider.describeObject!(object.path, kindId);
+
+    if (!kindHasColumns(findKind(capabilities, kindId))) {
+      abstained.push(kindId);
+      if (detail.columns.length > 0) {
+        throw new Error(
+          `kind "${kindId}" declares no hasColumns and describeObject answered ${detail.columns.length} column(s) ` +
+            `for ${JSON.stringify(object.path)}; an object of a kind that declares nothing is a LEAF in the tree, ` +
+            "so those columns reach no reader at all - declare hasColumns on the kind, or stop answering columns",
+        );
+      }
+      continue;
+    }
+
+    if (detail.columns.length === 0) {
+      if (!Object.hasOwn(exempt, kindId)) {
+        throw new Error(
+          `kind "${kindId}" declares hasColumns and describeObject answered no column for ` +
+            `${JSON.stringify(object.path)}, which listObjects produced, so the twisty this declaration draws ` +
+            `opens on nothing; name it in columnlessSamples["${kindId}"] with the engine fact that makes an empty ` +
+            "answer legal, or stop declaring it",
+        );
+      }
+      excused.add(kindId);
+      continue;
+    }
+
+    for (const column of detail.columns) {
+      if (typeof column.name !== "string" || column.name.trim() === "") {
+        throw new Error(
+          `kind "${kindId}" answered a column with no name a reader can be shown for ` +
+            `${JSON.stringify(object.path)}: ${JSON.stringify(column.name)}`,
+        );
+      }
+      if (typeof column.type !== "string") {
+        throw new Error(
+          `kind "${kindId}" answered a column with no type a reader can be shown for ` +
+            `${JSON.stringify(object.path)}, column "${column.name}": ${JSON.stringify(column.type)}`,
+        );
+      }
+    }
+  }
+
+  if (abstained.length === 0 && expected.noAbstainingKinds !== true) {
+    throw new Error(
+      `${provider.type} listed no kind that abstains from hasColumns, so the negative direction of invariant 8 ran ` +
+        "zero times and certifies nothing; set noAbstainingKinds if every kind this engine has really declares " +
+        "columns, which is true of druid, mongodb and libredb and of nothing else",
+    );
+  }
+  if (abstained.length > 0 && expected.noAbstainingKinds === true) {
+    throw new Error(
+      `the expectation sets noAbstainingKinds and the listed kind(s) ${abstained.join(", ")} declare no hasColumns, ` +
+        "so the field states a fact this provider's own declarations contradict",
+    );
+  }
+  for (const id of Object.keys(exempt)) {
+    if (!excused.has(id)) {
+      throw new Error(
+        `columnlessSamples names "${id}", which excused nothing: that kind either answered a column or was never ` +
+          "listed here, so the sentence describes no absence",
+      );
+    }
+  }
+}
+
+/**
  * The strings a reason may NOT be, refused by name rather than only described.
  *
  * A docblock that enumerates forbidden words while the code accepts them is the weaker half
@@ -554,8 +706,8 @@ function assertNoStaleReason(reasons: Readonly<Record<string, string>>, zeroed: 
  *
  * The zero-iteration case of each loop is what the throws guard:
  *
- *   - the PAIRING is outside every loop, so the fifteen providers that implement nothing are
- *     certified exactly as strongly as the two that implement something: `false === false` is
+ *   - the PAIRING is outside every loop, so the providers that implement nothing are
+ *     certified exactly as strongly as the ones that implement something: `false === false` is
  *     an assertion too, and it is the only thing standing between a declaration and a method
  *     that disagree;
  *   - a source-bearing kind the expectation never NAMES is refused by name, one notch narrower
@@ -593,15 +745,15 @@ async function assertSourceSurface(
   }
 
   // The edit pairing, unconditional and outside every loop, exactly as the source pairing above
-  // it is written. There is NO loop here, and that is the point: it certifies the pairing for all
-  // seventeen providers INCLUDING the fourteen that declare no editable kind, which is the
+  // it is written. There is NO loop here, and that is the point: it certifies the pairing for every
+  // provider INCLUDING the ones that declare no editable kind, which is the
   // population a loop over editable kinds cannot reach. A build with no apply is a mandatory
   // preview with nothing behind it; an apply with no build is ruling 1a violated (#789 Phase 3).
   // THROUGH `kindAcceptsSourceEdits()` and never `kind.acceptsSourceEdits === true` inline: that
   // function is the single reader of the field, its own docblock says so, and a later phase that
   // changes the derivation (the way `kindAcceptsRowWrites` sits next to `supportsInlineRowEdit`)
   // would otherwise move every provider and every route while this helper kept the old semantics
-  // for all seventeen suites (#789 Phase 3).
+  // for every provider's suite (#789 Phase 3).
   const editableKinds = declaredKinds(capabilities).filter((kind) => kindAcceptsSourceEdits(capabilities, kind.id));
   // `typeof` and never `"buildObjectEdit" in provider`: the property is optional on the
   // interface, so an `in` test walks the prototype chain and would answer true for anything the

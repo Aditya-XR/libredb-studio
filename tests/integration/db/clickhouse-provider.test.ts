@@ -32,6 +32,7 @@ import {
 import type { DatabaseProvider, ObjectSourceDocument } from "@/lib/db/types";
 import type { DatabaseConnection, DatabaseType } from "@/lib/types";
 import { ClickHouseProvider } from "@/lib/db/providers/sql/clickhouse";
+import { generateTableQuery } from "@/lib/query-generators";
 import { CLICKHOUSE_CONTAINER_LEVELS, CLICKHOUSE_OBJECT_KINDS } from "@/lib/db/providers/sql/clickhouse/objects";
 import { maintenanceControl } from "@/lib/db/types";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
@@ -438,6 +439,10 @@ describe("ClickHouseProvider metadata", () => {
       supportsExternalQueryLimiting: true,
       supportsCreateTable: false,
       supportsInlineRowEdit: false,
+      // `LIMIT n OFFSET m` from the shared limiter (#816). A statement ending in
+      // `FORMAT` or `SETTINGS` comes back `wasLimited: false`, and the route's
+      // `hasMore` requires that, so those offer no Load More without a type branch.
+      supportsResultPagination: true,
       supportsTransactions: false,
       declaresForeignKeys: false,
       supportsMaintenance: true,
@@ -454,6 +459,7 @@ describe("ClickHouseProvider metadata", () => {
       // #789. Asserted in full in the `object surface` block below; repeated here only
       // so this exhaustive comparison stays exhaustive.
       containerLevels: CLICKHOUSE_CONTAINER_LEVELS,
+      containerPathShapes: "exact",
       objectKinds: CLICKHOUSE_OBJECT_KINDS,
       schemaRefreshPattern: "\\b(CREATE|DROP|ALTER|RENAME|TRUNCATE|ATTACH|DETACH)\\b",
     });
@@ -949,6 +955,37 @@ describe("ClickHouseProvider query preparation", () => {
     expect(prepared.query).toBe(sql);
     expect(prepared.wasLimited).toBe(false);
     expect(prepared.limit).toBe(25);
+  });
+
+  /**
+   * WHERE ISSUE #264's HAZARD WENT (#816).
+   *
+   * The generator used to write `SELECT * FROM events LIMIT 50;` and a test in
+   * `tests/unit/lib/query-generators.test.ts` pinned that bound as the LAST clause,
+   * because `... FORMAT TSV LIMIT 1` is a hard syntax error. #816 removed the generated
+   * bound, so that guard had nothing left to guard, and the hazard now lives here: the
+   * preview is `SELECT * FROM events;`, and a user who appends `FORMAT TSV` to it makes a
+   * statement the limiter DECLINES to rewrite at any offset.
+   *
+   * Two consequences, both deliberate and both asserted below. The statement runs with no
+   * row bound at all, which on a large table costs more than it used to. And because it
+   * comes back `wasLimited: false`, the route's `hasMore` is false whatever the row count,
+   * so no Load More is offered for a statement that would answer every click with page
+   * one. The second is the point of the change; the first is its price.
+   */
+  test("the generated preview plus a user FORMAT clause runs unbounded and cannot be paged", () => {
+    const generated = generateTableQuery(["events"], provider().getCapabilities());
+    expect(generated).toBe("SELECT * FROM events;");
+
+    const edited = "SELECT * FROM events FORMAT TSV";
+    for (const offset of [0, 50]) {
+      const prepared = provider().prepareQuery(edited, { limit: 50, offset });
+
+      expect(prepared.query).toBe(edited);
+      // No bound reached the engine, and the limiter says so. `hasMore` requires
+      // `wasLimited`, so the grid offers nothing to click.
+      expect(prepared.wasLimited).toBe(false);
+    }
   });
 
   test.each([
@@ -1497,6 +1534,76 @@ describe("ClickHouseProvider maintenance", () => {
     expect(sqlWith("OPTIMIZE")).toBe('OPTIMIZE TABLE "demo"."we""ird" FINAL');
   });
 
+  // #772: `schemaName` is the DATABASE on ClickHouse, so a container replaces the split of
+  // the name rather than being recovered from it - which is the ambiguity that matters for a
+  // name containing a dot.
+  test("a container is the database outright, and the name is not split", async () => {
+    const provider = await connectProvider();
+
+    await provider.runMaintenance("optimize", "audit", "default");
+
+    expect(sqlWith("OPTIMIZE")).toBe('OPTIMIZE TABLE "default"."audit" FINAL');
+  });
+
+  test("a container is used whole even when it contains a dot", async () => {
+    const provider = await connectProvider();
+
+    await provider.runMaintenance("optimize", "audit", "my.db");
+
+    expect(sqlWith("OPTIMIZE")).toBe('OPTIMIZE TABLE "my.db"."audit" FINAL');
+  });
+
+  test("a bare target with no container keeps the pinned-database reading", async () => {
+    const provider = await connectProvider();
+
+    await provider.runMaintenance("optimize", "users");
+
+    expect(sqlWith("OPTIMIZE")).toBe('OPTIMIZE TABLE "demo"."users" FINAL');
+  });
+
+  // 3c. escapeIdentifier() dialect override (#1091 review)
+  //
+  // A backslash inside a quoted identifier is processed as an ESCAPE on this engine, so the
+  // inherited escaper - which doubles only the quote character - let a name ENDING in a backslash
+  // swallow its own closing quote and the rest of the statement was reparsed around it. The
+  // override escapes the backslash first, the order `literal()` in objects.ts uses.
+  test("escapeIdentifier doubles a backslash as well as the quote", () => {
+    const provider = new ClickHouseProvider(makeConnection());
+
+    const escape = (identifier: string) =>
+      (provider as unknown as { escapeIdentifier(identifier: string): string }).escapeIdentifier(identifier);
+
+    expect(escape("users")).toBe('"users"');
+    expect(escape('we"ird')).toBe('"we""ird"');
+    // The trailing backslash is the whole point: a run-based escaper that only doubles a
+    // backslash with a character after it leaves this one swallowing the closing quote.
+    expect(escape("x\\")).toBe('"x\\\\"');
+    expect(escape('a\\"b')).toBe('"a\\\\""b"');
+  });
+
+  test("a target ending in a backslash keeps its closing quote", async () => {
+    const provider = await connectProvider();
+
+    await provider.runMaintenance("optimize", "bs_one\\");
+
+    expect(sqlWith("OPTIMIZE")).toBe('OPTIMIZE TABLE "demo"."bs_one\\\\" FINAL');
+  });
+
+  test("a container ending in a backslash cannot swallow the quote that closes it", async () => {
+    // The request from the review: container `x\` with a target that reads as trailing clauses.
+    // Emitted through the inherited escaper, the container's closing quote was consumed by the
+    // backslash and the target became part of the identifier rather than a second segment.
+    const provider = await connectProvider();
+
+    await provider.runMaintenance("optimize", ".t FINAL SETTINGS optimize_throw_if_noop = 1 --", "x\\");
+
+    const sent = sqlWith("OPTIMIZE");
+    expect(sent).toBe('OPTIMIZE TABLE "x\\\\".".t FINAL SETTINGS optimize_throw_if_noop = 1 --" FINAL');
+    // The naive spelling - one backslash, so the quote after it is escaped rather than closing -
+    // is what the override exists to prevent.
+    expect(sent).not.toContain('"x\\".');
+  });
+
   test("analyze reports the part statistics ClickHouse keeps instead of computing new ones", async () => {
     // There is no ANALYZE: a MergeTree's statistics are its parts, and they are
     // always current. Reporting them is the honest equivalent of the operation.
@@ -1931,6 +2038,57 @@ describe("object surface", () => {
         .map((kind) => kind.id)
         .sort(),
     ).toEqual([]);
+    await provider.disconnect();
+  });
+
+  test("declares columns on exactly the four kinds a catalog describes, and the engine agrees", async () => {
+    // The declaration is NOT `role === "relation"` here, and this engine is one of the five
+    // cases in the fleet that refute the role: a dictionary is `role: "config"` and still
+    // answers its structure, out of `system.dictionaries` (#789, and `describeDictionary()`
+    // in `clickhouse/objects.ts` carries the measurement). A function is the other side:
+    // `CLICKHOUSE_OBJECT_CATALOGS` has no entry a column could come from, so it answers
+    // three empty arrays without a round trip and must declare nothing.
+    installObjectReplies();
+    const provider = await connectProvider({ database: OBJECT_DATABASE });
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["dictionary", "materialized_view", "table", "view"]);
+    // The other direction, so a kind added later cannot quietly gain a twisty. Absent is
+    // the abstention, and `false` is not written anywhere: `kindHasColumns` reads both the
+    // same way and one spelling keeps the census readable.
+    expect(kinds.filter((kind) => kind.hasColumns !== true).map((kind) => kind.id)).toEqual(["function"]);
+    expect(kinds.every((kind) => kind.hasColumns !== false)).toBe(true);
+
+    // Each declaration against the engine's own answer, at one object per kind, because a
+    // declaration checked against a transcription is checked against nothing. Both fields
+    // are asserted: the tree feeds `column.name` to `pathKey`, which calls `replaceAll` on
+    // it, and splits `column.type` in the row.
+    const samples = [
+      { kind: "table", name: "events" },
+      { kind: "view", name: "events_view" },
+      { kind: "materialized_view", name: "mv_to" },
+      { kind: "dictionary", name: "dict_users" },
+    ] as const;
+    for (const sample of samples) {
+      const detail = await provider.describeObject([OBJECT_DATABASE, sample.name], sample.kind);
+      expect(detail.columns.length).toBeGreaterThan(0);
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name.trim()).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(column.type.trim()).not.toBe("");
+      }
+    }
+
+    // The abstaining kind, from the same provider, so the negative direction is a read and
+    // not an omission.
+    const fn = await provider.describeObject([OBJECT_DATABASE, "probe_double"], "function");
+    expect(fn.columns).toEqual([]);
     await provider.disconnect();
   });
 

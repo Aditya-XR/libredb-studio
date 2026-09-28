@@ -263,5 +263,6 @@ export function offersRefusalExamples(modelId: string): boolean {
 export function samplingFor(modelId: string, workflow: AgentRunWorkflowType | undefined): AgentSampling {
   const own = entryFor(modelId);
   const ownSurface = workflow === undefined ? undefined : own?.perWorkflow?.[workflow];
-  return { ...DEFAULT_SAMPLING, ...own?.sampling, ...ownSurface };
+  const base = own?.sampling ?? DEFAULT_SAMPLING;
+  return ownSurface ? { ...base, ...ownSurface } : base;
 }

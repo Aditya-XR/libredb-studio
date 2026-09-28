@@ -37,6 +37,12 @@ async function main(): Promise<void> {
     driverEnv: process.env.LIBREDB_SQLITE_DRIVER ?? null,
   };
 
+  if (process.argv[3] === "unwritable") {
+    await unwritableFileScenario(config, report);
+    console.log(JSON.stringify(report));
+    return;
+  }
+
   const provider = new SQLiteProvider(config);
 
   // Connect
@@ -66,6 +72,58 @@ async function main(): Promise<void> {
 
   const del = await provider.query("DELETE FROM users WHERE id = ?", [2]);
   report.deleteRowCount = del.rowCount;
+
+  // 64-bit ids. With node:sqlite's defaults this read threw ERR_OUT_OF_RANGE
+  // outright, where bun:sqlite silently answered the NEIGHBOURING row's id; both
+  // drivers now read them as BigInt and the driver seam converts them back the same
+  // way. Read here against the real node:sqlite build, because an in-process bun run
+  // can prove nothing about it.
+  await provider.query("CREATE TABLE big (id INTEGER PRIMARY KEY, label TEXT)");
+  await provider.query("INSERT INTO big (id, label) VALUES (9007199254740992, 'neighbour')");
+  await provider.query("INSERT INTO big (id, label) VALUES (9007199254740993, 'target')");
+  const bigRows = (await provider.query("SELECT id, label FROM big ORDER BY id")).rows as Record<string, unknown>[];
+  report.bigIds = bigRows.map((row) => String(row.id));
+  report.bigIdTypes = bigRows.map((row) => typeof row.id);
+  // The inline editor's round trip: the id that was read is the UPDATE key.
+  const bigTarget = bigRows.find((row) => row.label === "target")!;
+  await provider.query("UPDATE big SET label = 'edited' WHERE id = ?", [bigTarget.id]);
+  report.bigRowsAfterUpdate = (await provider.query("SELECT id, label FROM big ORDER BY id")).rows;
+  // Ordinary integers must stay ordinary numbers despite the all-or-nothing driver flag.
+  report.bigSmallInteger = (await provider.query("SELECT 1 AS one")).rows;
+  report.bigCount = (await provider.query("SELECT COUNT(*) AS count FROM big")).rows;
+  await provider.query("DROP TABLE big");
+
+  // The same round trip on a column with NO affinity and on a BLOB one. SQLite
+  // compares those operands as they stand, so the decimal string the read prints used to
+  // match NOTHING and the row could not be edited at all. Read here against the real
+  // node:sqlite build, because the bind is the driver's own call and an in-process bun
+  // run can prove nothing about it.
+  const roundTripOn = async (ddl: string): Promise<Record<string, unknown>> => {
+    await provider.query(ddl);
+    await provider.query("INSERT INTO na VALUES (9007199254740992, 'neighbour')");
+    await provider.query("INSERT INTO na VALUES (9007199254740993, 'target')");
+    const read = (await provider.query("SELECT id, label FROM na ORDER BY id")).rows as Record<string, unknown>[];
+    const target = read.find((row) => row.label === "target")!;
+    const edit = await provider.query("UPDATE na SET label = 'edited' WHERE id = ?", [target.id]);
+    const after = (await provider.query("SELECT id, label FROM na ORDER BY id")).rows;
+    await provider.query("DROP TABLE na");
+    return { read: read.map((row) => String(row.id)), rowCount: edit.rowCount, after };
+  };
+  report.noAffinityRoundTrip = {
+    none: await roundTripOn("CREATE TABLE na (id, label TEXT)"),
+    blob: await roundTripOn("CREATE TABLE na (id BLOB, label TEXT)"),
+  };
+
+  // A genuinely textual all-digit key, including one with a leading zero, is still text.
+  await provider.query("CREATE TABLE tk (id TEXT PRIMARY KEY, label TEXT)");
+  await provider.query("INSERT INTO tk VALUES ('9007199254740993', 'wide')");
+  await provider.query("INSERT INTO tk VALUES ('007', 'bond')");
+  report.textKeyKinds = (await provider.query("SELECT id, typeof(id) AS kind FROM tk ORDER BY id")).rows;
+  report.textKeyMatches = [
+    (await provider.query("UPDATE tk SET label = 'edited' WHERE id = ?", ["9007199254740993"])).rowCount,
+    (await provider.query("UPDATE tk SET label = 'edited' WHERE id = ?", ["007"])).rowCount,
+  ];
+  await provider.query("DROP TABLE tk");
 
   // Object introspection, through the one surface that reads a SQLite file's objects.
   const listed = await provider.listObjects([], "table");
@@ -261,6 +319,32 @@ async function runAgentReadOnlyProfile(dbPath: string, report: Record<string, un
   );
   report.agentMissingDirOpenRejected = await rejects(() => missingDirProvider.connect());
   report.agentMissingDirCreated = existsSync(missingDir);
+}
+
+/**
+ * The editor path against a file this process cannot write (mode 0444 in a 0555 directory,
+ * prepared by the test): it opens read-only, reads, and a write fails with the provider's
+ * read-only message.
+ */
+async function unwritableFileScenario(config: DatabaseConnection, report: Record<string, unknown>): Promise<void> {
+  const provider = new SQLiteProvider(config);
+  await provider.connect();
+  try {
+    report.connected = provider.isConnected();
+    const health = await provider.getHealth();
+    report.integrity = health.slowQueries.find((sq) => sq.query.includes("Integrity"))?.query;
+    report.journalMode = (await provider.query("PRAGMA journal_mode")).rows;
+    report.tables = (await provider.listObjects([], "table")).map((object) => object.name);
+    report.count = (await provider.query("SELECT COUNT(*) AS n FROM orders")).rows;
+    try {
+      await provider.query("INSERT INTO orders VALUES (4, 'dee', 1)");
+      report.insertError = null;
+    } catch (error) {
+      report.insertError = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    }
+  } finally {
+    await provider.disconnect();
+  }
 }
 
 /** True when the thunk rejects; false when it resolves. */

@@ -30,7 +30,6 @@
 import type {
   ColumnSchema,
   Container,
-  ContainerLevelSpec,
   DatabaseObject,
   ForeignKeySchema,
   IndexSchema,
@@ -44,15 +43,31 @@ import type {
 import { QueryError } from "@/lib/db/errors";
 import {
   applySourceBound,
+  assertContainerPathShape,
+  assertObjectPathShape,
   callerBoundTruncationReason,
-  containerDepth,
   declaredKinds,
   findKind,
   requireSourceKind,
+  type ContainerPathShapeEngine,
+  type ObjectPathShapeEngine,
 } from "@/lib/db/object-kinds";
 import { comparePaths } from "@/lib/db/object-path";
+import { unquoteLiteral } from "@/lib/sql/values";
 import { readNumber, readText } from "./introspect";
 import type { LibSQLBatchOutcome, LibSQLRow, LibSQLStatement, LibSQLTransport } from "./transport";
+
+/**
+ * libSQL's identity for the shared container-path renderer.
+ *
+ * Which paths this engine accepts is not a field here: it is `containerPathShapes` in
+ * `getCapabilities()` (`./index.ts`), which the object routes read too (#1147).
+ */
+const LIBSQL_CONTAINER_PATH_ENGINE: ContainerPathShapeEngine = {
+  code: "libsql",
+  label: "A libSQL",
+  shapeNames: "label",
+};
 
 // ============================================================================
 // The one schema, and the statements that read it
@@ -367,10 +382,26 @@ const BULK_DETAIL_SQL_BOUNDED: Readonly<Record<string, BulkDetailStatements>> = 
 const SOURCE_SQL: Pick<ObjectKindSpec, "hasSource" | "sourceLanguage"> = { hasSource: true, sourceLanguage: "sql" };
 
 export const LIBSQL_OBJECT_KINDS: readonly ObjectKindSpec[] = [
-  { id: "table", role: "relation", label: "Table", labelPlural: "Tables", acceptsRowWrites: true, ...SOURCE_SQL },
+  // `hasColumns` is written on the two relation kinds and nowhere else, which is exactly
+  // what `describeLibSQLObject` answers: it returns three empty arrays for any kind whose
+  // role is not `relation` (see its gate below), so an index row and a trigger row would
+  // draw a twisty that opens on nothing. It is written literally rather than derived from
+  // the role, because the role is not the general rule - a MariaDB sequence is declared
+  // `config` and has real columns - and the literal is checked against this engine's own
+  // answer by invariant 8 of the object-surface contract rather than against a
+  // transcription (#789).
+  {
+    id: "table",
+    role: "relation",
+    label: "Table",
+    labelPlural: "Tables",
+    acceptsRowWrites: true,
+    hasColumns: true,
+    ...SOURCE_SQL,
+  },
   // No `acceptsRowWrites`. A write to a view is refused outright unless an INSTEAD OF
   // trigger carries it, which is a per-OBJECT fact a per-kind declaration cannot state.
-  { id: "view", role: "relation", label: "View", labelPlural: "Views", ...SOURCE_SQL },
+  { id: "view", role: "relation", label: "View", labelPlural: "Views", hasColumns: true, ...SOURCE_SQL },
   { id: "index", role: "config", label: "Index", labelPlural: "Indexes", ...SOURCE_SQL },
   { id: "trigger", role: "attached", label: "Trigger", labelPlural: "Triggers", attachedTo: "table", ...SOURCE_SQL },
 ];
@@ -378,21 +409,6 @@ export const LIBSQL_OBJECT_KINDS: readonly ObjectKindSpec[] = [
 // ============================================================================
 // Pure derivations
 // ============================================================================
-
-/**
- * The container levels this provider declares, sliced to the depth `containerDepth()`
- * reports.
- *
- * One reader for the whole file, so the depth and the level list can never be taken by two
- * different rules. `containerDepth()` is what decides, never `containerLevels.length`:
- * absent and empty are the same fact, and two callers reading the field by different rules
- * is how the tree and the API route came to disagree about one engine.
- *
- * On libSQL this answers the empty array, which is the engine and not a degenerate case.
- */
-function declaredLevels(capabilities: ProviderCapabilities): readonly ContainerLevelSpec[] {
-  return (capabilities.containerLevels ?? []).slice(0, containerDepth(capabilities));
-}
 
 /**
  * Refuses a container path that is not the shape the DECLARATION describes.
@@ -408,37 +424,17 @@ function declaredLevels(capabilities: ProviderCapabilities): readonly ContainerL
  * like a database holding nothing is the worst way to report that.
  */
 function assertContainerPath(capabilities: ProviderCapabilities, container: readonly string[]): void {
-  const levels = declaredLevels(capabilities);
-  if (container.length === levels.length) return;
-  const shape = levels.length === 0 ? "empty" : `[${levels.map((level) => level.label.toLowerCase()).join(", ")}]`;
-  throw new QueryError(`A libSQL container path is ${shape}, received ${JSON.stringify(container)}`, "libsql");
+  assertContainerPathShape(capabilities, container, LIBSQL_CONTAINER_PATH_ENGINE);
 }
 
 /**
- * Refuses a path no shape of this kind admits, naming the shape it does admit.
- *
- * ONE writer for two readers since #789 Phase 2. `describeLibSQLObject` and
- * `readLibSQLObjectSource` ask the same question about the same path, and two copies of this
- * derivation are two chances for the detail pane and the Source tab to disagree about what a
- * trigger's address is.
- *
- * Derived, never counted. The depth comes from `containerDepth()` through `declaredLevels()`,
- * so absent and empty cannot be answered differently here than anywhere else, and the segment
- * NAMES are the declared level labels, so the message and the check are the same array. There
- * is ONE shape per kind rather than MySQL's two, because every trigger on this engine has a
- * parent: `sqlite_schema.tbl_name` is never null for one.
+ * libSQL: an attached kind requires its parent segment, so the error names one shape.
  */
-function assertObjectPathShape(
-  capabilities: ProviderCapabilities,
-  spec: ObjectKindSpec,
-  kind: string,
-  path: readonly string[],
-): void {
-  const levels = declaredLevels(capabilities).map((level) => level.label.toLowerCase());
-  const shape = spec.attachedTo === undefined ? [...levels, "name"] : [...levels, spec.attachedTo, "name"];
-  if (path.length === shape.length) return;
-  throw new QueryError(`A libSQL "${kind}" path is [${shape.join(", ")}], received ${JSON.stringify(path)}`, "libsql");
-}
+const PATH_SHAPE_ENGINE: ObjectPathShapeEngine = {
+  code: "libsql",
+  label: "A libSQL",
+  attachedSegment: "required",
+};
 
 /**
  * Every declared kind seeded at zero, before any row is read.
@@ -664,6 +660,19 @@ export async function listLibSQLObjects(
     .sort((left, right) => comparePaths(left.path, right.path));
 }
 
+/**
+ * The VALUE a column defaults to, read out of the catalog text (#1029). libSQL reports a
+ * default as the expression AS WRITTEN, so a string default arrives as the quoted literal
+ * `'abc'`. `unquoteLiteral` decodes exactly one complete literal with this dialect's
+ * escaping and answers `undefined` for anything else, which is what lets a number such as
+ * `42` or an expression such as `CURRENT_TIMESTAMP` through unchanged. The text itself is
+ * kept alongside as `defaultExpression`, because once decoded this is no longer something
+ * that can be pasted after the word DEFAULT.
+ */
+function readCatalogDefault(raw: string | null | undefined): string | undefined {
+  return raw === null || raw === undefined ? undefined : (unquoteLiteral(raw, "libsql") ?? raw);
+}
+
 /** One column of an object, as `pragma_table_xinfo` publishes it. */
 function toColumn(row: LibSQLRow, sql: string): ColumnSchema {
   const defaultValue = row.dflt_value;
@@ -679,7 +688,9 @@ function toColumn(row: LibSQLRow, sql: string): ColumnSchema {
     // `=== 1` reports the second key column as ordinary. Measured on
     // `PRIMARY KEY (region, year)`.
     isPrimary: (readNumber(row.pk) ?? 0) > 0,
-    ...(defaultValue === null || defaultValue === undefined ? {} : { defaultValue: String(defaultValue) }),
+    ...(defaultValue === null || defaultValue === undefined
+      ? {}
+      : { defaultValue: readCatalogDefault(String(defaultValue)), defaultExpression: String(defaultValue) }),
   };
 }
 
@@ -779,7 +790,7 @@ export async function describeLibSQLObject(
     throw new QueryError(`libSQL declares no object kind "${kind}"`, "libsql");
   }
 
-  assertObjectPathShape(reader.capabilities, spec, kind, path);
+  assertObjectPathShape(reader.capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
 
   if (spec.role !== "relation") {
     return { path: [...path], columns: [], indexes: [], foreignKeys: [] };
@@ -1106,7 +1117,7 @@ export async function readLibSQLObjectSource(
   limit?: number,
 ): Promise<ObjectSourceDocument> {
   const spec = requireSourceKind(reader.capabilities, kind, { displayName: "libSQL", type: "libsql" });
-  assertObjectPathShape(reader.capabilities, spec, kind, path);
+  assertObjectPathShape(reader.capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
   if (!Object.hasOwn(SOURCE_CATALOG_TYPES, kind)) {
     throw new QueryError(
       `libSQL declares readable source for the kind "${kind}" but has no catalog type that reads it`,

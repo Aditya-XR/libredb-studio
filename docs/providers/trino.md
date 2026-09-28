@@ -1,11 +1,13 @@
-# Apache Trino Provider
+# Trino Provider
 
-> Apache Trino support for LibreDB Studio, built on Trino's own client protocol (`POST /v1/statement`,
+> Trino support for LibreDB Studio, built on Trino's own client protocol (`POST /v1/statement`,
 > port `8080`) with **no driver dependency of any kind**: every statement is the body of an HTTP
 > request and the answer is read by following a chain of `nextUri` links through the runtime's own
 > `fetch`. This document is the single reference point for the Trino provider: design, architecture,
 > usage, and tests. If you are reading the code, extending Trino support, adding PrestoDB, or
 > authoring a new provider over HTTP, start here.
+
+`DB_HTTP_BLOCK_PRIVATE_HOSTS=true` blocks loopback, private, link-local and other non-public HTTP destinations; it is off by default so local connections work.
 
 | | |
 |---|---|
@@ -22,7 +24,7 @@
 | **Transactions** | Not exposed |
 | **Maintenance** | `kill` only, via `CALL system.runtime.kill_query` ([§8](#8-maintenance)) |
 | **Query cancellation** | Yes — `cancelQuery()` over `DELETE /v1/query/{id}` ([§3.7](#37-abandoning-a-request-does-not-stop-the-work)) |
-| **Verified against** | **Apache Trino 476**, the official `trinodb/trino:476` image with authentication disabled, catalogs `tpch` / `tpcds` / `memory` / `system` / `jmx`; schema tree read against `tpch`, statistics against `tpch.tiny`. Measured 2026-08-20 |
+| **Verified against** | **Trino 476**, the official `trinodb/trino:476` image with authentication disabled, catalogs `tpch` / `tpcds` / `memory` / `system` / `jmx`; schema tree read against `tpch`, statistics against `tpch.tiny`. Measured 2026-08-20 |
 | **Source** | [`src/lib/db/providers/sql/trino/`](../../src/lib/db/providers/sql/trino/) |
 | **Tests** | [`tests/integration/db/trino-provider.test.ts`](../../tests/integration/db/trino-provider.test.ts) + [`tests/unit/db/trino/`](../../tests/unit/db/trino/) + [`tests/unit/lib/explain/trino-json.test.ts`](../../tests/unit/lib/explain/trino-json.test.ts) + [`e2e/trino-provider.spec.ts`](../../e2e/trino-provider.spec.ts) |
 | **Tracking issue** | [#424 — Wire-compatibility and new engines](https://github.com/libredb/libredb-studio/issues/424), Phase 2 |
@@ -318,6 +320,7 @@ What that produces, deliberately and consistently:
 | `ColumnSchema.isPrimary` | `false` | No key is declared for any column |
 | `declaresForeignKeys` | `false` | So the ER diagram draws boxes and no edges *as the engine's answer*, not as a schema that happens to be empty (#414) |
 | `supportsInlineRowEdit` | `false` | The inline editor builds `UPDATE … WHERE <pk> = <val>`. With no column that identifies one row, an edit would silently rewrite every row that matches, so the control is not offered |
+| `supportsResultPagination` | `true` | `OFFSET m LIMIT n` — Trino refuses the clauses in the other order, so this provider transposes what the shared limiter emitted ([§3.5](#35-offset-comes-before-limit)) (#816) |
 | `DatabaseOverview.indexCount` | `0` | — |
 
 ### 3.9 The bytes are somewhere else, so the size panels say so
@@ -527,6 +530,36 @@ listening.
 authentication disabled ([§3.6](#36-a-password-is-a-tls-only-credential)). A password on a plain-HTTP
 connection is refused by the transport constructor rather than sent and 401'd.
 
+
+### 4.4 Endpoint validation and redirects
+
+`host` and `port` are validated when the transport is constructed, which happens in `connect()`, so
+a bad value fails Test Connection and never a capability read. A host must be a hostname, an IPv4
+address or an IPv6 address (bracketed or not), and a port must be an integer from 1 to 65535.
+Anything else is a `DatabaseConfigError` that names the field and does not repeat the value.
+Every request URL is built by the shared [`endpoint.ts`](../../src/lib/db/http/endpoint.ts) with
+`URL` and `URLSearchParams` and checked against the intended hostname, port and path before it is
+sent, so no value can move a request to another path or another server. A scheme's default port
+(80 for `http`, 443 for `https`) is left out of the URL the way `URL` serializes it.
+
+Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx answer becomes a
+`ConnectionError` naming the status and only the origin of its `Location`, since a followed
+redirect would take the Basic credential and the statement to wherever the server pointed.
+
+Two things differ from the other HTTP transports. The constructor runs inside `connect()`'s guard
+(it also refuses a password over plain HTTP, [§3.6](#36-a-password-is-a-tls-only-credential)), so a
+refused host or port arrives wrapped in the connect failure, `Failed to connect to Trino: Invalid
+host: ...`. And the transport follows links the coordinator hands back, so those links are held to
+the connection's own origin (#1087). Before a `nextUri` is requested, its scheme, host and port are
+compared with the configured ones as parsed origins, so `[::1]` against `[0:0:0:0:0:0:0:1]` and a
+default port left out of the URL compare equal. A link on another origin is refused with a
+`ConnectionError` naming only the two origins, never the path (which carries the query id and a
+continuation slug), and the statement is cancelled on the configured coordinator the way every
+other abandoned loop is. Measured against Trino 476, the coordinator builds `nextUri` from the
+request's own `Host` header, so a direct connection always gets links on the origin it used; a
+reverse proxy that rewrites `Host` would make the coordinator advertise its own address, and that
+is what the refusal message points at.
+
 ---
 
 ## 5. Query interface
@@ -684,6 +717,13 @@ is among them, and there is no index catalog at all
 ([§3.8](#38-no-keys-no-indexes--and-why-that-is-a-fact-about-the-engine)). A declared kind draws a
 folder, and a folder for something the engine cannot have is a lie its zero badge makes look like a
 fact.
+
+`hasColumns: true` is declared on the three relation kinds, `table`, `view` and
+`materialized_view`, and on nothing else: `describeObject` gates on the role, so `function` answers
+`columns: []` without reaching the cluster, and the object tree therefore draws no expander on a
+function row. One `describeObject` here is the most expensive single object read in the fleet at
+25.8 ms, measured in the A/B below against `describeObjects()`, which the tree pays once for each
+row a reader expands and never for a row they do not.
 
 `describeObject` therefore answers `indexes: []` and `foreignKeys: []` for every kind, and every
 column carries `isPrimary: false`. Those are the engine's answers and not defaults this provider
@@ -865,9 +905,9 @@ collide with a schema called `a` holding `b.c`.
 
 #### Container shapes and the derivations behind them
 
-Both depths are accepted by all four methods: a catalog alone answers "how many tables does this whole
-catalog hold", and a schema answers the folder the tree actually draws. That matches SQL Server and
-DuckDB, and `src/lib/api/object-route.ts` admits any path down to the declared depth.
+Both depths are accepted by all four methods: a catalog alone answers "how many tables does this whole catalog hold", and a schema answers the folder the tree actually draws.
+The declaration states it as `containerPathShapes: "prefixes"`, the same answer SQL Server, DuckDB and Couchbase give.
+The object routes in `src/lib/api/object-route.ts` read that field through the same kernel reader this provider refuses by, `acceptedContainerShapes()` in `src/lib/db/object-kinds.ts`, so a path of neither depth is refused at the HTTP edge with the shapes the provider names.
 
 Nothing reads a path by position. The container segments come from the declared `ContainerLevelSpec`
 ids, the object name is `path[path.length - 1]`, and the depth is `containerDepth()` — never
@@ -1563,6 +1603,9 @@ every connector decides for itself whether it implements it, and measured, the `
 answers `This connector does not support analyze` and no connector on the probe cluster implements
 it. A button that always fails is worse than a stated reason.
 
+A `container` is deliberately ignored (#772): the only operation this provider performs is `kill`,
+whose target is a query id rather than an object inside any namespace.
+
 ### Where each operation may be offered (`maintenanceOperationSpecs`)
 
 Declaring that an operation EXISTS is not enough to put a button on it: two engines that
@@ -1602,6 +1645,7 @@ are undeclared.
 | `supportsExternalQueryLimiting` | `true` | `LIMIT` is injected by the shared limiter, transposed ([§3.5](#35-offset-comes-before-limit)) |
 | `supportsCreateTable` | `true` | In the grammar, live-verified on `memory` ([§5.5](#55-writes-belong-to-the-connector-not-to-the-engine)) |
 | `supportsInlineRowEdit` | `false` | No primary key exists to build a one-row `WHERE` ([§3.8](#38-no-keys-no-indexes--and-why-that-is-a-fact-about-the-engine)) |
+| `supportsResultPagination` | `true` | `OFFSET m LIMIT n`, transposed by this provider ([§3.5](#35-offset-comes-before-limit)); the results grid offers Load More (#816) |
 | `supportsTransactions` | `false` | Trino has `START TRANSACTION`, but a transaction lives in an HTTP session header this provider does not carry between statements, so the trio and SANDBOX are not offered (#464) |
 | `declaresForeignKeys` | `false` | Not in the model at all ([§3.8](#38-no-keys-no-indexes--and-why-that-is-a-fact-about-the-engine)) |
 | `supportsMaintenance` | `true` | |
@@ -1610,6 +1654,9 @@ are undeclared.
 | `defaultPort` | `8080` | Same under TLS ([§4.3](#43-tls-and-the-password-rule)) |
 | `identifierQuoting` | `"double"` | Declared, not derived from a generic port ([§3.13](#313-a-trailing-semicolon-is-a-syntax-error)) |
 | `statementTerminator` | `"none"` | `SELECT 1;` is a syntax error ([§3.13](#313-a-trailing-semicolon-is-a-syntax-error)) |
+| `containerLevels` | `catalog`, then `schema` | Labelled Catalog and Schema: a catalog is a named connector configuration, not a database ([two container levels](#two-container-levels-and-a-catalog-is-not-a-database)) |
+| `containerPathShapes` | `"prefixes"` | `[catalog]` and `[catalog, schema]` both address a container, because a catalog alone is a real address ([container shapes](#container-shapes-and-the-derivations-behind-them)); the empty path and a longer path are both refused, by the object routes over HTTP and by this provider directly (#1147) |
+| `objectKinds` | `table`, `view`, `materialized_view`, `function` | Declared in this order ([the object surface](#the-object-surface-789)) |
 
 ### `getLabels()` ([`trino/index.ts`](../../src/lib/db/providers/sql/trino/index.ts))
 

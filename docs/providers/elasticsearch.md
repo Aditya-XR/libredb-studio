@@ -7,6 +7,8 @@
 > [opensearch.md](./opensearch.md) is the prime reference for the fork — **one implementation serves
 > both type-ids**, and the two documents deliberately disagree wherever the two products do.
 
+`DB_HTTP_BLOCK_PRIVATE_HOSTS=true` blocks loopback, private, link-local and other non-public HTTP destinations; it is off by default so local connections work.
+
 | | |
 |---|---|
 | **Status** | Implemented & shipped |
@@ -364,6 +366,31 @@ disabled and a bogus `Basic` header is *ignored* there (HTTP 200, measured), so 
 be captured — and rather than invent one, the code uses the one signal whose meaning HTTP itself fixes
 ([http-transport.ts:64-68](../../src/lib/db/providers/sql/search/http-transport.ts)).
 
+### 3.7a API key auth (#708)
+
+An `apiKeyId`/`apiKeySecret` pair on the connection is sent as `Authorization: ApiKey
+base64(apiKeyId:apiKeySecret)`, Elasticsearch's own published scheme for its REST API
+([elastic.co/docs/deploy-manage/api-keys/elasticsearch-api-keys](https://www.elastic.co/docs/deploy-manage/api-keys/elasticsearch-api-keys)).
+That is stated as documentation, not as something measured against a probe cluster: unlike a response
+envelope's shape, a product's own published wire contract for its auth header is not a claim this
+provider needs a live server to verify, the same status the `Basic` header construction already had
+before this pair existed. Both halves are **trimmed** before the half-filled guard and before the
+encode: a trailing newline in either half measured as HTTP 401 on a key that works once the
+whitespace is gone.
+
+**Elasticsearch only — `SearchDialectSpec.supportsApiKeyAuth` gates it, `true` there and `false` on
+OpenSearch** ([http-transport.ts](../../src/lib/db/providers/sql/search/http-transport.ts)), because
+nothing here has measured whether OpenSearch's security plugin accepts the same scheme. The form
+never offers the fields for that type-id ([db-ui-config.ts](../../src/lib/db-ui-config.ts)). A seed
+or stored connection that still carries the pair on OpenSearch is **refused** at the transport
+(and at seed parse) rather than dropped with no error — see [opensearch.md §4.1](./opensearch.md#41-configuration-fields).
+
+**Precedence: the key pair wins when both it and `user`/`password` are set.** It is the scheme
+operators prefer, and a connection edited to add one without clearing the other should use the one
+added on purpose. **Either half missing (after trim) falls back to `user`/`password`** (or to no
+credentials) rather than sending `ApiKey base64("id:")` for a secret that was never actually
+configured — a half-filled pair is not a shorter key, it is a leftover from switching schemes.
+
 ### 3.8 The deadline is the client's, and only the client's
 
 `deadline()` ([index.ts:609](../../src/lib/db/providers/sql/search/index.ts)) is one
@@ -439,14 +466,16 @@ shared generator emits a `?` this provider would then decline to fill.
 
 ### 4.1 Configuration fields
 
-The form offers exactly four fields
-([`db-ui-config.ts:138`](../../src/lib/db-ui-config.ts)): `host`, `port`, `user`, `password`.
+The form offers six fields
+([`db-ui-config.ts:138`](../../src/lib/db-ui-config.ts)): `host`, `port`, `user`, `password`,
+`apiKeyId`, `apiKeySecret`.
 
 | Field | Required | Notes |
 |---|---|---|
 | `host` | **Yes** | `validate()` ([index.ts:529](../../src/lib/db/providers/sql/search/index.ts)) throws `DatabaseConfigError` — "Elasticsearch requires a host". There is no connection string to substitute for it |
 | `port` | No | Defaults to `9200` ([index.ts:151](../../src/lib/db/providers/sql/search/index.ts), and the transport applies the same floor at [http-transport.ts:99](../../src/lib/db/providers/sql/search/http-transport.ts)). One number for both schemes — see [§4.3](#43-tls) |
-| `user` / `password` | No | Sent as HTTP Basic **only when `user` is set**, for the security plugin. Measured on a node with security disabled: a bogus `Basic` header is *ignored* (HTTP 200), so credentials are genuinely optional |
+| `user` / `password` | No | Sent as HTTP Basic **only when `user` is set** and no complete API key pair is, for the security plugin. Measured on a node with security disabled: a bogus `Basic` header is *ignored* (HTTP 200), so credentials are genuinely optional |
+| `apiKeyId` / `apiKeySecret` | No | Sent as `Authorization: ApiKey base64(id:secret)` when **both** are set (trimmed), in preference to `user`/`password` (#708) — see [§3.7a](#37a-api-key-auth-708). Elasticsearch only; OpenSearch **refuses** the pair rather than dropping it |
 | `ssl` | No | Any mode but `disable` switches the transport to `https` ([§4.3](#43-tls)) |
 | `database` | — | **Not offered, and ignored if set** — see below |
 
@@ -516,6 +545,22 @@ one. A publicly-trusted certificate works.
 An IPv6 literal host is bracketed before it becomes a URL authority
 ([http-transport.ts:431](../../src/lib/db/providers/sql/search/http-transport.ts)).
 
+
+### 4.4 Endpoint validation and redirects
+
+`host` and `port` are validated when the transport is constructed, which happens in `connect()`, so
+a bad value fails Test Connection and never a capability read. A host must be a hostname, an IPv4
+address or an IPv6 address (bracketed or not), and a port must be an integer from 1 to 65535.
+Anything else is a `DatabaseConfigError` that names the field and does not repeat the value.
+Every request URL is built by the shared [`endpoint.ts`](../../src/lib/db/http/endpoint.ts) with
+`URL` and `URLSearchParams` and checked against the intended hostname, port and path before it is
+sent, so no value can move a request to another path or another server. A scheme's default port
+(80 for `http`, 443 for `https`) is left out of the URL the way `URL` serializes it.
+
+Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx answer becomes a
+`ConnectionError` naming the status and only the origin of its `Location`, since a followed
+redirect would take the Basic or `ApiKey` credential and the statement to wherever the server pointed.
+
 ---
 
 ## 5. Query interface
@@ -583,8 +628,13 @@ Query", the first two things a user clicks on an index — and both were refused
 `extraneous input ';'` (measured in the browser, 2026-08-19). So
 `ProviderCapabilities.statementTerminator` is `"none"` on both products and
 [`query-generators.ts`](../../src/lib/query-generators.ts) asks the capability instead of the engine
-name: the generated statement now ends at `LIMIT 50`. Both spellings run on the fork, which is why one
-answer serves both type-ids rather than a branch on `dialect`.
+name. Both spellings run on the fork, which is why one answer serves both type-ids rather than a
+branch on `dialect`.
+
+The bound in that measurement has since gone too: #816 moved the preview cap out of the statement and
+into the `limit` execution option, so the generated statement is now `SELECT * FROM probe_orders` —
+no `LIMIT`, no `;`. The terminator measurement above is unaffected and still the reason for the
+declaration.
 
 A semicolon a **user** types is unaffected by that declaration and still runs, because the editor's
 statement reader strips the terminator before the statement is sent. The raw `POST /api/db/query`
@@ -948,6 +998,13 @@ answer rather than a gap: they are JSON documents with no field list, exactly as
 and a sequence have no columns on the SQL engines. `indexes` and `foreignKeys` are always empty, for
 the reasons in the table above.
 
+Those same three kinds declare `hasColumns: true` (#789), which is what gives an object row a twisty
+in the object tree; a `pipeline` and a `template` declare nothing and stay leaves, so no column read
+is ever issued for them. An `alias` row and a `data stream` row show the mapping of **one** backing
+index: the transport takes the first entry of a `_mapping` payload keyed by concrete index name
+(`src/lib/db/providers/sql/search/http-transport.ts:1266`), so an alias spanning two indices shows
+whichever the cluster answered first, with nothing on screen to say the other is missing.
+
 #### `describeObjects`, the bulk column read (#789)
 
 `describeObjects(container, kind, limit?)` answers columns for every object of one kind, and **which
@@ -1306,11 +1363,13 @@ be told work happened.
 
 ## 9. Capabilities & labels
 
-### `getCapabilities()` ([index.ts:388](../../src/lib/db/providers/sql/search/index.ts))
+### `getCapabilities()` ([index.ts:680](../../src/lib/db/providers/sql/search/index.ts))
 
-One answer for both products, because every flag here measured the same on both. The single
-difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it in, so it lives on
-`SearchProduct` and is read by `prepareQuery()` alone.
+Two flags diverge between the products; every other one measured the same on both.
+`identifierQuoting` is one of them, below.
+`OFFSET` is the other, and since #816 it has a field of its own: `supportsResultPagination` is
+declared as `this.product.acceptsOffsetClause`, so the declaration and the `prepareQuery()`
+refusal are the same value and cannot drift apart.
 
 | Capability | Value | Why |
 |---|---|---|
@@ -1319,6 +1378,7 @@ difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it
 | `supportsExternalQueryLimiting` | `true` | `LIMIT n` is correct here; the one form that is not is refused by `prepareQuery()` ([§5.5](#55-the-preparequery-override-there-is-no-second-page)) |
 | `supportsCreateTable` | **`false`** | Not in the grammar ([§5.6](#56-this-grammar-does-not-write)) |
 | `supportsInlineRowEdit` | **`false`** | `UPDATE` is not in the grammar, so the editor's statement could only ever produce an error (#269) |
+| `supportsResultPagination` | **`false`** | Elasticsearch SQL has no `OFFSET` clause. `prepareQuery` throws rather than answer page two with page one, and this flag hides the control that would provoke it. OpenSearch, the same implementation, declares `true` (#816) |
 | `supportsTransactions` | **`false`** | `BEGIN` is not in the grammar and the surface is stateless HTTP; the trio and SANDBOX are withheld instead of answering HTTP 400 (#464) |
 | `declaresForeignKeys` | **`false`** | The engine has no such constraint in its model, so the empty `foreignKeys` means "impossible here" rather than "none declared, or none visible to this role" — the distinction #414 was about |
 | `supportsMaintenance` | **`false`** | Nothing in `MaintenanceType` is SQL-reachable ([§8](#8-maintenance)) |
@@ -1326,7 +1386,7 @@ difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it
 | `supportsConnectionString` | **`false`** | No URI convention, and `http(s)://` is ClickHouse's ([§4.2](#42-there-is-no-connection-string-and-that-is-deliberate)) |
 | `defaultPort` | `9200` | Both schemes ([§4.3](#43-tls)) |
 | `identifierQuoting` | **`double`** | Declared because the port cannot say: the fork ships on 9200 too and quotes differently, and a wrong guess there returns **no rows** rather than an error ([opensearch.md §5.4](./opensearch.md#54-dialect-traps-a-user-will-hit)) |
-| `statementTerminator` | **`none`** | This grammar has no `;`, and the generated `SELECT * FROM probe_orders LIMIT 50;` was refused — the schema tree's first click ([§5.4](#54-dialect-traps-a-user-will-hit)) |
+| `statementTerminator` | **`none`** | This grammar has no `;`, and the generated statement of the day, `SELECT * FROM probe_orders LIMIT 50;`, was refused — the schema tree's first click. #816 later took the bound out of that statement too, leaving the terminator as the reason ([§5.4](#54-dialect-traps-a-user-will-hit)) |
 | `containerLevels` | **`[]`** | An index is not inside anything, and both products' own SQL surfaces say so ([§6](#the-object-surface-789)) |
 | `objectKinds` | `index`, `alias`, `stream`, `pipeline`, `template` | The five objects a search cluster publishes over REST; `index` is the only one that accepts row writes ([§6](#the-object-surface-789)) |
 | `schemaRefreshPattern` | `\b(DELETE)\b` | Can never fire on this product — its grammar has no DELETE. It is there for the fork ([§5.6](#56-this-grammar-does-not-write)) |
@@ -1595,8 +1655,10 @@ because the provider exposes no `cancelQuery` ([§3.8](#38-the-deadline-is-the-c
   ([§3.4](#34-the-success-envelope-positional-rows-and-a-duplicate-name-that-must-not-vanish)). It is
   dropped even where the fork supplies it, so no surface behaves differently between the two.
 - **A trailing semicolon is a syntax error**, including in the statement
-  `generateTableQuery()` produces for a search connection — measured, `SELECT * FROM probe_orders
-  LIMIT 50;` answers `parsing_exception`, "extraneous input ';'"
+  `generateTableQuery()` produces for a search connection — measured against the statement of the day,
+  `SELECT * FROM probe_orders LIMIT 50;`, which answers `parsing_exception`, "extraneous input ';'".
+  That statement is now `SELECT * FROM probe_orders`: #816 moved the preview cap into the `limit`
+  execution option, and the terminator declaration is what still keeps the `;` off it
   ([§5.4](#54-dialect-traps-a-user-will-hit)).
 - **There is a paging ceiling.** A statement whose result the engine spreads over more than
   `MAX_PAGES = 1000` pages is **refused** rather than truncated, after the cursor is closed. At the
@@ -1646,4 +1708,4 @@ because the provider exposes no `cancelQuery` ([§3.8](#38-the-deadline-is-the-c
 - Mapping: <https://www.elastic.co/guide/en/elasticsearch/reference/current/mapping.html>
 - `_cat/indices`: <https://www.elastic.co/guide/en/elasticsearch/reference/current/cat-indices.html>
 - Elastic License 2.0: <https://www.elastic.co/licensing/elastic-license>
-- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [MongoDB](./mongodb.md) · [Couchbase](./couchbase.md) · [ClickHouse](./clickhouse.md) · [Apache Druid](./druid.md) · [Apache Trino](./trino.md) · [OpenSearch](./opensearch.md) · [Redis](./redis.md) · [LibreDB](./libredb.md)
+- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [MongoDB](./mongodb.md) · [Couchbase](./couchbase.md) · [ClickHouse](./clickhouse.md) · [Apache Druid](./druid.md) · [Trino](./trino.md) · [OpenSearch](./opensearch.md) · [Redis](./redis.md) · [LibreDB](./libredb.md)

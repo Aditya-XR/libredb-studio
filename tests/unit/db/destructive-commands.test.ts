@@ -1,11 +1,17 @@
 import { describe, test, expect } from "bun:test";
-import { NON_SQL_DESTRUCTIVE_VOCABULARY, isDestructiveNonSqlQuery } from "@/lib/db/destructive-commands";
+import { SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
+import {
+  NON_SQL_DESTRUCTIVE_VOCABULARY,
+  isDestructiveNonSqlQuery,
+  vocabularyDecidesAlone,
+} from "@/lib/db/destructive-commands";
+import { readsSqlText } from "@/lib/sql/grammar";
 
-// The facts behind the confirmation gate for the two engines whose query text is
-// not SQL. The gate itself (`isDangerousQuery`) is tested in
+// The facts behind the confirmation gate for the engines whose query text is not
+// SQL. The gate itself (`isDangerousQuery`) is tested in
 // tests/components/QuerySafetyDialog.test.tsx; this file pins the vocabulary and the
-// two readers it is driven from, because they are what decides whether an operator
-// is asked before a FLUSHALL or a deleteMany runs.
+// readers it is driven from, because they are what decides whether an operator is
+// asked before a FLUSHALL or a deleteMany runs.
 
 describe("isDestructiveNonSqlQuery", () => {
   // ── The table decides which types this reader answers about ───────────────
@@ -121,6 +127,36 @@ describe("isDestructiveNonSqlQuery", () => {
   });
 
   test.each<[string]>([
+    ["BLPOP queue 0"],
+    ["BRPOP queue 0"],
+    ["BLMPOP 2 2 queue LEFT COUNT 1"],
+    ["BLMOVE src dst LEFT RIGHT 0"],
+    ["BRPOPLPUSH src dst 0"],
+    ["BZPOPMIN z 0"],
+    ["BZPOPMAX z 0"],
+    ["BZMPOP 2 1 z MIN COUNT 1"],
+  ])("does not ask before the Redis command %s, which the provider refuses before it reaches the server", (query) => {
+    // Since #1121 `RedisProvider.query()` refuses the blocking commands through
+    // `sharedConnectionRefusal`, so a confirmation followed by a refusal is the
+    // double take this gate exists to avoid. The dialog is for commands that run.
+    expect(isDestructiveNonSqlQuery(query, "redis")).toBe(false);
+  });
+
+  test.each<[string]>([
+    ["LPOP queue"],
+    ["RPOP queue"],
+    ["LMPOP 1 queue LEFT COUNT 1"],
+    ["LMOVE src dst LEFT RIGHT"],
+    ["RPOPLPUSH src dst"],
+    ["ZPOPMIN z"],
+    ["ZPOPMAX z"],
+    ["ZMPOP 1 z MIN COUNT 1"],
+  ])("still asks before %s, the non-blocking form of a refused command", (query) => {
+    // The provider runs these, and each one removes what it returns.
+    expect(isDestructiveNonSqlQuery(query, "redis")).toBe(true);
+  });
+
+  test.each<[string]>([
     ["GET k"],
     ["HGETALL user:1"],
     ["SCAN 0 MATCH session:* COUNT 50"],
@@ -211,11 +247,74 @@ describe("isDestructiveNonSqlQuery", () => {
   ])("reduces the buffer the way the provider does - %s", (_label, query, expected) => {
     expect(isDestructiveNonSqlQuery(query, "redis")).toBe(expected);
   });
+
+  // ── Prometheus ───────────────────────────────────────────────────────────
+
+  test.each<[string, string]>([
+    ["a metric named like a SQL write", "update"],
+    ["the same name uppercased", "DELETE"],
+    ["a selector with a matcher", 'drop{job="x"}'],
+    ["a range function", "rate(http_requests_total[5m])"],
+    ["a selector behind a comment", "# nightly\nalter"],
+    ["SQL, which the server refuses to parse", "DROP TABLE users"],
+    ["an expression that never closes", "sum(("],
+    ["nothing at all", ""],
+  ])("names nothing for %s, because PromQL text can only be evaluated", (_label, query) => {
+    // Not "unreadable, so ask": whatever the text, the one request it becomes is an
+    // evaluation on the query endpoint, which cannot write (#1085, section 2). Text the
+    // server cannot parse is refused there, with nothing changed.
+    expect(isDestructiveNonSqlQuery(query, "prometheus")).toBe(false);
+  });
+
+  // ── Kafka ────────────────────────────────────────────────────────────────
+
+  test.each<[string, string]>([
+    ["a read of a topic named like a SQL write", '{"topic": "delete", "from": "latest", "limit": 50}'],
+    ["the same, uppercased", '{"topic": "DROP", "from": "earliest"}'],
+    ["a topic named update, by offset", '{"topic": "update", "partition": 0, "from": {"offset": "120"}}'],
+    ["a topic named truncate, by timestamp", '{"topic": "truncate", "from": {"timestamp": "2026-09-23T00:00:00Z"}}'],
+    ["topics named insert and alter", '{"topic": "insert"} {"topic": "alter"}'],
+    ["SQL, which the parser refuses", "DELETE FROM orders"],
+    ["a request that never closes", '{"topic": "orders"'],
+    ["nothing at all", ""],
+  ])("names nothing for %s, because a Kafka read request can only read", (_label, query) => {
+    // Not "unreadable, so ask": whatever the text, the provider either parses it as one read of
+    // one topic's messages or refuses it before anything is sent, and it sends no request that
+    // writes (#1088, section 2).
+    expect(isDestructiveNonSqlQuery(query, "kafka")).toBe(false);
+  });
+});
+
+describe("vocabularyDecidesAlone", () => {
+  // The rows the gate reads without its SQL keyword test in front. MongoDB and Redis keep that
+  // test as a backstop; a type with no row is read by the SQL half entirely.
+  test("is true for prometheus and kafka and for no other type", () => {
+    expect(SHIPPED_DATABASE_TYPES.filter((type) => vocabularyDecidesAlone(type))).toEqual(["prometheus", "kafka"]);
+  });
+
+  test("is false with no type at all", () => {
+    expect(vocabularyDecidesAlone()).toBe(false);
+  });
 });
 
 describe("NON_SQL_DESTRUCTIVE_VOCABULARY", () => {
-  test("carries a row for exactly the two types whose text is not SQL", () => {
-    expect(Object.keys(NON_SQL_DESTRUCTIVE_VOCABULARY).sort()).toEqual(["mongodb", "redis"]);
+  test("carries a row for exactly the four types whose text is not SQL", () => {
+    expect(Object.keys(NON_SQL_DESTRUCTIVE_VOCABULARY).sort()).toEqual(["kafka", "mongodb", "prometheus", "redis"]);
+  });
+
+  test("names no Kafka operation, because a read request has none to name", () => {
+    // Not an omission: the editor text is one read request, and the provider refuses any key
+    // but the four it reads, so there is no operation a row could list.
+    expect(NON_SQL_DESTRUCTIVE_VOCABULARY.kafka?.operations.size).toBe(0);
+  });
+
+  // `readsSqlText` is the gate's other table. A type it reports as not SQL skips the SQL
+  // span check, and without a row here nothing but the SQL keyword test reads its text:
+  // that is how PromQL came to be read as SQL. A type added to one table and not the
+  // other fails here, so the gate's reading of it is decided rather than inherited.
+  test("carries a row for a type exactly when readsSqlText says its text is not SQL", () => {
+    const notSql = SHIPPED_DATABASE_TYPES.filter((type) => !readsSqlText(type));
+    expect(Object.keys(NON_SQL_DESTRUCTIVE_VOCABULARY).sort()).toEqual([...notSql].sort());
   });
 
   test("names no MongoDB operation the provider cannot dispatch", () => {

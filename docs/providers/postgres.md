@@ -131,19 +131,12 @@ If you edit these queries, keep `MATERIALIZED` or you reintroduce the timeout.
 
 **Fallback chain for engines that reject part of this query (#38680).** The object surface's
 container and detail reads all route their query through `queryWithMaterializedFallback()` ([postgres.ts](../../src/lib/db/providers/sql/postgres.ts)), which
-recovers real object-browser data on four independent gaps instead of failing outright:
+recovers real object-browser data on independent gaps instead of failing outright:
 
-1. **The `MATERIALIZED` keyword itself.** Materialize and RisingWave reserve it for their own
-   `CREATE MATERIALIZED VIEW` grammar and reject the CTE modifier, even though the underlying
-   `information_schema` views are otherwise readable there. `withoutMaterializedHint()` strips it.
-2. **`pg_total_relation_size()`.** CockroachDB has no such builtin at all — this is why its object
-   browser used to read empty even though it happily accepts the `MATERIALIZED` hint — and
-   Materialize reaches the same gap once past #1. `withoutTotalRelationSizeFn()` replaces the call
-   with a literal `0`, trading per-table size for real column/PK data instead of nothing.
-3. **`json_agg()` / `json_build_object()`.** Materialize has neither, only the `jsonb_` forms
-   (verified: they return the identical shape over the wire — `pg` parses both OIDs into plain JS
-   values). `withoutJsonAggFunctions()` swaps the function names.
-4. **`information_schema.constraint_column_usage`.** Materialize answers `table_constraints` and
+1. **`pg_total_relation_size()`.** CockroachDB has no such builtin at all, and neither has
+   Materialize. `withoutTotalRelationSizeFn()` replaces the call with a literal `0`, trading
+   per-table size for real column/PK data instead of nothing.
+2. **`information_schema.constraint_column_usage`.** Materialize answers `table_constraints` and
    `key_column_usage` but does not implement this one: its catalog ships fourteen
    `information_schema` views and that is not among them, at HEAD as well as at the probed release,
    so it is not a version gap that will close. Worth knowing what the fallback is and is not buying:
@@ -151,23 +144,46 @@ recovers real object-browser data on four independent gaps instead of failing ou
    columns would come back empty even with the view present. The fallback exists because the query
    *fails* without it, not because it recovers data. `withoutForeignKeyCatalog()` empties the `fk_info` CTE rather
    than dropping it, which keeps the outer `LEFT JOIN`/`FULL OUTER JOIN` valid and leaves
-   `foreignKeys` as `[]`. It matches the closing parenthesis by depth, not by text, because the
-   three fallbacks above have already rewritten parts of the statement by the time it runs.
+   `foreignKeys` as `[]`. It matches the closing parenthesis by depth, not by text, because another
+   fallback may already have rewritten part of the statement by the time it runs.
+   RisingWave refuses the view too, and names its own `SHOW` commands instead.
 
-Each fallback is matched against whichever error actually comes back, not tried in a fixed order —
-CockroachDB hits #2 as its *first* error with #1 never in play, Materialize hits all three in
-sequence. Real PostgreSQL never takes any retry path; it accepts every construct above and the first
-attempt succeeds. An error no fallback recognizes, or one that survives every applicable fallback, is
-mapped through `mapDatabaseError()` and rethrown rather than left raw.
+Two gaps that used to be repaired here no longer reach the chain at all (#1075).
 
-**What still doesn't work.** On Materialize, foreign keys and indexes come back empty (see gap #4);
-sizes are unmeasured (gap #2). RisingWave's object browser remains unavailable for a different,
-unrelated reason: its query binder fails on the `LEFT JOIN pg_class ON (...)::regclass` pattern
-itself (`missing FROM-clause entry for table c`), which none of the four fallbacks above address.
+The `MATERIALIZED` keyword: Materialize and RisingWave reserve it for their own `CREATE MATERIALIZED VIEW` grammar and refuse the CTE modifier, Materialize with *Expected left parenthesis, found MATERIALIZED* and RisingWave 3.0.4 with *Expected 'changelog' but found 'MATERIALIZED'*.
+Both object reads strip the hints where they are defined, for the measured reason under [§3.1.4](#314-what-the-object-surface-declares-and-which-catalog-answers-for-it), so no statement that reaches the chain carries one.
+The matcher that sat first in the chain was therefore dead, and worse than dead: it accepted any message that named the word, and RisingWave's `constraint_column_usage` refusal recommends `SHOW MATERIALIZED VIEWS`, so it spent a retry resending an identical statement.
+It is removed.
+
+`json_agg()` / `json_build_object()` and the `json` type: the rows are built with `jsonb_agg()`, `jsonb_build_object()` and `'[]'::jsonb` from the start.
+RisingWave 3.0.4 has no `json` type at all and refuses `json_agg()`, `json_build_object()`, `'[]'::json` and `CAST(NULL AS json)` alike, while it answers every `jsonb` form; Materialize 26.40.0 has no `json_agg()` either.
+A swap applied after the first refusal could not work on RisingWave: the `constraint_column_usage` repair inserts a `NULL::json` of its own after the swap has already been spent, and the read failed on that.
+PostgreSQL and every relative in the registry answer both forms, and `pg` parses the two OIDs into the same plain value.
+`jsonb` reorders an object's keys and drops duplicate ones, which changes nothing here: every object these statements build has a fixed set of distinct keys, and every consumer reads it parsed, never as text.
+It keeps an array's order, and `ORDER BY a.attnum` inside the aggregate is what hands back the table's own column order.
+
+Each fallback is matched against whichever error actually comes back, not tried in a fixed order.
+Real PostgreSQL never takes any retry path; it accepts every construct above and the first attempt succeeds.
+An error no fallback recognizes, or one that survives every applicable fallback, is mapped through `mapDatabaseError()` and rethrown rather than left raw.
+
+**What still doesn't work.** On Materialize, foreign keys come back empty (see gap #2), because
+the engine has none; sizes are unmeasured (gap #1).
+
+RisingWave's object browser was unavailable until 2026-09-19 and this paragraph named the wrong
+cause, which is worth keeping rather than quietly replacing. It said the binder fails on the
+`LEFT JOIN pg_class ON (...)::regclass` pattern itself. Measured against a live 3.0.4, that pattern
+is fine: `LEFT JOIN pg_class ON c.relnamespace = n.oid` binds, a bare `::regclass` cast evaluates,
+and joining two `information_schema` relations binds. The one thing that does not bind is
+`c.reltuples`, because RisingWave's `pg_class` has no such column - it carries oid, relname,
+relnamespace, relowner, relpersistence, relkind, relpages, relam, reltablespace, reloptions,
+relispartition and relpartbound. The engine reports an unbindable column on its first line and
+`missing FROM-clause entry for table "c"` on its second, and reading the second line first is what
+produced the wrong diagnosis. The repair is in the object listing rather than in this chain: see
+`withoutRowCountColumn()`.
 
 A statement that never joined the catalog a fallback repairs is *not* retried blind:
 `withoutForeignKeyCatalog()` returns the SQL untouched when there is no `fk_info` CTE to empty
-(`SCHEMA_LIST_SQL` has none), so the rejection is mapped and rethrown on the next attempt instead of
+(`CONTAINERS_SQL` has none), so the rejection is mapped and rethrown on the next attempt instead of
 looping on a statement nothing changed.
 
 ### 3.0.1 Resolving a name that may vanish mid-read
@@ -184,12 +200,11 @@ Materialize has no `to_regclass`, so it retries with the cast through
 `withoutToRegclass()` and behaves as it did before. PostgreSQL, TimescaleDB, YugabyteDB,
 Cloudberry, AlloyDB Omni and CockroachDB were each asked on a live instance and all have it.
 
-**What this costs, measured:** a PostgreSQL schema read is still **one** round trip.
-A Materialize one is **six** — it walks the whole chain (`MATERIALIZED` hint,
-`pg_total_relation_size`, `json_agg`, `constraint_column_usage`, `to_regclass`) before it
-lands on a statement that runs. Each failed attempt is a parse or plan error rather than
-work, and the chain is error-driven so it cannot be pre-sorted, but on a remote instance
-those round trips are latency the object browser pays on every refresh.
+**What this costs, measured** on 2026-09-24 through `describeObject()` and `describeObjects()` (#1075):
+a PostgreSQL object read is **one** round trip, and so is a CockroachDB one.
+A Materialize one is **two**, and so is a RisingWave one: each refuses `constraint_column_usage` once and the retry runs.
+Materialize took three before the rows were built with `jsonb`, the extra one for `json_agg()`; RisingWave took four and still failed.
+Each failed attempt is a parse or plan error rather than work, and the chain is error-driven so it cannot be pre-sorted, but on a remote instance those round trips are latency the object browser pays on every refresh.
 
 ### 3.1.0 A row count nobody counted
 
@@ -375,8 +390,19 @@ no row at all for a materialized view or a sequence. On the seeded `postgres:18`
 **0 columns** for `app.revenue_by_month` (relkind `'m'`) and **0** for `app.invoice_number_seq`
 (`'S'`), while `pg_attribute` answered 2 and 3. Reusing it would have shipped the browser's headline
 new folder, the materialized view #710 is about, with an empty column list. The primary key, foreign
-key and index CTEs *are* reused, so a fork that needs `withoutForeignKeyCatalog()` or
-`withoutJsonAggFunctions()` gets the same repair here that the container read gets.
+key and index CTEs *are* reused, so a fork that needs `withoutForeignKeyCatalog()` gets the same
+repair here that the container read gets.
+
+**A column's default is read only where `pg_attrdef` has one.** The column read hands
+`pg_get_expr()` an expression only through `CASE WHEN ad.adbin IS NOT NULL`. PostgreSQL answers NULL
+for a NULL expression anyway, but RisingWave 3.0.4 answers `''`, and its `pg_attrdef` is always empty,
+so an unguarded call gave every column there an empty default, which the schema diagram prints as
+*Default: '' (empty string)* (#1075).
+
+**An index's column list is a `LATERAL` join, not a subquery inside the aggregate.** RisingWave 3.0.4
+refuses any subquery among an aggregate call's arguments, *subquery inside aggregation calls*, and the
+index CTE used to build each index's column list that way. The `LATERAL` form is the same per-index
+read, and an index over expressions alone still answers NULL, which the provider reads as `[]` (#1075).
 
 The type text matches on every column but one shape. `format_type(a.atttypid, NULL)` is passed NULL
 rather than `a.atttypmod` because that is what `information_schema.columns.data_type` says:
@@ -406,8 +432,8 @@ size column REMOVED: the row then carries no `size_bytes` and `DatabaseObject.si
 which draws no badge. The shared `withoutTotalRelationSizeFn()` would have answered a literal `0`
 instead, and "0 bytes" is a claim about every relation on those servers that nobody measured, which
 is the distinction [§3.1.0](#310-a-row-count-nobody-counted) draws for row counts. Nothing else in
-the listing statement is repairable by that chain anyway: it has no `AS MATERIALIZED`, no
-`json_agg`, no `to_regclass` and no `pg_depend`. `listContainers()` does go through the chain,
+the listing statement is repairable by that chain anyway: it has no `to_regclass` and no
+`pg_depend`. `listContainers()` does go through the chain,
 because `schemaExclusion()` carries the `pg_depend` ownership test and
 `withoutExtensionOwnershipTest()` drops only a filter.
 
@@ -460,6 +486,17 @@ is derived from the declaration in the same way, two segments plus one where the
 written as a literal: `2` and `3` are right for a one-level engine and wrong for the five two-level
 ones in this epic, and the segment names in the refusal message come from the same array as the
 depth, so the message and the check cannot disagree.
+
+**`hasColumns` is declared on `table`, `view`, `materialized_view` and `sequence`, and on nothing
+else (#789).** The declaration is not transcribed: it reads `RELKIND_BY_KIND`, the same map
+`describeObject()` gates on, so the twisty the object tree draws and the read that fills it are one
+fact. `function`, `procedure` and `trigger` declare nothing and answer `columns: []` with no round
+trip, which is why they are leaves in the tree. `sequence` is the kind that shows this cannot be read
+off `role`: it is `role: "config"` and it answers `last_value`, `log_cnt` and `is_called` out of
+`pg_attribute`, where Oracle's kind of the same id answers none. An object dropped between the
+listing and the expand does NOT reach the reader as an empty answer here: the detail statement's
+aggregate has no `GROUP BY`, so zero rows means the statement that ran was not the one we wrote, and
+the provider raises `No detail row for <schema>.<name>`.
 
 **Listing order is applied in TypeScript, not with an `ORDER BY`, and sorts by PATH.** Three
 different catalogs answer the three listings, so three `ORDER BY` clauses would be three chances to
@@ -557,6 +594,29 @@ describeObjects(app, table, limit 10):   10 details, truncated=undefined
 
 Every detail path was found in that kind's own `listObjects()` answer, and every column list matched
 `describeObject()` for the same table column for column.
+
+**The bound is written into the statement, not bound to it.**
+`LIMIT 3`, never `LIMIT $2`, and that is a relative's constraint rather than a style choice.
+Measured 2026-09-22 through `pg` with the same statement three ways: no bound, a literal bound and a
+parameterised one.
+Stock PostgreSQL 17.11 answers all three.
+**RisingWave 3.0.4** answers the first two and refuses the third with *Failed to prepare the statement ...
+expects an integer or expression*, which is the same trait
+[`compatibility.ts`](../../src/lib/db/compatibility.ts) already records for its monitoring reads, where a
+parameterised `LIMIT` is why the slow-query and active-session panels stay empty.
+What is spelled in is the caller's `limit + 1`, which `describeObjects()` has already rejected unless it is a
+positive whole number, so the rendered statement can carry nothing but digits.
+
+That change did not make RisingWave's object browser work on its own, and this paragraph used to name the wrong reason, which is worth keeping rather than quietly replacing.
+Measured against RisingWave 3.0.4 on 2026-09-22, `describeObject()`, `describeObjects()` and `describeObjects(..., 1)` all failed alike with *Failed to bind expression: CAST(NULL AS json)* / *Feature is not yet implemented: unsupported data type: json*, and the paragraph concluded that the gap was the engine's missing `json` type rather than anything this statement chose.
+That was wrong: the engine has every form the statement needs under the `jsonb` name, and the statement chose `json`.
+Two more constraints of the statement's own sat behind it: an index's column list built by a subquery inside an aggregate, which RisingWave refuses, and a default read through `pg_get_expr()` over a missing `pg_attrdef` row, which RisingWave answers with `''`.
+All three are repaired (#1075), and measured again on 2026-09-24 against a live 3.0.4 with tables, a secondary index, a view and a materialized view present: all four reads answer, each with the object's columns and types in the table's own order.
+The bound was never what decided it.
+
+The same four reads were run on the same day against PostgreSQL and every relative in the registry, before and after the change, over one fixture of two tables with a primary key, a foreign key, a unique index, a two-column index, an expression index, a view and a materialized view.
+Each engine answered byte-identically before and after, with key order set aside: PostgreSQL 18.4, TimescaleDB 2.30.1 on PostgreSQL 17.11, OrioleDB beta 16 on PostgreSQL 18.4 (nightly of 2026-08-24), CockroachDB v26.2.5, YugabyteDB 2.25.2.0-b0, Citus 14.1-1 on PostgreSQL 18.4, Apache Cloudberry 2.1.0-incubating, AlloyDB Omni 17.9.0, ParadeDB 0.25.4, Percona Server for PostgreSQL 18.6.1 and Materialize 26.40.0.
+Foreign keys and indexes read as they did wherever the engine has them, and nowhere lost one.
 
 ### 3.1.5 Object source (#789)
 
@@ -656,7 +716,7 @@ One writer for both, because two copies are two chances for the read to answer "
 `pg_get_function_identity_arguments()` is not used, for the reason [§3.1.4](#314-what-the-object-surface-declares-and-which-catalog-answers-for-it) gives: it renders parameter names.
 
 **`pgsql` is a real Monaco language id and is no compromise here.**
-It is among the ids the installed `monaco-editor` 0.56.0 registers, unlike `plsql` and `tsql`, which Oracle and SQL Server have to render under `sql`.
+It is among the ids the installed `monaco-editor` 0.57.0 registers, unlike `plsql` and `tsql`, which Oracle and SQL Server have to render under `sql`.
 A PL/pgSQL body inside a `$function$` dollar-quoted string is highlighted as PostgreSQL SQL rather than as a procedural language, which is the closest this bundle can come.
 
 ### 3.1.6 Object edit (#789)
@@ -1099,10 +1159,14 @@ Monitoring never hard-fails on a missing optional feature:
 
 ### 3.6 Safe maintenance targets
 
-`qualifyMaintenanceTarget()` ([`postgres.ts`](../../src/lib/db/providers/sql/postgres.ts)) quotes
-maintenance targets through `escapeIdentifier()`: a bare name defaults to the `public` schema; a
-`schema.table` target is quoted per-part. This prevents identifier injection in `VACUUM`/`ANALYZE`/
-`REINDEX` statements (which cannot use bind parameters for object names).
+`qualifyMaintenanceTarget(target, container)` ([`postgres.ts`](../../src/lib/db/providers/sql/postgres.ts))
+quotes maintenance targets through `escapeIdentifier()`. A caller that passes a `container` (the
+`schemaName` the table row already carries) gets that schema, quoted whole, prefixed to the quoted
+table name: the schema is never recovered by splitting the name, because a schema is allowed to
+contain a dot and the split would land on the wrong side. Without a container the older readings
+stay, so a bare name defaults to the `public` schema and a `schema.table` target is quoted per-part.
+This prevents identifier injection in `VACUUM`/`ANALYZE`/`REINDEX` statements (which cannot use
+bind parameters for object names).
 
 ---
 
@@ -1244,7 +1308,9 @@ acquires a pooled client, optionally records its backend PID for cancellation, r
 
 Native `pg` errors are normalised through `mapDatabaseError()` into the shared
 [`errors.ts`](../../src/lib/db/errors.ts) classes (syntax → `QueryError`, auth → `AuthenticationError`,
-timeout → `TimeoutError`, etc.).
+timeout → `TimeoutError`, etc.). A PostgreSQL `statement_timeout` or `lock_timeout` is a timeout even
+though the engine reports it as `canceling statement due to …`, so since #1145 it maps to `TimeoutError`;
+only an operator cancel (`pg_cancel_backend`, `due to user request`) stays a `QueryCancelledError`.
 
 ### 5.2 Automatic `LIMIT` injection
 
@@ -1349,7 +1415,7 @@ via `POST /api/db/cancel`.
 `pg` says exactly one thing about a column's type: `field.dataTypeID`, a `pg_type` OID. There is no
 name on the wire, and no value-shaped guess can supply one — `numeric` arrives as the **string**
 `"4.99"` so that its precision survives, `bigint` arrives as a string for the same reason, and a
-`timestamp` is a string by the time the browser has read the JSON. Measured against the local
+`timestamp` arrives as the engine's own text (§5.5). Measured against the local
 dvdrental before this existed, `SELECT rental_rate, last_update, film_id FROM film` exported as
 `("rental_rate" TEXT, "last_update" TIMESTAMP, "film_id" BIGINT)`: a `numeric` typed as text, and an
 `integer` widened. Guessing from the string's SHAPE is not the answer either — it would type a text
@@ -1395,11 +1461,40 @@ schema tree shows — answers for the same column, and the modifier is not on th
 reconstructing. `columnTypes` is consumed by the results grid's column labels, by the SQL-DDL export
 (which prefers a declared type over its value-shaped guess) and by the agent's state summary.
 
+### 5.5 Date and timestamp values
+
+The pool carries its own type parsers (`ZONELESS_AS_TEXT` in [`postgres.ts`](../../src/lib/db/providers/sql/postgres.ts)), passed as the `types` option in `buildPoolConfig()`, so the structured form and a pasted connection string both get them.
+`date`, `date[]`, `timestamp` (without time zone) and `timestamp[]` arrive as the engine's own text, `'2026-09-01'` and `'2026-09-01 10:30:00'`, whatever the TZ of the Node process.
+`timestamptz` and `timestamptz[]` still arrive as a JavaScript `Date`, which is an instant, so the JSON the routes answer with carries its ISO UTC form, `'2026-09-01T10:30:00.000Z'`, in every TZ.
+`time` and `timetz` were already the engine's text and are unchanged.
+Every other type is what `pg-types` makes of it.
+
+The text is the server's rendering, so it follows the session's `DateStyle`; the default `ISO, MDY` gives the forms above, and `'infinity'` and `'0044-03-15 BC'` come through as written.
+
+Before this, `pg-types` built a `date` as a `Date` at local midnight of the Node process and read a `timestamp` as local wall-clock time, and the row was then serialised as ISO UTC.
+The published image runs in UTC, which hid it; `npx @libredb/studio` on a machine east or west of UTC did not.
+Measured 2026-09-27 on `postgres:18-alpine` through `PostgresProvider`, for `DATE '2026-09-01'` and `TIMESTAMP '2026-09-01 10:30:00'`:
+
+| process TZ | `date` before | `timestamp` before | `date` after | `timestamp` after |
+|---|---|---|---|---|
+| UTC | `2026-09-01T00:00:00.000Z` | `2026-09-01T10:30:00.000Z` | `2026-09-01` | `2026-09-01 10:30:00` |
+| Europe/Istanbul | `2026-08-31T21:00:00.000Z` | `2026-09-01T07:30:00.000Z` | `2026-09-01` | `2026-09-01 10:30:00` |
+| America/Los_Angeles | `2026-09-01T07:00:00.000Z` | `2026-09-01T17:30:00.000Z` | `2026-09-01` | `2026-09-01 10:30:00` |
+
+Under Europe/Istanbul the SQL INSERT export of that row, replayed into a copy of the table, stored `2026-08-31` and `07:30:00` before and the original values after.
+`'infinity'::date` used to arrive as `Infinity` and leave as `null`, and `DATE '0044-03-15 BC'` moved by the zone's local mean time offset.
+`timestamptz` answered `2026-09-01T10:30:00.000Z` under all three zones, before and after.
+
+The parsers are per pool on purpose: `pg.types.setTypeParser` is process-wide, and a host that embeds `@libredb/studio` has its own `pg` users.
+Only the text format is intercepted, since the binary one has no text to return.
+An in-process consumer of the library surface now receives strings, not `Date` objects, for these four types.
+Every relative that goes through `PostgresProvider` (the `via: "postgres"` entries in [`compatibility.ts`](../../src/lib/db/compatibility.ts)) shares the change.
+
 ---
 
 ## 6. Schema introspection
 
-One surface, the object surface ([§3.1.1](#311-the-object-surface-789)): `listContainers()`,
+One surface, the object surface ([§3.1.4](#314-what-the-object-surface-declares-and-which-catalog-answers-for-it)): `listContainers()`,
 `countObjects()`, `listObjects()`, `describeObject()` and `describeObjects()`, over one set of shared
 `MATERIALIZED` CTEs.
 
@@ -1553,7 +1648,7 @@ A pooled client left `idle in transaction` poisons every later user of that stor
 
 ## 9. Maintenance
 
-`runMaintenance(type, target?)` ([`postgres.ts`](../../src/lib/db/providers/sql/postgres.ts)),
+`runMaintenance(type, target?, container?)` ([`postgres.ts`](../../src/lib/db/providers/sql/postgres.ts)),
 with targets quoted via [§3.6](#36-safe-maintenance-targets):
 
 | Type | With target | Without target |
@@ -1609,6 +1704,7 @@ Overrides the SQL base defaults:
 | `supportsExternalQueryLimiting` | `true` |
 | `supportsCreateTable` | `true` |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core PostgreSQL DML |
+| `supportsResultPagination` | `true` — `LIMIT n OFFSET m` from the shared limiter (#816) |
 | `supportsTransactions` | `true` — `beginTransaction()` holds one pool client and runs `BEGIN` / `COMMIT` / `ROLLBACK` on it, so the editor's transaction trio and the auto-rolled-back SANDBOX toggle are offered here (#464) |
 | `declaresForeignKeys` | `true` — inherited from the base capabilities; an empty `foreignKeys` list is then a fact about the schema or the reading role, never about the engine |
 | `supportsMaintenance` | `true` |
@@ -1616,6 +1712,7 @@ Overrides the SQL base defaults:
 | `supportsConnectionString` | `true` |
 | `defaultPort` | `5432` |
 | `containerLevels` | one level, `schema`: the connection pins one database and nothing can switch it ([§3.1.4](#314-what-the-object-surface-declares-and-which-catalog-answers-for-it)) |
+| `containerPathShapes` | `exact`: only `[schema]` addresses a container, so a shorter or a longer path is refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
 | `objectKinds` | `table`, `view`, `materialized_view`, `sequence`, `function`, `procedure`, `trigger`. No `index` kind: `pg_index` is keyed by `indrelid`, so an index is a property of a relation and stays in `describeObject()` ([§3.1.4](#314-what-the-object-surface-declares-and-which-catalog-answers-for-it)) |
 | `schemaRefreshPattern` | `(CREATE\|DROP\|ALTER\|TRUNCATE)\b` (from base) |
 
@@ -1702,8 +1799,9 @@ the shared hierarchy:
 | Operation before `connect()` | `DatabaseConfigError` (via `ensureConnected()`) |
 | `connect()` fails | `ConnectionError` (carries host/port) |
 | SQL syntax / bad column / relation | `QueryError` (with position when available) |
-| `statement_timeout` exceeded, or user cancel via `pg_cancel_backend` | `QueryCancelledError` — both emit *"canceling statement due to …"*, which `mapDatabaseError()` matches **before** its timeout check |
-| Generic timeout / connection-acquire timeout (message contains "timeout"/"timed out", not "canceling statement") | `TimeoutError` |
+| `statement_timeout` or `lock_timeout` exceeded (`canceling statement due to statement timeout` / `due to lock timeout`) | `TimeoutError` — a time budget elapsed, so since #1145 `mapDatabaseError()` recognises these **before** its cancellation branch and keeps the engine's text |
+| User cancel via `pg_cancel_backend` (`canceling statement due to user request`) | `QueryCancelledError` |
+| Generic timeout / connection-acquire timeout (message contains "timeout"/"timed out") | `TimeoutError` |
 | Bad password / authentication | `AuthenticationError` |
 | Pool exhausted / too many connections | `PoolExhaustedError` |
 
@@ -1909,13 +2007,16 @@ Four things about the PostgreSQL side of that layer are worth knowing here:
   clamp really preempts; on SQLite it does not — see
   [sqlite.md §12](./sqlite.md#12-agent-read-only-execution-profile-328).
 
-  Worth knowing what the preemption looks like coming back, because it is not what the name suggests:
-  PostgreSQL reports it as `canceling statement due to statement timeout`, and `mapDatabaseError`
-  matches `canceling statement` before its timeout branch, so it arrives as a `QueryCancelledError` and
-  never as a `TimeoutError` on this engine. The agent tool layer treats it as a repairable statement
-  failure — narrowing the read is the repair that helps — and the mapper discards the wording that
-  would separate it from an operator cancel ([BACKLOG](../BACKLOG.md) B4), which is why a run
-  cancellation is enforced by the run loop's own state rather than by that exception.
+  Worth knowing what the preemption looks like coming back: PostgreSQL reports it as
+  `canceling statement due to statement timeout`, sharing the `canceling statement` prefix an operator
+  cancel uses. Since #1145 `mapDatabaseError` recognises that phrasing (and `due to lock timeout`)
+  **before** its cancellation branch and returns a `TimeoutError` carrying the engine's own text, so a
+  budget timeout arrives as a `TimeoutError` on this engine like everywhere else — only
+  `pg_cancel_backend`'s `due to user request` stays a `QueryCancelledError`. The agent tool layer
+  treats the timeout as a repairable statement failure — narrowing the read is the repair that helps.
+  A run cancellation is still enforced by the run loop's own state rather than by that exception,
+  because an operator cancel arriving mid-statement is repairable too (see [BACKLOG](../BACKLOG.md) B4
+  for the residual: classification reads the message text rather than the `57014`/`55P03` SQLSTATE).
 
 ---
 
@@ -2046,4 +2147,4 @@ await provider.disconnect();
 - Errors: [`src/lib/db/errors.ts`](../../src/lib/db/errors.ts)
 - Tests: [`tests/integration/db/postgres-provider.test.ts`](../../tests/integration/db/postgres-provider.test.ts)
 - API contract: [`docs/API_DOCS.md`](../API_DOCS.md)
-- Sibling provider docs: [Apache Trino](./trino.md) · [Redis](./redis.md)
+- Sibling provider docs: [Trino](./trino.md) · [Redis](./redis.md)

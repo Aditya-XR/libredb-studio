@@ -111,6 +111,26 @@ function retryAfterSeconds(response: Response): number | null {
   return Number.isInteger(seconds) && seconds > 0 ? seconds : null;
 }
 
+/**
+ * The connection half of ONE RUN's request body, plus the database its tab belongs to.
+ *
+ * A TOP-LEVEL FIELD RATHER THAN A FIELD OF THE CONNECTION, and that is the whole of this function. A
+ * run's connection is expressed two ways on the wire: a user's own saved connection travels as a
+ * full object, and a managed one travels as an id (`{ connectionId: "seed:..." }`) that the server
+ * resolves from the OPERATOR's config — discarding any connection field the caller attached, by
+ * design (GHSA-3wh2-8x78). So a `database` merged into the connection object is dropped for every
+ * managed connection, and the read would run in the session's database while the key tab claims it
+ * read another. As a field beside the connection it survives the resolve, and `POST /api/db/query`
+ * applies it after resolving: same field, same meaning as `POST /api/db/keys/scan`.
+ *
+ * `undefined` is NOT database 0 and NOT "the session's number": it is the absence of an override, so
+ * the body is byte for byte what it was before this existed.
+ */
+function payloadForRun(connection: DatabaseConnection, database: number | undefined): Record<string, unknown> {
+  const payload = buildConnectionPayload(connection);
+  return database === undefined ? payload : { ...payload, database };
+}
+
 export function useQueryExecution({
   activeConnection,
   metadata,
@@ -252,6 +272,12 @@ export function useQueryExecution({
         return false;
       }
 
+      // The connection this run reaches, and the database it reads when the tab was opened in one: a
+      // tab opened from a key browser walked ONE numbered database, so every run of that tab - the
+      // initial read, a re-run, a selection, an inline edit, the next page - names it. See
+      // `payloadForRun`.
+      const runPayload = payloadForRun(activeConnection, tabToExec.databaseOverride);
+
       // Safety check for dangerous queries (skip for explain, load-more, playground, and force-execute)
       const skipSafety = executionOptions?.skipSafety ?? false;
       if (
@@ -347,7 +373,7 @@ export function useQueryExecution({
           const beginRes = await appFetch("/api/db/transaction", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...buildConnectionPayload(activeConnection), action: "begin" }),
+            body: JSON.stringify({ ...runPayload, action: "begin" }),
           });
           if (!beginRes.ok) {
             logger.warn("Playground transaction BEGIN failed", { route: "use-query-execution" });
@@ -367,8 +393,9 @@ export function useQueryExecution({
         // carried a `;` inside a `#` comment, so the buffer was split, and the
         // first "statement" was comments only - the run failed with "No command to
         // run" and the panel reported a successful empty result. Unknown metadata
-        // keeps the pre-existing behaviour, since only a declared JSON dialect is
-        // known not to be SQL.
+        // keeps the pre-existing behaviour, since only a declared language is known
+        // not to be SQL: JSON, and PromQL since #1085, whose single expression the
+        // splitter would cut at a `;` inside a `#` comment exactly as it cut Redis's.
         const dialectIsSql = (metadata?.capabilities.queryLanguage ?? "sql") === "sql";
         const useMultiQuery =
           !isExplain &&
@@ -396,7 +423,7 @@ export function useQueryExecution({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            ...buildConnectionPayload(activeConnection),
+            ...runPayload,
             // The parameter array travels beside the SQL on whichever endpoint the
             // statement takes, and only when the caller supplied one: a request
             // without values must stay a request without a `params` key (#290).
@@ -433,7 +460,7 @@ export function useQueryExecution({
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                ...buildConnectionPayload(activeConnection),
+                ...runPayload,
                 sql: queryToExecute,
                 options: {},
                 explain: { mode: "estimate" },
@@ -614,6 +641,16 @@ export function useQueryExecution({
               resultQuery: queryToExecute,
               result: {
                 ...resultData,
+                // THE SHAPE COMES FROM THE ROWS ON SCREEN, NOT FROM THE PAGE THAT ARRIVED.
+                //
+                // A page of the same statement cannot legitimately name different columns,
+                // and an empty page often names none at all: SQLite answers `... LIMIT 50
+                // OFFSET 100` on a hundred-row table with `rows: 0, fields: []`. Spreading
+                // that over the tab left the grid holding its hundred rows under zero
+                // columns - the strip read "100 rows / 0 columns" and the table rendered
+                // header-less, cell-less stripes. A table whose size is an exact multiple
+                // of the page size reaches that state in one click.
+                fields: resultData.fields.length > 0 ? resultData.fields : t.result.fields,
                 rows: newAllRows,
                 rowCount: newAllRows.length,
               },
@@ -637,6 +674,9 @@ export function useQueryExecution({
             isExecuting: false,
             isLoadingMore: false,
             explainPlan: explainPlanData || t.explainPlan,
+            // A run that landed answers the failure before it. An EXPLAIN leaves the
+            // results panel alone, so it leaves that panel's error alone too.
+            runError: isExplain ? t.runError : undefined,
           };
         });
 
@@ -646,7 +686,7 @@ export function useQueryExecution({
             await appFetch("/api/db/transaction", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ...buildConnectionPayload(activeConnection), action: "rollback" }),
+              body: JSON.stringify({ ...runPayload, action: "rollback" }),
             });
           } catch {
             logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });
@@ -693,7 +733,7 @@ export function useQueryExecution({
             await appFetch("/api/db/transaction", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ...buildConnectionPayload(activeConnection), action: "rollback" }),
+              body: JSON.stringify({ ...runPayload, action: "rollback" }),
             });
           } catch {
             logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });
@@ -714,12 +754,33 @@ export function useQueryExecution({
           return false;
         }
 
-        const title = "Query Error";
+        // A LOST PAGE IS NOT A LOST QUERY (#816). Under the generic title the user reads
+        // their own statement as having failed, when the rows on screen are intact and
+        // only the next page did not arrive. `use-query-adapter.ts` raises the same
+        // wording for the same failure, so the standalone app and the embedded workspace
+        // say one thing.
+        const title = isLoadMore ? "Load More Error" : "Query Error";
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        // Fallback string check for cancellation errors not caught by response code
-        if (errorMessage.includes("Query was cancelled") || errorMessage.includes("cancelled")) {
-          toast({ title: "Query Cancelled", description: "Query execution was cancelled." });
-          return false;
+        // NO MESSAGE CHECK FOR A CANCEL. Both real cancellations are caught before this by
+        // structure: the fetch's own AbortError above, and the server's 499 `QUERY_CANCELLED`,
+        // which every provider's cancel maps to, where the response is read. A check for the
+        // word "cancelled" here also caught `column "cancelled" does not exist` and kept the
+        // previous statement's rows under it.
+        // A FAILED RUN IS NOT A RUN OF THE ROWS ON SCREEN. A new run that fails replaces the
+        // previous result with its error, because leaving those rows up broke the invariant
+        // the replace branch keeps (#881): the grid, export and inline edit went on acting on
+        // the previous statement's rows while the editor showed the one that failed, and the
+        // toast that said so fades. A failed page keeps its rows, for the reason above, and an
+        // EXPLAIN never owned the results. `commitToTab` drops the write for a superseded run.
+        if (!isLoadMore && !isExplain) {
+          commitToTab((t) => ({
+            ...t,
+            result: null,
+            resultQuery: undefined,
+            allRows: undefined,
+            currentOffset: 0,
+            runError: errorMessage,
+          }));
         }
         toast({ title, description: errorMessage, variant: "destructive" });
         return false;
@@ -756,8 +817,9 @@ export function useQueryExecution({
   );
 
   /**
-   * Run a statement an agent run handed to this editor (#329, §2.1/§2.5 of
-   * `docs/AGENT_ANALYST_DESIGN.md`; reshaped by the #373 review).
+   * Run a statement an agent run handed to this editor (#329, see the "Handing the
+   * answer to the editor (auto-execute)" section of `docs/AGENT.md`; reshaped by the
+   * #373 review).
    *
    * It takes a RUN, not a statement to execute. The statement is named only so this
    * hook can label the history entry with the text the user is looking at; what is
@@ -887,6 +949,14 @@ export function useQueryExecution({
   // Load More handler
   const handleLoadMore = useCallback(() => {
     if (!currentTab.result?.pagination?.hasMore) return;
+    // Restates the condition the rendered control already enforces: the button that calls
+    // this is `disabled={isLoadingMore}` in `StatsBar`, and the flag is wired end to end.
+    // It reads render state rather than a ref, so it cannot be more than that - two calls
+    // in the same tick would both read the value from before `executeQuery` claims the
+    // tab and both pass. It is a second line behind the disabled control, not a
+    // replacement for it, and a caller that renders no such control has to enforce the
+    // invariant itself (#816).
+    if (currentTab.isLoadingMore) return;
 
     const currentOffset = currentTab.currentOffset || currentTab.result.rows.length;
     // The next page of the STATEMENT THAT BUILT THIS GRID, not of whatever has been typed
@@ -895,7 +965,10 @@ export function useQueryExecution({
     // appended another table's rows under these columns and left the tab holding rows from
     // two tables while naming one (#881).
     executeQuery(currentTab.resultQuery ?? currentTab.query, currentTab.id, false, {
-      limit: 500,
+      // The size of the page already on screen, not a constant. A table preview is 50
+      // rows and a hand-run statement is 500, and a hardcoded 500 made the second page
+      // ten times the first while the footer's own label promised 500 either way (#816).
+      limit: currentTab.result.pagination.limit,
       offset: currentOffset,
     });
   }, [currentTab, executeQuery]);

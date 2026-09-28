@@ -17,6 +17,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { DruidHttpTransport } from "@/lib/db/providers/sql/druid/http-transport";
 import { DRUID_TRANSPORT_FAILURE, DruidTransportError } from "@/lib/db/providers/sql/druid/transport";
+import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
 import type { DatabaseConnection, DatabaseType } from "@/lib/db/types";
 
 // ============================================================================
@@ -296,6 +297,43 @@ describe("DruidHttpTransport endpoint", () => {
     await makeTransport({ host: "[::1]" }).query("SELECT 1");
 
     expect(lastCall().url).toBe("http://[::1]:8888/druid/v2/sql");
+  });
+
+  // A host is spliced into nothing: one that would rewrite the URL around it is
+  // refused before the transport exists, so no request can carry the credential.
+  test.each(["evil.example/steal?", "user@evil.example", "db#x", "db\\evil", "db%2f", "db evil"])(
+    "refuses the host %p before any request is sent",
+    (host) => {
+      expect(() => makeTransport({ host })).toThrow(DatabaseConfigError);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  test.each([0, 65536, 1.5, "8888abc"])("refuses the port %p before any request is sent", (port) => {
+    expect(() => makeTransport({ port: port as number })).toThrow(DatabaseConfigError);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("DruidHttpTransport redirects", () => {
+  test("asks fetch not to follow a redirect", async () => {
+    await makeTransport().query("SELECT 1");
+
+    expect(lastCall().init?.redirect).toBe("manual");
+  });
+
+  test("refuses a 3xx response with a ConnectionError naming only the target origin", async () => {
+    handler = () => respond("", { status: 307, headers: { location: "https://evil.example:9443/steal?token=SECRET" } });
+
+    const error = await makeTransport()
+      .query("SELECT 1")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect((error as Error).message).toContain("HTTP 307");
+    expect((error as Error).message).toContain("https://evil.example:9443");
+    expect((error as Error).message).not.toContain("SECRET");
+    expect(calls).toHaveLength(1);
   });
 });
 

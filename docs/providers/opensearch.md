@@ -8,6 +8,8 @@
 > implementation serves both type-ids**, and the two documents deliberately disagree wherever the two
 > products do.
 
+`DB_HTTP_BLOCK_PRIVATE_HOSTS=true` blocks loopback, private, link-local and other non-public HTTP destinations; it is off by default so local connections work.
+
 | | |
 |---|---|
 | **Status** | Implemented & shipped |
@@ -426,6 +428,7 @@ The form offers exactly four fields
 | `host` | **Yes** | `validate()` ([index.ts:529](../../src/lib/db/providers/sql/search/index.ts)) throws `DatabaseConfigError` — "OpenSearch requires a host" |
 | `port` | No | Defaults to `9200` ([index.ts:151](../../src/lib/db/providers/sql/search/index.ts)); the fork kept the upstream port. The container fixture publishes **9201** on the host, which is a collision on that machine rather than a fact about the product |
 | `user` / `password` | No | Sent as HTTP Basic **only when `user` is set**, for the security plugin. Measured with the plugin disabled: a bogus `Basic` header is *ignored* (HTTP 200), so credentials are genuinely optional. Note that a **default** distribution enables the plugin, serves HTTPS with a self-signed certificate and requires an admin password — see [§4.3](#43-tls) |
+| `apiKeyId` / `apiKeySecret` | — | **Not offered, and refused if set.** Elasticsearch's `Authorization: ApiKey` scheme ([elasticsearch.md §3.7a](./elasticsearch.md#37a-api-key-auth-708)). Nothing here has measured whether this product's security plugin accepts it, so a seed or stored connection that carries the pair is refused (`DatabaseConfigError`) rather than sent as Basic or as a guessed header. The seed schema and the seed projection refuse it the same way, so it cannot list as a connection that silently falls back. |
 | `ssl` | No | Any mode but `disable` switches the transport to `https` ([§4.3](#43-tls)) |
 | `database` | — | **Not offered, and ignored if set** — see below |
 
@@ -491,6 +494,22 @@ disabled by name.
 
 An IPv6 literal host is bracketed before it becomes a URL authority
 ([http-transport.ts:431](../../src/lib/db/providers/sql/search/http-transport.ts)).
+
+
+### 4.4 Endpoint validation and redirects
+
+`host` and `port` are validated when the transport is constructed, which happens in `connect()`, so
+a bad value fails Test Connection and never a capability read. A host must be a hostname, an IPv4
+address or an IPv6 address (bracketed or not), and a port must be an integer from 1 to 65535.
+Anything else is a `DatabaseConfigError` that names the field and does not repeat the value.
+Every request URL is built by the shared [`endpoint.ts`](../../src/lib/db/http/endpoint.ts) with
+`URL` and `URLSearchParams` and checked against the intended hostname, port and path before it is
+sent, so no value can move a request to another path or another server. A scheme's default port
+(80 for `http`, 443 for `https`) is left out of the URL the way `URL` serializes it.
+
+Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx answer becomes a
+`ConnectionError` naming the status and only the origin of its `Location`, since a followed
+redirect would take the Basic credential and the statement to wherever the server pointed.
 
 ---
 
@@ -603,7 +622,8 @@ confirmation gate reads a statement's spans to decide whether a write is hiding 
 an unreadable span is a **prompt** rather than silence.
 
 **A trailing semicolon is accepted.** `SELECT 1;` is HTTP 200 here and a `parsing_exception` upstream —
-so the generated statement (`SELECT * FROM probe_orders LIMIT 50;`) ran on this product and failed on
+so the generated statement, which at the time of that measurement was
+`SELECT * FROM probe_orders LIMIT 50;`, ran on this product and failed on
 the other ([elasticsearch.md §5.4](./elasticsearch.md#54-dialect-traps-a-user-will-hit)). This product
 nevertheless declares `statementTerminator: "none"` along with the upstream one, because the absence of
 the terminator is accepted **here too** (measured) and one answer that runs on both beats a branch on
@@ -946,6 +966,13 @@ the concrete index name - and **no columns** for a `pipeline` or a `template`, w
 answer rather than a gap: they are JSON documents with no field list, exactly as a routine, a trigger
 and a sequence have no columns on the SQL engines. `indexes` and `foreignKeys` are always empty, for
 the reasons in the table above.
+
+Those same three kinds declare `hasColumns: true` (#789), which is what gives an object row a twisty
+in the object tree; a `pipeline` and a `template` declare nothing and stay leaves, so no column read
+is ever issued for them. An `alias` row and a `data stream` row show the mapping of **one** backing
+index: the transport takes the first entry of a `_mapping` payload keyed by concrete index name
+(`src/lib/db/providers/sql/search/http-transport.ts:1266`), so an alias spanning two indices shows
+whichever the cluster answered first, with nothing on screen to say the other is missing.
 
 #### `describeObjects`, the bulk column read (#789)
 
@@ -1312,11 +1339,13 @@ be told work happened.
 
 ## 9. Capabilities & labels
 
-### `getCapabilities()` ([index.ts:388](../../src/lib/db/providers/sql/search/index.ts))
+### `getCapabilities()` ([index.ts:680](../../src/lib/db/providers/sql/search/index.ts))
 
-One answer for both products, because every flag here measured the same on both. The single
-difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it in, so it lives on
-`SearchProduct` and is read by `prepareQuery()` alone
+Two flags diverge between the products; every other one measured the same on both.
+`identifierQuoting` is one of them, below.
+`OFFSET` is the other, and since #816 it has a field of its own: `supportsResultPagination` is
+declared as `this.product.acceptsOffsetClause`, so the declaration and the `prepareQuery()`
+refusal are the same value and cannot drift apart
 ([§5.5](#55-offset-works-here-which-is-why-paging-does)).
 
 | Capability | Value | Why |
@@ -1326,6 +1355,7 @@ difference — `OFFSET` — has no field in `ProviderCapabilities` to declare it
 | `supportsExternalQueryLimiting` | `true` | **Both** limiter forms are correct here, `LIMIT n` and `LIMIT n OFFSET m` |
 | `supportsCreateTable` | **`false`** | Not in the grammar ([§5.6](#56-this-grammar-has-delete-and-it-is-off)) |
 | `supportsInlineRowEdit` | **`false`** | `UPDATE` is not in the grammar, so the editor's statement could only ever produce an error (#269) |
+| `supportsResultPagination` | **`true`** | OpenSearch SQL accepts an `OFFSET` clause, which is the one capability where this product diverges from Elasticsearch. Declared as `this.product.acceptsOffsetClause`, so it cannot drift from the refusal the shared `prepareQuery` enforces (#816) |
 | `supportsTransactions` | **`false`** | `BEGIN` is not in the grammar and the surface is stateless HTTP. Measured 2026-08-19 on OpenSearch 3.8.0: `POST /api/db/transaction` answered HTTP 400, *"Transaction control is not supported for this database type"*, for both `begin` and `rollback` — the measurement #U13 came from |
 | `declaresForeignKeys` | **`false`** | The engine has no such constraint in its model, so the empty `foreignKeys` means "impossible here" rather than "none declared, or none visible to this role" — the distinction #414 was about |
 | `supportsMaintenance` | **`false`** | Nothing in `MaintenanceType` is SQL-reachable ([§8](#8-maintenance)) |
@@ -1661,4 +1691,4 @@ because the provider exposes no `cancelQuery`
 - `_cat/indices`: <https://docs.opensearch.org/latest/api-reference/cat/cat-indices/>
 - Query insights (`top_queries`): <https://docs.opensearch.org/latest/observing-your-data/query-insights/index/>
 - Apache License, Version 2.0: <https://www.apache.org/licenses/LICENSE-2.0>
-- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [MongoDB](./mongodb.md) · [Couchbase](./couchbase.md) · [ClickHouse](./clickhouse.md) · [Apache Druid](./druid.md) · [Apache Trino](./trino.md) · [Elasticsearch](./elasticsearch.md) · [Redis](./redis.md) · [LibreDB](./libredb.md)
+- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [MongoDB](./mongodb.md) · [Couchbase](./couchbase.md) · [ClickHouse](./clickhouse.md) · [Apache Druid](./druid.md) · [Trino](./trino.md) · [Elasticsearch](./elasticsearch.md) · [Redis](./redis.md) · [LibreDB](./libredb.md)

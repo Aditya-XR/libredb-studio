@@ -88,7 +88,7 @@ describe("POST /api/db/objects/edit-apply", () => {
     // `1c7e7b2e9f9ee023a97ad141dd3d3c92923bb03472f6b0ff0c726968c3fe28a5`, this request answered 200
     // and `provider.applyObjectEdit` was called once, which is the apply landing on another server.
     //
-    // Why the URI and not the five fields: `src/lib/db/providers/sql/postgres.ts:2095-2099` returns
+    // Why the URI and not the five fields: `src/lib/db/providers/sql/postgres.ts:2070-2074` returns
     // `{ ...baseConfig, connectionString }` and NEVER reaches the host/port/user/database branch
     // below it, so these two records are byte-identical in every field the old frame hashed, `id`
     // included, and reach two different servers.
@@ -253,7 +253,7 @@ describe("POST /api/db/objects/edit-apply", () => {
   });
 
   test("the OUTCOME event's sink throwing leaves the 200 intact", async () => {
-    // `src/app/api/db/maintenance/route.ts:108-131` verbatim, including its stated reason: the
+    // `src/app/api/db/maintenance/route.ts:123-152` verbatim, including its stated reason: the
     // engine has already acted and a broken sink must not turn a completed apply into a 500 that
     // invites a retry that would be a SECOND DDL.
     const sealed = await mintValidPlan();
@@ -332,7 +332,7 @@ describe("POST /api/db/objects/edit-apply", () => {
 
   test("the audit names the connection and the caller, and falls back through the arms in order", async () => {
     // Fix round 1, finding 8. `connectionName` is `name || database || "unknown"`, inherited
-    // verbatim from `src/app/api/db/maintenance/route.ts:117`, and BOTH its fallback arms had no
+    // verbatim from `src/app/api/db/maintenance/route.ts:138`, and BOTH its fallback arms had no
     // population: the harness fixture always carries a name, so `?? "unknown"` on that line killed
     // nothing. `resolveConnection` returns an INLINE caller-supplied connection object verbatim, so
     // a connection whose `name` is empty is the caller's to send and is the live population here.

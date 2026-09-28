@@ -16,7 +16,7 @@
 | **Status** | Implemented & shipped |
 | **Database type id** | `cassandra` |
 | **Family** | SQL (`src/lib/db/providers/sql/cassandra/`) |
-| **Driver** | [`cassandra-driver`](https://www.npmjs.com/package/cassandra-driver) 4.9.0 — Apache-2.0, pure JS (no `binding.gyp`, no `.node`, no postinstall) ([§3.1](#31-a-driver-that-costs-no-distribution-channel-anything)) |
+| **Driver** | [`cassandra-driver`](https://www.npmjs.com/package/cassandra-driver) 4.10.0 — Apache-2.0, pure JS (no `binding.gyp`, no `.node`, no postinstall) ([§3.1](#31-a-driver-that-costs-no-distribution-channel-anything)) |
 | **Query language** | `sql` — CQL is SQL-*shaped*: no JOIN, no subquery, no OFFSET, no EXPLAIN ([§5.4](#54-dialect-traps-a-user-will-hit)) |
 | **Default port** | `9042` — the native protocol. Thrift (9160) is gone from 4.0 onwards; 7000/7001 are internode and 7199 is JMX |
 | **Connection pooling** | The driver's own, one session per connection: core 1 connection per local host, 2048 requests in flight per connection |
@@ -903,6 +903,12 @@ Nothing reads the name to work out what it is holding.
   trip**. A routine has no columns and neither has a trigger; that is a true fact about the kind
   rather than a failed read.
 
+`table`, `materialized_view` and `type` therefore declare `hasColumns`, which is what draws the
+object tree's twisty, and `index`, `function`, `aggregate` and `trigger` declare nothing and answer
+`columns: []`, so they stay leaves; `type` is `role: "config"` and still has columns, which is why
+the declaration is per kind and not derived from the role, and a UDT declared with no field is a
+legal empty answer rather than a defect.
+
 `foreignKeys` is always `[]` for the same reason [§6.2](#62-indexes-and-the-one-thing-they-never-are)
 gives.
 
@@ -1158,6 +1164,7 @@ because there are no table statistics to list at all.)
   supportsExternalQueryLimiting: true,
   supportsCreateTable: false,        // the modal cannot emit valid CQL, and a diff cannot derive the partition key (§5.5)
   supportsInlineRowEdit: false,      // one guessed key column is not a CQL primary key (§5.5)
+  supportsResultPagination: false,   // CQL has no OFFSET; prepareQuery throws rather than answer page two with page one (#816)
   supportsTransactions: false,       // CQL has no transaction; BATCH is not one (#464)
   declaresForeignKeys: false,        // the clause does not exist (§6.2)
   supportsMaintenance: false,        // every operation is a nodetool action (§8)
@@ -1165,6 +1172,9 @@ because there are no table statistics to list at all.)
   supportsConnectionString: false,   // no URI carries localDataCenter (§4.2)
   defaultPort: 9042,
   schemaRefreshPattern: "\\b(CREATE|DROP|ALTER)\\b",
+  containerLevels: [{ id: "schema", label: "Keyspace", labelPlural: "Keyspaces" }], // one level: CQL has none above a keyspace and none below it (§6.4)
+  containerPathShapes: "exact",      // only [keyspace] addresses a container; any other path is refused (§6.4, #1147)
+  objectKinds: ["table", "materialized_view", "index", "type", "function", "aggregate", "trigger"], // declared in this order (§6.4)
 }
 ```
 
@@ -1424,8 +1434,7 @@ The tier stays `partial`, and the reason has moved rather than gone. Not `full`,
 thirteen surfaces answer with nothing: the monitoring dashboard here carries a version, an uptime and
 two counts against Cassandra's full set, and `full` in this table means every surface *answered*, not
 every surface returned. Not `query-only` either, because the object browser, the column metadata and
-the index metadata all work — which is what separates this from Materialize and RisingWave, which have
-none of it.
+the index metadata all work.
 
 ---
 
@@ -1456,7 +1465,7 @@ first and then the remaining columns alphabetically, with all twenty table optio
 Nothing in the database holds the author's own bytes.
 
 **`cql` IS NOT A MONACO LANGUAGE ID**, and every row above says `sql` because of it. The installed
-monaco-editor 0.56.0 bundle registers 89 ids and `cql` is not among them; an unregistered id degrades
+monaco-editor 0.57.0 bundle registers 89 ids and `cql` is not among them; an unregistered id degrades
 to plain text with no throw and nothing observable. `sql` is the closest registered dialect, so a
 `CREATE TABLE` renders correctly and the CQL-only spellings (`PRIMARY KEY ((a), b)`,
 `frozen<address>`, a `$$ ... $$` function body) are highlighted as whatever the SQL tokenizer makes

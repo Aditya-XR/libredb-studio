@@ -192,7 +192,8 @@ export interface AgentTimelineItem {
   readonly isAnswer?: true;
   /**
    * What the RUN already did with this entry's statement, when the entry is an
-   * answer the run handed to the editor (§2.3 of `docs/AGENT_ANALYST_DESIGN.md`).
+   * answer the run handed to the editor (see the "Handing the answer to the editor
+   * (auto-execute)" section of `docs/AGENT.md`).
    *
    * Present only for a handover that happened: `none` is the setting being off, and
    * carrying it here would ask the rail to act on a decision to do nothing. The
@@ -481,6 +482,11 @@ const FAILURE_SENTENCES = {
   // not at fault: this refusal reaches PostgreSQL and SQLite too (B47).
   "agent-credential-unusable":
     "This connection's agent credential cannot be used: check that both the agent user and password are set, that the password still decrypts under the current secret key, and that no connection string is set beside it.",
+  // Names the database user, because the engine is supported and the credential was
+  // applied: the profile refused the principal it opened as. Folded into the engine
+  // sentence, an operator connected as `sa` was told to change engines.
+  "agent-principal-refused":
+    "The database user this run would execute as was refused by the read-only execution profile, not by the engine: it holds privileges the boundary cannot contain, or it cannot ask for the plan that admits a statement. Point the connection's agent credential at a least-privilege user.",
   "connection-unresolvable": "This run's database connection no longer resolves on the server.",
   internal: "The server could not carry this run. The reason is in the server log.",
 } as const satisfies Record<AgentRunFailureReason, string>;
@@ -1198,6 +1204,17 @@ function describeEvent(
         },
       };
     }
+    case "run-paused":
+      return {
+        tone: "progress",
+        headline: "Paused",
+        detail: "The run is paused; resume it to continue from where it stopped.",
+      };
+    case "run-resumed":
+      return {
+        tone: "progress",
+        headline: "Resumed",
+      };
     default:
       return {
         tone: TERMINAL_TONES[event.status],
@@ -1547,6 +1564,10 @@ export function foldLedgerEntries(entries: readonly AgentLedgerEntry[]): AgentRu
       if (event.kind === "run-started") {
         status = "running";
         mode = event.mode;
+      } else if (event.kind === "run-paused") {
+        status = "paused";
+      } else if (event.kind === "run-resumed") {
+        status = "running";
       } else if (event.kind === "run-finished") {
         status = event.status;
         failureReason = event.reason ?? null;

@@ -7,7 +7,7 @@
  * needs an index, whether a `GROUP BY` is answerable at all — turns on exactly that.
  * The honest way to obtain it is NOT to count: `COUNT(DISTINCT col)` per column is a
  * full scan, and this mode's whole selling point is that it can be pointed at
- * production. Both served engines already hold the numbers, so this module reads
+ * production. Every served engine already holds the numbers, so this module reads
  * what they hold and refuses to improve on it.
  *
  * It is its own module rather than part of `context-snapshot.ts` for a reason that is
@@ -80,7 +80,11 @@ export interface AgentColumnEstimate {
 export interface AgentTableEstimate {
   /** The engine's row estimate, or `null` where it has never counted this table. */
   readonly estimatedRows: number | null;
-  /** Empty where the engine holds no per-column distribution — which is all of SQLite. */
+  /**
+   * Empty where this run has no per-column distribution to report. That is all of SQLite,
+   * which records none at all, and all of SQL Server, which records them behind a DBCC
+   * command this boundary refuses — see `buildMssqlEstimates` for that distinction.
+   */
   readonly columns: readonly AgentColumnEstimate[];
 }
 
@@ -182,11 +186,46 @@ function buildSqliteEstimates(rows: readonly Record<string, unknown>[]): Map<str
   return byTable;
 }
 
+/**
+ * SQL Server's rows: one per USER TABLE, from `composeMssqlStatistics` - the sum of
+ * `sys.partitions.rows` over the heap or clustered index (`index_id IN (0, 1)`).
+ *
+ * Keyed `schema.table`, the same shape `buildPostgresEstimates` produces, because the
+ * inventory addresses a SQL Server object by the same qualified name and the packing
+ * joins the two by that key alone.
+ *
+ * `columns` is empty, and that is this READ's limit rather than the engine's: SQL Server
+ * does hold per-column distributions, but only behind `DBCC SHOW_STATISTICS`, which is a
+ * DBCC command rather than a read and is refused by the admission step and by the shared
+ * statement guard alike (`composeMssqlStatistics` records the same reasoning). The
+ * table half is what a catalog read can honestly answer here, exactly as on SQLite and
+ * DuckDB.
+ *
+ * There is no -1 case to unwind the way PostgreSQL's `reltuples` has one: `sys.partitions`
+ * carries a maintained count and a table with no rows arrives as 0. An unreadable value
+ * becomes absence through `numeric`, which is what keeps a driver that hands a `bigint`
+ * back as text from printing as `NaN` rows. Measured on AdventureWorks2022: the composed
+ * read answers 72 rows, one per user table.
+ */
+function buildMssqlEstimates(rows: readonly Record<string, unknown>[]): Map<string, AgentTableEstimate> {
+  const byTable = new Map<string, AgentTableEstimate>();
+
+  for (const row of rows) {
+    byTable.set(`${text(row.table_schema)}.${text(row.table_name)}`, {
+      estimatedRows: numeric(row.estimated_rows),
+      columns: [],
+    });
+  }
+
+  return byTable;
+}
+
 const ESTIMATE_BUILDERS: Partial<
   Record<DatabaseType, (rows: readonly Record<string, unknown>[]) => Map<string, AgentTableEstimate>>
 > = {
   postgres: buildPostgresEstimates,
   sqlite: buildSqliteEstimates,
+  mssql: buildMssqlEstimates,
 };
 
 /**

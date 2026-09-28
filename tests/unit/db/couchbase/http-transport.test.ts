@@ -9,6 +9,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
 import type { DatabaseConnection, DatabaseType } from "@/lib/db/types";
 import type { SSLConfig } from "@/lib/types";
 import { CouchbaseError } from "@/lib/db/providers/document/couchbase/transport";
@@ -506,6 +507,95 @@ describe("CouchbaseHttpTransport query endpoint discovery", () => {
 });
 
 // ============================================================================
+// Endpoint validation and redirects
+// ============================================================================
+
+describe("CouchbaseHttpTransport endpoint validation", () => {
+  // A host is spliced into nothing: one that would rewrite the URL around it is
+  // refused before the transport exists, so no request can carry the credential.
+  test.each(["evil.example/steal?", "user@evil.example", "db#x", "db\\evil", "db%2f", "db evil"])(
+    "refuses the host %p before any request is sent",
+    (host) => {
+      expect(() => makeTransport({ host })).toThrow(DatabaseConfigError);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  test.each([0, 65536, 1.5, "8091abc"])("refuses the port %p before any request is sent", (port) => {
+    expect(() => makeTransport({ port: port as number })).toThrow(DatabaseConfigError);
+    expect(calls).toHaveLength(0);
+  });
+
+  // The cluster reports its node addresses, and they are held to the same rule as
+  // the configured one: the query request carries the same credential.
+  test.each([
+    ["a node hostname", { nodesExt: [{ hostname: "evil.example/steal?", services: { n1ql: 8093 } }] }],
+    [
+      "an alternate address",
+      {
+        nodesExt: [
+          {
+            hostname: "node1.local",
+            services: { n1ql: 8093 },
+            alternateAddresses: { external: { hostname: "user@evil.example", ports: { n1ql: 30093 } } },
+          },
+        ],
+      },
+    ],
+    ["a query port", { nodesExt: [{ hostname: "node1.local", services: { n1ql: 70000 } }] }],
+  ])("refuses %s the cluster reports before any query is sent", async (_label, nodeServices) => {
+    handler = routeQuery(successPayload(), 200, nodeServices);
+
+    await expect(makeTransport().query("SELECT 1")).rejects.toBeInstanceOf(DatabaseConfigError);
+    expect(queryCalls()).toHaveLength(0);
+  });
+
+  test("refuses a host an SRV record names before any request is sent", async () => {
+    const deps: CouchbaseHttpTransportDeps = {
+      resolveSrv: async () => [{ name: "evil.example/steal?", port: 11207, priority: 0, weight: 0 }],
+    };
+
+    await expect(makeTransport({ port: undefined }, deps).manage("/pools/default")).rejects.toBeInstanceOf(
+      DatabaseConfigError,
+    );
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("CouchbaseHttpTransport redirects", () => {
+  // Drained like any other answer, so the socket goes back to the pool instead of
+  // being held by a body nobody reads.
+  test("reads the redirect's body before refusing it", async () => {
+    const redirect = new Response("moved", { status: 302, headers: { location: "https://evil.example/" } });
+    handler = () => redirect;
+
+    await expect(makeTransport().manage("/pools/default")).rejects.toBeInstanceOf(ConnectionError);
+    expect(redirect.bodyUsed).toBe(true);
+  });
+
+  test("asks fetch not to follow a redirect", async () => {
+    await makeTransport().query("SELECT 1");
+
+    expect(calls.map((call) => call.init?.redirect)).toEqual(["manual", "manual"]);
+  });
+
+  test("refuses a 3xx response with a ConnectionError naming only the target origin", async () => {
+    handler = () =>
+      new Response("", { status: 302, headers: { location: "https://evil.example:9443/steal?token=SECRET" } });
+
+    const error = await makeTransport()
+      .manage("/pools/default")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect((error as Error).message).toContain("HTTP 302");
+    expect((error as Error).message).toContain("https://evil.example:9443");
+    expect((error as Error).message).not.toContain("SECRET");
+    expect(calls).toHaveLength(1);
+  });
+});
+
+// ============================================================================
 // Capella SRV resolution (decision 3)
 // ============================================================================
 
@@ -854,6 +944,34 @@ describe("nodeRequestJson", () => {
       expect(response.payload).toBeNull();
     } finally {
       await server.close();
+    }
+  });
+
+  // node:http never follows a redirect on its own; this pins that it stays so,
+  // since the TLS path would otherwise carry the credential to the target.
+  test("does not follow a redirect to another server", async () => {
+    const reached: string[] = [];
+    const target = await startServer((req, res) => {
+      reached.push(req.headers.authorization ?? "");
+      res.end("{}");
+    });
+    const redirecting = await startServer((_req, res) => {
+      res.writeHead(307, { location: `${target.url}/pools/default` });
+      res.end();
+    });
+
+    try {
+      const response = await nodeRequestJson(
+        `${redirecting.url}/pools/default`,
+        { method: "GET", headers: { authorization: "Basic c2VjcmV0" } },
+        NO_TLS,
+      );
+
+      expect(response.httpCode).toBe(307);
+      expect(reached).toEqual([]);
+    } finally {
+      await redirecting.close();
+      await target.close();
     }
   });
 

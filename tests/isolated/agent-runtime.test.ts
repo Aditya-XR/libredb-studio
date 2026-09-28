@@ -364,6 +364,53 @@ describe("a drive that fails before the loop", () => {
     });
   });
 
+  test("records a principal the profile refused as itself, not as an unsupported engine", async () => {
+    // The third cause of the same error type, and the one the SQL Server work of
+    // 2026-09-18 found folded in. `PROFILE_PRIVILEGES_TOO_BROAD` is raised AFTER the
+    // credential resolved and the provider was built: the engine grants the profile
+    // and the profile refuses the user. `sa` is exactly that user, and it is the only
+    // SQL Server credential this repository's own `database-compose.yml` ships, so
+    // the folded label told an operator to change engines when the fix is one
+    // CREATE LOGIN.
+    await openRun("arun_broadprincipal");
+    mockResolveConnection.mockImplementationOnce(async () => {
+      throw new ExecutionProfileError(
+        "The agent read-only execution profile requires a least-privilege SQL Server principal; this principal is unverified or too broad (sysadmin)",
+        "PROFILE_PRIVILEGES_TOO_BROAD",
+      );
+    });
+
+    await expect(driveAgentRun("arun_broadprincipal")).rejects.toThrow(ExecutionProfileError);
+
+    expect(await finishedEvent("arun_broadprincipal")).toMatchObject({
+      status: "failed",
+      reason: "agent-principal-refused",
+    });
+  });
+
+  test("still records a target the profile cannot be granted against as the engine's limit", async () => {
+    // The control for the test above, and the reason the split cannot quietly
+    // collapse again: a classifier that answered the principal reason for every
+    // `ExecutionProfileError` would pass that test and fail this one, exactly as it
+    // would fail the `PROFILE_UNSUPPORTED_BY_PROVIDER` test further up. Nothing about
+    // an in-memory SQLite target is a principal, so `engine-unsupported` is what it
+    // still has to say.
+    await openRun("arun_stillnoprofile");
+    mockResolveConnection.mockImplementationOnce(async () => {
+      throw new ExecutionProfileError(
+        "The agent read-only execution profile cannot be granted against an in-memory SQLite database",
+        "PROFILE_UNSUPPORTED_TARGET",
+      );
+    });
+
+    await expect(driveAgentRun("arun_stillnoprofile")).rejects.toThrow(ExecutionProfileError);
+
+    expect(await finishedEvent("arun_stillnoprofile")).toMatchObject({
+      status: "failed",
+      reason: "engine-unsupported",
+    });
+  });
+
   test("records a connection that no longer resolves", async () => {
     await openRun("arun_connectiongone");
     mockResolveConnection.mockImplementationOnce(async () => {

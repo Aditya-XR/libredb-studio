@@ -7,7 +7,7 @@ import { renderHook, act, waitFor } from "@testing-library/react";
 import { mockToastDefault, mockToastDismiss } from "../helpers/mock-sonner";
 import "../helpers/mock-navigation";
 
-import { useTabManager } from "@/hooks/use-tab-manager";
+import { useTabManager, PREVIEW_PAGE_SIZE } from "@/hooks/use-tab-manager";
 import type { DatabaseConnection } from "@/lib/types";
 import type { DetailedObject } from "@/lib/db/detailed-object";
 import type { DatabaseObject } from "@/lib/db/types";
@@ -60,6 +60,23 @@ const defaultMetadata: ProviderMetadata = {
   },
 };
 
+/**
+ * The same labels over a Redis-shaped declaration.
+ *
+ * `queryDialect: "redis"` is what routes generation to the command grammar (#427); the labels are the
+ * postgres ones because nothing under test reads them, and copying twenty strings would suggest it
+ * does.
+ */
+const redisMetadata = {
+  capabilities: {
+    ...defaultMetadata.capabilities,
+    queryLanguage: "json",
+    queryDialect: "redis",
+    defaultPort: 6379,
+  },
+  labels: defaultMetadata.labels,
+} as ProviderMetadata;
+
 // Helper schema
 const testSchema: DetailedObject[] = [
   {
@@ -86,6 +103,53 @@ describe("useTabManager", () => {
     localStorage.clear();
     mockToastDefault.mockClear();
     mockToastDismiss.mockClear();
+  });
+
+  test("a count query opens and activates an editable tab without executing it", () => {
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection(), metadata: defaultMetadata, schema: [] }),
+    );
+    act(() => result.current.handleGenerateCount(["app", "Order.Items"]));
+    const tab = result.current.tabs[1];
+    expect(tab.name).toBe("Count: Order.Items");
+    expect(tab.query).toBe('SELECT COUNT(*) AS row_count\nFROM app."Order.Items";');
+    expect(tab.type).toBe("sql");
+    expect(tab.isExecuting).toBe(false);
+    expect(tab.result).toBeNull();
+    expect(result.current.activeTabId).toBe(tab.id);
+  });
+
+  test("a MongoDB count opens in the correct editor language", () => {
+    const metadata = {
+      ...defaultMetadata,
+      capabilities: {
+        ...defaultMetadata.capabilities,
+        queryLanguage: "json" as const,
+        containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }] as const,
+      },
+    };
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection({ type: "mongodb" }), metadata, schema: [] }),
+    );
+    act(() => result.current.handleGenerateCount(["shop", "orders"]));
+    expect(result.current.tabs[1].type).toBe("mongodb");
+    // The database rides as its own key (#843), or the count answers for the connected one.
+    expect(JSON.parse(result.current.tabs[1].query)).toEqual({
+      database: "shop",
+      collection: "orders",
+      operation: "count",
+      filter: {},
+    });
+  });
+
+  test.each([
+    null,
+    { ...defaultMetadata, capabilities: { ...defaultMetadata.capabilities, queryDialect: "redis" as const } },
+  ])("unresolved or unsupported metadata never creates a count tab (%#)", (metadata) => {
+    const { result } = renderHook(() => useTabManager({ activeConnection: makeConnection(), metadata, schema: [] }));
+    act(() => result.current.handleGenerateCount(["user:*"]));
+    expect(result.current.tabs).toHaveLength(1);
+    expect(result.current.activeTabId).toBe("default");
   });
 
   test("starts with one default tab", () => {
@@ -542,7 +606,9 @@ describe("useTabManager", () => {
     expect(result.current.tabs).toHaveLength(2);
     const newTab = result.current.tabs[1];
     expect(newTab.name).toBe("users");
-    expect(newTab.query).toBe("SELECT * FROM users LIMIT 50;");
+    // No row bound in the TEXT (#816): the preview cap rides the execution option below,
+    // so nothing downstream has to guess whether a bound in the statement was ours.
+    expect(newTab.query).toBe("SELECT * FROM users;");
     expect(newTab.type).toBe("sql");
 
     // Active tab should be the new one
@@ -552,7 +618,10 @@ describe("useTabManager", () => {
     // The hook uses setTimeout(..., 100), so we wait for it
     return new Promise<void>((resolve) => {
       setTimeout(() => {
-        expect(executeFn).toHaveBeenCalledWith("SELECT * FROM users LIMIT 50;", newTab.id);
+        expect(executeFn).toHaveBeenCalledWith("SELECT * FROM users;", newTab.id, false, {
+          limit: PREVIEW_PAGE_SIZE,
+        });
+        expect(PREVIEW_PAGE_SIZE).toBe(50);
         resolve();
       }, 150);
     });
@@ -918,6 +987,53 @@ describe("useTabManager", () => {
     expect(result.current.currentTab.id).toBe("default");
   });
 
+  /**
+   * A key activated in the key browser.
+   *
+   * A key is NOT a schema node — the cache this hook looks objects up in holds prefix groups — so its
+   * type is handed in. The two tests below are the pair that makes the parameter load-bearing: the
+   * same path, the same cache, and the only difference is whether the caller knew the type.
+   */
+  test("handleTableClick generates from columns the caller supplies", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ type: "redis", port: 6379 }),
+        metadata: redisMetadata,
+        schema: testSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["videobackend:login:refreshToken:1"], executeFn, [
+        { name: "type", type: "hash", nullable: false, isPrimary: false },
+      ]);
+    });
+
+    // A READ, because the type was known: `HGETALL` rather than a probe for what the value is.
+    expect(result.current.tabs[1].query).toBe("HGETALL videobackend:login:refreshToken:1");
+  });
+
+  test("handleTableClick falls back to the type probe for a key nobody described", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ type: "redis", port: 6379 }),
+        metadata: redisMetadata,
+        schema: testSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["videobackend:login:refreshToken:1"], executeFn);
+    });
+
+    // The generator's own unknown branch (#427), reached because no schema node holds this key: the
+    // editor opens on a command that FINDS OUT what the key is, which is the honest answer when
+    // nobody knows — and it is exactly what the shell avoids by passing the type the page carried.
+    expect(result.current.tabs[1].query).toBe("TYPE videobackend:login:refreshToken:1");
+  });
+
   test("handleTableClick without metadata uses fallback query", () => {
     const executeFn = mock(() => {});
     const { result } = renderHook(() =>
@@ -933,7 +1049,8 @@ describe("useTabManager", () => {
     });
 
     const newTab = result.current.tabs[1];
-    expect(newTab.query).toBe("SELECT * FROM users LIMIT 50;");
+    // The fallback statement loses its bound with the generated ones (#816).
+    expect(newTab.query).toBe("SELECT * FROM users;");
     expect(newTab.type).toBe("sql");
     expect(newTab.name).toBe("users");
   });
@@ -1150,6 +1267,116 @@ describe("useTabManager — Redis dialect", () => {
 });
 
 // ============================================================================
+// PromQL: a metric opens by its selector (#1085)
+// ============================================================================
+
+describe("useTabManager on a PromQL connection (#1085)", () => {
+  // The capabilities #1085 section 6.3 gives Prometheus, where they differ from the SQL default above.
+  // The connection keeps the helper's own type: nothing on this path reads the type id, which is
+  // the rule the generators keep.
+  const promqlMetadata: ProviderMetadata = {
+    capabilities: {
+      ...defaultMetadata.capabilities,
+      queryLanguage: "promql" as const,
+      defaultPort: 9090,
+      statementTerminator: "none" as const,
+      supportsExplain: false,
+      supportsExternalQueryLimiting: false,
+      supportsCreateTable: false,
+      supportsInlineRowEdit: false,
+      supportsMaintenance: false,
+      supportsConnectionString: false,
+    },
+    // The SQL labels as they are: nothing here reads them, and `ProviderMetadata.labels` is
+    // optional, so spreading it would type every label optional.
+    labels: defaultMetadata.labels,
+  };
+
+  // A metric as the inventory lists it: its label names, then timestamp and value (#1085, section 4.2).
+  const metricSchema: DetailedObject[] = [
+    {
+      name: "http_requests_total",
+      kind: "metric",
+      path: ["http_requests_total"],
+      columns: [
+        { name: "job", type: "string", nullable: true, isPrimary: false },
+        { name: "timestamp", type: "timestamp", nullable: false, isPrimary: false },
+        { name: "value", type: "float", nullable: false, isPrimary: false },
+      ],
+      indexes: [],
+    },
+  ];
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  test("a new tab on a PromQL connection is a promql tab", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ port: 9090 }),
+        metadata: promqlMetadata,
+        schema: metricSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+    });
+
+    expect(result.current.tabs[1].type).toBe("promql");
+  });
+
+  test("a tree click on a metric opens a promql tab and runs its selector with the preview option", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ port: 9090 }),
+        metadata: promqlMetadata,
+        schema: metricSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["http_requests_total"], executeFn);
+    });
+
+    const newTab = result.current.tabs[1];
+    expect(newTab.name).toBe("http_requests_total");
+    expect(newTab.type).toBe("promql");
+    expect(newTab.query).toBe("http_requests_total");
+
+    // The hook runs a click's statement on a 100 ms timer, as the SQL test above measures.
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        expect(executeFn).toHaveBeenCalledWith("http_requests_total", newTab.id, false, { limit: PREVIEW_PAGE_SIZE });
+        resolve();
+      }, 150);
+    });
+  });
+
+  test("Generate Query on a metric opens a promql tab whose one runnable line is its selector", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ port: 9090 }),
+        metadata: promqlMetadata,
+        schema: metricSchema,
+      }),
+    );
+
+    act(() => {
+      result.current.handleGenerateSelect(["http_requests_total"]);
+    });
+
+    const newTab = result.current.tabs[1];
+    expect(newTab.name).toBe("Query: http_requests_total");
+    expect(newTab.type).toBe("promql");
+    expect(newTab.query.split("\n").at(-1)).toBe("http_requests_total");
+    expect(newTab.query).not.toContain("SELECT");
+  });
+});
+
+// ============================================================================
 // The click path is addressed by PATH (#789, Task 30)
 // ============================================================================
 
@@ -1191,7 +1418,7 @@ describe("useTabManager addresses an object by its path", () => {
     });
 
     const newTab = result.current.tabs[1];
-    expect(newTab.query).toBe("SELECT TOP 50 * FROM libredb_objects.app.customers;");
+    expect(newTab.query).toBe("SELECT * FROM libredb_objects.app.customers;");
     // The tab is still LABELLED with the object's own segment.
     expect(newTab.name).toBe("customers");
   });
@@ -1272,7 +1499,7 @@ describe("useTabManager addresses an object by its path", () => {
       result.current.handleTableClick(["app", "customers"], executeFn);
     });
 
-    expect(result.current.tabs[1].query).toBe("SELECT * FROM app.customers LIMIT 50;");
+    expect(result.current.tabs[1].query).toBe("SELECT * FROM app.customers;");
   });
 });
 
@@ -1699,5 +1926,285 @@ describe("useTabManager opens a Source tab", () => {
 
     await waitFor(() => expect(result.current.currentTab.id).toBe("t"));
     expect(result.current.currentTab.source).toEqual({ path: ["app", "f"], kind: "function" });
+  });
+});
+
+/**
+ * The walked database, carried onto the tab (the #1095 review).
+ *
+ * A key activation happens in ONE numbered database, and the statement that reads the key cannot
+ * name it: Redis has no database-qualified key syntax, so the database is a property of the
+ * connection and `GET report:daily` reads whichever one the connection sits in. The number
+ * therefore has to outlive the call that opened the tab - the Run after this one, a selection, an
+ * inline edit and the next page are all about the same key - so it goes ON the tab. These tests pin
+ * the fact landing there and the control that an ordinary activation carries nothing at all.
+ */
+describe("useTabManager carries the walked database", () => {
+  /** A key activation: the key, its known type, and the database the panel walked. */
+  const openKey = (handleTableClick: ReturnType<typeof useTabManager>["handleTableClick"], database?: number): void => {
+    handleTableClick(
+      ["report:daily"],
+      () => {},
+      [{ name: "type", type: "string", nullable: false, isPrimary: false }],
+      database,
+    );
+  };
+
+  test("puts the walked database on the tab it opens", () => {
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection(), metadata: redisMetadata, schema: [] }),
+    );
+
+    act(() => openKey(result.current.handleTableClick, 3));
+
+    expect(result.current.tabs).toHaveLength(2);
+    expect(result.current.tabs[1].databaseOverride).toBe(3);
+    // The statement itself is untouched: the database is not something Redis lets it say, which is
+    // the whole reason the tab has to carry the fact.
+    expect(result.current.tabs[1].query).toBe("GET report:daily");
+  });
+
+  test("an ordinary activation carries no override at all", () => {
+    const executeFn = mock(() => {});
+    const { result } = renderHook(() =>
+      useTabManager({ activeConnection: makeConnection(), metadata: defaultMetadata, schema: testSchema }),
+    );
+
+    act(() => {
+      result.current.handleTableClick(["users"], executeFn);
+    });
+
+    // Absent, not `undefined`: an ordinary tab is the record it has always been, so nothing
+    // downstream can read a number nobody walked.
+    expect("databaseOverride" in result.current.tabs[1]).toBe(false);
+  });
+
+  test("a key tab's override survives the persisted record, so a reload still reads its own database", async () => {
+    /*
+     * The gap the review left: the field landed on the tab, but a tab is restored from
+     * `localStorage`, and this record did not carry the number. A reload therefore restored a
+     * key tab with no override, and every run after it read the session's database - the
+     * reviewer's `(nil)`, back in a form nobody would notice, because the tab looks and reads
+     * exactly like the one that was working before the reload.
+     *
+     * The whole record is asserted rather than the one field, so the field's presence in
+     * storage is pinned as an exact shape: it rides beside the four fields `PersistedTabState`
+     * has always written and adds nothing else.
+     */
+    const storageKey = "libredb_workspace_tabs_v1:override-persist";
+    const connection = makeConnection({ id: "override-persist" });
+    const first = renderHook(() =>
+      useTabManager({ activeConnection: connection, metadata: redisMetadata, schema: [], persistWorkspace: true }),
+    );
+
+    act(() => openKey(first.result.current.handleTableClick, 3));
+    await waitFor(
+      () => {
+        expect(localStorage.getItem(storageKey)).toBeTruthy();
+      },
+      { timeout: 2000 },
+    );
+
+    const persisted = JSON.parse(localStorage.getItem(storageKey) ?? "{}") as {
+      tabs: Array<Record<string, unknown>>;
+    };
+    expect(persisted.tabs[1]).toEqual({
+      id: first.result.current.tabs[1].id,
+      name: "report:daily",
+      query: "GET report:daily",
+      type: "redis",
+      databaseOverride: 3,
+    });
+
+    // The reload itself: the same stored record read by a fresh hook, which is what a page
+    // reload is to this hook.
+    first.unmount();
+    const second = renderHook(() =>
+      useTabManager({ activeConnection: connection, metadata: redisMetadata, schema: [], persistWorkspace: true }),
+    );
+
+    await waitFor(() => expect(second.result.current.tabs).toHaveLength(2));
+    expect(second.result.current.tabs[1].databaseOverride).toBe(3);
+  });
+
+  test("a tab with no stored override restores with no key, which is not `null` and not `0`", async () => {
+    /*
+     * The absence half, and it is the one that costs a wrong ANSWER rather than an error:
+     * `0` and `null` are both databases a restored tab would select, and the ordinary tab
+     * beside the key tab is the case that makes the assertion non-vacuous - a restore that
+     * invented a default would have to invent it here too.
+     *
+     * Both tabs in the record are key-looking (names and database-less statements) and both
+     * carry no override, because the record a version before this field wrote is exactly this
+     * shape and has to keep meaning "the connection's own database".
+     */
+    localStorage.setItem(
+      "libredb_workspace_tabs_v1:override-absent",
+      JSON.stringify({
+        activeTabId: "key",
+        tabs: [
+          { id: "ordinary", name: "Query 1", query: "SELECT 1;", type: "sql" },
+          { id: "key", name: "report:daily", query: "GET report:daily", type: "redis" },
+        ],
+      }),
+    );
+
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: makeConnection({ id: "override-absent" }),
+        metadata: redisMetadata,
+        schema: [],
+        persistWorkspace: true,
+      }),
+    );
+
+    await waitFor(() => expect(result.current.tabs).toHaveLength(2));
+    expect(result.current.tabs[1].databaseOverride).toBeUndefined();
+    // Absent, not present-but-undefined: `"databaseOverride" in tab` is what the rest of the
+    // shell would branch on, and a key holding `undefined` is a field somebody has to remember
+    // to test for. The control is the tab beside it, which never had one either.
+    expect(result.current.tabs.some((tab) => "databaseOverride" in tab)).toBe(false);
+  });
+});
+
+// ─── A second activation of the same object focuses its tab ───
+
+describe("useTabManager reuses an object's unedited data tab", () => {
+  /** Long enough for the deferred run `handleTableClick` schedules. */
+  const settle = () => new Promise((r) => setTimeout(r, 150));
+
+  function renderManager(schema: DetailedObject[] = testSchema) {
+    return renderHook(() => useTabManager({ activeConnection: makeConnection(), metadata: defaultMetadata, schema }));
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  test("two activations of the same object give one data tab, focused, run once", async () => {
+    const executeFn = mock(() => {});
+    const { result } = renderManager();
+
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    const opened = result.current.activeTabId;
+    // Away and back, so the second activation has something to focus.
+    act(() => result.current.setActiveTabId("default"));
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    await settle();
+
+    expect(result.current.tabs.map((t) => t.name)).toEqual(["Query 1", "users"]);
+    expect(result.current.activeTabId).toBe(opened);
+    expect(executeFn).toHaveBeenCalledTimes(1);
+  });
+
+  test("a matched tab whose last run failed is focused and run again, in that tab", async () => {
+    const executeFn = mock(() => {});
+    const { result } = renderManager();
+
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    const opened = result.current.activeTabId;
+    await settle();
+    // The shape a failed run leaves: no rows, and the reason in their place.
+    act(() => result.current.updateTabById(opened, { runError: "connection reset" }));
+    act(() => result.current.setActiveTabId("default"));
+    executeFn.mockClear();
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    await settle();
+
+    expect(result.current.tabs.map((t) => t.name)).toEqual(["Query 1", "users"]);
+    expect(result.current.activeTabId).toBe(opened);
+    expect(executeFn).toHaveBeenCalledTimes(1);
+    const query = result.current.tabs[1].query;
+    expect(executeFn).toHaveBeenCalledWith(query, opened, false, { limit: PREVIEW_PAGE_SIZE });
+  });
+
+  test("a tab opened on one connection is not reused on another holding the same path", async () => {
+    const executeFn = mock(() => {});
+    const { result, rerender } = renderHook(
+      ({ connectionId }: { connectionId: string }) =>
+        useTabManager({
+          activeConnection: makeConnection({ id: connectionId }),
+          metadata: defaultMetadata,
+          schema: testSchema,
+        }),
+      { initialProps: { connectionId: "conn-a" } },
+    );
+
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    const onA = result.current.activeTabId;
+    // Same connection: the control, reused.
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    expect(result.current.activeTabId).toBe(onA);
+    expect(result.current.tabs).toHaveLength(2);
+
+    rerender({ connectionId: "conn-b" });
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    await settle();
+
+    expect(result.current.tabs).toHaveLength(3);
+    expect(result.current.activeTabId).not.toBe(onA);
+    expect(executeFn).toHaveBeenCalledTimes(2);
+  });
+
+  test("a different object opens its own tab", async () => {
+    const executeFn = mock(() => {});
+    const { result } = renderManager();
+
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    act(() => result.current.handleTableClick(["orders"], executeFn));
+    await settle();
+
+    expect(result.current.tabs.map((t) => t.name)).toEqual(["Query 1", "users", "orders"]);
+    expect(executeFn).toHaveBeenCalledTimes(2);
+  });
+
+  test("a tab whose query the user edited is never captured", async () => {
+    const executeFn = mock(() => {});
+    const { result } = renderManager();
+
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    const edited = result.current.activeTabId;
+    act(() => result.current.updateTabById(edited, { query: "SELECT id FROM users WHERE id > 10;" }));
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    await settle();
+
+    expect(result.current.tabs).toHaveLength(3);
+    expect(result.current.activeTabId).not.toBe(edited);
+    expect(executeFn).toHaveBeenCalledTimes(2);
+    // The edit is the reader's work, and it is left exactly as they wrote it.
+    expect(result.current.tabs.find((t) => t.id === edited)?.query).toBe("SELECT id FROM users WHERE id > 10;");
+  });
+
+  test("the same key in another numbered database is another tab", async () => {
+    const executeFn = mock(() => {});
+    const { result } = renderManager([]);
+    const type = [{ name: "type", type: "string", nullable: false, isPrimary: false }];
+
+    act(() => result.current.handleTableClick(["report:daily"], executeFn, type, 3));
+    act(() => result.current.handleTableClick(["report:daily"], executeFn, type, 4));
+    act(() => result.current.handleTableClick(["report:daily"], executeFn, type, 3));
+    await settle();
+
+    expect(result.current.tabs.map((t) => t.databaseOverride)).toEqual([undefined, 3, 4]);
+    expect(result.current.activeTabId).toBe(result.current.tabs[1].id);
+    expect(executeFn).toHaveBeenCalledTimes(2);
+  });
+
+  test("a tab with the same name and query but no recorded origin is not captured", async () => {
+    // The shape a tab restored from storage has: its origin is never persisted.
+    const executeFn = mock(() => {});
+    const { result } = renderManager();
+
+    act(() =>
+      result.current.setTabs((prev) => [
+        ...prev,
+        { id: "restored", name: "users", query: "SELECT * FROM users;", result: null, isExecuting: false, type: "sql" },
+      ]),
+    );
+    act(() => result.current.handleTableClick(["users"], executeFn));
+    await settle();
+
+    expect(result.current.tabs).toHaveLength(3);
+    expect(executeFn).toHaveBeenCalledTimes(1);
   });
 });

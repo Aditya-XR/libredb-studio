@@ -77,6 +77,16 @@
  * node's filesystem rather than anything the database holds. The other six kinds DO
  * declare `hasSource`; see `CASSANDRA_OBJECT_KINDS` below, which is the list.
  *
+ * THREE kinds declare `hasColumns`, and the third is why the declaration is per kind rather
+ * than derived from `role` (#789). `table` and `materialized_view` are `relation` and answer
+ * the table's or the view's columns. `type` is `role: "config"` and answers the UDT's fields
+ * out of `system_schema.types` (`typeDetail` below), so a role-derived gate would withhold a
+ * twisty that opens on real content. `index` is `config` as well and declares NOTHING,
+ * because `indexDetail` answers `columns: []` and carries the index's whole content in
+ * `indexes` instead; `function`, `aggregate` and `trigger` have no columns at all. A UDT
+ * declared with no field is a legal empty answer rather than a defect, and the conformance
+ * expectation names it in `columnlessSamples` when a fixture holds one.
+ *
  * Only `table` declares `acceptsRowWrites`. A materialized view refuses every write
  * ("Cannot directly modify a materialized view", measured), and the other five kinds
  * have no rows at all. The provider's engine-wide `supportsInlineRowEdit: false` is a
@@ -87,11 +97,15 @@
 import { QueryError } from "@/lib/db/errors";
 import {
   applySourceBound,
+  assertContainerPathShape,
+  assertObjectPathShape,
   callerBoundTruncationReason,
   containerDepth,
   declaredKinds,
   findKind,
   requireSourceKind,
+  type ContainerPathShapeEngine,
+  type ObjectPathShapeEngine,
 } from "@/lib/db/object-kinds";
 import { comparePaths } from "@/lib/db/object-path";
 import type {
@@ -115,6 +129,18 @@ import { CassandraTransportError, type CassandraRow, type CassandraTransport } f
 
 const PROVIDER = "cassandra" as const;
 
+/**
+ * Cassandra's identity for the shared container-path renderer.
+ *
+ * Which paths this engine accepts is not a field here: it is `containerPathShapes` in
+ * `getCapabilities()` (`./index.ts`), which the object routes read too (#1147).
+ */
+const CASSANDRA_CONTAINER_PATH_ENGINE: ContainerPathShapeEngine = {
+  code: PROVIDER,
+  label: "A Cassandra",
+  shapeNames: "label",
+};
+
 // ============================================================================
 // Declaration
 // ============================================================================
@@ -132,7 +158,7 @@ export const CASSANDRA_CONTAINER_LEVELS: ContainerLevels = Object.freeze([
 /**
  * The Monaco id every readable kind here renders under, and the reason it is a compromise.
  *
- * `cql` IS NOT A MONACO LANGUAGE ID. Measured against the installed monaco-editor 0.56.0
+ * `cql` IS NOT A MONACO LANGUAGE ID. Measured against the installed monaco-editor 0.57.0
  * bundle in this epic: it registers 89 ids and `cql` is not one of them, and an unregistered
  * id degrades to plain text with no throw and nothing observable. `sql` is the closest
  * registered dialect, so a `CREATE TABLE` renders correctly and CQL-only spellings
@@ -149,6 +175,7 @@ export const CASSANDRA_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     label: "Table",
     labelPlural: "Tables",
     acceptsRowWrites: true,
+    hasColumns: true,
     hasSource: true,
     sourceLanguage: CASSANDRA_SOURCE_LANGUAGE,
   },
@@ -157,6 +184,7 @@ export const CASSANDRA_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     role: "relation",
     label: "Materialized View",
     labelPlural: "Materialized Views",
+    hasColumns: true,
     hasSource: true,
     sourceLanguage: CASSANDRA_SOURCE_LANGUAGE,
   },
@@ -173,6 +201,7 @@ export const CASSANDRA_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
     role: "config",
     label: "Type",
     labelPlural: "Types",
+    hasColumns: true,
     hasSource: true,
     sourceLanguage: CASSANDRA_SOURCE_LANGUAGE,
   },
@@ -579,41 +608,18 @@ function containerSegment(
  * the worst way to report a caller mistake.
  */
 function containerKeyspace(capabilities: ProviderCapabilities, container: readonly string[]): string {
-  const levels = declaredLevels(capabilities);
-  if (container.length !== levels.length) {
-    throw new QueryError(
-      `A Cassandra container path is [${levels.map((level) => level.label.toLowerCase()).join(", ")}], ` +
-        `received ${JSON.stringify(container)}`,
-      PROVIDER,
-    );
-  }
+  assertContainerPathShape(capabilities, container, CASSANDRA_CONTAINER_PATH_ENGINE);
   return containerSegment(capabilities, container, "schema");
 }
 
 /**
- * How many segments a path of one KIND has, checked against the declaration (#789).
- *
- * ONE writer for two readers: `describeObject` and `readObjectSource` ask the same question
- * about the same path, and two copies of this derivation are two chances for the detail pane
- * and the Source tab to disagree about what an object's address is.
- *
- * Derived, not counted. One segment per declared container level plus the name, and a nesting
- * segment for a kind that declares `attachedTo` - which is the ONLY thing that changes the
- * depth, so both shapes come from the declaration rather than from a kind id written out here.
+ * Cassandra: an attached kind is addressed through its table, so the segment is required.
  */
-function assertObjectPathShape(
-  capabilities: ProviderCapabilities,
-  spec: ObjectKindSpec,
-  path: readonly string[],
-): void {
-  const levels = declaredLevels(capabilities).map((level) => level.label.toLowerCase());
-  const shape = spec.attachedTo === undefined ? [...levels, "name"] : [...levels, spec.attachedTo, "name"];
-  if (path.length === shape.length) return;
-  throw new QueryError(
-    `A Cassandra "${spec.id}" path is [${shape.join(", ")}], received ${JSON.stringify(path)}`,
-    PROVIDER,
-  );
-}
+const PATH_SHAPE_ENGINE: ObjectPathShapeEngine = {
+  code: PROVIDER,
+  label: "A Cassandra",
+  attachedSegment: "required",
+};
 
 /**
  * The server's own sentence, verbatim, for ONE kind whose read was refused.
@@ -983,7 +989,7 @@ export async function describeObject(
     throw new QueryError(`Cassandra declares no object kind "${kind}"`, PROVIDER);
   }
 
-  assertObjectPathShape(capabilities, spec, path);
+  assertObjectPathShape(capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
 
   const catalog = objectCatalog(kind);
   if (catalog === undefined) {
@@ -1351,7 +1357,7 @@ export async function readObjectSource(
   limit?: number,
 ): Promise<ObjectSourceDocument> {
   const spec = requireSourceKind(capabilities, kind, { displayName: "Cassandra", type: PROVIDER });
-  assertObjectPathShape(capabilities, spec, path);
+  assertObjectPathShape(capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
   const catalog = objectCatalog(kind);
   if (catalog?.describeTarget === undefined || catalog.describeType === undefined) {
     throw new QueryError(

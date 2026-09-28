@@ -25,6 +25,8 @@ describe("credential-resolver", () => {
     delete process.env.MY_USER;
     delete process.env.MY_DB;
     delete process.env.MY_CONN_STR;
+    delete process.env.ELASTIC_API_KEY_ID;
+    delete process.env.ELASTIC_API_KEY_SECRET;
   });
 
   it("resolves ${VAR} in password field", () => {
@@ -50,6 +52,20 @@ describe("credential-resolver", () => {
     expect(resolved.user).toBe("admin");
     expect(resolved.host).toBe("db.internal");
     expect(resolved.database).toBe("mydb");
+  });
+
+  it("resolves ${VAR} in both halves of an Elasticsearch API key pair", () => {
+    process.env.ELASTIC_API_KEY_ID = "seed-key-id";
+    process.env.ELASTIC_API_KEY_SECRET = "seed-key-secret";
+    const conn: SeedConnection = {
+      ...baseConn,
+      type: "elasticsearch",
+      apiKeyId: "${ELASTIC_API_KEY_ID}",
+      apiKeySecret: "${ELASTIC_API_KEY_SECRET}",
+    };
+    const resolved = resolveConnectionCredentials(conn);
+    expect(resolved.apiKeyId).toBe("seed-key-id");
+    expect(resolved.apiKeySecret).toBe("seed-key-secret");
   });
 
   it("throws when env var is not defined", () => {

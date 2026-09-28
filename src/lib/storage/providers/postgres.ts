@@ -3,8 +3,15 @@
  * Uses the existing `pg` package (already a project dependency).
  */
 
-import type { ServerStorageProvider, StorageCollection, StorageData } from "../types";
-import { STORAGE_COLLECTIONS } from "../types";
+import { accountFromRow, type AccountRow } from "../account-row";
+import type {
+  AccountWriteOptions,
+  ServerStorageProvider,
+  StorageCollection,
+  StorageData,
+  StoredAccount,
+} from "../types";
+import { LastAdminError, STORAGE_COLLECTIONS } from "../types";
 import { logger } from "@/lib/logger";
 
 let Pool: typeof import("pg").Pool;
@@ -53,6 +60,17 @@ export class PostgresStorageProvider implements ServerStorageProvider {
           data       TEXT NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           PRIMARY KEY (user_id, collection)
+        );
+        CREATE TABLE IF NOT EXISTS accounts (
+          email         TEXT PRIMARY KEY,
+          password_hash TEXT NOT NULL,
+          role          TEXT NOT NULL,
+          totp_secret   TEXT,
+          totp_pending  TEXT,
+          disabled      INTEGER NOT NULL DEFAULT 0,
+          session_version INTEGER NOT NULL DEFAULT 0,
+          created_at    TEXT NOT NULL,
+          updated_at    TEXT NOT NULL
         )
       `);
     } catch (error) {
@@ -124,6 +142,110 @@ export class PostgresStorageProvider implements ServerStorageProvider {
             [userId, collection, JSON.stringify(collectionData)],
           );
         }
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listAccounts(): Promise<StoredAccount[]> {
+    this.ensurePool();
+    const { rows } = await this.pool!.query(
+      `SELECT email, password_hash, role, totp_secret, totp_pending, disabled, session_version, created_at, updated_at
+       FROM accounts ORDER BY email`,
+    );
+    return (rows as AccountRow[]).map(accountFromRow);
+  }
+
+  async getAccount(email: string): Promise<StoredAccount | null> {
+    this.ensurePool();
+    const { rows } = await this.pool!.query(
+      `SELECT email, password_hash, role, totp_secret, totp_pending, disabled, session_version, created_at, updated_at
+       FROM accounts WHERE email = $1`,
+      [email],
+    );
+    const row = (rows as AccountRow[])[0];
+    return row ? accountFromRow(row) : null;
+  }
+
+  async insertAccount(account: StoredAccount): Promise<void> {
+    this.ensurePool();
+    await this.pool!.query(
+      `INSERT INTO accounts (email, password_hash, role, totp_secret, totp_pending, disabled, session_version, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        account.email,
+        account.passwordHash,
+        account.role,
+        account.totpSecret,
+        account.totpPending,
+        account.disabled ? 1 : 0,
+        account.sessionVersion,
+        account.createdAt,
+        account.updatedAt,
+      ],
+    );
+  }
+
+  async updateAccount(account: StoredAccount, options: AccountWriteOptions = {}): Promise<void> {
+    this.ensurePool();
+    await this.accountWrite(options, async (client) => {
+      await client.query(
+        `UPDATE accounts
+         SET password_hash = $1, role = $2, totp_secret = $3, totp_pending = $4, disabled = $5, session_version = $6,
+             updated_at = $7
+         WHERE email = $8`,
+        [
+          account.passwordHash,
+          account.role,
+          account.totpSecret,
+          account.totpPending,
+          account.disabled ? 1 : 0,
+          account.sessionVersion,
+          account.updatedAt,
+          account.email,
+        ],
+      );
+    });
+  }
+
+  async deleteAccount(email: string, options: AccountWriteOptions = {}): Promise<void> {
+    this.ensurePool();
+    // One transaction: an account removed without its rows would hand them to the next account
+    // created with the same email.
+    await this.accountWrite(options, async (client) => {
+      await client.query("DELETE FROM accounts WHERE email = $1", [email]);
+      await client.query("DELETE FROM user_storage WHERE user_id = $1", [email]);
+    });
+  }
+
+  /**
+   * Run an account write in one transaction. With keepEnabledAdmin the enabled admin rows are
+   * locked first, so a concurrent guarded write waits for this one to commit and then sees what
+   * it left; the write is rolled back if no enabled admin remains.
+   */
+  private async accountWrite(
+    options: AccountWriteOptions,
+    write: (client: import("pg").PoolClient) => Promise<void>,
+  ): Promise<void> {
+    const client = await this.pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (options.keepEnabledAdmin) {
+        await client.query(
+          "SELECT email FROM accounts WHERE role = 'admin' AND disabled = 0 ORDER BY email FOR UPDATE",
+        );
+      }
+      await write(client);
+      if (options.keepEnabledAdmin) {
+        const { rows } = await client.query(
+          "SELECT COUNT(*)::int AS n FROM accounts WHERE role = 'admin' AND disabled = 0",
+        );
+        if (Number((rows as { n: number | string }[])[0]?.n) === 0) throw new LastAdminError();
       }
       await client.query("COMMIT");
     } catch (err) {

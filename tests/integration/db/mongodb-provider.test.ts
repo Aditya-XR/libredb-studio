@@ -67,6 +67,10 @@ let mongoAggregatePipelines: Record<string, unknown>[][] = [];
 let mongoIndexReads: string[] = [];
 /** Every `<database>.<collection>` a `find()` cursor was opened on, in order. */
 let mongoFoundCollections: string[] = [];
+/** A server refusal per `<database>.<collection>`, raised when a `find()` cursor is read. */
+let mockFindErrors: Record<string, Error> = {};
+/** A placeholder credential: the driver is mocked, so nothing ever authenticates with it. */
+const TEST_PASSWORD = "password";
 
 /** The collections one captured sample pipeline names, first arm included. */
 function pipelineNamespaces(pipeline: Record<string, unknown>[]): string[] {
@@ -168,7 +172,14 @@ function runMockAggregate(
 const createMockCollection = (name = "users", dbName = "testdb") => ({
   find: () => {
     mongoFoundCollections.push(`${dbName}.${name}`);
-    return createMockCursor(mockDocumentsByNs[`${dbName}.${name}`] ?? mockCollectionData);
+    const cursor = createMockCursor(mockDocumentsByNs[`${dbName}.${name}`] ?? mockCollectionData);
+    const refusal = mockFindErrors[`${dbName}.${name}`];
+    if (refusal !== undefined) {
+      cursor.toArray = async () => {
+        throw refusal;
+      };
+    }
+    return cursor;
   },
   findOne: async () => mockCollectionData[0] || null,
   aggregate: (pipeline?: Record<string, unknown>[]) => ({
@@ -356,7 +367,7 @@ mock.module("mongodb", () => ({
 // ============================================================================
 
 const { MongoDBProvider } = await import("@/lib/db/providers/document/mongodb");
-const { DatabaseConfigError, ConnectionError } = await import("@/lib/db/errors");
+const { DatabaseConfigError, ConnectionError, QueryError } = await import("@/lib/db/errors");
 const { assertObjectSurface } = await import("../../helpers/object-surface-conformance");
 const { isSourcePartUnavailable } = await import("@/lib/db/object-kinds");
 
@@ -560,6 +571,7 @@ function resetObjectSurfaceMocks(): void {
   mongoAggregatePipelines = [];
   mongoIndexReads = [];
   mongoFoundCollections = [];
+  mockFindErrors = {};
   lastListDatabasesCommand = {};
 }
 
@@ -626,7 +638,10 @@ describe("MongoDBProvider", () => {
       ).toThrow(DatabaseConfigError);
     });
 
-    test("throws when database is missing and no connectionString", () => {
+    // #843: the database named at connect is only the default for a statement that names
+    // none, since every statement the product writes carries its own. So it is optional
+    // in field mode as well, the way it always was with a connection string.
+    test("accepts a missing database without a connectionString", () => {
       expect(
         () =>
           new MongoDBProvider({
@@ -634,7 +649,7 @@ describe("MongoDBProvider", () => {
             database: undefined,
             connectionString: undefined,
           }),
-      ).toThrow(DatabaseConfigError);
+      ).not.toThrow();
     });
 
     test("connectionString bypasses host/database requirement", () => {
@@ -660,6 +675,21 @@ describe("MongoDBProvider", () => {
       expect(lastMongoUri).toBe("mongodb://localhost:27017/testdb");
     });
 
+    test("names no database in the path when none is configured", async () => {
+      // The path database is also the driver's default auth database, so a stand-in like
+      // `/test` would authenticate an `admin` user against `test` and fail as bad
+      // credentials. An empty path leaves the driver's own default, which is `admin`.
+      provider = new MongoDBProvider({ ...baseConfig, database: undefined, user: "app", password: TEST_PASSWORD });
+      await provider.connect();
+      expect(lastMongoUri).toBe(`mongodb://app:${TEST_PASSWORD}@localhost:27017/`);
+    });
+
+    test("keeps the auth database when no database is configured", async () => {
+      provider = new MongoDBProvider({ ...baseConfig, database: undefined, authSource: "admin" });
+      await provider.connect();
+      expect(lastMongoUri).toBe("mongodb://localhost:27017/?authSource=admin");
+    });
+
     test("names the auth database as ?authSource, and percent-encodes it", async () => {
       // MongoDB keeps users in one database and the data in another, and the driver
       // authenticates against the database in the URI when nothing says otherwise. So
@@ -669,6 +699,21 @@ describe("MongoDBProvider", () => {
       await provider.connect();
       expect(lastMongoUri).toBe("mongodb://app:s3cret@localhost:27017/testdb?authSource=admin%20db");
     });
+
+    // The session database is read from the URI's PATH, after the authority. A regex over
+    // the whole string used to take the host of a path-less URI as the database name.
+    for (const [uri, expected] of [
+      ["mongodb://remote:27017/shop", "shop"],
+      [`mongodb://app:${TEST_PASSWORD}@remote:27017/?authSource=admin`, "test"],
+      ["mongodb://remote:27017", "test"],
+      [`mongodb+srv://app:${TEST_PASSWORD}@cluster.example.net/shop?retryWrites=true`, "shop"],
+    ] as const) {
+      test(`the session database of ${uri} is ${expected}`, async () => {
+        provider = new MongoDBProvider({ ...baseConfig, database: undefined, connectionString: uri });
+        await provider.connect();
+        expect(mongoOpenedDatabases).toEqual([expected]);
+      });
+    }
 
     test("a pasted connection string is passed through verbatim, authSource and all", async () => {
       // The URI the user typed is the whole answer. Re-composing it would drop the
@@ -809,6 +854,9 @@ describe("MongoDBProvider", () => {
       // No SQL at all here: the query language is JSON commands, so the inline row
       // editor's `UPDATE ... SET` has nothing to run against (#269).
       expect(caps.supportsInlineRowEdit).toBe(false);
+      // `prepareQuery` pins `offset` to 0 and returns the command untouched, so page two
+      // would be page one. The control is hidden rather than offered (#816).
+      expect(caps.supportsResultPagination).toBe(false);
       // Multi-document transactions need a client session this provider does not
       // hold, so the trio and the sandbox toggle are withheld (#464).
       expect(caps.supportsTransactions).toBe(false);
@@ -861,7 +909,7 @@ describe("MongoDBProvider", () => {
       // The keys a runnable command is built from - the ones `parseQuery` reads.
       // `field` is here because a model that cannot see it writes a `distinct` with no
       // field, which is now refused rather than answered with `_id`.
-      for (const key of ["collection", "operation", "filter", "pipeline", "field"]) {
+      for (const key of ["collection", "operation", "filter", "pipeline", "field", "database"]) {
         expect(statementLanguage).toContain(key);
       }
       // The two forms a model reaches for instead, named so they are excluded.
@@ -899,6 +947,49 @@ describe("MongoDBProvider", () => {
       expect(result.executionTime).toBeGreaterThanOrEqual(0);
       // ObjectId should be serialized to string
       expect(typeof result.rows[0]._id).toBe("string");
+    });
+
+    // #843: `database` names the database a command runs in, so a collection outside
+    // the connected one is reachable. Before the key existed, the same statement
+    // silently read the same-named collection in the CONNECTED database instead - a
+    // wrong answer, not an error.
+    test("database key reads a collection in another database", async () => {
+      mockDocumentsByNs["otherdb.users"] = [{ _id: new MockObjectId("z1"), name: "Zoe" }];
+      const result = await provider.query(
+        JSON.stringify({ database: "otherdb", collection: "users", operation: "find", filter: {} }),
+      );
+      expect(result.rows.length).toBe(1);
+      expect(result.rows[0].name).toBe("Zoe");
+      expect(mongoFoundCollections).toEqual(["otherdb.users"]);
+    });
+
+    test("a statement with no database key reads the connected database", async () => {
+      // Every statement written before the key existed, saved queries and snippets alike.
+      mockDocumentsByNs["otherdb.users"] = [{ _id: new MockObjectId("z1"), name: "Zoe" }];
+      const result = await provider.query(JSON.stringify({ collection: "users", operation: "find", filter: {} }));
+      expect(result.rows.length).toBe(2);
+      expect(mongoFoundCollections).toEqual(["testdb.users"]);
+    });
+
+    test("a database the credentials cannot read raises the server's own sentence", async () => {
+      // Not an empty result: a refusal read as 0 rows is the #843 failure in another form.
+      const sentence = 'not authorized on analytics to execute command { find: "events" }';
+      mockFindErrors["analytics.events"] = Object.assign(new Error(sentence), { code: 13 });
+      await expect(
+        provider.query(JSON.stringify({ database: "analytics", collection: "events", operation: "find" })),
+      ).rejects.toThrow(sentence);
+    });
+
+    test("a non-string or empty database is a QueryError naming the key", async () => {
+      for (const database of [42, "", null]) {
+        const error = await provider
+          .query(JSON.stringify({ database, collection: "users", operation: "find" }))
+          .catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(QueryError);
+        expect((error as Error).message).toContain('"database" must be a non-empty string');
+      }
+      // Refused before any database is opened: `MongoClient.db("")` is not a question to send.
+      expect(mongoOpenedDatabases).toEqual(["testdb"]);
     });
 
     test("findOne returns a single document", async () => {
@@ -1111,6 +1202,40 @@ describe("MongoDBProvider", () => {
       const result = await provider.runMaintenance("vacuum", "users");
       expect(result.success).toBe(true);
       expect(result.message).toContain("Compacted");
+    });
+
+    // #1091 review: the refusal compared `config.database`, and a connection-string connection
+    // sets no `config.database` - so it refused the database the provider IS bound to and every
+    // per-collection button answered `bound to the database ""`. The comparison is against the
+    // name `getDatabaseName()` resolves and `connect()` opens.
+    test("a connection-string connection accepts the database it is bound to", async () => {
+      const provider = new MongoDBProvider({
+        ...baseConfig,
+        host: undefined,
+        database: undefined,
+        connectionString: "mongodb://remote:27017/fromstring",
+      });
+      await provider.connect();
+
+      const result = await provider.runMaintenance("analyze", "users", "fromstring");
+
+      expect(result.success).toBe(true);
+      await provider.disconnect();
+    });
+
+    test("a container naming another database is refused, and the sentence names the bound one", async () => {
+      const provider = new MongoDBProvider({
+        ...baseConfig,
+        host: undefined,
+        database: undefined,
+        connectionString: "mongodb://remote:27017/fromstring",
+      });
+      await provider.connect();
+
+      await expect(provider.runMaintenance("vacuum", "users", "elsewhere")).rejects.toThrow(
+        'bound to the database "fromstring"',
+      );
+      await provider.disconnect();
     });
 
     test("unsupported maintenance type throws", async () => {
@@ -1704,6 +1829,35 @@ describe("object surface", () => {
     ).toEqual(["collection"]);
   });
 
+  test("declares columns on every kind it has, and both answer a usable column shape", async () => {
+    const kinds = objectProvider.getCapabilities().objectKinds ?? [];
+    // BOTH, and there is no third: `describeObject` samples documents the same way for a
+    // collection and for a view (its docblock in `mongodb.ts`), so no kind here abstains and the
+    // expectation above has to say `noAbstainingKinds`.
+    expect(kinds.filter((kind) => kind.hasColumns === true).map((kind) => kind.id)).toEqual(["collection", "view"]);
+    expect(kinds.filter((kind) => kind.hasColumns !== true).map((kind) => kind.id)).toEqual([]);
+    // `false` is not the spelling: a kind either declares the fact or abstains from it, and
+    // this engine has no abstainer to spell.
+    expect(kinds.some((kind) => kind.hasColumns === false)).toBe(false);
+
+    // The declaration is what draws the twisty, so what it promises is asserted against the
+    // provider's own answer rather than against the declaration alone: a name and a type
+    // that are both non-empty strings, which is what the column row dereferences.
+    for (const [path, kind] of [
+      [["app", "customers"], "collection"],
+      [["app", "active_customers"], "view"],
+    ] as const) {
+      const detail = await objectProvider.describeObject(path, kind);
+      expect(detail.columns.length).toBeGreaterThan(0);
+      for (const column of detail.columns) {
+        expect(typeof column.name).toBe("string");
+        expect(column.name).not.toBe("");
+        expect(typeof column.type).toBe("string");
+        expect(column.type).not.toBe("");
+      }
+    }
+  });
+
   // --------------------------------------------------------------------------
   // Conformance
   // --------------------------------------------------------------------------
@@ -1717,6 +1871,12 @@ describe("object surface", () => {
       // does not hold. A view simply not being in the `listCollections` answer is absence
       // here, and absence RAISES rather than answering a refusal part (#789).
       absentSource: { path: ["app", "no_such_view"], kind: "view" },
+      // Every kind this engine has declares `hasColumns`, so invariant 8's negative
+      // direction iterates zero times and certifies nothing unless it is said out loud.
+      // There is no schema to read here: a collection and a view both get their fields SAMPLED from
+      // documents by the same code path (`describeObject` in `mongodb.ts`), so there is no kind
+      // left that could abstain.
+      noAbstainingKinds: true,
     });
   });
 

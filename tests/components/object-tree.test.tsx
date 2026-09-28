@@ -8,7 +8,7 @@ import { ObjectTree } from "@/components/object-tree";
 import { treeWindow } from "@/components/object-tree/ObjectTree";
 import { useTreeNodes } from "@/components/object-tree/use-tree-nodes";
 import type { DatabaseObject, ProviderCapabilities } from "@/lib/db/types";
-import type { DatabaseConnection } from "@/lib/types";
+import type { ColumnSchema, DatabaseConnection } from "@/lib/types";
 
 /**
  * The object tree, its hook and its row (#789).
@@ -16,7 +16,7 @@ import type { DatabaseConnection } from "@/lib/types";
  * The three absence states are the point of this surface and are asserted as three different
  * outcomes: an undeclared kind draws NO folder, `{ count: 0 }` draws a folder with a zero badge,
  * and `{ unavailable }` draws the engine's own sentence on a row that cannot be opened. A fourth
- * state sits above them: sixteen of seventeen engines answer 501 today, and that has to read as
+ * state sits above them: an engine that answers 501, which has to read as
  * "this engine is not wired up yet" rather than as an empty database.
  */
 
@@ -71,6 +71,9 @@ interface Handlers {
   readonly containers?: Handler;
   readonly counts?: Handler;
   readonly list?: Handler;
+  // A property named `describe` in a file that imports bun's `describe`. Legal, because this is a
+  // member name and never an identifier: the route's own last path segment is what names it.
+  readonly describe?: Handler;
 }
 
 const realFetch = globalThis.fetch;
@@ -94,11 +97,16 @@ function installFetch(handlers: Handlers): FetchCall[] {
 
 const appSchema = [{ path: ["app"], name: "app", level: 0 }];
 
-function routesFor(objects: Record<string, DatabaseObject[]>, counts: Record<string, unknown> = {}): Handlers {
+function routesFor(
+  objects: Record<string, DatabaseObject[]>,
+  counts: Record<string, unknown> = {},
+  columns: ColumnSchema[] = [],
+): Handlers {
   return {
     containers: () => appSchema,
     counts: () => counts,
     list: (body) => objects[String(body.kind)] ?? [],
+    describe: (body) => ({ path: body.path, columns, indexes: [], foreignKeys: [] }),
   };
 }
 
@@ -570,7 +578,7 @@ describe("ObjectTree object rows", () => {
     await waitFor(() => expect(screen.getByText("orders")).toBeTruthy());
   }
 
-  test("an object row is a leaf, labelled by its name rather than by its path segment", async () => {
+  test("an object row of a kind that declares no columns is a leaf, labelled by its name rather than by its path segment", async () => {
     withObjects();
     await openTables();
 
@@ -588,7 +596,12 @@ describe("ObjectTree object rows", () => {
     // An ICON, not a word laid out in the row: the word is there for a reader who needs it.
     expect(status.querySelector("svg")).not.toBeNull();
     expect(status.getAttribute("title")).toBe("INVALID");
-    expect(within(row(/orders/)).getByTestId("tree-row-count").textContent).toBe("1,234");
+    expect(within(row(/orders/)).getByTestId("tree-row-count").textContent).toBe("1.2K");
+    expect(
+      within(row(/orders/))
+        .getByTestId("tree-row-count")
+        .getAttribute("title"),
+    ).toContain("1,234 rows");
     expect(within(row(/order_total/)).queryByTestId("tree-row-status")).toBeNull();
     expect(within(row(/order_total/)).queryByTestId("tree-row-count")).toBeNull();
   });
@@ -631,6 +644,23 @@ describe("ObjectTree object rows", () => {
     await waitFor(() => expect(row(/Views/).getAttribute("aria-expanded")).toBe("true"));
     await userEvent.keyboard(" ");
     await waitFor(() => expect(row(/Views/).getAttribute("aria-expanded")).toBe("false"));
+  });
+
+  test("a held Space on an object row activates once, and its repeats are still swallowed", async () => {
+    // Every auto-repeat of a held key arrives as another keydown, so without the guard one long
+    // press opened a data tab per repeat.
+    const clicked: DatabaseObject[] = [];
+    withObjects();
+    await openTables((object) => clicked.push(object));
+
+    row(/orders/).focus();
+    await userEvent.click(row(/orders/));
+    clicked.length = 0;
+
+    expect(fireEvent.keyDown(row(/orders/), { key: " ", repeat: true })).toBe(false);
+    expect(clicked).toHaveLength(0);
+    expect(fireEvent.keyDown(row(/orders/), { key: " " })).toBe(false);
+    expect(clicked).toHaveLength(1);
   });
 });
 
@@ -1185,5 +1215,127 @@ describe("useTreeNodes", () => {
 
     expect(calls.every((call) => (call.body.connection as { id: string }).id === "browser-only")).toBe(true);
     expect(calls).toHaveLength(2);
+  });
+});
+
+/**
+ * The two gestures on one object row, which are now different gestures (#789).
+ *
+ * The row's activation still opens the data tab, which is what `onObjectClick` has meant to both
+ * shells since 0.16.0 and what every test above asserts. The columns are a SECOND gesture with its
+ * own target, and what a person DOES with a row is a third thing beyond what they see and what the
+ * model is told, so every case here drives a press or a key rather than reading the render.
+ */
+const withColumns = capabilitiesOf({
+  containerLevels: [{ id: "schema", label: "Schema", labelPlural: "Schemas" }],
+  objectKinds: [
+    { id: "table", role: "relation", label: "Table", labelPlural: "Tables", hasColumns: true },
+    { id: "view", role: "relation", label: "View", labelPlural: "Views" },
+  ],
+});
+
+describe("ObjectTree object expansion", () => {
+  const ordersColumns: ColumnSchema[] = [
+    { name: "id", type: "integer", nullable: false, isPrimary: true },
+    { name: "total", type: "numeric", nullable: true, isPrimary: false },
+  ];
+
+  /** Opens Tables on the column-bearing declaration and hands back what the shell was told. */
+  async function openTables(): Promise<DatabaseObject[]> {
+    const clicked: DatabaseObject[] = [];
+    installFetch(
+      routesFor(
+        { table: [{ path: ["app", "orders"], name: "orders", kind: "table" }] },
+        { table: { count: 1 }, view: { count: 0 } },
+        ordersColumns,
+      ),
+    );
+    render(
+      <ObjectTree
+        connection={connectionOf("pg")}
+        capabilities={withColumns}
+        onObjectClick={(object) => clicked.push(object)}
+      />,
+    );
+    await expandApp();
+    await userEvent.click(row(/Tables/));
+    await waitFor(() => expect(screen.getByText("orders")).toBeTruthy());
+    return clicked;
+  }
+
+  function twisty(name: string | RegExp): HTMLElement {
+    return within(row(name)).getByTestId("tree-row-twisty");
+  }
+
+  test("the twisty opens the columns and does NOT open the data tab", async () => {
+    const clicked = await openTables();
+
+    await userEvent.click(twisty(/orders/));
+    await waitFor(() => expect(screen.getByText("total")).toBeTruthy());
+    // Without `stopPropagation` the press would also reach the tree's delegated click, so the
+    // reader would have run a statement to see a column list.
+    expect(clicked).toHaveLength(0);
+  });
+
+  test("clicking the label opens the data tab and leaves the row closed", async () => {
+    const clicked = await openTables();
+
+    await userEvent.click(within(row(/orders/)).getByTestId("tree-row-label"));
+    expect(clicked.map((object) => object.name)).toEqual(["orders"]);
+    expect(row(/orders/).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  test("ArrowRight opens the columns rather than activating the row", async () => {
+    // `activate` returns before the toggle on an object row, so an arrow key routed through it
+    // would have opened a query tab instead of the columns the pattern promises.
+    const clicked = await openTables();
+    await userEvent.click(within(row(/orders/)).getByTestId("tree-row-label"));
+    clicked.length = 0;
+
+    await userEvent.keyboard("{ArrowRight}");
+    await waitFor(() => expect(row(/orders/).getAttribute("aria-expanded")).toBe("true"));
+    expect(clicked).toHaveLength(0);
+  });
+
+  test("ArrowLeft closes an open row rather than opening a second tab", async () => {
+    const clicked = await openTables();
+    await userEvent.click(twisty(/orders/));
+    await waitFor(() => expect(screen.getByText("total")).toBeTruthy());
+    clicked.length = 0;
+
+    await userEvent.keyboard("{ArrowLeft}");
+    await waitFor(() => expect(row(/orders/).getAttribute("aria-expanded")).toBe("false"));
+    expect(clicked).toHaveLength(0);
+  });
+
+  test("ArrowDown from an open table lands on its first column, and Enter there does nothing", async () => {
+    const clicked = await openTables();
+    await userEvent.click(twisty(/orders/));
+    await waitFor(() => expect(screen.getByText("total")).toBeTruthy());
+    clicked.length = 0;
+
+    await userEvent.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-row-id")).toBe("column%3Aapp/orders/table/id"),
+    );
+
+    // A column row selects and does nothing else: no handler, and above all no statement.
+    await userEvent.keyboard("{Enter}");
+    expect(clicked).toHaveLength(0);
+    expect(screen.getByTestId("object-tree")).toBeTruthy();
+    expect(document.activeElement?.getAttribute("data-row-id")).toBe("column%3Aapp/orders/table/id");
+  });
+
+  test("the arrow keys still work after a pointer press on the twisty", async () => {
+    // A pointer press focuses the button in most browsers, and the tree's key handler sits on the
+    // tree root. `focusRow` is what pulls focus back onto the treeitem, and this is that repair.
+    await openTables();
+    await userEvent.click(twisty(/orders/));
+    await waitFor(() => expect(screen.getByText("total")).toBeTruthy());
+
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+    expect(document.activeElement?.getAttribute("data-row-id")).toBe("column%3Aapp/orders/table/total");
+    await userEvent.keyboard("{ArrowUp}{ArrowUp}");
+    expect(document.activeElement?.getAttribute("data-row-id")).toBe("app/orders/table");
   });
 });

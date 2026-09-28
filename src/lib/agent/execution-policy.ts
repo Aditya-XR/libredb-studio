@@ -111,9 +111,10 @@ const HANDOVER_STATEMENT_TIMEOUT_MS = 2_147_483_647;
  * - **Rows: the editor's own default**, imported rather than restated, because the
  *   number the checkbox names and the number the server enforces have to be one
  *   value. It refuses rather than truncates, like every other read on this path
- *   (§2.5 of `docs/AGENT_ANALYST_DESIGN.md` argues at length against injecting a
- *   `LIMIT`, and a server-side truncation would be the same lie with a different
- *   author). Condition 1 of the gate has already established that this statement
+ *   (the "Handing the answer to the editor (auto-execute)" section of `docs/AGENT.md`
+ *   argues at length against injecting a `LIMIT`, and a server-side truncation would
+ *   be the same lie with a different author). Condition 1 of the gate has already
+ *   established that this statement
  *   returned 200 rows or fewer on the agent's own path, so the headroom to 500 is
  *   real rather than nominal.
  * - **Time: no limit, spelled as the ceiling above.**
@@ -135,9 +136,9 @@ export const AGENT_HANDOVER_BUDGET: ReadOnlyStatementBudget = Object.freeze({
  * The three fields are enforced in three different places — the policy by the
  * operation pipeline, `runDeadlineMs` by `AgentRunDeadline`, `maxModelTurns` by the
  * run loop — and they are held together here because they only make sense together:
- * §1.3 of `docs/AGENT_ANALYST_DESIGN.md` shows that a turn ceiling raised without the
- * wall clock that makes it reachable is decoration, and a wall clock raised without
- * the turns is room nothing can use.
+ * the "What bounds a run" section of `docs/AGENT.md` shows that a turn ceiling raised
+ * without the wall clock that makes it reachable is decoration, and a wall clock
+ * raised without the turns is room nothing can use.
  */
 export interface AgentWorkflowBudget {
   /** The policy every tool call of a run of this workflow is evaluated against. */
@@ -307,13 +308,16 @@ function workflowBudget(input: {
  *   in front of a container needs its own timeout raised — stated in `docs/AGENT.md`
  *   under "Deployment" rather than silently assumed.
  *
- * Every one of these ceilings is per DRIVE, not per run. The budget tracker, the repair
- * ledger and the deadline all live in the process that drives a run, so a run resumed
- * after a process death starts each of them again: N resumes cost up to N times a single
- * drive's ceiling. Nothing here is a lie about a run's total cost because nothing here
- * claims to bound one — bounding a run ACROSS resumes needs a ceiling folded from its own
- * ledger (the record carries `createdAtMs`, so the data exists), and that is recorded in
- * `docs/BACKLOG.md` rather than implied here.
+ * Which of these bound a RUN and which bound one DRIVE, since #999 folded the run's own
+ * ledger into the ceilings a drive starts with (`drive-budget.ts`):
+ *
+ *   - `maxStatementsPerRun` and the database-time figure bound the run. A resumed drive is
+ *     seeded with what earlier drives spent, so N resumes no longer cost N times the
+ *     ceiling.
+ *   - `runDeadlineMs` bounds the run too, and on the WALL clock: it is derived from
+ *     `createdAtMs`, so time a run spends paused or between drives is spent against it.
+ *   - `maxModelTurns` and the repair ledger are still per drive. A resumed run counts its
+ *     own turns, and its repair attempts start again (`docs/BACKLOG.md` B6).
  */
 export const AGENT_WORKFLOW_BUDGETS: Readonly<Record<AgentRunWorkflowType, AgentWorkflowBudget>> = Object.freeze({
   investigation: workflowBudget({

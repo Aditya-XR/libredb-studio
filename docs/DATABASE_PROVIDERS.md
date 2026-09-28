@@ -59,7 +59,7 @@ src/lib/db/
 │   │   │   ├── transport.ts    #   CassandraTransport seam + neutral result + fault categories
 │   │   │   ├── driver-transport.ts # The one file that imports cassandra-driver
 │   │   │   └── introspect.ts   #   system_schema + system_views -> schema and monitoring
-│   │   └── trino/              # Apache Trino Strategy (SQL over the client protocol, no driver)
+│   │   └── trino/              # Trino Strategy (SQL over the client protocol, no driver)
 │   │       ├── index.ts        #   TrinoProvider
 │   │       ├── transport.ts    #   TrinoTransport seam + error categories + the dialect descriptor
 │   │       ├── http-transport.ts # The one HTTP implementation (fetch); the nextUri page loop
@@ -74,6 +74,32 @@ src/lib/db/
 │   │       └── introspect.ts   #   system:* catalogs + INFER
 │   ├── keyvalue/               # Key-Value Providers
 │   │   └── redis.ts            # Redis Strategy
+│   ├── timeseries/             # Time-Series Providers
+│   │   └── prometheus/         # Prometheus Strategy (PromQL over the Prometheus HTTP API, no driver)
+│   │       ├── index.ts        #   PrometheusProvider: lifecycle and composition only
+│   │       ├── transport.ts    #   PrometheusTransport seam + neutral result types + error categories
+│   │       ├── request.ts      #   fetch or node:https; byte cap, AbortSignal, no redirects
+│   │       ├── http-transport.ts # The one HTTP implementation; every endpoint's exact parameters
+│   │       ├── promql.ts       #   the one builder for every PromQL fragment written from a name
+│   │       ├── results.ts      #   query data -> rows and fields
+│   │       ├── objects.ts      #   kinds and the object surface: metrics, rules, scrape targets
+│   │       ├── monitoring.ts   #   buildinfo, runtimeinfo, flags, TSDB status -> monitoring
+│   │       ├── errors.ts       #   transport error category -> the repository's error classes
+│   │       └── concurrency.ts  #   the per-connection limit on in-flight queries
+│   ├── stream/                 # Stream Providers
+│   │   └── kafka/              # Kafka Strategy (JSON read requests over the Kafka protocol, @platformatic/kafka)
+│   │       ├── index.ts        #   KafkaProvider: lifecycle and composition only
+│   │       ├── client.ts       #   KafkaReadClient seam (read methods only) + KafkaError categories
+│   │       ├── platformatic-client.ts # The only file that imports @platformatic/kafka
+│   │       ├── connection-options.ts #  bootstrap address, tls and sasl, validated first
+│   │       ├── request.ts      #   the editor JSON -> a read request
+│   │       ├── read.ts         #   start offsets and the bounded fetch loop
+│   │       ├── decode.ts       #   key, value and header decoding
+│   │       ├── results.ts      #   decoded records -> rows and fields
+│   │       ├── groups.ts       #   consumer groups and lag
+│   │       ├── objects.ts      #   kinds and the object surface: topics, groups, brokers
+│   │       ├── monitoring.ts   #   metadata, configs, log dirs -> monitoring
+│   │       └── errors.ts       #   KafkaError category -> the repository's error classes
 │   └── embedded/               # Embedded (in-process) Providers
 │       └── libredb.ts          # LibreDB Strategy
 └── utils/
@@ -102,6 +128,8 @@ BaseDatabaseProvider (abstract)
 ├── MongoDBProvider ────────────────────────┤ Document Database
 ├── CouchbaseProvider ──────────────────────┤ Document Database (SQL++ over REST)
 ├── RedisProvider ──────────────────────────┤ Key-Value Store
+├── PrometheusProvider ─────────────────────┤ Time series (PromQL over HTTP)
+├── KafkaProvider ──────────────────────────┤ Stream (JSON read requests over the Kafka protocol)
 └── LibreDBProvider ────────────────────────┘ Embedded (key-value)
 ```
 
@@ -159,7 +187,7 @@ QueryEditor                      /api/db/query
 
 ## Supported Databases
 
-Seventeen type-ids are supported by sixteen provider modules — `elasticsearch` and `opensearch` share
+Nineteen type-ids are supported by eighteen provider modules: `elasticsearch` and `opensearch` share
 one, `providers/sql/search/`. The count is derived from the exhaustive `SHIPPED` record in
 [`src/lib/db/compatibility.ts`](../src/lib/db/compatibility.ts) rather than written here twice. For
 the per-provider reference (driver, pooling, query format,
@@ -181,8 +209,10 @@ monitoring, limitations, …) see the prime docs in **[`docs/providers/`](./prov
 | Apache Druid | `druid` | SQL (read-only) | [providers/druid.md](./providers/druid.md) |
 | Elasticsearch | `elasticsearch` | Search (SQL, read-only) | [providers/elasticsearch.md](./providers/elasticsearch.md) |
 | OpenSearch | `opensearch` | Search (SQL, read-only) | [providers/opensearch.md](./providers/opensearch.md) |
-| Apache Trino | `trino` | SQL (federated query engine) | [providers/trino.md](./providers/trino.md) |
+| Trino | `trino` | SQL (federated query engine) | [providers/trino.md](./providers/trino.md) |
 | Apache Cassandra | `cassandra` | SQL-shaped (CQL, wide-column) | [providers/cassandra.md](./providers/cassandra.md) |
+| Prometheus | `prometheus` | Time series (PromQL over HTTP, read-only) | [providers/prometheus.md](./providers/prometheus.md) |
+| Apache Kafka | `kafka` | Stream (JSON read requests over the Kafka protocol, read-only) | [providers/kafka.md](./providers/kafka.md) |
 | LibreDB | `libredb` | Embedded (key-value) | [providers/libredb.md](./providers/libredb.md) |
 
 ## Core Interface
@@ -212,7 +242,7 @@ interface DatabaseProvider {
   getHealth(): Promise<HealthInfo>;
 
   // Maintenance operations
-  runMaintenance(type: MaintenanceType, target?: string): Promise<MaintenanceResult>;
+  runMaintenance(type: MaintenanceType, target?: string, container?: string): Promise<MaintenanceResult>;
 
   // Validation
   validate(): void;
@@ -362,7 +392,7 @@ Provider-specific behaviour — pooling model, SSL/encryption, pagination, monit
 maintenance operations, and known limitations — is documented per provider under
 [`docs/providers/`](./providers/README.md). Start there for anything specific to PostgreSQL, MySQL,
 Oracle, SQL Server, SQLite, libSQL, DuckDB, Redis, MongoDB, Couchbase, ClickHouse, Apache Druid,
-Elasticsearch, OpenSearch, Apache Trino, Apache Cassandra, or LibreDB.
+Elasticsearch, OpenSearch, Trino, Apache Cassandra, Prometheus, Apache Kafka, or LibreDB.
 
 Not every provider has every feature, and the docs record the absences rather than glossing over
 them. Druid is the sharpest case: its SQL has no `UPDATE`, no `DELETE` and no `CREATE TABLE`, no

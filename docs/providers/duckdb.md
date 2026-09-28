@@ -12,7 +12,7 @@
 | **Status** | Implemented & shipped |
 | **Database type id** | `duckdb` |
 | **Family** | SQL (`src/lib/db/providers/sql/duckdb/`) — embedded / file-based, like `sqlite` |
-| **Driver** | `@duckdb/node-api` 1.5.5-r.4 — a **native N-API binding**, not a pure-JS client. Four packages, ~70 MB of shared library per platform (§9) |
+| **Driver** | `@duckdb/node-api` 1.5.5-r.4 — a **native N-API binding**, not a pure-JS client. Four packages, ~70 MB of shared library per platform (§11) |
 | **Query language** | `sql` (DuckDB's own PostgreSQL-flavoured dialect; `version()` answered `v1.5.5`) |
 | **Default port** | `null` — there is no network listener |
 | **Connection** | A **server-local file path** (or `:memory:`) — **not** a network endpoint |
@@ -21,15 +21,16 @@
 | **Connection pooling** | None — one instance, one connection, held for the life of the connection |
 | **EXPLAIN** | `duckdb-json` — `EXPLAIN (FORMAT JSON)`. The **ANALYZE variant is never emitted, permanently**: measured, `EXPLAIN (ANALYZE, FORMAT JSON) <statement>` **EXECUTES the statement** (§5) |
 | **Transactions** | Not exposed (`supportsTransactions: false`) — the provider holds no explicit begin/commit/rollback API |
+| **Result pagination** | `supportsResultPagination: true` — `prepareQuery` applies a positive offset as `LIMIT n OFFSET m` through the shared limiter, so the results grid offers Load More (#816) |
 | **Query cancellation** | Yes — `DuckDBConnection.prototype.interrupt()` exists in 1.5.5-r.4 and is what `cancelQuery` calls (§3.9) |
-| **Agent read-only profile** | Yes — a separate handle opened `access_mode: 'READ_ONLY'` **and** `enable_external_access: 'false'`, because the read-only flag alone is not a filesystem sandbox. The SQL denylist remains only as defence in depth (§3.10, §11) |
+| **Agent read-only profile** | Yes — a separate handle opened `access_mode: 'READ_ONLY'` **and** `enable_external_access: 'false'`, because the read-only flag alone is not a filesystem sandbox. The SQL denylist remains only as defence in depth (§3.10, §14)|
 | **Maintenance** | `vacuum` and `analyze` (per table **and** global), `optimize` mapped onto `CHECKPOINT` (global only). `reindex`, `check` and `kill` are withheld — measured unsupported (§8) |
 | **Concurrency** | `singleWriterFile: true` — a **second process is refused even read-only** (§3.8) |
 | **Source** | [`src/lib/db/providers/sql/duckdb/`](../../src/lib/db/providers/sql/duckdb/) |
 | **Tests** | [`tests/integration/db/duckdb-provider.test.ts`](../../tests/integration/db/duckdb-provider.test.ts) |
 | **Tracking issue** | [#424 — the database coverage map](https://github.com/libredb/libredb-studio/issues/424) |
 | **Probed against** | DuckDB **v1.5.5** embedded through `@duckdb/node-api` **1.5.5-r.4**, under **Node 24.14.0** and **Bun 1.3.14**, on **2026-08-27** |
-| **Reproducible with** | `bun add @duckdb/node-api@1.5.5-r.4` — the engine ships inside the package, so there is no image to pull and no service in `database-compose.yml` (§10). Every statement quoted below was run against a two-schema fixture built from scratch; the integration test builds the same fixture in a temp directory |
+| **Reproducible with** | `bun add @duckdb/node-api@1.5.5-r.4` — the engine ships inside the package, so there is no image to pull and no service in `database-compose.yml` (§11). Every statement quoted below was run against a two-schema fixture built from scratch; the integration test builds the same fixture in a temp directory |
 
 ---
 
@@ -60,6 +61,15 @@ local development, edge, and zero-config trials — **not** a multi-tenant SaaS 
 One consequence is sharper than SQLite's, and it is measured rather than inherited: a DuckDB file
 open by a writer **cannot be opened by a second process at all, not even read-only** (§3.8). Two
 Studio replicas pointed at one file is not a degraded configuration, it is a broken one.
+
+**Not in the `-alpine-slim` image.** The driver is four packages ending in a ~70 MB `libduckdb.so`,
+which makes it the largest removable item in that variant, so it is left out on purpose (issue #840,
+[DISTRIBUTION.md](../DISTRIBUTION.md)). Every other engine is unaffected, because `openDuckDBClient`
+reaches the driver through `await import(...)` and nothing else in the process touches it. Opening a
+DuckDB connection there fails with a `ConnectionError` naming the tags that do ship the driver —
+`describeDriverAbsence` in [client.ts](../../src/lib/db/providers/sql/duckdb/client.ts) — rather
+than a raw module-resolution stack. The default and `-alpine` tags ship it, and so does every
+non-Docker channel.
 
 ### 1.2 Concept mapping
 
@@ -267,7 +277,7 @@ a nested `children`) — an OBJECT, not the array `physical_plan` publishes.
 So the provider offers the JSON **physical plan** and never the analyze form. There is no timing
 data to show and none is faked. This is not a version to wait out: a later DuckDB that emits valid
 analyze JSON makes the hazard **worse**, because the plan would then look usable while still
-executing whatever the user asked only to see (§12).
+executing whatever the user asked only to see (§15).
 
 ### 3.7 No slow-query log and no session list — the empties are the engine's
 
@@ -364,7 +374,7 @@ last measurement is what makes the option a boundary rather than a default — `
 accepted on a read-only handle, so "the engine refuses to be reconfigured" was not a given.
 
 The SQL denylist stays, as **defence in depth** rather than as the boundary: it names the construct
-and says why, which the engine's sentence does not, and it costs nothing to run first. §11 records
+and says why, which the engine's sentence does not, and it costs nothing to run first. §14 records
 the three bypasses that proved a text guard cannot be the boundary here.
 
 ### 3.11 A multi-statement string runs the first statement only
@@ -554,7 +564,7 @@ does not merely fail to produce usable JSON — it **executes the statement it w
 (measured: three calls on an `INSERT` took a table from 0 rows to 3). "Explain this" must never run
 it, so the direct Explain action turns the feature off for DuckDB rather than emitting the analyze
 form; the strategy publishes no timings and fabricates none. See §3.6 for the full measurement and
-§12 for why a later engine version does not change this.
+§15 for why a later engine version does not change this.
 
 ---
 
@@ -604,6 +614,8 @@ DuckDB is the second two-level engine in #789, after SQL Server. The outer level
 connection's own file restated: `ATTACH '<file>' AS warehouse` puts another whole catalog in the same
 session and a three-part name reaches into it, so one connection genuinely holds databases holding
 schemas holding objects. `ATTACH ':memory:' AS name` works too, which is what the tests use.
+
+A database alone is therefore a real address as well as a database and a schema, and the declaration states it as `containerPathShapes: "prefixes"`: a database-level read answers for every schema in that database.
 
 #### Four kinds, and one `duckdb_*` function behind each
 
@@ -722,6 +734,11 @@ two other providers in #789 broke on their first pass.
   parser error too, so zero column rows raises rather than rendering a dropped table as a table with
   no columns.
 
+`hasColumns: true` is declared on `table` and `view` and on nothing else, because `describeObject`
+gates the four reads above on `role: "relation"`: a `macro` and a `sequence` answer three empty
+arrays without a round trip, so both declare nothing and their rows are leaves in the object tree
+rather than twisties that open on nothing.
+
 #### `describeObject` takes the KIND, and on this engine that is not theoretical
 
 Measured on v1.5.5, in ONE schema: `CREATE SEQUENCE overlap` and `CREATE MACRO overlap(x)` both
@@ -801,6 +818,35 @@ The join is on BOTH `schema_name` and the name, never on the name alone, and the
 different columns AND in two catalogs with the same schema name, so a join on the name alone answers
 one table with another's columns rather than an error anybody would notice.
 
+#### Column defaults: the value, with the catalog text kept alongside (#1029)
+
+DuckDB reports a column default as the expression AS WRITTEN, through `information_schema.columns.column_default`. A string
+default therefore arrives quoted, with SQL standard quote doubling, while a number and an
+expression arrive bare. Measured 2026-09-21 on DuckDB v1.5.5 through `@duckdb/node-api`:
+
+| DDL | the value the column defaults to | catalog text |
+| --- | --- | --- |
+| `DEFAULT 'NULL'` | `NULL` | `'NULL'` |
+| `DEFAULT 'abc'` | `abc` | `'abc'` |
+| `DEFAULT ''` | the empty string | `''` |
+| `DEFAULT 'it''s'` | `it's` | `'it''s'` |
+| `DEFAULT 'a\b'` | `a\b` | `'a\b'` |
+| `DEFAULT 42` | `42` | `42` |
+| `DEFAULT CURRENT_TIMESTAMP` | the expression | `CURRENT_TIMESTAMP` |
+| `GENERATED ALWAYS AS (id * 2) VIRTUAL` | the expression | `CAST((id * 2) AS INTEGER)` |
+| no default | none | SQL NULL |
+
+Each column carries both readings. `defaultValue` is the value, decoded by `unquoteLiteral()`
+(`src/lib/sql/values.ts`) with this dialect's `"standard"` escaping, so `'it''s'` reads as
+`it's` and a backslash stays ordinary data. Text that is not exactly one complete literal,
+a number or an expression such as a generated column's `CAST((id * 2) AS INTEGER)`, passes through unchanged. `defaultExpression` is the
+catalog text itself, which is always valid SQL here and is what the schema-diff migration
+generator writes after the word `DEFAULT`; without it, a decoded `abc` would be emitted as
+`DEFAULT abc`. The empty string default stays the empty string, never `undefined`, and a
+column with no default carries neither field. `readCatalogDefault()` is local to this
+provider, the way per-provider normalization is everywhere else in this tree; the escape
+knowledge it relies on is the shared part.
+
 #### No row count on a listed object, deliberately
 
 `estimated_size` is the only per-table cardinality DuckDB publishes and it is an ESTIMATE (§3.5), so
@@ -834,7 +880,7 @@ Every declared kind publishes a definition text, so **all four declare `hasSourc
 one object and answers a document of exactly one part.
 
 `sql` is the honest Monaco id rather than a compromise. DuckDB's dialect is PostgreSQL-shaped, the
-installed monaco-editor 0.56.0 registers no DuckDB id, and the text the engine publishes is ordinary
+installed monaco-editor 0.57.0 registers no DuckDB id, and the text the engine publishes is ordinary
 SQL. This is unlike Oracle, SQL Server and Cassandra, where `plsql`, `tsql` and `cql` are not
 registrable ids in that bundle and `sql` really is a compromise those provider docs record.
 
@@ -889,7 +935,7 @@ The `partial` form is this engine's only one, not the fleet's: PostgreSQL `view`
 #### The refusals: NONE, stated as a CANNOT
 
 **This engine has no privilege model and no refusal for a source read.** DuckDB has no users, no
-roles and no passwords (§11), so there is nothing a read can be denied for.
+roles and no passwords (§14), so there is nothing a read can be denied for.
 
 Nor does it answer a row carrying nothing. Measured on v1.5.5 over a fresh instance holding the
 fixture: zero `duckdb_tables()` rows, zero of 47 `duckdb_views()` rows, zero `duckdb_sequences()`
@@ -1006,9 +1052,90 @@ per-entity control would fail at the point the user clicked it. `runMaintenance`
 withheld types **here**, naming the reason, rather than sending a statement the engine will reject
 with wording about a keyword the user never typed.
 
+`runMaintenance(type, target?, container?)` takes a `container` as the SCHEMA the row carries as
+`schemaName` (#772), the same reading PostgreSQL uses: the schema is quoted whole and prefixed to
+the quoted table name, and never recovered by splitting the target - a schema is allowed to contain
+a dot. Without one the old readings stand: `schema.table` is quoted part by part and a bare name
+falls back to `main`.
+
 ---
 
-## 9. Packaging
+## 9. Capabilities & labels
+
+### 9.1  `getCapabilities()` ([`index.ts`](../../src/lib/db/providers/sql/duckdb/index.ts))
+
+| Capability | Value | UI effect |
+|---|---|---|
+| `defaultPort` | `null` | No port field is needed; DuckDB has no network listener. |
+| `supportsConnectionString` | `false` | The connection form takes a database file path rather than a URI (§4.2). |
+| `supportsExplain` | `true` | Enables the Explain action. |
+| `explainFormat` | `duckdb-json` | The Explain view consumes DuckDB's JSON physical plan (§5). |
+| `supportsInlineRowEdit` | `true` | Enables inline row editing for writable table objects. |
+| `supportsResultPagination` | `true` | Enables Load More; the shared limiter emits `LIMIT n OFFSET m`. |
+| `supportsTransactions` | `false` | Hides the transaction controls; the provider exposes no transaction API. |
+| `singleWriterFile` | `true` | Lets callers treat an already-open DuckDB file as a single-writer resource (§3.8). |
+| `identifierQuoting` | `double` | Generated SQL quotes identifiers with double quotes. |
+| `maintenanceOperations` | `vacuum`, `analyze`, `optimize` | Offers only the maintenance operations implemented in §8. |
+| `containerLevels` | `Database`, `Schema` | The object browser nests schemas under databases (§6). |
+| `containerPathShapes` | `prefixes` | `[database]` and `[database, schema]` both address a container, because an attached database alone is a real address; the empty path and a longer path are both refused, by the object routes over HTTP and by this provider directly (§6, #1147). |
+| `objectKinds` | `table`, `view`, `macro`, `sequence` | These are the object folders exposed in the browser (§6). |
+
+The maintenance specs make `vacuum` and `analyze` available both per table and globally.
+`optimize` is global only and is labelled **Checkpoint Database** because it runs `CHECKPOINT`.
+See §8 for the statements and placement rules.
+
+### 9.2  `getLabels()` ([`index.ts`](../../src/lib/db/providers/sql/duckdb/index.ts))
+
+| Label | UI effect |
+|---|---|
+| `slowQueriesEmptyState` | Explains that DuckDB publishes no `duckdb_queries()` table function, so the Queries panel has no finished-statement store to show. |
+| `sessionsEmptyState` | Explains that DuckDB publishes no `duckdb_connections()` table function, so the Sessions panel cannot show rows. |
+| `vacuumGlobalDesc` | Describes the global `VACUUM` control and its checkpoint behaviour. |
+
+The first two replace generic empty-state copy with the engine-specific absence already measured
+in §3.7. The maintenance label does not add another operation; it only describes the global
+`vacuum` control declared above.
+
+
+
+---
+
+
+
+
+## 10. Error handling
+
+DuckDB errors are classified by `mapDuckDBError()` before falling back to the shared database
+error mapper. The provider reads DuckDB's error-class prefix first so that words inside an engine
+message do not accidentally select an unrelated shared classification.
+
+| Condition | Provider error | What the user sees |
+|---|---|---|
+| `INTERRUPT Error` | `QueryCancelledError` | `Query was cancelled` |
+| Conflicting file lock | `ConnectionError` | `DuckDB file <path> is locked by <process>. DuckDB admits one operating-system process per database file, in read-only mode too, so the other process has to release it first. Engine message: <engine message>` |
+| `Parser Error`, `Binder Error`, `Catalog Error`, `Conversion Error`, `Invalid Input Error`, `Constraint Error`, `Out of Range Error`, `Not implemented Error`, `Permission Error`, `Serialization Error`, `TransactionContext Error` | `QueryError` | The engine message, with the query attached when one is available |
+| Anything else | shared database error | `mapDatabaseError()` classifies the error using the common provider rules |
+
+A lock conflict uses the same `describeOpenFailure()` path whether it happens while opening the
+file or later in a session. When DuckDB includes the holder PID, the sentence names
+`process <pid>`; otherwise it says `another process`.
+
+Open-time failures have two additional provider-specific diagnoses:
+
+| Condition | Provider error | What the user sees |
+|---|---|---|
+| `@duckdb/node-api` is not installed | `ConnectionError` | `DuckDB is not available in this deployment: the @duckdb/node-api driver is not installed. The libredb-studio -alpine-slim image leaves it out to stay small; the default and -alpine tags ship it. Use one of those tags, or install the driver, to open DuckDB connections.` |
+| Read-only open of a missing file | `ConnectionError` | `DuckDB database <path> does not exist and a read-only handle will not create one. Engine message: <engine message>` |
+| Other open failure | `ConnectionError` | `Failed to open DuckDB database <path>: <engine message>` |
+
+The lock and missing-file sentences above are the provider's wrapped messages, not the raw engine
+messages measured in §3.8. Driver absence is diagnosed only when module resolution fails and the
+failure names `@duckdb/node-api`; other import failures are re-raised unchanged.
+
+
+---
+
+## 11. Packaging
 
 DuckDB is the first new **native** dependency in this repo since `better-sqlite3`, and it is not
 shaped like it. `bun add @duckdb/node-api@1.5.5-r.4` installed four packages:
@@ -1033,7 +1160,7 @@ and `parquet` were loaded, and `httpfs` was installed but not loaded.
 
 ---
 
-## 10. Testing
+## 12. Testing
 
 ```bash
 # Just this provider
@@ -1079,7 +1206,7 @@ fixture holds enough, so the refusal would come and go with the fixture's size. 
 has to be a second handle, because once the depth is 1 even `SET max_expression_depth=1000` and
 `RESET` are refused by the same limit.
 
-### Verifying by hand
+### 12.1 Verifying by hand
 
 Create a directory and point a connection at a file inside it:
 
@@ -1093,13 +1220,58 @@ second process is refused even for reading.
 
 ---
 
-## 11. Security
+
+
+
+
+## 13. Usage examples
+
+These examples assume a DuckDB file connection already configured as described in §4.
+DuckDB has no connection string or network endpoint; SQL runs against the file named by the
+connection's `database` field.
+
+Create a table and insert rows:
+
+```sql
+CREATE TABLE events (
+  id INTEGER,
+  name VARCHAR
+);
+
+INSERT INTO events VALUES
+  (1, 'created'),
+  (2, 'updated');
+```
+
+Read rows from the file:
+
+```sql
+SELECT id, name
+FROM events
+ORDER BY id;
+```
+
+Pagination is supported, so ordinary DuckDB `LIMIT` and `OFFSET` queries can also be run directly:
+
+```sql
+SELECT id, name
+FROM events
+ORDER BY id
+LIMIT 25 OFFSET 0;
+```
+
+For the provider's maintenance operations, use the controls described in §8 rather than repeating
+their setup here.
+
+---
+
+## 14. Security
 
 DuckDB has no users, no roles and no passwords: **the filesystem is the access control**, and Studio
 runs the engine in its own process with its own privileges. Two consequences drive the provider's
 security posture.
 
-### 11.1 `access_mode` alone does not bound the process — the escapes that proved it
+### 14.1 `access_mode` alone does not bound the process — the escapes that proved it
 
 With `access_mode: 'READ_ONLY'` genuinely in force — `INSERT` refused with *Cannot execute statement
 of type "INSERT" on database "w" which is attached in read-only mode!* in the same session — the
@@ -1128,7 +1300,7 @@ Read the first column as: the engine flag protects the *database file*, and noth
 given only that handle could write CSV anywhere the Studio process can write, read any file the
 process can read, and pull an extension over the network.
 
-### 11.2 The boundary is in the engine, and the denylist is defence in depth
+### 14.2 The boundary is in the engine, and the denylist is defence in depth
 
 `queryReadOnly` opens its handle with **`access_mode: 'READ_ONLY'` and
 `enable_external_access: 'false'`**, both fixed at open. The second is what makes the profile a
@@ -1162,7 +1334,7 @@ The same measurement pass found one thing the option does **not** stop: `read_du
 connection's own file>')` still answers, because it reaches nothing the profile had not already
 granted.
 
-### 11.3 The file path is the whole trust boundary
+### 14.3 The file path is the whole trust boundary
 
 Anyone who can create a DuckDB connection chooses a path on the server's filesystem, and the engine
 will happily read a CSV, Parquet or JSON file next to it. Grant connection-creation rights
@@ -1171,7 +1343,7 @@ to a database login.
 
 ---
 
-## 12. Known limitations
+## 15. Known limitations
 
 | Limitation | Cause | Owner |
 |---|---|---|
@@ -1185,7 +1357,7 @@ to a database login.
 | Wide integers render as strings | `getRowObjectsJson()` quotes them to stay exact | The engine's, and deliberate (§3.2) |
 | A multi-statement string runs only its first statement | The driver's `runAndReadAll` behaviour | The driver's (§3.11) |
 | No `SERIAL`, no `IDENTITY`, no `AUTOINCREMENT` | None of the three exists; `GENERATED … AS IDENTITY` parses and is refused at execution | The engine's — the create-table form defaults from a sequence instead (§3.13) |
-| ~140 MB of bindings on a Linux tree | glibc and musl packages both install | Ours to prune in the AppImage build (§9) |
+|  ~140 MB of bindings on a Linux tree | glibc and musl packages both install | Ours to prune in the AppImage build (§11) |
 | MotherDuck / `md:` / Quack / DuckLake unsupported | Different products, different authentication | Ours — out of scope for v1 (§4.3) |
 | TEMP tables are absent from the object tree | `duckdb_databases()` marks `temp` `internal`, alongside `system` | Ours, §6 |
 | Secrets are not an object kind | A secret has no catalog and no schema, so nothing in the model can hold it | Ours, out of Phase 1's scope (§6) |
@@ -1195,7 +1367,7 @@ to a database login.
 
 ---
 
-## 13. References
+## 16. References
 
 - DuckDB — <https://duckdb.org>
 - `@duckdb/node-api` — <https://www.npmjs.com/package/@duckdb/node-api>

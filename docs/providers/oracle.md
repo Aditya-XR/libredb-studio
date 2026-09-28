@@ -175,6 +175,12 @@ The generator carried that `;` from the day its Oracle branch was written, so cl
 Oracle had never once worked. This is a declaration rather than a branch in the generator: nothing
 in `src/lib/query-generators.ts` needs to know which engine it is writing for (#789).
 
+The row bound in the statement above has since gone: #816 moved the preview cap into the `limit`
+execution option, so what the generator writes today is `SELECT * FROM APP.APP_CUSTOMERS` — still
+with no `;`, which is the half of that measurement the engine cares about. The Oracle branch itself
+was removed with the bound, because once there is no `FETCH FIRST` to spell it did nothing the
+shared return does not already do.
+
 It bounds the GENERATORS only. A `;` a user types is still stripped by the editor's statement reader
 before the statement is sent, and the raw API passes text through untouched.
 
@@ -205,7 +211,22 @@ mapping, and for the two Oracle-specific consequences: the chain is **always** v
 `rejectUnauthorized` to turn off), and the CA and client certificates travel as one `walletContent`
 PEM rather than three options.
 
-### 3.6 Privilege-resilient monitoring
+### 3.6 A failed connect closes the pool it created
+
+`createPool()` resolves before anything is dialled in Thin mode, so a connect that fails on its test
+borrow already holds a live pool. `factory.getOrCreateProvider()` never caches a provider whose
+`connect()` threw, which means nothing can call `disconnect()` on it afterwards, and node-oracledb's
+background creator keeps reaching for `poolMin` connections with **no delay between attempts**. One
+failed connect to an unreachable host therefore pins a CPU core and floods that host until the
+process exits — measured at roughly 14,000 TCP connect attempts and one full core per second.
+
+The `catch` in `connect()` closes that pool with `close(0)` (force close, the oracledb equivalent of
+`end()`) and clears `this.pool` before rethrowing, so a retried `connect()` creates a fresh pool
+instead of returning silently through the `if (this.pool)` guard while connected to nothing. A
+`close()` that itself rejects is swallowed rather than replacing the connect error. This is the same
+contract PostgreSQL and SQL Server already follow ([#1102](https://github.com/libredb/libredb-studio/issues/1102)).
+
+### 3.7 Privilege-resilient monitoring
 
 Oracle monitoring reads `V$` dynamic-performance views, which require privileges a typical app user
 may lack. Every monitoring sub-query is wrapped in its own try/catch and degrades rather than failing
@@ -304,6 +325,16 @@ the same string to `tls.createSecureContext()` as `cert`, `key` **and** `ca`.
 # The version matters: use Instant Client 19c for an Oracle 11.2 server (see below).
 ORACLE_CLIENT_LIB_DIR=/opt/oracle/instantclient_19_28
 ```
+
+**Thick mode is reachable on the default image only.** Oracle publishes no musl build of Instant
+Client, so the `-alpine` and `-alpine-slim` tags (issue #840, [DISTRIBUTION.md](../DISTRIBUTION.md))
+can never load it whatever an operator layers on top — `Dockerfile.alpine` therefore does not ship
+node-oracledb's native addons at all, since nothing in those images could load them. Thin mode is
+unaffected and measured working on both: the driver is pure JavaScript there, Next's output file
+tracing carries it into the standalone payload, and `oracledb.thin === true` inside the running
+container. An attempted `initOracleClient()` fails with the driver's own NJS-045, whose text already
+tells the operator to use Thin mode. So an Oracle 12.1+ server works on every tag; an 11.2 server
+needs the default one.
 
 node-oracledb's Thin/Thick choice is a **process-wide singleton** — `initOracleClient()` throws if
 called more than once, or after any connection/pool already exists. This is why the setting is a
@@ -1146,6 +1177,17 @@ breaks: these statements key the last path segment against `TABLE_NAME`, and a t
 `APP_ORDERS` on table `APP_CUSTOMERS` is legal, so it would have been handed `APP_ORDERS`'s columns
 as if they were its own.
 
+Those same three kinds, `table`, `view` and `materialized_view`, are the ones that declare
+`hasColumns`, which is what gives an object row a twisty in the object tree; a synonym, a sequence, a
+package, a procedure, a function and a trigger declare nothing and are leaves, because
+`describeObject()` answers them three empty arrays.
+`sequence` is why the declaration is per provider rather than derived from the role or the kind id:
+this provider gates on the role, so an Oracle sequence has no columns at all, while PostgreSQL's
+`sequence` answers `last_value`, `log_cnt` and `is_called` under the same kind id.
+An object dropped between the listing and the expand is not an error here: the four reads answer no
+row and `describeObject()` returns three empty arrays, which the tree reports on the open row as
+`No columns reported` rather than as a refusal.
+
 Two of the four statements differ from the deleted flat reading's counterparts on purpose:
 
 - The foreign-key read pairs columns with `rcc.POSITION = acc.POSITION`. Without it a two-column
@@ -1290,7 +1332,7 @@ The owner is the segment the DECLARATION assigns to the `schema` container level
 is the LAST path segment; neither is read by a literal index.
 
 **The Monaco language id is `sql`, and that is a compromise this provider states rather than hides.**
-MEASURED on the installed monaco-editor 0.56.0: `plsql` is not among the 89 language ids the bundle
+MEASURED on the installed monaco-editor 0.57.0: `plsql` is not among the 89 language ids the bundle
 registers, and an unregistered id degrades to plain text SILENTLY, with no throw and nothing
 observable. A PL/SQL body therefore renders under the SQL grammar, which highlights the DML and
 misses `IS`, `BEGIN`, `EXCEPTION` and the block structure.
@@ -1542,7 +1584,7 @@ No kind here declares `acceptsSourceEdits`, and `tests/isolated/object-edit-decl
 ## 8. Monitoring & health
 
 All from `V$`/`USER_*` views; `getMonitoringData()` (inherited) fans them out in parallel. Each
-sub-query is independently privilege-guarded ([§3.6](#36-privilege-resilient-monitoring)).
+sub-query is independently privilege-guarded ([§3.7](#37-privilege-resilient-monitoring)).
 
 | Method | Primary source | Notes / degradation |
 |--------|----------------|---------------------|
@@ -1702,12 +1744,18 @@ boundary preserves those states without a falsy test that would erase a genuine 
 
 ## 9. Maintenance
 
-`runMaintenance(type, target?)` ([`oracle.ts`](../../src/lib/db/providers/sql/oracle.ts)):
+`runMaintenance(type, target?, container?)` ([`oracle.ts`](../../src/lib/db/providers/sql/oracle.ts)):
+
+A `container` is the OWNER the row carries as `schemaName` (#772). It moves every read off the
+`USER_*` catalogs and onto their `ALL_*` twins with the owner bound, passes that owner as the
+first `GATHER_TABLE_STATS` / `GATHER_SCHEMA_STATS` argument in place of `USER`, and qualifies
+each `ALTER INDEX "<owner>"."<index>" REBUILD`. Without one the connected user is the owner,
+which is the reading every column below used before the parameter existed.
 
 | Type | With target | Without target |
 |------|-------------|----------------|
-| `analyze` | `DBMS_STATS.GATHER_TABLE_STATS(USER, '<t>')` | `DBMS_STATS.GATHER_SCHEMA_STATS(USER)` |
-| `optimize` | rebuild the indexes THAT TABLE owns: `SELECT INDEX_NAME FROM USER_INDEXES WHERE TABLE_NAME = :t AND INDEX_TYPE = 'NORMAL'`, then `ALTER INDEX "<i>" REBUILD` for each (own try/catch) | rebuild **every** normal user index (`USER_INDEXES`, each in its own try/catch) |
+| `analyze` | `DBMS_STATS.GATHER_TABLE_STATS(<owner>, '<t>')` | `DBMS_STATS.GATHER_SCHEMA_STATS(<owner>)` |
+| `optimize` | rebuild the indexes THAT TABLE owns: `SELECT INDEX_NAME FROM USER_INDEXES WHERE TABLE_NAME = :t AND INDEX_TYPE = 'NORMAL'` (or `ALL_INDEXES` with `OWNER = :owner`), then `ALTER INDEX "<i>" REBUILD` for each (own try/catch) | rebuild **every** normal user index (`USER_INDEXES` / `ALL_INDEXES`, each in its own try/catch) |
 | `kill` | `ALTER SYSTEM KILL SESSION '<SID,SERIAL#>'` | throws (`SID,SERIAL#` required) |
 
 `getCapabilities().maintenanceOperations = ['analyze', 'optimize', 'kill']`. Targets are
@@ -1801,6 +1849,7 @@ is what lets the Operations tab render those words and send an operation Oracle 
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `supportsCreateTable` | `true` (from base) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core Oracle DML |
+| `supportsResultPagination` | `true` — `OFFSET m ROWS FETCH NEXT n ROWS ONLY` from this provider's own `prepareQuery` override; page one is `FETCH FIRST n ROWS ONLY` (#816) |
 | `supportsTransactions` | `true` — Oracle is always in a transaction and the held connection commits or rolls back, so the trio and the SANDBOX toggle are offered (#464) |
 | `declaresForeignKeys` | `true` — inherited from the base capabilities; read from `ALL_CONSTRAINTS`, so an empty list is about the schema or the owner, not the engine |
 | `supportsMaintenance` | `true` |
@@ -1810,6 +1859,7 @@ is what lets the Operations tab render those words and send an operation Oracle 
 | `statementTerminator` | `'none'` - node-oracledb sends one statement and `;` is not part of it (see [§3.2a](#32a-a-generated-statement-carries-no-terminator)) |
 | `schemaRefreshPattern` | `(CREATE\|DROP\|ALTER\|TRUNCATE)\b` (from base) |
 | `containerLevels` | one level, `schema` - and on Oracle that level is a USER ([§7](#the-object-surface-789-and-the-confinement-it-lifts-765)) |
+| `containerPathShapes` | `exact`: only `[schema]` addresses a container, so a shorter or a longer path is refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
 | `objectKinds` | nine: table, view, materialized view, synonym, sequence, package, procedure, function, trigger. No `index` kind ([§7](#the-object-surface-789-and-the-confinement-it-lifts-765)) |
 
 ### Labels — overridden (`getLabels()`, [`oracle.ts`](../../src/lib/db/providers/sql/oracle.ts))
@@ -2058,4 +2108,4 @@ the object tree's own routes under `POST /api/db/objects/*`
 - Errors (incl. `ORA-*` mapping): [`src/lib/db/errors.ts`](../../src/lib/db/errors.ts)
 - Tests: [`tests/integration/db/oracle-provider.test.ts`](../../tests/integration/db/oracle-provider.test.ts)
 - API contract: [`docs/API_DOCS.md`](../API_DOCS.md)
-- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Apache Trino](./trino.md) · [Redis](./redis.md)
+- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Trino](./trino.md) · [Redis](./redis.md)

@@ -48,6 +48,15 @@ const oneLevel = capabilitiesOf({
   ],
 });
 
+/** The same engine with the columns declaration, which is the only shape that CAN describe. */
+const oneLevelWithColumns = capabilitiesOf({
+  containerLevels: [{ id: "schema", label: "Schema", labelPlural: "Schemas" }],
+  objectKinds: [
+    { id: "table", role: "relation", label: "Table", labelPlural: "Tables", hasColumns: true },
+    { id: "view", role: "relation", label: "View", labelPlural: "Views" },
+  ],
+});
+
 const twoLevels = capabilitiesOf({
   containerLevels: [
     { id: "catalog", label: "Database", labelPlural: "Databases" },
@@ -228,6 +237,58 @@ describe("opening a connection", () => {
     expect(calls[2].body.container).toEqual(["shop", "dbo"]);
   });
 
+  /**
+   * Decision A's second half, and it needs a control for the reason every zero in this file does:
+   * "no describe at first paint" is satisfied by a tree that can never describe anything at all.
+   *
+   * So the DECLARATION here is the one that grants a twisty, and the control below drives the
+   * gesture on the same fixture and the same counter until the path appears. A column read is per
+   * gesture, which is the whole argument for the per-row shape over a per-folder prefetch: a
+   * reader who opens a connection and expands nothing pays nothing, where a folder read would
+   * pay 293 ms on Couchbase and 165 ms on Trino for columns nobody asked to see.
+   */
+  test("first paint reads no columns, on an engine whose kind declares them", async () => {
+    const calls = installFetch({
+      "/api/db/objects/containers": ownerContainers,
+      "/api/db/objects/counts": { table: { count: 2 }, view: { count: 0 } },
+      "/api/db/objects/list": [{ path: ["APP", "ORDERS"], name: "ORDERS", kind: "table" }],
+      "/api/db/objects/describe": { path: ["APP", "ORDERS"], columns: [], indexes: [], foreignKeys: [] },
+    });
+
+    render(<ObjectTree connection={connectionOf()} capabilities={oneLevelWithColumns} />);
+
+    await firstPaintSettled("2");
+    expect(catalogPaths(calls)).toEqual(["/api/db/objects/containers", "/api/db/objects/counts"]);
+  });
+
+  test("control: the same counter sees a describe the moment a row is opened", async () => {
+    const calls = installFetch({
+      "/api/db/objects/containers": ownerContainers,
+      "/api/db/objects/counts": { table: { count: 2 }, view: { count: 0 } },
+      "/api/db/objects/list": [{ path: ["APP", "ORDERS"], name: "ORDERS", kind: "table" }],
+      "/api/db/objects/describe": {
+        path: ["APP", "ORDERS"],
+        columns: [{ name: "ID", type: "NUMBER", nullable: false, isPrimary: true }],
+        indexes: [],
+        foreignKeys: [],
+      },
+    });
+
+    render(<ObjectTree connection={connectionOf()} capabilities={oneLevelWithColumns} />);
+    await firstPaintSettled("2");
+    await userEvent.click(screen.getByRole("treeitem", { name: /Tables/ }));
+    await screen.findByText("ORDERS");
+    await userEvent.click(within(screen.getByRole("treeitem", { name: /ORDERS/ })).getByTestId("tree-row-twisty"));
+    await screen.findByText("ID");
+
+    expect(catalogPaths(calls)).toEqual([
+      "/api/db/objects/containers",
+      "/api/db/objects/counts",
+      "/api/db/objects/list",
+      "/api/db/objects/describe",
+    ]);
+  });
+
   test("a browser-only connection is posted as the whole connection, a seed as its id", async () => {
     const calls = installFetch({
       "/api/db/objects/containers": schemaContainers,
@@ -265,7 +326,8 @@ describe("the no-scan escape hatch", () => {
       "/api/db/objects/counts": { table: { count: 2 } },
     });
 
-    render(<ObjectTree connection={connectionOf()} capabilities={oneLevel} deferred />);
+    // The declaration that DOES grant a twisty, so this zero is the flag and not the fixture.
+    render(<ObjectTree connection={connectionOf()} capabilities={oneLevelWithColumns} deferred />);
 
     expect(await screen.findByTestId("tree-deferred")).toBeTruthy();
     // Not the spinner: nothing is loading, because nothing was asked for.

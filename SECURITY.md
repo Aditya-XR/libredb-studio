@@ -120,7 +120,11 @@ When using LibreDB Studio, please follow these security best practices:
   that fetched the rows on screen, read under the connection's own dialect, and is refused
   whenever that statement's rows have no single table or the reader cannot settle the name. An
   unquoted name is validated as a bare identifier rather than quoted, because quoting changes its
-  case semantics; a quoted one is copied exactly as the query spells it
+  case semantics; a quoted one is copied exactly as the query spells it. The key column the
+  `WHERE` is built on is inferred as well, from the result's own field names, so the apply asks
+  the engine whether that column addresses one row per value and refuses the whole apply when it
+  does not: a result carrying a foreign key instead of the table's own key made one cell edit
+  rewrite every row sharing that value
 - Login attempts, the AI endpoints and every database-reaching route (query execution, schema
   browsing, maintenance operations, and the admin fleet-health check) are rate limited in the
   application. The counters live in the application process, so with more than one replica the
@@ -187,8 +191,12 @@ When using LibreDB Studio, please follow these security best practices:
   risk has to be made again rather than inherited
 - The published container image is scanned daily and its findings are published
   to the Security tab. Most OS-package findings in any Debian-based image have no
-  fixed package available at the time they appear; the ones that do are taken by
-  bumping the base image
+  fixed package available at the time they appear, and those are reported rather
+  than gated. A CRITICAL one that does have a fix available fails the scan, so it
+  is taken by bumping the base image and cutting a release rather than carried
+  quietly; if the distribution has shipped the fix but the base image has not yet
+  picked it up, that wait is written down in `.trivyignore.yaml` with an expiry
+  like any other suppression
 - Every commit is scanned for credentials. The full history was swept once and
   classified: 24 matches across 753 commits, every one of them a fabricated test
   fixture, a documented example password or UI placeholder copy. **No credential

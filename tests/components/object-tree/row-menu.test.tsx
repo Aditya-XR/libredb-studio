@@ -147,6 +147,29 @@ afterEach(() => {
 });
 
 describe("the row menu is driven by the declaration", () => {
+  test("the count action reaches its handler from the context menu without activating data", async () => {
+    const onGenerateCount = mock(() => {});
+    const onObjectClick = mock(() => {});
+    await openTree([], { onGenerateCount }, onObjectClick);
+    fireEvent.contextMenu(row(/orders/));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Generate Count Query" }));
+    expect(onGenerateCount).toHaveBeenCalledWith(objects.table[0]);
+    expect(onObjectClick).not.toHaveBeenCalled();
+  });
+
+  test("a million-row badge carries the complete reported figure in its title", async () => {
+    const previous = objects.table[0];
+    objects.table[0] = { ...previous, rowCount: 1553900 };
+    try {
+      await openTree();
+      const badge = within(row(/orders/)).getByTestId("tree-row-count");
+      expect(badge.textContent).toBe("1.6M");
+      expect(badge.title).toContain("1,553,900");
+      expect(badge.title).toContain("estimate");
+    } finally {
+      objects.table[0] = previous;
+    }
+  });
   test("a writable relation is offered every action the shell handed over", async () => {
     await openTree();
     // `false` means the page took the gesture: the browser's own menu must not open on top
@@ -602,7 +625,9 @@ describe("the row menu has a visible trigger", () => {
   test("the row count is still there, and still where it was, while the trigger is showing", async () => {
     await openTree();
     const orders = row(/orders/);
-    expect(within(orders).getByTestId("tree-row-count").textContent).toBe("1,234");
+    expect(within(orders).getByTestId("tree-row-count").textContent).toBe("1.2K");
+    expect(within(orders).getByTestId("tree-row-count").title).toContain("1,234");
+    expect(within(orders).getByTestId("tree-row-count").title).toContain("estimate");
     // The flat explorer's defect, pinned: the count must not be tied to the hover state that
     // reveals the trigger, in either direction - hidden, or pushed leftward under the pointer.
     expect(within(orders).getByTestId("tree-row-count").className).not.toContain("group-hover");
@@ -682,6 +707,10 @@ describe("the row names itself, and never the control inside it", () => {
     expect(within(orders).getByTestId("tree-row-menu-trigger")).toBeTruthy();
     expect(nameSourceIds(orders)).toEqual(["tree-row-label", "tree-row-count"]);
     expect(nameSources(orders).some((element) => element.tagName === "BUTTON")).toBe(false);
+    // The badge draws the compact "1.2K", but a screen reader hears the exact figure (#702):
+    // `title` is never consulted for a name once the element has text, so the count span
+    // carries it in `aria-label`, which `aria-labelledby` resolution does read.
+    expect(within(orders).getByTestId("tree-row-count").textContent).toBe("1.2K");
     expect(screen.getByRole("treeitem", { name: "orders 1,234" })).toBe(orders);
   });
 
@@ -853,5 +882,101 @@ describe("View Source gives a routine row its first menu", () => {
     expect(row(/order_total/).hasAttribute("aria-haspopup")).toBe(false);
     expect(fireEvent.contextMenu(row(/order_total/))).toBe(true);
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+});
+
+/**
+ * A COLUMN row, which is the one row kind that is offered nothing at all (#789).
+ *
+ * It is not an object and is not addressable as one: it carries no kind id, so `objectFor` misses
+ * and `rowActions` refuses, so `actionsFor(row).length === 0` and the one predicate this component
+ * owns withholds the trigger, the `aria-haspopup` and the menu together. The right click then
+ * falls through to the browser, which is the same contract a routine row has above.
+ *
+ * The name check is repeated here rather than left to the object rows: a column row is the first
+ * row to reference two new slots, and a slot whose id collided with another row's would resolve to
+ * a span in that row without a single attribute looking wrong.
+ */
+const withColumnKinds = {
+  ...oneLevel,
+  objectKinds: [
+    { id: "table", role: "relation", label: "Table", labelPlural: "Tables", acceptsRowWrites: true, hasColumns: true },
+    { id: "view", role: "relation", label: "View", labelPlural: "Views" },
+    { id: "function", role: "routine", label: "Function", labelPlural: "Functions" },
+  ],
+} as ProviderCapabilities;
+
+/** The same fixture as `installFetch`, plus the describe the twisty asks for. */
+function installColumnFetch(): void {
+  globalThis.fetch = mock(async (url: string | URL, init?: RequestInit) => {
+    const text = String(url);
+    const route = text.slice(text.lastIndexOf("/") + 1);
+    const body = JSON.parse(String(init?.body ?? "{}")) as { kind?: string; path?: string[] };
+    if (route === "containers")
+      return Response.json([{ path: ["app"], name: "app", level: 0, isSessionDefault: true }]);
+    if (route === "counts") return Response.json({ table: { count: 2 }, view: { count: 1 }, function: { count: 1 } });
+    if (route === "describe")
+      return Response.json({
+        path: body.path,
+        columns: [
+          { name: "id", type: "integer", nullable: false, isPrimary: true },
+          { name: "ZZ TOTAL", type: "NUMERIC(10,2)", nullable: true, isPrimary: false },
+        ],
+        indexes: [],
+        foreignKeys: [],
+      });
+    return Response.json(objects[String(body.kind)] ?? []);
+  }) as never;
+}
+
+describe("a column row is offered nothing", () => {
+  async function openOrdersColumns(): Promise<void> {
+    installColumnFetch();
+    render(<ObjectTree connection={connectionOf()} capabilities={withColumnKinds} actions={allHandlers([])} />);
+    await screen.findByRole("treeitem", { name: /Tables/ });
+    await userEvent.click(row(/Tables/));
+    await waitFor(() => expect(screen.getByText("orders")).toBeTruthy());
+    await userEvent.click(within(row(/orders 1,234/)).getByTestId("tree-row-twisty"));
+    await waitFor(() => expect(screen.getByText("ZZ TOTAL")).toBeTruthy());
+  }
+
+  function columnRows(): HTMLElement[] {
+    return screen.getAllByRole("treeitem").filter((item) => item.getAttribute("aria-level") === "4");
+  }
+
+  test("no trigger, no aria-haspopup, and the browser keeps the right click", async () => {
+    await openOrdersColumns();
+    // The parent has all three, which is what makes the column's absence a statement rather than
+    // a tree where nothing has a menu.
+    expect(within(row(/orders 1,234/)).getByTestId("tree-row-menu-trigger")).toBeTruthy();
+    expect(row(/orders 1,234/).getAttribute("aria-haspopup")).toBe("menu");
+
+    expect(columnRows()).toHaveLength(2);
+    for (const column of columnRows()) {
+      expect(within(column).queryByTestId("tree-row-menu-trigger")).toBeNull();
+      expect(column.hasAttribute("aria-haspopup")).toBe(false);
+      // Not prevented: there is nothing to offer, so the page must not swallow the gesture.
+      expect(fireEvent.contextMenu(column)).toBe(true);
+      expect(screen.queryByRole("menu")).toBeNull();
+    }
+  });
+
+  test("every reference on a column row resolves to a span inside that row", async () => {
+    await openOrdersColumns();
+    for (const column of columnRows()) {
+      const refs = (column.getAttribute("aria-labelledby") ?? "").split(" ").filter((id) => id !== "");
+      expect(refs.length).toBeGreaterThan(0);
+      const resolved = nameSources(column);
+      expect(resolved.length).toBeGreaterThan(0);
+      for (const element of resolved) expect(column.contains(element)).toBe(true);
+    }
+    // The primary key's mark and the whole declared type are both part of the NAME, in render
+    // order, and the trigger-less row carries no other slot. `ZZ TOTAL` holds a space, which is
+    // exactly what separates the tokens of `aria-labelledby`, so its id has to survive escaping.
+    const [id, total] = columnRows();
+    expect(nameSourceIds(id)).toEqual(["tree-row-label", "tree-row-primary", "tree-row-column-type"]);
+    expect(screen.getByRole("treeitem", { name: "id Primary key integer" })).toBe(id);
+    expect(nameSourceIds(total)).toEqual(["tree-row-label", "tree-row-column-type"]);
+    expect(screen.getByRole("treeitem", { name: "ZZ TOTAL NUMERIC(10,2)" })).toBe(total);
   });
 });

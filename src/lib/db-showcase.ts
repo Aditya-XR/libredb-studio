@@ -46,15 +46,23 @@ export const SHOWCASE_RANK: Record<DatabaseType, number> = {
   // it is the engine a data platform is usually met THROUGH rather than one more
   // store to choose between.
   trino: 14,
-  // Behind Trino and ahead of the embedded store: libSQL is the newest name on this
+  // Behind Trino and ahead of libSQL (#1085): a name every cloud-native evaluator already
+  // knows, but met as the metrics store beside their databases rather than as one of them,
+  // so it follows the query engine and leads the two newest names on this page.
+  prometheus: 15,
+  // Behind Prometheus and ahead of libSQL (#1088), for the reason Prometheus sits where it does:
+  // the message log a cloud-native team runs beside its databases, as well known to that
+  // evaluator as Prometheus and met the same way, beside the databases rather than as one of them.
+  kafka: 16,
+  // Behind Kafka and ahead of the embedded store: libSQL is the newest name on this
   // page and the one an evaluator is least likely to have met, but it is a product
   // name (Turso's server) rather than our own, so it goes ahead of `libredb`.
-  libsql: 15,
+  libsql: 17,
   // Last on purpose: the embedded store is the least recognisable name here. It is
   // still shown - it is a shipped provider with a doc (docs/providers/libredb.md), an
   // icon and a slot in the connection picker, so omitting it would make the login page
   // contradict the app (issue #425, step 2).
-  libredb: 16,
+  libredb: 18,
 };
 
 /**
@@ -74,7 +82,7 @@ export interface ShowcaseDatabase {
   /**
    * True for the embedded store, false for a database the user already runs.
    *
-   * The showcase shows all seventeen providers while the hero claims sixteen engines,
+   * The showcase shows every provider while the hero claims the external engines only,
    * and this flag is how the page carries that difference without any surface typing
    * the word "libredb": the pill it marks is the one the count leaves out.
    */

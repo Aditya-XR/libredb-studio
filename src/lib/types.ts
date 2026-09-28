@@ -45,7 +45,7 @@ export type DatabaseType =
   // KEYSPACE, and `localDataCenter` is a field only this engine has - the driver
   // refuses to connect without it.
   | "cassandra"
-  // Apache Trino (issue #424 Phase 2). A QUERY ENGINE rather than a store: what the
+  // Trino (issue #424 Phase 2). A QUERY ENGINE rather than a store: what the
   // connection's `database` field pins is a Trino CATALOG (`tpch`, `hive`, `iceberg`),
   // the way a PostgreSQL connection pins a database, and the schemas inside it are the
   // schema level. PrestoDB is deliberately NOT this id - the transport builds its
@@ -82,7 +82,19 @@ export type DatabaseType =
   // MotherDuck (`md:`), Quack and DuckLake are NOT this id and have no row anywhere
   // yet: each is a different connection story than a local path, and #424 publishes
   // no name it has not connected to.
-  | "duckdb";
+  | "duckdb"
+  // Prometheus (#1085). A metrics store queried in PromQL over its HTTP API, and the first
+  // provider whose `queryLanguage` is neither `sql` nor `json`. The connection is a host, a port
+  // and an optional credential: `user` and `password` are HTTP Basic, and a password with no
+  // user is sent as a bearer token. VictoriaMetrics speaks the same API and is recorded as a
+  // relative of this id, never as an id of its own.
+  | "prometheus"
+  // Apache Kafka (#1088). A message log browsed read-only over the Kafka protocol, the first
+  // member of the `stream/` family. Its editor text is a JSON read request, so it declares
+  // `queryLanguage: "json"` with a `queryDialect` of its own. The connection is one bootstrap
+  // address plus TLS and an optional SASL credential, `saslMechanism` below naming how `user` and
+  // `password` are checked; the client learns every other broker from the cluster's metadata.
+  | "kafka";
 
 export type ConnectionEnvironment = "production" | "staging" | "development" | "local" | "other";
 
@@ -260,6 +272,16 @@ export interface DatabaseConnection {
    */
   authSource?: string;
   /**
+   * Kafka: the SASL mechanism that checks `user` and `password`, absent meaning none (#1088).
+   *
+   * A mechanism NAME, never a credential, and not a refinement either: a broker keeps a SCRAM
+   * credential per mechanism, so the same user and password are a different principal's secret
+   * under each, and a credential sent with no mechanism has no way to be sent at all, which the
+   * provider refuses rather than dropping. PLAIN and both SCRAM mechanisms require TLS there.
+   * OAUTHBEARER and GSSAPI are not offered.
+   */
+  saslMechanism?: "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512";
+  /**
    * Read no catalog when this connection opens.
    *
    * For a connection whose owner holds tens of thousands of objects, even the two cheap
@@ -278,6 +300,20 @@ export interface DatabaseConnection {
   seedId?: string; // stable reference to seed config ID
   agentUser?: string; // optional least-privilege role for the agent read-only execution profile (#328)
   agentPassword?: string; // password for agentUser; secret-classified, sealed at rest by connection-secrets
+  /**
+   * Elasticsearch only (#708): an API key pair, sent as `Authorization: ApiKey
+   * base64(apiKeyId:apiKeySecret)` in preference to `user`/`password` when both halves
+   * are set (each half trimmed first). Half a pair (one field with no other) is not a
+   * shorter key, so it falls back to `user`/`password` rather than sending a key built
+   * from an empty secret. OpenSearch refuses the pair: nothing has measured whether
+   * its security plugin accepts the same scheme.
+   *
+   * `apiKeyId` is classified `secret` in connection-secrets.ts, not `public` the way
+   * `user` is: unlike a name an operator chose, it is one generated, opaque half of a
+   * credential pair, and leaving it readable narrows what a leak has to guess.
+   */
+  apiKeyId?: string;
+  apiKeySecret?: string;
 }
 
 export interface ForeignKeySchema {
@@ -289,9 +325,73 @@ export interface ForeignKeySchema {
 export interface ColumnSchema {
   name: string;
   type: string;
+  /**
+   * The type this column's declared type is BUILT ON, where the engine distinguishes the
+   * two, and absent where it does not.
+   *
+   * SQL Server alias types are why it exists. `Person.PersonPhone.PhoneNumber` is declared
+   * `Phone`, which is an alias over `nvarchar`, and `Person.Person.FirstName` is `Name` over
+   * the same: the alias is what a person wants to SEE, and it is what `type` carries and
+   * what the object browser renders. It is not what a reader can DECIDE on. Anything that
+   * matches a declared type against a spelling it knows - which columns get a text shape
+   * test, which cannot be counted, which have no equality operator - is matching a name the
+   * schema's author invented, and it silently matches nothing.
+   *
+   * So a provider that can tell the two apart reports both, and a reader that is deciding
+   * rather than displaying prefers this one. Optional because most engines have no such
+   * distinction, and there an absent field is the honest answer rather than a copy of
+   * `type` that would claim a provider had looked.
+   */
+  baseType?: string;
   nullable: boolean;
   isPrimary: boolean;
+  /**
+   * What the column defaults to, as the provider reads it, and NOT one single kind of string
+   * across the fleet.
+   *
+   * On most providers it is the engine's own catalog TEXT, copied out unchanged: PostgreSQL
+   * reports `nextval('app.orders_id_seq'::regclass)` here, SQL Server `((0))`. On MySQL and
+   * MariaDB it is the DECODED value, `abc` rather than `'abc'`, because MariaDB reports the
+   * default as the expression its author wrote and showing that to a reader showed a default
+   * nobody wrote (#795). SQLite, libSQL and DuckDB report it the same way MariaDB does and
+   * decode it the same way (#1029).
+   *
+   * ClickHouse is neither. `readDefault` in `clickhouse/introspect.ts` answers the bare
+   * expression for kind `DEFAULT` and CONSTRUCTS `MATERIALIZED a + b` for the other kinds,
+   * so the field there names its own clause and is not pasteable after the word DEFAULT.
+   * The migration generator has `clickhouseDefaultKind` for exactly that, and the half of it
+   * that was never applied is issue #1032.
+   *
+   * Decoding is why {@link defaultExpression} exists: once a provider decodes, this field is
+   * no longer something a reader can paste after the word DEFAULT, so the provider that
+   * decoded carries the text alongside it.
+   */
   defaultValue?: string;
+  /**
+   * The SQL TEXT that produces {@link defaultValue}, as the engine's own catalog spells it,
+   * carried by a provider that DECODED the value out of it.
+   *
+   * It exists for the same reason `baseType` does: a reader that is DECIDING needs a
+   * different field from a reader that is DISPLAYING. Where both are set, `defaultValue` is
+   * the VALUE the column defaults to, which is what the object browser shows; this is what
+   * goes after the word DEFAULT, and a reader EMITTING SQL must prefer it. The two are
+   * genuinely different strings: MariaDB's `DEFAULT 'abc'` has the value `abc` and the
+   * expression `'abc'`, and `CREATE TABLE t (note varchar(20) DEFAULT abc)` is ERROR 1054 on
+   * that server while `DEFAULT 'abc'` is accepted (measured on 12.3.2).
+   *
+   * A provider sets it where it DECODED {@link defaultValue} out of the catalog text. Absence
+   * is therefore not negligence and not "there is no expression": on the providers that copy
+   * the catalog out unchanged it says `defaultValue` already IS the text, and a reader
+   * emitting SQL should use that.
+   *
+   * Two engines are absent for their own reasons rather than that one. MySQL reports the
+   * evaluated value with an EXTRA that cannot say whether the text is SQL - `abc` is a value,
+   * `b'1'` and `0x616263` are SQL, all three carry an empty EXTRA - so it declares nothing
+   * here rather than inventing a quoting rule, and what that costs is issue #1031. ClickHouse
+   * builds a clause-naming string rather than a value, which is a third case this field does
+   * not model; see {@link defaultValue} and issue #1032.
+   */
+  defaultExpression?: string;
 }
 
 export interface IndexSchema {
@@ -462,8 +562,18 @@ export interface QueryTab {
    * Absent on a tab whose result predates this field, and on one that has never run.
    */
   resultQuery?: string;
+  /**
+   * Why the tab's last NEW run failed, in the words the failure arrived with.
+   *
+   * Set together with `result: null`, so the results panel shows the failure in place of the
+   * previous run's rows instead of leaving them up under a statement that did not produce them.
+   * A failed Load More does not set it: the rows on screen are intact and only the next page did
+   * not arrive. Cleared by the next run that lands. Absent on a tab whose last run succeeded, and
+   * optional because this type is part of the published package surface.
+   */
+  runError?: string;
   isExecuting: boolean;
-  type: "sql" | "mongodb" | "redis" | "libredb";
+  type: "sql" | "mongodb" | "redis" | "libredb" | "promql" | "kafka";
   viewMode?: "results" | "explain" | "history" | "saved";
   explainPlan?: unknown;
   // Pagination state
@@ -471,9 +581,47 @@ export interface QueryTab {
   isLoadingMore?: boolean;
   allRows?: Record<string, unknown>[];
   /**
+   * The numbered database this tab's statements belong to, when the tab was opened against one
+   * that is NOT the connection's own session database.
+   *
+   * WHY THE TAB CARRIES IT. A key lives in exactly one numbered database, and Redis has no
+   * database-qualified key syntax: the database is a property of the CONNECTION (`SELECT n`) and
+   * never of the statement. `GET report:daily` therefore names the key and cannot name the database
+   * it is in, so the same statement sent on a connection sitting in another database reads a
+   * different key space and answers `(nil)` for a key that is right there. The panel that opened
+   * this tab walked one database, and every run of the tab - the initial read, the next Run, a
+   * selection, an inline edit, the next page - is about the same key, so the one fact travels with
+   * the tab rather than with the call that opened it.
+   *
+   * ABSENT MEANS NO OVERRIDE, and is not database `0` or "the session's number": it is the ordinary
+   * tab saying nothing, whose run reaches whatever database its connection names. Only this number
+   * is overridden; the connection is otherwise the active one, whole.
+   */
+  databaseOverride?: number;
+  /**
+   * The object activation that opened this tab: the connection it was opened on, the object's
+   * path, the database override it was opened with, and the statement it was opened on.
+   *
+   * WHAT LETS A SECOND ACTIVATION FOCUS THIS TAB instead of opening another and reading the same
+   * rows again. The tab is reused only on the connection that opened it, since two connections
+   * can hold the same path, and only while `query` still equals `origin.query`: a tab whose
+   * statement the reader has edited is their work, and an activation must never capture it. A
+   * reused tab whose `runError` is set is run again in place.
+   *
+   * NOT PERSISTED, so a tab restored from storage carries none and is never matched: a restored
+   * tab opens a fresh one on the next activation, which is what every activation did before this.
+   */
+  origin?: {
+    /** Absent when no connection was active; optional because this type is published. */
+    readonly connectionId?: string;
+    readonly path: readonly string[];
+    readonly databaseOverride?: number;
+    readonly query: string;
+  };
+  /**
    * Present exactly on a Source tab (#789 Phase 2).
    *
-   * An optional FIELD and deliberately not a fifth member of `type`. Every member of that
+   * An optional FIELD and deliberately not another member of `type`. Every member of that
    * union is a QUERY DIALECT that `resolveTabType` may answer and that
    * `editorLanguageForTabType` maps onto `QueryEditor`'s closed language union, so a
    * `"source"` member would be an arm the resolver can never produce and the language mapper

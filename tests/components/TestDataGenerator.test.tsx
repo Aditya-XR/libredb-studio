@@ -17,7 +17,11 @@ import type { ProviderCapabilities } from "@/lib/db/types";
 function capsOf(overrides: Partial<ProviderCapabilities>): ProviderCapabilities {
   return { queryLanguage: "sql", ...overrides } as unknown as ProviderCapabilities;
 }
-const jsonCaps = capsOf({ queryLanguage: "json" });
+// MongoDB's declaration: one container level, the database (`MONGODB_CONTAINER_LEVELS`).
+const jsonCaps = capsOf({
+  queryLanguage: "json",
+  containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
+});
 const postgresCaps = capsOf({ defaultPort: 5432 });
 const mssqlCaps = capsOf({ defaultPort: 1433 });
 
@@ -45,6 +49,22 @@ const schema: DetailedObject = {
     { name: "email", type: "VARCHAR(255)", nullable: false, isPrimary: false },
     { name: "name", type: "VARCHAR(100)", nullable: false, isPrimary: false },
     { name: "salary", type: "DECIMAL(10,2)", nullable: true, isPrimary: false },
+  ],
+};
+
+/**
+ * A MySQL/MariaDB reading (#1033): `type` is the type AS DECLARED and `baseType` the family.
+ * An `ENUM` carries its VALUES in the declaration, so `enum('int','text')` answers a
+ * substring test for `int` and picks a generator that writes numbers into a string column.
+ */
+const declaredTypeSchema: DetailedObject = {
+  name: "lentest",
+  kind: "table",
+  path: ["lentest"],
+  indexes: [],
+  columns: [
+    { name: "qty", type: "int unsigned", baseType: "int", nullable: true, isPrimary: false },
+    { name: "flavour", type: "enum('int','text')", baseType: "enum", nullable: true, isPrimary: false },
   ],
 };
 
@@ -154,6 +174,34 @@ describe("TestDataGenerator", () => {
     expect(text).not.toContain("(+1-555-");
   });
 
+  test("quotes a numeric-looking value for an ENUM whose values spell a number type (#1033)", () => {
+    // The mirror of the test above: here the VALUE is honest and the TYPE misleads. MySQL
+    // reports `enum('int','x')` in `type`, which a substring test reads as an integer column,
+    // so the `age` generator's number went into the statement bare. Measured on MySQL 26.7.0,
+    // a bare number into an ENUM is an INDEX into its value list: `1` silently stores 'int',
+    // and `42` is error 1265. The family in `baseType` is `enum`, so the value is quoted.
+    const enumAge: DetailedObject = {
+      name: "people",
+      kind: "table",
+      path: ["people"],
+      indexes: [],
+      columns: [{ name: "age", type: "enum('int','x')", baseType: "enum", nullable: true, isPrimary: false }],
+    };
+    const { container } = render(
+      <TestDataGenerator
+        isOpen
+        onClose={mock(() => {})}
+        tablePath={["people"]}
+        tableSchema={enumAge}
+        onExecuteQuery={mock(() => {})}
+      />,
+    );
+
+    const text = container.textContent || "";
+    expect(text).toMatch(/\('\d+'\)/);
+    expect(text).not.toMatch(/\(\d+\)/);
+  });
+
   test("row count buttons change output", () => {
     const { queryByText, container } = render(
       <TestDataGenerator
@@ -195,11 +243,11 @@ describe("TestDataGenerator", () => {
       <TestDataGenerator
         isOpen
         onClose={mock(() => {})}
-        tablePath={["users"]}
+        tablePath={["shop", "users"]}
         tableSchema={{
           name: "users",
           kind: "table",
-          path: ["users"],
+          path: ["shop", "users"],
           indexes: [],
           columns: [{ name: "email", type: "VARCHAR(255)", nullable: false, isPrimary: false }],
         }}
@@ -263,11 +311,11 @@ describe("TestDataGenerator", () => {
       <TestDataGenerator
         isOpen
         onClose={mock(() => {})}
-        tablePath={["users"]}
+        tablePath={["shop", "users"]}
         tableSchema={{
           name: "users",
           kind: "table",
-          path: ["users"],
+          path: ["shop", "users"],
           indexes: [],
           columns: [
             { name: "name", type: "VARCHAR(100)", nullable: false, isPrimary: false },
@@ -279,6 +327,9 @@ describe("TestDataGenerator", () => {
       />,
     );
     const text = container.textContent || "";
+    // The database rides as its own key (#843): without it the insert landed in the
+    // connected database's same-named collection, a write to the wrong place.
+    expect(text).toContain('"database": "shop"');
     expect(text).toContain('"collection": "users"');
     expect(text).toContain('"operation": "insertMany"');
     expect(text).toContain('"documents"');
@@ -384,6 +435,23 @@ describe("TestDataGenerator", () => {
     expect(text).toContain("email: email");
     expect(text).toContain("name: fullName");
     expect(text).toContain("salary: price");
+  });
+
+  test("picks a generator from the type FAMILY, not the declaration (#1033)", () => {
+    const { container } = render(
+      <TestDataGenerator
+        isOpen
+        onClose={mock(() => {})}
+        tablePath={["lentest"]}
+        tableSchema={declaredTypeSchema}
+        onExecuteQuery={mock(() => {})}
+      />,
+    );
+    const text = container.textContent || "";
+    // `int unsigned` IS an integer and `enum('int','text')` is not, and the declaration alone
+    // cannot say so.
+    expect(text).toContain("qty: integer");
+    expect(text).toContain("flavour: text");
   });
 
   // ── Row count 25 generates 25 rows ─────────────────────────────────────────
@@ -546,7 +614,7 @@ describe("TestDataGenerator", () => {
     const richSchema: DetailedObject = {
       name: "profiles",
       kind: "table",
-      path: ["profiles"],
+      path: ["shop", "profiles"],
       indexes: [],
       columns: [
         { name: "shipping_address", type: "VARCHAR(255)", nullable: true, isPrimary: false },
@@ -568,7 +636,7 @@ describe("TestDataGenerator", () => {
       <TestDataGenerator
         isOpen
         onClose={mock(() => {})}
-        tablePath={["profiles"]}
+        tablePath={["shop", "profiles"]}
         tableSchema={richSchema}
         capabilities={jsonCaps}
         onExecuteQuery={onExecuteQuery}
@@ -633,7 +701,7 @@ describe("TestDataGenerator", () => {
     const typedSchema: DetailedObject = {
       name: "events",
       kind: "table",
-      path: ["events"],
+      path: ["shop", "events"],
       indexes: [],
       columns: [
         { name: "birth_date", type: "DATE", nullable: true, isPrimary: false },
@@ -650,7 +718,7 @@ describe("TestDataGenerator", () => {
       <TestDataGenerator
         isOpen
         onClose={mock(() => {})}
-        tablePath={["events"]}
+        tablePath={["shop", "events"]}
         tableSchema={typedSchema}
         capabilities={jsonCaps}
         onExecuteQuery={onExecuteQuery}

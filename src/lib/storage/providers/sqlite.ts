@@ -4,8 +4,15 @@
  * WAL mode enabled for concurrent read performance.
  */
 
-import type { ServerStorageProvider, StorageCollection, StorageData } from "../types";
-import { STORAGE_COLLECTIONS } from "../types";
+import { accountFromRow, type AccountRow } from "../account-row";
+import type {
+  AccountWriteOptions,
+  ServerStorageProvider,
+  StorageCollection,
+  StorageData,
+  StoredAccount,
+} from "../types";
+import { LastAdminError, STORAGE_COLLECTIONS } from "../types";
 import type BetterSqlite3 from "better-sqlite3";
 import { logger } from "@/lib/logger";
 import { DEFAULT_STORAGE_SQLITE_PATH } from "@/lib/data-dir";
@@ -61,7 +68,7 @@ export class SQLiteStorageProvider implements ServerStorageProvider {
       // Enable WAL mode for better concurrent read performance
       this.db!.pragma("journal_mode = WAL");
 
-      // Create table
+      // user_storage is per-user product data. accounts is the local identity registry (#784).
       this.db!.exec(`
         CREATE TABLE IF NOT EXISTS user_storage (
           user_id    TEXT NOT NULL,
@@ -69,6 +76,17 @@ export class SQLiteStorageProvider implements ServerStorageProvider {
           data       TEXT NOT NULL,
           updated_at TEXT NOT NULL DEFAULT (datetime('now')),
           PRIMARY KEY (user_id, collection)
+        );
+        CREATE TABLE IF NOT EXISTS accounts (
+          email         TEXT PRIMARY KEY,
+          password_hash TEXT NOT NULL,
+          role          TEXT NOT NULL,
+          totp_secret   TEXT,
+          totp_pending  TEXT,
+          disabled      INTEGER NOT NULL DEFAULT 0,
+          session_version INTEGER NOT NULL DEFAULT 0,
+          created_at    TEXT NOT NULL,
+          updated_at    TEXT NOT NULL
         )
       `);
     } catch (error) {
@@ -147,6 +165,87 @@ export class SQLiteStorageProvider implements ServerStorageProvider {
       }
     });
     tx();
+  }
+
+  async listAccounts(): Promise<StoredAccount[]> {
+    this.ensureDb();
+    const rows = this.db!.prepare(
+      `SELECT email, password_hash, role, totp_secret, totp_pending, disabled, session_version, created_at, updated_at
+       FROM accounts ORDER BY email`,
+    ).all() as AccountRow[];
+    return rows.map(accountFromRow);
+  }
+
+  async getAccount(email: string): Promise<StoredAccount | null> {
+    this.ensureDb();
+    const row = this.db!.prepare(
+      `SELECT email, password_hash, role, totp_secret, totp_pending, disabled, session_version, created_at, updated_at
+       FROM accounts WHERE email = ?`,
+    ).get(email) as AccountRow | undefined;
+    return row ? accountFromRow(row) : null;
+  }
+
+  async insertAccount(account: StoredAccount): Promise<void> {
+    this.ensureDb();
+    this.db!.prepare(
+      `INSERT INTO accounts (email, password_hash, role, totp_secret, totp_pending, disabled, session_version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      account.email,
+      account.passwordHash,
+      account.role,
+      account.totpSecret,
+      account.totpPending,
+      account.disabled ? 1 : 0,
+      account.sessionVersion,
+      account.createdAt,
+      account.updatedAt,
+    );
+  }
+
+  async updateAccount(account: StoredAccount, options: AccountWriteOptions = {}): Promise<void> {
+    this.ensureDb();
+    // IMMEDIATE takes the write lock before the check reads, so a second writer, in this process or
+    // another, waits for the first to commit and then counts what it left.
+    const write = this.db!.transaction(() => {
+      this.db!.prepare(
+        `UPDATE accounts
+         SET password_hash = ?, role = ?, totp_secret = ?, totp_pending = ?, disabled = ?, session_version = ?,
+             updated_at = ?
+         WHERE email = ?`,
+      ).run(
+        account.passwordHash,
+        account.role,
+        account.totpSecret,
+        account.totpPending,
+        account.disabled ? 1 : 0,
+        account.sessionVersion,
+        account.updatedAt,
+        account.email,
+      );
+      if (options.keepEnabledAdmin) this.assertEnabledAdmin();
+    });
+    write.immediate();
+  }
+
+  async deleteAccount(email: string, options: AccountWriteOptions = {}): Promise<void> {
+    this.ensureDb();
+    // One transaction: an account removed without its rows would hand them to the next account
+    // created with the same email.
+    const tx = this.db!.transaction(() => {
+      this.db!.prepare("DELETE FROM accounts WHERE email = ?").run(email);
+      this.db!.prepare("DELETE FROM user_storage WHERE user_id = ?").run(email);
+      if (options.keepEnabledAdmin) this.assertEnabledAdmin();
+    });
+    tx.immediate();
+  }
+
+  /** Inside a write transaction: throwing rolls the write back. */
+  private assertEnabledAdmin(): void {
+    const row = this.db!.prepare("SELECT COUNT(*) AS n FROM accounts WHERE role = 'admin' AND disabled = 0").get() as {
+      n: number;
+    };
+    if (row.n === 0) throw new LastAdminError();
   }
 
   async isHealthy(): Promise<boolean> {

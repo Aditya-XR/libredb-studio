@@ -19,8 +19,12 @@ import Redis, { type RedisOptions } from "ioredis";
 import { BaseDatabaseProvider } from "../../base-provider";
 import {
   applySourceBound,
+  assertContainerPathShape,
+  assertObjectPathShape,
+  type ObjectPathShapeEngine,
   callerBoundTruncationReason,
   containerDepth,
+  type ContainerPathShapeEngine,
   declaredKinds,
   findKind,
   requireEditableKind,
@@ -50,6 +54,8 @@ import {
   type ContainerLevels,
   type ContainerLevelSpec,
   type DatabaseObject,
+  type KeyScanOptions,
+  type KeyScanPage,
   type KindCount,
   type ObjectDetail,
   type ObjectDetailBatch,
@@ -67,6 +73,18 @@ import {
   type OpenQueryTransactionOutcome,
 } from "../../types";
 import { DatabaseConfigError, QueryError, ConnectionError } from "../../errors";
+
+/**
+ * Redis's identity for the shared container-path renderer.
+ *
+ * Which paths this engine accepts is not a field here: it is `containerPathShapes` in
+ * `getCapabilities()`, which the object routes read too (#1147).
+ */
+const REDIS_CONTAINER_PATH_ENGINE: ContainerPathShapeEngine = {
+  code: "redis",
+  label: "A Redis",
+  shapeNames: "label",
+};
 
 /**
  * The server's own words for "you asked me to discard and there is nothing queued".
@@ -93,6 +111,112 @@ const QUEUED_REPLY = "QUEUED";
 
 /** `PING`'s own reply, the other half of the reading above. */
 const PONG_REPLY = "PONG";
+
+/**
+ * Commands that change the CONNECTION rather than the data, refused by `query()` (#1107).
+ *
+ * `getOrCreateProvider` caches this provider per connection for the whole process and it runs
+ * every statement on one client, so connection state a statement sets is state every later
+ * request inherits, whoever sends it. MEASURED 2026-09-25 on redis 8.10.2 through ioredis
+ * 5.11.1, on a connection configured for database 2 as ACL user `ro` (`+@read`):
+ * - `SELECT 0` answered OK and every later `GET` read database 0; `MULTI` / `SELECT 0` /
+ *   `EXEC` did the same, which is why the refusal is by command and not by reply.
+ * - `RESET` answered RESET and left the connection in database 0 AND authenticated as
+ *   `default`: the read-only user could `SET` afterwards.
+ * - `AUTH default <anything>` answered OK against a stock `default nopass` and did the same.
+ * - `HELLO 3` switched the reply protocol and ioredis raised "Protocol error, got \"%\"".
+ * `SWAPDB`, `MOVE` and a script's `redis.call('SELECT', n)` were measured too and leave the
+ * connection where it was, so they are not listed.
+ */
+const SESSION_STATE_COMMANDS: ReadonlySet<string> = new Set(["SELECT", "RESET", "AUTH", "HELLO"]);
+
+/**
+ * Commands after which the shared client stops answering later requests, refused by `query()`
+ * for the reason above (#1107). `CLIENT REPLY` belongs here too and is matched by its subcommand
+ * in `sharedConnectionRefusal`. MEASURED 2026-09-28 on redis 8.10.2 through ioredis 5.11.1:
+ * - `SUBSCRIBE`, `PSUBSCRIBE` and `SSUBSCRIBE` never answered, ioredis threw an uncaught
+ *   TypeError, and every later command failed "Connection in subscriber mode". Through
+ *   `POST /api/db/query`, one `SUBSCRIBE` from a `user` session failed the connection for every
+ *   user, admin included, until the idle sweep evicted the provider.
+ * - `QUIT` answered OK and closed the socket for good: every later command failed "Connection is
+ *   closed.", while `isConnected()` still said true, so the provider cache kept serving it.
+ * - `MONITOR` turned the connection into a feed of every command the server runs, which ioredis
+ *   read as replies to later commands.
+ * - `CLIENT REPLY OFF` and `CLIENT REPLY SKIP` stopped the server replying, so every later
+ *   command waited for an answer that never came.
+ * `UNSUBSCRIBE`, `PUNSUBSCRIBE` and `SUNSUBSCRIBE` outside subscriber mode answered 0 and changed
+ * nothing, so they run.
+ */
+const UNANSWERING_COMMANDS: ReadonlySet<string> = new Set(["QUIT", "SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE", "MONITOR"]);
+
+/**
+ * Commands that hold the connection until data or their timeout arrives, refused by `query()`
+ * (#1107). The shared client answers in order, so every other request on the connection waits
+ * behind one. MEASURED 2026-09-28 on redis 8.10.2 through ioredis 5.11.1: with a timeout of 0,
+ * each of these, and `XREAD` / `XREADGROUP` with `BLOCK 0`, never returned and neither did any
+ * later command; a `GET` sent while `BLPOP queue 3` waited answered after 3 seconds. So the
+ * refusal does not depend on the timeout. `XREAD` and `XREADGROUP` block only with their BLOCK
+ * option, which `streamReadBlocks` looks for.
+ */
+const BLOCKING_COMMANDS: ReadonlySet<string> = new Set([
+  "BLPOP",
+  "BRPOP",
+  "BRPOPLPUSH",
+  "BLMOVE",
+  "BLMPOP",
+  "BZPOPMIN",
+  "BZPOPMAX",
+  "BZMPOP",
+  "WAIT",
+  "WAITAOF",
+]);
+
+/**
+ * A command word as the server may match it: upper-cased, and cut at the first NUL.
+ *
+ * MEASURED 2026-09-28 on redis 8.10.2: the server reuses the previous command's lookup when the
+ * next name matches it as a C string, so the match stops at a NUL. On a raw socket `SELECT\0 0`
+ * answered OK right after `SELECT 2` and "unknown command" right after `PING`. `openClient` sends
+ * `SELECT <db>` on connect, so a check on the whole word let the first statement on a fresh
+ * provider, `SELECT\0 0`, move the connection to database 0 through `POST /api/db/query`.
+ */
+function commandWord(text: string): string {
+  return text.split("\u0000", 1)[0].toUpperCase();
+}
+
+/**
+ * Whether an `XREAD` or `XREADGROUP` carries its BLOCK option. The options come before `STREAMS`,
+ * after which every word is a key or an id, and `GROUP` takes a group and a consumer name, so a
+ * key or a group named "BLOCK" is not the option.
+ */
+function streamReadBlocks(args: readonly string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const word = commandWord(args[i]);
+    if (word === "STREAMS") return false;
+    if (word === "BLOCK") return true;
+    if (word === "GROUP") i += 2;
+  }
+  return false;
+}
+
+/** Why `query()` does not send this command on the shared client, or `null` when it does (#1107). */
+function sharedConnectionRefusal(command: string, args: readonly string[]): string | null {
+  const name = commandWord(command);
+  if (SESSION_STATE_COMMANDS.has(name)) {
+    const instead =
+      name === "SELECT" ? " Pick the database in the Keys panel, or change the connection's Database field." : "";
+    return `${name} is not run here: it would change the shared connection for every later request.${instead}`;
+  }
+  const replySubcommand = name === "CLIENT" && args.length > 0 && commandWord(args[0]) === "REPLY";
+  if (UNANSWERING_COMMANDS.has(name) || replySubcommand) {
+    return `${replySubcommand ? "CLIENT REPLY" : name} is not run here: the shared connection would stop answering later requests.`;
+  }
+  const streamBlocks = (name === "XREAD" || name === "XREADGROUP") && streamReadBlocks(args);
+  if (BLOCKING_COMMANDS.has(name) || streamBlocks) {
+    return `${streamBlocks ? `${name} BLOCK` : name} is not run here: every other request on the shared connection would wait until it returns.`;
+  }
+  return null;
+}
 
 // JSON query payload: { "command": "GET", "args": ["key"] }
 type RedisJsonCommand = { command: string; args?: string[] };
@@ -188,7 +312,19 @@ const REDIS_CONTAINER_LEVELS: ContainerLevels = Object.freeze([
  * showing a zero nobody measured.
  */
 const REDIS_OBJECT_KINDS: readonly ObjectKindSpec[] = Object.freeze([
-  { id: "keyspace", role: "relation", label: "Key Pattern", labelPlural: "Key Patterns" },
+  {
+    id: "keyspace",
+    role: "relation",
+    label: "Key Pattern",
+    labelPlural: "Key Patterns",
+    // THE ONE KIND WITH COLUMNS ON THIS ENGINE (#789). Written as a literal because the gate in
+    // `describeObject` is the kind itself (`kind !== "keyspace"` returns the empty shape), so
+    // there is no predicate to derive it from. The three columns are SYNTHETIC, derived from the
+    // types sampled by the SCAN walk rather than from any catalog (`keyGroupColumns` above), and
+    // they are declared because that grouping IS what this provider models a key pattern as.
+    // `function` abstains: a library has no columns, so a twisty on it would open on nothing.
+    hasColumns: true,
+  },
   {
     id: "function",
     role: "routine",
@@ -251,29 +387,14 @@ function declaredLevels(capabilities: ProviderCapabilities): readonly ContainerL
 }
 
 /**
- * The path SHAPE both object reads share, with ONE writer for the rule and its sentence.
- *
- * Derived, not counted: the depth comes from `containerDepth()` through `declaredLevels`,
- * and the names in the message are the declared labels, so the check and its message cannot
- * disagree. Neither kind declares `attachedTo`, so there is one shape rather than two.
- *
- * `describeObject` has checked this since Phase 1 and `readObjectSource` did not, which the
- * external review of PR #820 found (#789). The HTTP route bounds an empty path, but both
- * methods are published through `@libredb/studio`, are reached by the embedded host seam and
- * by the conformance helper, and none of those three sees the route. Measured on the
- * unchecked method: an empty path made `path[path.length - 1]` `undefined`, and ioredis then
- * threw `undefined is not an object (evaluating 'arg.toUpperCase')` out of the command
- * encoder, which is this file's defect arriving as the driver's.
+ * Redis: neither kind declares `attachedTo`, so there is one shape: the declared level
+ * plus the name.
  */
-function assertObjectPathShape(capabilities: ProviderCapabilities, kind: string, path: readonly string[]): void {
-  const levels = declaredLevels(capabilities);
-  if (path.length === levels.length + 1) return;
-  throw new QueryError(
-    `A Redis "${kind}" path is [${[...levels.map((level) => level.label.toLowerCase()), "name"].join(", ")}], ` +
-      `received ${JSON.stringify(path)}`,
-    "redis",
-  );
-}
+const PATH_SHAPE_ENGINE: ObjectPathShapeEngine = {
+  code: "redis",
+  label: "A Redis",
+  attachedSegment: "required",
+};
 
 /**
  * The segment of `path` belonging to the declared container level `id`.
@@ -316,14 +437,7 @@ function containerSegment(
  * limit of the deployment, which this function does not know without a second round trip.
  */
 function containerDatabase(capabilities: ProviderCapabilities, container: readonly string[]): number {
-  const levels = declaredLevels(capabilities);
-  if (container.length !== levels.length) {
-    throw new QueryError(
-      `A Redis container path is [${levels.map((level) => level.label.toLowerCase()).join(", ")}], ` +
-        `received ${JSON.stringify(container)}`,
-      "redis",
-    );
-  }
+  assertContainerPathShape(capabilities, container, REDIS_CONTAINER_PATH_ENGINE);
   const segment = containerSegment(capabilities, container, "schema");
   if (!/^\d+$/.test(segment)) {
     throw new QueryError(`A Redis database is a number, received ${JSON.stringify(segment)}`, "redis");
@@ -344,6 +458,70 @@ function keyGrouping(key: string): string {
     return key.substring(0, colonIdx) + ":*";
   }
   return key;
+}
+
+/**
+ * Whether an `INFO cluster` reply says this deployment is clustered.
+ *
+ * MEASURED, and it is the whole fact: a cluster node answers `cluster_enabled:1`, and a plain
+ * server answers `cluster_enabled:0`. Only the literal `1` may become `true`; `0` is a deployment
+ * that SAID it is not clustered, and everything else - a missing line, a value that is neither
+ * word, or a reply that is not text at all, which is how a refused `INFO cluster` arrives in a
+ * pipeline - is `undefined`, this contract's word for "the deployment did not say". A refusal is
+ * not evidence, so nothing is inferred from one: the one-node wording belongs on a page only when
+ * the server itself said the keys belong to one node.
+ *
+ * The field is looked up by NAME the way `parseDatabaseCount` looks up `databases`, never by
+ * position: `INFO` answers a section of pairs whose order the server owns, and `parseRedisInfo`
+ * reads every other `INFO` reply in this file the same way.
+ */
+function parseClusterEnabled(reply: unknown): boolean | undefined {
+  if (typeof reply !== "string") return undefined;
+  for (const line of reply.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("cluster_enabled:")) continue;
+    const value = trimmed.substring("cluster_enabled:".length).trim();
+    if (value === "1") return true;
+    if (value === "0") return false;
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Every key's value type in ONE page, in ONE round trip.
+ *
+ * `TYPE` TAKES ONE KEY AND REDIS PUBLISHES NO BATCH FORM, so the alternative to this is one call per
+ * key: at the default batch of 500 that is five hundred round trips for a list somebody is waiting
+ * to look at, and the cost of the walk would stop being the walk. ioredis pipelines them instead, so
+ * the page costs one extra round trip whatever it holds.
+ *
+ * The repository already reads key types one at a time (`scanKeyGroups` probes `TYPE` until it has
+ * seen three distinct types under a prefix); this is the same reading, batched, and it is a
+ * DIFFERENT question from that one: a grouping's columns answer "what kinds live under this
+ * prefix", and this answers "what is this key", which is what a row beside a name needs.
+ *
+ * A KEY THAT VANISHED answers `"none"` — the server's own word for an absent key — and that word is
+ * KEPT rather than filtered out: a row the sample says is there, beside a type that says it is not,
+ * is a true pair, and dropping the entry would draw the key as merely unreadable. Only a transport
+ * failure omits an entry, because then there is genuinely nothing to show.
+ */
+async function readKeyTypes(client: Redis, keys: readonly string[]): Promise<Record<string, string>> {
+  if (keys.length === 0) return {};
+
+  const pipeline = client.pipeline();
+  for (const key of keys) pipeline.call("TYPE", key);
+  const replies = await pipeline.exec();
+  if (replies === null) return {};
+
+  const types: Record<string, string> = {};
+  replies.forEach(([error, reply], index) => {
+    const key = keys[index];
+    // `error === null` is a reply; anything else is a command this connection could not complete,
+    // and there is nothing truthful to record for that key.
+    if (error === null && typeof reply === "string") types[key] = reply;
+  });
+  return types;
 }
 
 /**
@@ -778,6 +956,9 @@ export class RedisProvider extends BaseDatabaseProvider {
       // Redis commands are not SQL, so the inline row editor's `UPDATE ... SET` has
       // nothing here to run against (issue #269).
       supportsInlineRowEdit: false,
+      // `prepareQuery` pins both `limit` and `offset`: a Redis read is a command, not a
+      // statement with a bound this layer can advance.
+      supportsResultPagination: false,
       // MULTI/EXEC exists in Redis and is not exposed here.
       supportsTransactions: false,
       // Redis has no constraints of any kind, and this provider's "tables" are key
@@ -817,7 +998,18 @@ export class RedisProvider extends BaseDatabaseProvider {
       // The object model (#789). Both are module constants: see their docblocks for the
       // measurements behind the one container level and the two kinds.
       containerLevels: REDIS_CONTAINER_LEVELS,
+      // Only the declared depth is an address: a partial path would leave a level unbound and
+      // answer an empty folder. Read through `acceptedContainerShapes()` (#1147).
+      containerPathShapes: "exact",
       objectKinds: REDIS_OBJECT_KINDS,
+      // The key-space walk. `defaultCount` is the batch a caller that names none gets, and it
+      // is larger than the object surface's `COUNT 100` on purpose: this is a WALK a person
+      // drives with a visible progress bar, so a bigger batch is fewer round trips for the
+      // same gesture. `maxCount` bounds what one request can ask the server to do, because
+      // `COUNT` is only a hint to Redis and a huge one still makes the server build a huge
+      // reply in one go. 1000 is the same budget `KEY_SCAN_LIMIT` already puts on the object
+      // surface's walk, so the two readings of one keyspace are bounded alike.
+      keyScan: { defaultCount: 500, maxCount: 1000 },
       schemaRefreshPattern: "(DEL|FLUSHDB|FLUSHALL|RENAME)\\b",
     };
   }
@@ -909,13 +1101,38 @@ export class RedisProvider extends BaseDatabaseProvider {
   /**
    * The numbered database this connection's SESSION is in. Absent means 0, which is what
    * ioredis does with no `db` option and what a bare `redis-cli` connects to.
+   *
+   * Anything else that is not a number is refused, as `containerDatabase` refuses a path segment:
+   * the form's Database field is free text, and `parseInt("testdb")` is NaN, which ioredis read as
+   * no database at all and connected to database 0 without a word.
    */
   private sessionDatabase(): number {
-    return this.config.database ? parseInt(this.config.database, 10) : 0;
+    const database = this.config.database;
+    if (!database) return 0;
+    if (!/^\d+$/.test(database)) {
+      throw new DatabaseConfigError(`A Redis database is a number, received ${JSON.stringify(database)}`, "redis");
+    }
+    return Number(database);
   }
 
   /**
-   * Every option ioredis needs, for ONE numbered database.
+   * Every option ioredis needs, for any numbered database: `openClient` selects the database.
+   */
+  private redisOptions(): RedisOptions {
+    const tls = this.buildTLSOptions();
+    return {
+      host: this.config.host,
+      port: this.config.port || 6379,
+      username: this.config.user || undefined,
+      password: this.config.password || undefined,
+      connectTimeout: this.queryTimeout,
+      lazyConnect: true,
+      ...(tls ? { tls } : {}),
+    };
+  }
+
+  /**
+   * A connection IN numbered database `db`, or a refusal in the server's words.
    *
    * Parameterised by `db` rather than reading `this.config.database` directly, because the
    * object surface reads a database the session is not in: `countObjects(["3"])` has to
@@ -923,19 +1140,31 @@ export class RedisProvider extends BaseDatabaseProvider {
    * `SELECT`-ing on the shared client and selecting back, is a race rather than a shortcut
    * - this provider instance serves concurrent requests, so a query running alongside the
    * tree would execute against whichever database the object read had left selected.
+   *
+   * The `SELECT` is sent here rather than handed to ioredis as its `db` option, because ioredis
+   * does not fail a connect on it. Measured 2026-09-24 on redis 8.10.0 through ioredis 5.11.1
+   * with `db: 99`: `connect()` resolved, "ERR DB index is out of range" arrived only as an
+   * unhandled `error` event, and every later command ran in database 0. A `SELECT` ioredis saw
+   * answered is also the one it re-sends after a reconnect, so the connection stays where it was
+   * put.
    */
-  private redisOptions(db: number): RedisOptions {
-    const tls = this.buildTLSOptions();
-    return {
-      host: this.config.host,
-      port: this.config.port || 6379,
-      username: this.config.user || undefined,
-      password: this.config.password || undefined,
-      db,
-      connectTimeout: this.queryTimeout,
-      lazyConnect: true,
-      ...(tls ? { tls } : {}),
-    };
+  private async openClient(db: number): Promise<Redis> {
+    const client = new Redis(this.redisOptions());
+    try {
+      await client.connect();
+      if (db !== 0) {
+        await client.select(db).catch((error: unknown) => {
+          throw new QueryError(
+            `Redis refused database ${db}: ${error instanceof Error ? error.message : String(error)}`,
+            "redis",
+          );
+        });
+      }
+      return client;
+    } catch (error) {
+      client.disconnect();
+      throw error;
+    }
   }
 
   /**
@@ -956,12 +1185,13 @@ export class RedisProvider extends BaseDatabaseProvider {
    */
   public async connect(): Promise<void> {
     try {
-      this.client = new Redis(this.redisOptions(this.sessionDatabase()));
-
-      await this.client.connect();
+      this.client = await this.openClient(this.sessionDatabase());
       this.setConnected(true);
     } catch (error) {
       this.setError(error instanceof Error ? error : new Error(String(error)));
+      // A database the config cannot name or the server does not have is a request fault, not an
+      // unreachable host.
+      if (error instanceof QueryError || error instanceof DatabaseConfigError) throw error;
       throw new ConnectionError(
         `Failed to connect to Redis: ${error instanceof Error ? error.message : String(error)}`,
         "redis",
@@ -1235,6 +1465,8 @@ export class RedisProvider extends BaseDatabaseProvider {
   }
 
   private async runCommand(command: string, args: string[]): Promise<Omit<QueryResult, "executionTime">> {
+    const refusal = sharedConnectionRefusal(command, args);
+    if (refusal !== null) throw new QueryError(refusal, "redis");
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await (this.client as any).call(command, ...args);
@@ -1390,9 +1622,8 @@ export class RedisProvider extends BaseDatabaseProvider {
    * it - `quit()` waits for a reply this caller has no use for.
    */
   private async withDatabase<T>(db: number, read: (client: Redis) => Promise<T>): Promise<T> {
-    const client = new Redis(this.redisOptions(db));
+    const client = await this.openClient(db);
     try {
-      await client.connect();
       return await read(client);
     } finally {
       client.disconnect();
@@ -1429,6 +1660,60 @@ export class RedisProvider extends BaseDatabaseProvider {
       // unlike a PostgreSQL `search_path` there is one answer and it is never ambiguous.
       isSessionDefault: index === session,
     }));
+  }
+
+  /**
+   * One page of a resumable walk of one database's key space.
+   *
+   * A CONNECTION OF ITS OWN, NOT `this.client`, for the reason `withDatabase` exists: the walk
+   * names the database it is walking, and `SELECT` on the pooled client would move the session
+   * out from under a query somebody is typing in another pane. `withDatabase` opens, selects,
+   * reads and closes, so a page here cannot move anybody else's cursor — or their `SELECT`.
+   *
+   * `DBSIZE` TRAVELS WITH EVERY PAGE RATHER THAN BEING ITS OWN CALL. It is O(1) on the server
+   * and it is the denominator a progress indicator divides by; a caller that had to ask
+   * separately would have to keep two round trips in step, and the number would be stale
+   * between them for no saving worth having.
+   *
+   * THE DEPLOYMENT'S SHAPE TRAVELS WITH THAT COUNT, AND COSTS NO ROUND TRIP: `INFO cluster`
+   * depends on nothing `DBSIZE` answers, so both ride one pipeline - the round trip the count
+   * already paid - instead of adding a call of their own. It is NOT folded into the `TYPE` batch
+   * below, because that batch is skipped outright for a page holding no keys while the count on
+   * that same page still describes one node. What comes back is the server's own
+   * `cluster_enabled` (see `parseClusterEnabled`), so a page can say that its keys and its total
+   * describe the node that answered and nothing else.
+   *
+   * NO DEDUPLICATION AND NO ORDERING, because `SCAN` promises neither: a key present for the
+   * whole walk is returned at least once and may be returned twice, and the order is the hash
+   * table's rather than the caller's. A caller building a tree from successive pages is
+   * therefore merging into a SET, which is what the key browser does. Sorting here would imply
+   * an order this engine does not have.
+   *
+   * THE CURSOR IS THE CALLER'S and is passed through verbatim in both directions, so nothing
+   * here parses one.
+   */
+  public async scanKeysPage(options: KeyScanOptions): Promise<KeyScanPage> {
+    this.ensureConnected();
+    const db = options.database ?? this.sessionDatabase();
+
+    return this.withDatabase(db, async (client) => {
+      const [cursor, keys] = options.pattern
+        ? await client.scan(options.cursor, "MATCH", options.pattern, "COUNT", options.count)
+        : await client.scan(options.cursor, "COUNT", options.count);
+      // ONE ROUND TRIP FOR BOTH READS, and therefore none for the fact. A count the pipeline did
+      // not bring back is the refusal `client.dbsize()` used to raise, kept as a refusal rather
+      // than papered over: `total` is what a progress bar divides by, and a stand-in number
+      // would be one nobody measured.
+      const replies = await client.pipeline().dbsize().info("cluster").exec();
+      const total = replies?.[0]?.[1];
+      if (typeof total !== "number") {
+        throw replies?.[0]?.[0] ?? new QueryError("Redis answered no key count for this page of the walk", "redis");
+      }
+      const clustered = parseClusterEnabled(replies?.[1]?.[1]);
+      // ONE EXTRA ROUND TRIP FOR THE WHOLE PAGE, not one per key: see `readKeyTypes`.
+      const types = await readKeyTypes(client, keys);
+      return { keys, cursor, total, types, ...(clustered === undefined ? {} : { clustered }) };
+    });
   }
 
   /**
@@ -1622,11 +1907,12 @@ export class RedisProvider extends BaseDatabaseProvider {
   public async describeObject(path: readonly string[], kind: string): Promise<ObjectDetail> {
     this.ensureConnected();
     const capabilities = this.getCapabilities();
-    if (findKind(capabilities, kind) === undefined) {
+    const spec = findKind(capabilities, kind);
+    if (spec === undefined) {
       throw new QueryError(`Redis declares no object kind "${kind}"`, "redis");
     }
 
-    assertObjectPathShape(capabilities, kind, path);
+    assertObjectPathShape(capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
     const levels = declaredLevels(capabilities);
 
     if (kind !== "keyspace") return { path: [...path], columns: [], indexes: [], foreignKeys: [] };
@@ -1718,7 +2004,7 @@ export class RedisProvider extends BaseDatabaseProvider {
         "redis",
       );
     }
-    assertObjectPathShape(capabilities, kind, path);
+    assertObjectPathShape(capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
     const name = path[path.length - 1];
     let reply: unknown;
     try {
@@ -1840,7 +2126,7 @@ export class RedisProvider extends BaseDatabaseProvider {
         "redis",
       );
     }
-    assertObjectPathShape(capabilities, request.kind, request.path);
+    assertObjectPathShape(capabilities, spec, request.kind, request.path, PATH_SHAPE_ENGINE);
     // The LAST segment and never `path[1]`: at depth 2 the second segment is a container, and
     // the suite drives this by spying a two-level declaration in.
     const name = request.path[request.path.length - 1];
@@ -1989,8 +2275,8 @@ export class RedisProvider extends BaseDatabaseProvider {
     }
     const unit = plan.unit;
     const capabilities = this.getCapabilities();
-    requireEditableKind(capabilities, plan.kind, REDIS_ENGINE);
-    assertObjectPathShape(capabilities, plan.kind, plan.path);
+    const spec = requireEditableKind(capabilities, plan.kind, REDIS_ENGINE);
+    assertObjectPathShape(capabilities, spec, plan.kind, plan.path, PATH_SHAPE_ENGINE);
     if (plan.revision.check === "unavailable") {
       // H3's three states stay three. A revision that says "this provider could not produce a
       // token" says NOTHING about whether the object moved, so answering `conflict` /

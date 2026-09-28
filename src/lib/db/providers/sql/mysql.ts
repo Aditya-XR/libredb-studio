@@ -43,8 +43,12 @@ import {
 import { DatabaseConfigError, ConnectionError, QueryError, mapDatabaseError } from "../../errors";
 import {
   applySourceBound,
+  assertContainerPathShape,
+  assertObjectPathShape,
+  type ObjectPathShapeEngine,
   callerBoundTruncationReason,
   containerDepth,
+  type ContainerPathShapeEngine,
   declaredKinds,
   findKind,
   requireSourceKind,
@@ -53,6 +57,19 @@ import { comparePaths } from "../../object-path";
 import { formatBytes } from "../../utils/pool-manager";
 import { measuredNullableAggregate } from "../../utils/measured-aggregate";
 import { CACHE_HIT_RATIO_UNAVAILABLE, formatCacheHitRatio, measuredNumber } from "@/lib/monitoring-cache-ratio";
+import { unquoteLiteral } from "@/lib/sql/values";
+
+/**
+ * MySQL's identity for the shared container-path renderer.
+ *
+ * Which paths this engine accepts is not a field here: it is `containerPathShapes` in
+ * `getCapabilities()`, which the object routes read too (#1147).
+ */
+const MYSQL_CONTAINER_PATH_ENGINE: ContainerPathShapeEngine = {
+  code: "mysql",
+  label: "A MySQL",
+  shapeNames: "label",
+};
 
 /**
  * mysql2 3.23 narrowed `execute`'s values parameter from `any` to a concrete
@@ -881,10 +898,12 @@ const LIST_EVENTS_SQL = `
 const OBJECT_COLUMNS_SQL = `
         SELECT
           COLUMN_NAME AS column_name,
+          COLUMN_TYPE AS column_type,
           DATA_TYPE AS data_type,
           IS_NULLABLE AS is_nullable,
           COLUMN_DEFAULT AS column_default,
-          COLUMN_KEY AS column_key
+          COLUMN_KEY AS column_key,
+          EXTRA AS extra
         FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
         ORDER BY ORDINAL_POSITION`;
@@ -945,16 +964,26 @@ const OBJECT_INDEXES_SQL = `
  * decides WHICH objects a bound keeps and nothing else: the answer is re-sorted by path
  * below, and a caller joins on path rather than on position.
  *
- * `LIMIT ?` is bound and not interpolated. Measured on MySQL 26.7.0 through the binary
- * prepared protocol, a placeholder in a derived table's LIMIT is accepted.
+ * The bound is SPELLED INTO the statement rather than bound as a parameter, and it is the one
+ * thing here that is not the obvious shape. This paragraph used to say the opposite, that
+ * `LIMIT ?` is bound and not interpolated because MySQL 26.7.0 accepts a placeholder in a
+ * derived table's LIMIT. That measurement still holds and was the wrong one to generalise
+ * from: two of this driver's own relatives refuse a parameter in the LIMIT position under the
+ * binary prepared protocol, measured 2026-09-22 through mysql2. Apache Doris 4.1.3-rc02
+ * answers `mismatched input 'LIMIT' expecting {<EOF>, ';'}` and StarRocks 3.3.22-753696f
+ * answers `using parameter(?) as limit or offset not supported`, while both run the identical
+ * statement with the number written in, and the text protocol takes either form everywhere.
+ * Stock MySQL binds it either way, so writing the bound in costs nothing there.
+ * `describeObjects` validates the caller's limit as a positive whole number before this is
+ * reached, so what gets spelled in is only ever digits.
  */
-function bulkTargetSql(spellings: number, bounded: boolean): string {
+function bulkTargetSql(spellings: number, bound?: number): string {
   const placeholders = Array.from({ length: spellings }, () => "?").join(", ");
   return `
           SELECT TABLE_NAME AS name
           FROM information_schema.TABLES
           WHERE TABLE_SCHEMA = ? AND TABLE_TYPE IN (${placeholders})
-          ORDER BY TABLE_NAME${bounded ? "\n          LIMIT ?" : ""}`;
+          ORDER BY TABLE_NAME${bound === undefined ? "" : `\n          LIMIT ${bound}`}`;
 }
 
 /** The four statements one bulk read issues, all four sharing one target set. */
@@ -989,18 +1018,20 @@ interface BulkDetailStatements {
  * for an object the target's extra `limit + 1` row named are dropped by the caller below
  * rather than by a fourth bound.
  */
-function bulkDetailSql(spellings: number, bounded: boolean): BulkDetailStatements {
-  const target = bulkTargetSql(spellings, bounded);
+function bulkDetailSql(spellings: number, bound?: number): BulkDetailStatements {
+  const target = bulkTargetSql(spellings, bound);
   return {
     target,
     columns: `
         SELECT
           d.name AS object_name,
           c.COLUMN_NAME AS column_name,
+          c.COLUMN_TYPE AS column_type,
           c.DATA_TYPE AS data_type,
           c.IS_NULLABLE AS is_nullable,
           c.COLUMN_DEFAULT AS column_default,
-          c.COLUMN_KEY AS column_key
+          c.COLUMN_KEY AS column_key,
+          c.EXTRA AS extra
         FROM (${target}) d
         JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA = ? AND c.TABLE_NAME = d.name
         ORDER BY d.name, c.ORDINAL_POSITION`,
@@ -1038,14 +1069,7 @@ function bulkDetailSql(spellings: number, bounded: boolean): BulkDetailStatement
 const BULK_DETAIL_SQL: Record<string, BulkDetailStatements> = Object.fromEntries(
   Object.entries(MYSQL_OBJECT_TYPES)
     .filter(([, spec]) => spec.catalog === "tables")
-    .map(([kind, spec]) => [kind, bulkDetailSql(spec.types.length, false)]),
-);
-
-/** The same four statements with the target bounded. */
-const BULK_DETAIL_SQL_BOUNDED: Record<string, BulkDetailStatements> = Object.fromEntries(
-  Object.entries(MYSQL_OBJECT_TYPES)
-    .filter(([, spec]) => spec.catalog === "tables")
-    .map(([kind, spec]) => [kind, bulkDetailSql(spec.types.length, true)]),
+    .map(([kind, spec]) => [kind, bulkDetailSql(spec.types.length)]),
 );
 
 // ----------------------------------------------------------------------------
@@ -1059,7 +1083,7 @@ const BULK_DETAIL_SQL_BOUNDED: Record<string, BulkDetailStatements> = Object.fro
  * `hasSource` and miss its language: an absent or unregistered Monaco id degrades to plain text
  * with no throw and nothing observable, which is a Source tab that silently stops highlighting.
  *
- * `mysql` is a language id the installed monaco-editor 0.56.0 bundle really registers, unlike
+ * `mysql` is a language id the installed monaco-editor 0.57.0 bundle really registers, unlike
  * `plsql`, `tsql` and `cql`, which the design's first-pass table named and the bundle does not
  * have. The same id serves MariaDB: the two servers share one dialect for everything here
  * except the ORACLE-mode package, whose text Monaco highlights as MySQL with the quoted
@@ -1082,13 +1106,25 @@ const MYSQL_OBJECT_KINDS: readonly ObjectKindSpec[] = [
     label: "Table",
     labelPlural: "Tables",
     acceptsRowWrites: true,
+    // DERIVED, not transcribed (#789). `hasColumns()` (:1860) is the one rule `describeObject`
+    // and `describeObjects` already gate on, and a function declaration hoists, so calling it
+    // here is legal: `MYSQL_OBJECT_TYPES` (:694) is initialized ahead of this array. A second
+    // hand-written copy of the catalog fact is how the client gate and the reads would drift.
+    hasColumns: hasColumns("table"),
     ...MYSQL_SOURCE_DECLARATION,
   },
   // No `acceptsRowWrites`. MySQL takes an UPDATE against a simple updatable view and
   // refuses it against a view with an aggregate, a UNION or a DISTINCT, which is a
   // per-OBJECT fact this per-kind declaration cannot state; claiming it would offer an
   // import target that fails on most views in most databases.
-  { id: "view", role: "relation", label: "View", labelPlural: "Views", ...MYSQL_SOURCE_DECLARATION },
+  {
+    id: "view",
+    role: "relation",
+    label: "View",
+    labelPlural: "Views",
+    hasColumns: hasColumns("view"),
+    ...MYSQL_SOURCE_DECLARATION,
+  },
   {
     id: "procedure",
     role: "routine",
@@ -1124,7 +1160,17 @@ const MARIADB_EXTRA_OBJECT_KINDS: readonly ObjectKindSpec[] = [
     childKinds: ["procedure", "function"],
     ...MYSQL_SOURCE_DECLARATION,
   },
-  { id: "sequence", role: "config", label: "Sequence", labelPlural: "Sequences", ...MYSQL_SOURCE_DECLARATION },
+  {
+    id: "sequence",
+    role: "config",
+    label: "Sequence",
+    labelPlural: "Sequences",
+    // `config` and it still has columns, which is the entry that refutes deriving the client
+    // gate from the role: a sequence is a table underneath and `information_schema.COLUMNS`
+    // answers eight rows for it (measured on MariaDB 12.3.2). Same derivation as `table`.
+    hasColumns: hasColumns("sequence"),
+    ...MYSQL_SOURCE_DECLARATION,
+  },
 ];
 
 /**
@@ -1138,24 +1184,37 @@ const MARIADB_EXTRA_OBJECT_KINDS: readonly ObjectKindSpec[] = [
 const MARIADB_VERSION = /mariadb/i;
 
 /**
- * The kinds a server with this `VERSION()` string has.
+ * Which server in this family this is.
+ *
+ * A type id cannot answer it: `DatabaseType` has no `mariadb` entry, and choosing MySQL in
+ * the connection dialog is the documented way to reach a MariaDB server
+ * (docs/providers/mysql.md 1.1). Branching on the type id here would be both forbidden
+ * inside `src/lib/db` and unable to tell the two servers apart in the first place.
+ */
+type MySQLFlavour = "mysql" | "mariadb";
+
+/**
+ * The flavour a server with this `VERSION()` string is, and THE ONLY PLACE
+ * `MARIADB_VERSION` is read.
+ *
+ * An unmeasured version answers `"mysql"`, which is what an unconnected provider gets:
+ * `POST /api/db/provider-meta` reads capabilities off a provider it never connects (#457).
+ * MySQL is the safe default of the two for `objectKinds`, because declaring a kind the
+ * server does not have draws a folder that can never fill, while missing one costs two
+ * folders a MariaDB user regains the moment the connection is live.
+ */
+function flavourFor(version: string | undefined): MySQLFlavour {
+  return version !== undefined && MARIADB_VERSION.test(version) ? "mariadb" : "mysql";
+}
+
+/**
+ * The kinds a server of this flavour has.
  *
  * THIS IS THE ONE PROVIDER WHOSE `objectKinds` IS NOT A CONSTANT, and the resolution is from
- * the server rather than from the type id because there is no second type id to resolve
- * from: `DatabaseType` has no `mariadb` entry and choosing MySQL in the connection dialog is
- * the documented way to reach a MariaDB server (docs/providers/mysql.md 1.1). Branching on
- * the type id here would be both forbidden inside `src/lib/db` and unable to tell the two
- * servers apart in the first place.
- *
- * An unmeasured version answers the MySQL set, which is what an unconnected provider gets:
- * `POST /api/db/provider-meta` reads capabilities off a provider it never connects (#457).
- * The MySQL set is the safe default of the two, because declaring a kind the server does not
- * have draws a folder that can never fill, while missing one costs two folders a MariaDB
- * user regains the moment the connection is live.
+ * the server rather than from the type id, for the reason `MySQLFlavour` records.
  */
-function objectKindsFor(version: string | undefined): readonly ObjectKindSpec[] {
-  if (version === undefined || !MARIADB_VERSION.test(version)) return MYSQL_OBJECT_KINDS;
-  return [...MYSQL_OBJECT_KINDS, ...MARIADB_EXTRA_OBJECT_KINDS];
+function objectKindsFor(flavour: MySQLFlavour): readonly ObjectKindSpec[] {
+  return flavour === "mariadb" ? [...MYSQL_OBJECT_KINDS, ...MARIADB_EXTRA_OBJECT_KINDS] : MYSQL_OBJECT_KINDS;
 }
 
 /**
@@ -1165,7 +1224,7 @@ function objectKindsFor(version: string | undefined): readonly ObjectKindSpec[] 
  * Nothing here rejects, for the reason `probeExplainFormat` does not: a version string the
  * server would not give is a fact about which folders the browser can draw, not about the
  * connection, and `connect()` must not fail for it. The cost of the absent case is
- * `objectKindsFor`'s MySQL default, which every server in this family does have.
+ * `flavourFor`'s MySQL default, which every server in this family does have.
  */
 const probeServerVersion = async (queryable: MySQLQueryable): Promise<string | undefined> => {
   try {
@@ -1270,14 +1329,7 @@ function containerSegment(
  * position holds the schema is read off the declaration rather than assumed.
  */
 function containerSchema(capabilities: ProviderCapabilities, container: readonly string[]): string {
-  const levels = declaredLevels(capabilities);
-  if (container.length !== levels.length) {
-    throw new QueryError(
-      `A MySQL container path is [${levels.map((level) => level.label.toLowerCase()).join(", ")}], ` +
-        `received ${JSON.stringify(container)}`,
-      "mysql",
-    );
-  }
+  assertContainerPathShape(capabilities, container, MYSQL_CONTAINER_PATH_ENGINE);
   return containerSegment(capabilities, container, "schema");
 }
 
@@ -1329,43 +1381,16 @@ function unavailableCounts(ids: readonly string[], error: unknown): Record<strin
 }
 
 /**
- * The path shapes ONE kind admits, outermost segment first.
- *
- * ONE writer for two readers since #789 Phase 2. `describeObject` and `readObjectSource` ask
- * the same question about the same path, and two copies of this derivation are two chances for
- * the detail pane and the Source tab to disagree about what a trigger's address is.
- *
- * Derived, never counted. The depth comes from `containerDepth()` through `declaredLevels()`,
- * so absent and empty cannot be answered differently here than anywhere else, and the segment
- * NAMES are the declared level labels, so the message and the check are the same array. An
- * attached kind takes EITHER depth, because `objectPath()` collapses a parentless trigger onto
- * the container-level address (standing ruling 5f: the listing must contain exactly what the
- * count counted, and the count wins).
+ * MySQL: an attached kind takes EITHER depth, because `objectPath()` collapses a
+ * parentless trigger onto the container-level address (standing ruling 5f: the listing
+ * must contain exactly what the count counted, and the count wins), so the error names
+ * both shapes.
  */
-function objectPathShapes(capabilities: ProviderCapabilities, spec: ObjectKindSpec): string[][] {
-  const levels = declaredLevels(capabilities).map((level) => level.label.toLowerCase());
-  if (spec.attachedTo === undefined) return [[...levels, "name"]];
-  return [
-    [...levels, spec.attachedTo, "name"],
-    [...levels, "name"],
-  ];
-}
-
-/** Refuses a path no shape of this kind admits, naming every shape it does admit. */
-function assertObjectPathShape(
-  capabilities: ProviderCapabilities,
-  spec: ObjectKindSpec,
-  kind: string,
-  path: readonly string[],
-): void {
-  const shapes = objectPathShapes(capabilities, spec);
-  if (shapes.some((shape) => shape.length === path.length)) return;
-  throw new QueryError(
-    `A MySQL "${kind}" path is ${shapes.map((shape) => `[${shape.join(", ")}]`).join(" or ")}, ` +
-      `received ${JSON.stringify(path)}`,
-    "mysql",
-  );
-}
+const PATH_SHAPE_ENGINE: ObjectPathShapeEngine = {
+  code: "mysql",
+  label: "A MySQL",
+  attachedSegment: "optional",
+};
 
 // ----------------------------------------------------------------------------
 // Object source reading (#789 Phase 2)
@@ -1688,10 +1713,21 @@ function objectPath(container: readonly string[], row: ObjectRow): string[] {
 /** One row of the column read, single or bulk. `object_name` is present only in the bulk one. */
 interface DetailColumnRow extends RowDataPacket {
   column_name: string;
+  /**
+   * The type AS DECLARED, length and precision and value list and `unsigned` included
+   * (#1033). Both column reads select it, so it is required rather than optional: a row
+   * without it is a read this module did not write.
+   */
+  column_type: string;
+  /** The type FAMILY. A separate catalog column the server reports on its own, not one derived from `COLUMN_TYPE` by stripping parts out of it. */
   data_type: string;
   is_nullable: string;
   column_default: string | null;
   column_key: string;
+  /** Optional because the mocks of the OTHER column reads in the suite do not carry it, and
+   *  because a row without it says nothing about the column being generated, which is a
+   *  true reading rather than a fallback. */
+  extra?: string | null;
 }
 
 /** One referencing column of one foreign key, with the database the reference lands in. */
@@ -1717,6 +1753,88 @@ interface DetailRows {
 }
 
 /**
+ * How a server of one flavour spells a column default in `information_schema.COLUMNS`.
+ *
+ * Measured 2026-09-20 on MariaDB 12.3.2-MariaDB-ubu2404 and MySQL 26.7.0, one probe table
+ * per server, `HEX(COLUMN_DEFAULT)` read beside the text.
+ *
+ * MySQL reports the VALUE: a column with no default is SQL NULL, and `DEFAULT 'abc'` reads
+ * back as the three characters `abc`. MariaDB reports the DEFAULT EXPRESSION AS WRITTEN: a
+ * NULLABLE column with no default reads back as the four-character keyword `NULL`, and
+ * `DEFAULT 'abc'` reads back as `'abc'`, quotes included. So the same four characters mean
+ * opposite things on the two servers, and every string default differs by its quotes (#795).
+ *
+ * This is a table and not a conditional so that the next divergence adds a FIELD here
+ * rather than a branch at a call site.
+ */
+interface CatalogDefaultReading {
+  /** What `COLUMN_DEFAULT` holds for a column that has no default. */
+  readonly absence: "sql-null" | "null-keyword";
+  /** Whether a string default arrives evaluated, or as the SQL literal as written. */
+  readonly literal: "evaluated" | "as-written";
+}
+
+const CATALOG_DEFAULT_READING: Record<MySQLFlavour, CatalogDefaultReading> = {
+  mysql: { absence: "sql-null", literal: "evaluated" },
+  mariadb: { absence: "null-keyword", literal: "as-written" },
+};
+
+/**
+ * The two `EXTRA` spellings that mean the column is generated, and the reason the match is
+ * on the WHOLE value.
+ *
+ * Measured on both servers: a generated column reads `STORED GENERATED` or `VIRTUAL
+ * GENERATED`, identically. But MySQL also writes `DEFAULT_GENERATED` for an ORDINARY
+ * expression default, and `DEFAULT_GENERATED on update CURRENT_TIMESTAMP` for an on-update
+ * one, where MariaDB writes nothing at all. A rule matching the substring `GENERATED` would
+ * therefore erase a MySQL default the user really set.
+ */
+const GENERATED_COLUMN_EXTRA = new Set(["STORED GENERATED", "VIRTUAL GENERATED"]);
+
+/**
+ * One catalog row's default, as BOTH readings a column can have: the value it really
+ * defaults to, and the SQL text that produces that value where this server's catalog text is
+ * valid SQL. An empty object is a column with no default at all, and neither field is set.
+ *
+ * The order is part of the contract:
+ *
+ *  1. SQL NULL is absence on both servers, whatever else the row says.
+ *  2. A generated column has no insert default on EITHER server, so this rule carries no
+ *     flavour and is true everywhere. It comes before the keyword rule because MariaDB
+ *     reports the same four characters for both cases.
+ *  3. The keyword, on the flavour that spells absence with it.
+ *  4. A literal, on the flavour that reports literals as written. `unquoteLiteral` answers
+ *     `undefined` for anything that is not exactly one literal, which is what lets an
+ *     expression default such as `concat('x','y')` through untouched.
+ */
+function catalogDefault(
+  raw: string | null,
+  extra: string | null | undefined,
+  reading: CatalogDefaultReading,
+): { defaultValue?: string; defaultExpression?: string } {
+  if (raw === null) return {};
+  // `undefined` is a row that carries no EXTRA at all, which is the shape every OTHER mock
+  // in the suite produces and a truthful reading: nothing said this column was generated.
+  if (extra !== null && extra !== undefined && GENERATED_COLUMN_EXTRA.has(extra.trim().toUpperCase())) {
+    return {};
+  }
+  if (reading.absence === "null-keyword" && raw === "NULL") return {};
+  // MariaDB's catalog text is always valid SQL for MariaDB: measured on 12.3.2, every form
+  // it reports - `'abc'`, `''`, `42`, `b'1'`, `x'616263'`, `'2020-01-01'`,
+  // `current_timestamp()`, `concat('x','y')` - can be pasted back after the word DEFAULT. So
+  // the expression is the raw text, unchanged, and the value is it decoded.
+  if (reading.literal === "as-written") {
+    return { defaultValue: unquoteLiteral(raw, "mysql") ?? raw, defaultExpression: raw };
+  }
+  // MySQL reports the VALUE, and no column of the row says whether that text is also SQL:
+  // `abc` is a value and is not valid after DEFAULT, while `b'1'` and `0x616263` ARE SQL,
+  // and all three arrive with an EMPTY `EXTRA`. So this flavour declares no SQL text at all
+  // rather than a guessed one. Do not "complete" this arm without a measurement that tells
+  // the two apart.
+  return { defaultValue: raw };
+}
+
+/**
  * Three catalog row sets turned into one `ObjectDetail`, shared by the single and the bulk
  * read.
  *
@@ -1735,13 +1853,19 @@ interface DetailRows {
  * a path. Qualifying the cross-database case is not cosmetic: a bare name there addresses a
  * table in the wrong database, and InnoDB does accept a foreign key into another one.
  */
-function objectDetailFromRows(path: readonly string[], schema: string, rows: DetailRows): ObjectDetail {
+function objectDetailFromRows(
+  path: readonly string[],
+  schema: string,
+  rows: DetailRows,
+  reading: CatalogDefaultReading,
+): ObjectDetail {
   const columns: ColumnSchema[] = rows.columns.map((row) => ({
     name: row.column_name,
-    type: row.data_type,
+    type: row.column_type,
+    ...(row.column_type === row.data_type ? {} : { baseType: row.data_type }),
     nullable: row.is_nullable === "YES",
     isPrimary: row.column_key === "PRI",
-    defaultValue: row.column_default ?? undefined,
+    ...catalogDefault(row.column_default, row.extra, reading),
   }));
 
   const byIndex = new Map<string, IndexSchema>();
@@ -1809,12 +1933,12 @@ export class MySQLProvider extends SQLBaseProvider {
   private measuredExplainFormat: ExplainFormat | undefined = "mysql-json";
 
   /**
-   * What this server called itself, measured by `probeServerVersion()` at connect, and the
-   * only thing that decides whether `objectKinds` carries MariaDB's two extra kinds. It
-   * starts undefined, which `objectKindsFor()` reads as the MySQL set: an unconnected
-   * provider has not asked any server anything yet.
+   * Which server this is, derived at connect from `probeServerVersion()`. It starts as
+   * `"mysql"`, the answer for a provider that has not asked any server anything yet, for
+   * the reason `flavourFor` records. The DERIVED fact is what is stored, the same way
+   * `measuredExplainFormat` stores a grammar and not the text of the probe that found it.
    */
-  private measuredServerVersion: string | undefined;
+  private measuredFlavour: MySQLFlavour = "mysql";
 
   // Transaction support: dedicated connection held outside pool
   private txConn: PoolConnection | null = null;
@@ -1843,6 +1967,8 @@ export class MySQLProvider extends SQLBaseProvider {
       ...(this.measuredExplainFormat === undefined ? {} : { explainFormat: this.measuredExplainFormat }),
       supportsConnectionString: true,
       supportsInlineRowEdit: true,
+      // `LIMIT n OFFSET m`, applied by the shared limiter in `SQLBaseProvider.prepareQuery`.
+      supportsResultPagination: true,
       // The driver's own connection.beginTransaction() over one held connection.
       supportsTransactions: true,
       maintenanceOperations: ["analyze", "optimize", "check", "kill"],
@@ -1861,9 +1987,12 @@ export class MySQLProvider extends SQLBaseProvider {
       // level here - MySQL has exactly one and `information_schema.SCHEMATA` is what a
       // catalog would contain.
       containerLevels: [{ id: "schema", label: "Database", labelPlural: "Databases" }],
+      // Only the declared depth is an address: a partial path would leave a level unbound and
+      // answer an empty folder. Read through `acceptedContainerShapes()` (#1147).
+      containerPathShapes: "exact",
       // Six kinds on MySQL and eight on MariaDB, resolved from what the server called
       // itself and never from the type id (#789). See `objectKindsFor`.
-      objectKinds: objectKindsFor(this.measuredServerVersion),
+      objectKinds: objectKindsFor(this.measuredFlavour),
     };
   }
 
@@ -1947,7 +2076,7 @@ export class MySQLProvider extends SQLBaseProvider {
       // Which server this is, which is what decides the object-kind declaration (#789).
       // Measured rather than derived from the type id, because there is no `mariadb` type
       // id to derive from.
-      this.measuredServerVersion = await probeServerVersion(conn);
+      this.measuredFlavour = flavourFor(await probeServerVersion(conn));
       conn.release();
 
       this.setConnected(true);
@@ -1972,6 +2101,21 @@ export class MySQLProvider extends SQLBaseProvider {
 
   private buildPoolConfig(): mysql.PoolOptions {
     const baseConfig: mysql.PoolOptions = {
+      // Without this, mysql2 hands a BIGINT past 2^53 back as a rounded Number. Measured on
+      // MySQL 8.4.11 through the inline-edit hook: a table holding 9007199254740992 and
+      // 9007199254740993 sent BOTH rows to the browser as ...992, the guard asked about
+      // ...992 and was told one row matched, and the UPDATE then wrote the NEIGHBOUR's row
+      // and reported success. With it, the driver returns a string for the values a Number
+      // cannot hold and the edit writes the row the user opened.
+      //
+      // First entry so it covers both paths below - the structured config and the pasted
+      // connection string, which share nothing else.
+      //
+      // Nothing narrower changes type - measured on the same server with this on, `SELECT 5`
+      // is still the number 5 and `COUNT(*)` is still a number; only the values a Number
+      // cannot hold arrive as strings. `bigNumberStrings` is deliberately NOT set: it would
+      // turn both of those into strings too, changing types that were never wrong.
+      supportBigNumbers: true,
       connectionLimit: this.poolConfig.max,
       waitForConnections: true,
       queueLimit: 0,
@@ -1979,10 +2123,23 @@ export class MySQLProvider extends SQLBaseProvider {
       keepAliveInitialDelay: 10000,
     };
 
+    // Without a zone, mysql2 reads DATE and DATETIME in the Node process's local zone and the
+    // row then serialises as ISO UTC, so the value moves with the server's TZ. Measured under
+    // TZ=Europe/Istanbul on MySQL 8.4: a pasted connection string answered `DATE '2026-09-01'`
+    // as 2026-08-31T21:00:00.000Z, the previous day, while the structured form, the only one
+    // that set this, answered 2026-09-01.
+    const timezone = this.options.timezone ?? "Z";
+
     if (this.config.connectionString) {
+      // A `?timezone=` written into the string is the user's own choice, and mysql2 lets an
+      // option beat the `uri` (`ConnectionConfig` skips every uri key the options already
+      // set), so the default is passed only when the string names no zone of its own.
+      const connectionString = this.config.connectionString;
+      const namesTimezone = new URL(connectionString).searchParams.has("timezone");
       return {
         ...baseConfig,
-        uri: this.config.connectionString,
+        ...(namesTimezone ? {} : { timezone }),
+        uri: connectionString,
       };
     }
 
@@ -1994,7 +2151,7 @@ export class MySQLProvider extends SQLBaseProvider {
       password: this.config.password,
       database: this.config.database,
       ssl: this.buildSSLConfig(),
-      timezone: this.options.timezone ?? "Z",
+      timezone,
     };
   }
 
@@ -2392,7 +2549,7 @@ export class MySQLProvider extends SQLBaseProvider {
     // Derived, not counted, and derived in ONE place: `assertObjectPathShape()` is the same
     // writer `readObjectSource` reads, so the detail pane and the Source tab cannot disagree
     // about what a trigger's address is.
-    assertObjectPathShape(capabilities, spec, kind, path);
+    assertObjectPathShape(capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
 
     if (!hasColumns(kind)) {
       return { path: [...path], columns: [], indexes: [], foreignKeys: [] };
@@ -2413,7 +2570,12 @@ export class MySQLProvider extends SQLBaseProvider {
       const columns = await this.runObjectQuery<DetailColumnRow[]>(conn, OBJECT_COLUMNS_SQL, binds);
       const foreignKeys = await this.runObjectQuery<DetailForeignKeyRow[]>(conn, OBJECT_FOREIGN_KEYS_SQL, binds);
       const indexes = await this.runObjectQuery<DetailIndexRow[]>(conn, OBJECT_INDEXES_SQL, binds);
-      return objectDetailFromRows(path, schema, { columns, foreignKeys, indexes });
+      return objectDetailFromRows(
+        path,
+        schema,
+        { columns, foreignKeys, indexes },
+        CATALOG_DEFAULT_READING[this.measuredFlavour],
+      );
     } finally {
       conn.release();
     }
@@ -2473,10 +2635,11 @@ export class MySQLProvider extends SQLBaseProvider {
     if (!hasColumns(kind)) return { details: [] };
 
     const bounded = limit !== undefined;
-    const statements = bounded ? BULK_DETAIL_SQL_BOUNDED[kind] : BULK_DETAIL_SQL[kind];
     const types = MYSQL_OBJECT_TYPES[kind].types;
-    // One row more than the bound, so the read itself says whether it stopped short.
-    const targetParams = bounded ? [schema, ...types, limit + 1] : [schema, ...types];
+    // One row more than the bound, so the read itself says whether it stopped short. The
+    // bound is rendered rather than bound, for the reason `bulkTargetSql` carries.
+    const statements = bounded ? bulkDetailSql(types.length, limit + 1) : BULK_DETAIL_SQL[kind];
+    const targetParams = [schema, ...types];
     // The three detail reads carry the target's own binds and then the schema again, for
     // the join. A prepared statement takes positional parameters, so the repeat is a second
     // bind of one value rather than a second question.
@@ -2499,11 +2662,16 @@ export class MySQLProvider extends SQLBaseProvider {
 
       const details = described
         .map((row) =>
-          objectDetailFromRows(objectPath(container, row), schema, {
-            columns: columns.get(row.name) ?? [],
-            foreignKeys: foreignKeys.get(row.name) ?? [],
-            indexes: indexes.get(row.name) ?? [],
-          }),
+          objectDetailFromRows(
+            objectPath(container, row),
+            schema,
+            {
+              columns: columns.get(row.name) ?? [],
+              foreignKeys: foreignKeys.get(row.name) ?? [],
+              indexes: indexes.get(row.name) ?? [],
+            },
+            CATALOG_DEFAULT_READING[this.measuredFlavour],
+          ),
         )
         .sort((left, right) => comparePaths(left.path, right.path));
       return truncated ? { details, truncated: { limit, reason: callerBoundTruncationReason(limit) } } : { details };
@@ -2605,7 +2773,7 @@ export class MySQLProvider extends SQLBaseProvider {
     this.ensureConnected();
     const capabilities = this.getCapabilities();
     const spec = requireSourceKind(capabilities, kind, { displayName: "MySQL", type: "mysql" });
-    assertObjectPathShape(capabilities, spec, kind, path);
+    assertObjectPathShape(capabilities, spec, kind, path, PATH_SHAPE_ENGINE);
     if (!Object.hasOwn(MYSQL_SOURCE_PART_PLANS, kind)) {
       throw new QueryError(
         `MySQL declares readable source for the kind "${kind}" but has no statement that reads it`,
@@ -2769,7 +2937,21 @@ export class MySQLProvider extends SQLBaseProvider {
   // Maintenance Operations
   // ============================================================================
 
-  public async runMaintenance(type: MaintenanceType, target?: string): Promise<MaintenanceResult> {
+  /**
+   * A maintenance target as a `database.table` identifier, qualified only when the caller's
+   * container is a database OTHER than the connected one. A MySQL statement already resolves
+   * a bare table inside the connected database, so qualifying with the same name would add a
+   * prefix the engine reads as redundant, and a container that is not a database at all is
+   * not something this engine can act on.
+   */
+  private qualifyMaintenanceTarget(target: string, container?: string): string {
+    if (container && container !== this.config.database) {
+      return `${this.escapeIdentifier(container)}.${this.escapeIdentifier(target)}`;
+    }
+    return this.escapeIdentifier(target);
+  }
+
+  public async runMaintenance(type: MaintenanceType, target?: string, container?: string): Promise<MaintenanceResult> {
     this.ensureConnected();
 
     const { result, executionTime } = await this.measureExecution(async () => {
@@ -2784,7 +2966,9 @@ export class MySQLProvider extends SQLBaseProvider {
           case "analyze":
           case "optimize":
           case "check": {
-            const tables = target ? this.escapeIdentifier(target) : await this.getAllTablesForMaintenance(conn);
+            const tables = target
+              ? this.qualifyMaintenanceTarget(target, container)
+              : await this.getAllTablesForMaintenance(conn);
             // An empty database joined to an empty list, and `OPTIMIZE TABLE ` alone is
             // a syntax error - measured through the provider against a database with no
             // tables on 2026-08-25: "You have an error in your SQL syntax ... near ''".

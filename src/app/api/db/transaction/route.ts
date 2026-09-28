@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateProvider } from "@/lib/db";
+import type { QueryResult } from "@/lib/db/types";
 import { createErrorResponse } from "@/lib/api/errors";
 import { resolveConnection } from "@/lib/seed/resolve-connection";
 import { guardRoute } from "@/lib/api/require-session";
@@ -17,10 +18,7 @@ interface TransactionProvider {
   commitTransaction(): Promise<void>;
   rollbackTransaction(): Promise<void>;
   isInTransaction(): boolean;
-  queryInTransaction(
-    sql: string,
-    params?: unknown[],
-  ): Promise<{ rows: Record<string, unknown>[]; fields: string[]; rowCount: number; executionTime: number }>;
+  queryInTransaction(sql: string, params?: unknown[]): Promise<QueryResult>;
 }
 
 function isTransactionProvider(provider: unknown): provider is TransactionProvider {
@@ -132,7 +130,19 @@ export async function POST(req: NextRequest) {
 
         touchTransaction(connection.id);
 
-        const hasMore = result.rows.length === prepared.limit;
+        // THE SAME CONJUNCT AS `/api/db/query` (#816), for the same reason and on purpose.
+        //
+        // This route is not a second-class copy: `use-query-execution.ts` sends a run
+        // here whenever a transaction is open or the playground is driving, and that
+        // includes a Load More click. `wasLimited` is the limiter saying it rewrote the
+        // statement, which is the only thing that makes advancing the bound meaningful:
+        // a statement returned untouched runs the same way at every offset, so a control
+        // offered on one appends the rows already on screen.
+        //
+        // `pagination.hasMore` has one meaning wherever it is produced, and it is read
+        // outside the grid as well — `lib/export/scope.ts` swings the export dialog's
+        // copy on it.
+        const hasMore = prepared.wasLimited && result.rows.length === prepared.limit;
 
         return NextResponse.json({
           ...result,
@@ -142,7 +152,7 @@ export async function POST(req: NextRequest) {
             offset: prepared.offset,
             hasMore,
             totalReturned: result.rows.length,
-            wasLimited: prepared.wasLimited,
+            wasLimited: hasMore || result.pagination?.wasLimited === true,
           },
         });
       }

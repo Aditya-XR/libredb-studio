@@ -32,8 +32,17 @@ const FINGERPRINT = /^[0-9a-f]{40}:[^:\s]+:[a-z0-9-]+:[0-9]+$/;
 const contentLines = lines.map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
 
 describe(".gitleaksignore", () => {
-  test("has fingerprint entries - the sweep found 24 fabricated matches to classify", () => {
-    expect(contentLines).toHaveLength(24);
+  test("has fingerprint entries - 24 from the sweep, plus #708's ApiKey fixture, plus 2 added since", () => {
+    // 24 came out of the 2026-08-09 full-history sweep. The 3 added since are
+    // #708's fabricated ApiKey-header test pair, plus one placeholder JWT
+    // secret written twice into the release runbook's smoke phase in 2ff08e3a,
+    // removed from the working tree in the commit that added those lines -
+    // history keeps the commit, so the findings stay.
+    //
+    // This number is the point of the test: a suppression is a decision someone
+    // has to make on purpose, so both a line silently dropped and a line
+    // silently added land here as a failing diff rather than as nothing.
+    expect(contentLines).toHaveLength(27);
   });
 
   test("every non-comment, non-blank line is a well-formed fingerprint", () => {

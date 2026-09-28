@@ -44,7 +44,7 @@ if it only lists the good news.
 | Surface | What it sends | Fenced? |
 | --- | --- | --- |
 | `POST /api/agent/classify`, **before any run exists** | Your objective, and nothing else. One short completion that asks the model to name one of the five workflows. It fires when you press **Start** with the workflow left on **Automatic**, which is the default; naming a workflow yourself under **Advanced** skips it entirely. See [the classification, before any run](#the-classification-before-any-run) | No — it carries no database content to fence. Your objective is sent as the user message, and the server's instructions tell the model to treat that text as data to classify and never as instructions to it |
-| Any **run**, in either mode, on **any** engine | Your objective, and a schema inventory (table, column, index identifiers and column types) with its relations graph (identifiers only). **Since #414 that inventory leaves on every engine**, where before it left on PostgreSQL and SQLite alone: those two are read with catalog statements the server composes, and the other fifteen by asking the connection's own provider to describe its schema. On **MongoDB and Couchbase** the provider works out a collection's fields from a **sample of your own documents** — no value from them is in the message, but the **existence** of a field there is derived from your data rather than read from a catalog, which is a weaker claim than a catalog reading's and is why that reading has its own operation id (`db.schema.read`) an operator can deny alone. When the reading cannot be taken — a refusal, a provider that cannot describe its own schema, a description that overran the time the run granted it — nothing of the schema leaves and a server sentence saying which of those happened goes in its place. See [the schema inventory](#3-the-schema-inventory--identifiers-and-types-fenced) | Everything derived from the database is wrapped in an untrusted-content fence before it reaches a prompt |
+| Any **run**, in either mode, on **any** engine | Your objective, and a schema inventory (table, column, index identifiers and column types) with its relations graph (identifiers only). **Since #414 that inventory leaves on every engine**, where before it left on PostgreSQL and SQLite alone: those two are read with catalog statements the server composes, and the other seventeen by asking the connection's own provider to describe its schema. On **MongoDB and Couchbase** the provider works out a collection's fields from a **sample of your own documents**: no value from them is in the message, but the **existence** of a field there is derived from your data rather than read from a catalog, which is a weaker claim than a catalog reading's and is why that reading has its own operation id (`db.schema.read`) an operator can deny alone. When the reading cannot be taken (a refusal, a provider that cannot describe its own schema, a description that overran the time the run granted it), nothing of the schema leaves and a server sentence saying which of those happened goes in its place. See [the schema inventory](#3-the-schema-inventory--identifiers-and-types-fenced) | Everything derived from the database is wrapped in an untrusted-content fence before it reaches a prompt |
 | An **agent run** | The above, plus the rows of each read the model performed, up to 200 per read; engine error text; server-written refusals; server-minted ids | Same fence |
 | Any **run that continues a conversation**, in either mode, on any engine | **In addition to everything above**: the earlier steps' objectives — *your own earlier questions*, capped at 200 characters each — and the most recent step's report, which is a model's claims about your data. No row of any result, and no earlier step's report but the newest. Sent only when the rail attaches a previous run's id, which it does for a follow-up on the same connection; a run that starts its own conversation sends no such message. Bounded to 4000 characters by default and switchable off with `LIBREDB_AGENT_THREAD_CONTEXT=false`. See [the conversation](#2a-the-conversation-when-a-run-continues-one--fenced) | Same fence, identified as `operation agent/thread`: it is prose a user and a model wrote, and none of it is the server's voice |
 | An **agent run opened as Operate** | Your objective; a **schema inventory reduced to its own names and index names** (no column names, no column types, no relations graph), read whichever of the two ways that engine is read and named with whichever noun that engine's provider declares — tables, collections, datasources, key patterns; in Plan mode the engine's **row-count estimates** for those same tables where the engine holds any — PostgreSQL and SQLite — and nothing per column; and the rows of each curated reading — which, for the `sessions` and `slow-queries` kinds, include **other database users' in-flight statement text and their database usernames**. See [the operations workflow](#5a-the-operations-workflow-what-a-curated-reading-sends) | Same fence: the inventory and every reading's rows are database content and are fenced |
@@ -185,7 +185,7 @@ routes for that reason.
 
 ## One agent run, message by message
 
-The transcript is assembled in `runInvestigation` (`src/lib/agent/investigation.ts:662-825`) and is
+The transcript is assembled in `runInvestigation` (`src/lib/agent/investigation.ts:2540`) and is
 sent by `takeTurn` through `streamText` (`investigation.ts:575-592`). Nothing else in the runtime
 sends anything.
 
@@ -201,14 +201,14 @@ One field of your connection record *is*: its **engine type**, the canonical typ
 spends it on the fence tag the deliverable must carry, and since the Operate-engine fix a prose plan
 spends it twice: on the rule that binds the readings it may name to the engine it is planning
 against, and on the fence tag for a reading that engine happens to express as a statement. It is
-a server-side enum with seventeen members, so what it discloses is which of seventeen engines this
+a server-side enum with nineteen members, so what it discloses is which of nineteen engines this
 connection is — never its host, its database name or its credentials, none of which reach a prompt at
 all (see [What never leaves](#what-never-leaves)).
 
 ### 2. Your objective, verbatim
 
 The first user message is the text you typed, unmodified apart from the trim the rail applies
-(`investigation.ts:698`). Bounded to 4000 characters by the route and by the rail
+(`investigation.ts:2654`). Bounded to 4000 characters by the route and by the rail
 (`AGENT_MAX_OBJECTIVE_LENGTH`).
 
 ### 2a. The conversation, when a run continues one — fenced
@@ -216,7 +216,7 @@ The first user message is the text you typed, unmodified apart from the trim the
 **This is the one message whose content came from an EARLIER question of yours.** It is sent only
 when a run continues a conversation: a follow-up asked on the same connection, where the rail
 attaches the previous run's id and the route derives the block server-side from those runs' own
-ledgers (`thread-context.ts`, `investigation.ts:1923`). A run that starts a conversation of its own
+ledgers (`thread-context.ts`, `investigation.ts:2660-2661`). A run that starts a conversation of its own
 sends nothing here, and there is no such message at all.
 
 What is in it, and where each half came from:
@@ -271,18 +271,18 @@ a refusal — nothing of the schema leaves and a server-written note says so in 
 
 **Two readings produce it, and which one runs is the dialect's decision** (#414). On PostgreSQL and
 SQLite the server composes a catalog statement per kind and executes it read-only. On the other
-fifteen it invokes `db.schema.read`, which walks the connection's own OBJECT SURFACE — the same
+seventeen it invokes `db.schema.read`, which walks the connection's own OBJECT SURFACE, the same
 `listContainers`, `countObjects`, `listObjects` and `describeObjects` the sidebar walks when it lists
-your objects — and composes no statement at all.
-**Fifteen counts type-ids the factory can build, not engines a user would name**: `SHIPPED` holds
-seventeen, `CATALOG_PLANS` serves two of them, and the remainder is what this second reading covers.
+your objects, and composes no statement at all.
+**Seventeen counts type-ids the factory can build, not engines a user would name**: `SHIPPED` holds
+nineteen, `CATALOG_PLANS` serves two of them, and the remainder is what this second reading covers.
 Every other count said about grounding in these docs counts the same thing. libSQL is one of the
-fifteen and not one of the two: it speaks SQLite's dialect, but the read-only catalog path
+seventeen and not one of the two: it speaks SQLite's dialect, but the read-only catalog path
 `CATALOG_PLANS` serves needs a database-native read-only profile, and `PRAGMA query_only` is refused
 by a libSQL server (see [`providers/libsql.md`](./providers/libsql.md)). Two things it does
 NOT count. The wire-compatible engines of
 [`docs/providers/README.md`](./providers/README.md) are not extra members — TiDB is grounded because it
-arrives as `mysql`, and it is that type-id that is counted. And two of the fifteen, the embedded
+arrives as `mysql`, and it is that type-id that is counted. And two of the seventeen, the embedded
 `libredb` and `duckdb`, reach this path through a handle they do not open: the file takes an exclusive
 lock, so the grounding acquisition borrows the connection's own open provider rather than opening a
 second one that the lock would refuse (`findOpenSingleWriterProvider`, `src/lib/db/factory.ts`; see
@@ -322,7 +322,7 @@ that was hard-coded before.
 So on an Operate run this section is narrower than what follows and section 4 does not happen. On
 every other workflow, the inventory is captured once per run by whichever of the two readings that
 dialect gets, then packed for the task
-(`packContextForTask`, `src/lib/agent/context-snapshot.ts:466-505`). Per table it renders
+(`packContextForTask`, `src/lib/agent/context-snapshot.ts:1392`). Per table it renders
 (`renderTable`, `context-snapshot.ts:428-441`):
 
 - the table name;
@@ -343,11 +343,11 @@ name is what the block carries.
 ### 4. The relations block — identifiers only, quoted and escaped
 
 The inventory's foreign keys, rendered as a relation list and fenced beside the inventory
-(`packRelations`, `investigation.ts:288-294`; rendering in `src/lib/agent/er-diagram.ts:228-269`).
+(`packRelations`, `investigation.ts:1806`; rendering in `src/lib/agent/er-diagram.ts:228-269`).
 It carries table names, column names, and at the deepest detail level a table's primary-key and
 leading-index column names (`keyColumns`, `er-diagram.ts:145-157`). **Never a row value.**
 
-On the ten engines that declare no foreign keys at all (MongoDB, Redis, LibreDB, Druid, ClickHouse, Couchbase, Trino, Cassandra, Elasticsearch and OpenSearch) this block carries no relations and says why: the engine has no such constraint to
+On the twelve engines that declare no foreign keys at all (MongoDB, Redis, LibreDB, Druid, ClickHouse, Couchbase, Trino, Cassandra, Elasticsearch, OpenSearch, Prometheus and Apache Kafka) this block carries no relations and says why: the engine has no such constraint to
 declare, so there is nothing here a reading could have missed (#414, driven from
 `ProviderCapabilities.declaresForeignKeys` rather than from the connection's type). It is one server
 sentence and no database content, which makes it the one form of this block that discloses nothing.
@@ -362,7 +362,7 @@ rendered characters — a bound in characters, because a count of edges is not a
 
 | Outcome | What is sent back to the model | Call site |
 | --- | --- | --- |
-| A completed read | A server sentence naming the artifact id, then the **rows**: one `JSON.stringify` per row, newline separated, inside a fence labelled `<what it was>, N row(s)` | `tools.ts:918-932`, rendering at `tools.ts:620-624` |
+| A completed read | A server sentence naming the artifact id, then the **rows**: one `JSON.stringify` per row, newline separated, inside a fence labelled `<what it was>, N row(s)` | `tools.ts:2079`, rendering at `tools.ts:620-624` |
 | A statement that failed at the database | The **engine's own message**, fenced, referenced by the statement's fingerprint | `tools.ts:872-882` |
 | A policy denial | Server text only: the deny code, the policy version, and advice that a boundary decided this. There is no engine text because a denial produced none | `denialText`, `tools.ts:568-574` |
 | An approval requirement | Server text naming the operation id | `approvalText`, `tools.ts:576-581` |
@@ -481,7 +481,7 @@ statement rather than as an opaque token.
 ## The fence, and what it does not do
 
 Everything derived from the database is wrapped by `fenceUntrustedContent`
-(`src/lib/agent/untrusted-content.ts:71-76`): a header naming what the block is, which operation
+(`src/lib/agent/untrusted-content.ts:119`): a header naming what the block is, which operation
 produced it and which id it joins to; a fixed instruction that the lines are data and must never be
 followed as instructions; and a pair of markers bounding the region.
 
@@ -545,7 +545,7 @@ The frozen execution policies are the ceiling on one run's egress, one row per w
 | Bound | Value | What it caps |
 | --- | --- | --- |
 | `maxResultRows` / `maxResultBytes` | 200 rows / 256 KiB | The most one read can return — and therefore the most one tool result can send |
-| `maxStatementsPerRun` | 18-45, by workflow | Reads per drive, grounding reads and repairs included — the composed catalog reads and, since #414, the one `db.schema.read` call that replaces them on the other fifteen. The figures did not move for it: that path is the cheapest of the three, so nothing had to be bought (`docs/AGENT.md`, the budget arithmetic) |
+| `maxStatementsPerRun` | 18-45, by workflow | Reads per run, folded across its drives (#999), grounding reads and repairs included: the composed catalog reads and, since #414, the one `db.schema.read` call that replaces them on the other seventeen. The figures did not move for it: that path is the cheapest of the three, so nothing had to be bought (`docs/AGENT.md`, the budget arithmetic) |
 | `AGENT_CONTEXT_PACK_MAX_CHARS` | 6000 | The fenced schema inventory |
 | `MAX_ER_CHARS` | 2000 | The fenced relations block |
 | `AGENT_MAX_OBJECTIVE_LENGTH` | 4000 | Your objective |
@@ -555,8 +555,12 @@ An oversized read is **refused, not truncated**, so a result that reached the mo
 one. Note the honest edge: the comparison happens after the driver has materialised the rows, so an
 oversized read is refused but still paid for at the database.
 
-Every one of these is **per drive**. A run resumed after a restart starts each of them again
-(`docs/BACKLOG.md` B6).
+**Some of these bound the run and some bound one drive.** `maxStatementsPerRun` and the
+database-time figure bound the run: since #999 a drive is seeded with what the run's ledger says
+earlier drives spent. `runDeadlineMs` bounds the run on the wall clock, measured from the moment
+the run opened, so time it spends paused or between drives is spent against it. `maxModelTurns` and
+the repair ledger are still per drive: a resumed run counts its own turns and its repair attempts
+start again (`docs/BACKLOG.md` B6).
 
 **The classification is outside all of it**, by construction: it happens before a run exists, so
 there is no budget to charge it to. Its own bounds are its 8-second ceiling and its 16-token
@@ -636,7 +640,7 @@ fences what it sends:
 | Data Profiler's AI summary | `POST /api/ai/describe-schema` | Per column: null percent, distinct count, **`min=` and `max=`** | `src/components/DataProfiler.tsx:84-107` |
 
 **That last row is the one to read carefully.** `/api/db/profile` computes `MIN(col::text)` and
-`MAX(col::text)` per column (`src/app/api/db/profile/route.ts:115-116`), and the Data Profiler puts
+`MAX(col::text)` per column (`src/app/api/db/profile/route.ts:132-133`), and the Data Profiler puts
 both into the context it sends for an AI summary. Those are **real values out of your columns** —
 the lexicographic first and last of each profiled column. It is the sharpest difference between the
 two profiling surfaces in this product: the agent's `profile_table` was built so that no value can

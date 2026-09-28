@@ -21,6 +21,8 @@
   PostgreSQL प्रोजेक्ट में सूचीबद्ध:
   <a href="https://www.postgresql.org/about/news/libredb-studio-an-open-source-self-hosted-sql-ide-for-postgresql-in-the-browser-3368/">News</a>
   ·
+  <a href="https://wiki.postgresql.org/wiki/PostgreSQL_Clients#LibreDB_Studio">PostgreSQL Clients</a>
+  ·
   <a href="https://www.postgresql.org/download/products/1/">Software Catalogue</a>
   ·
   <a href="https://wiki.postgresql.org/wiki/Community_Guide_to_PostgreSQL_GUI_Tools#LibreDB_Studio">Community Guide to GUI Tools</a>
@@ -31,9 +33,11 @@
   <a href="https://clickhouse.com/docs/integrations/connectors/tools/gui#libredb-studio">ClickHouse</a>,
   <a href="https://mariadb.com/docs/server/clients-and-utilities/graphical-and-enhanced-clients/libredb-studio">MariaDB</a>,
   <a href="https://trino.io/ecosystem/client-application#libredb-studio">Trino</a>,
-  <a href="https://cloudberry.apache.org/docs/ecosystem/sql-clients/libredb-studio/">Apache Cloudberry</a>
+  <a href="https://cloudberry.apache.org/docs/ecosystem/sql-clients/libredb-studio/">Apache Cloudberry</a>,
+  <a href="https://opensearch.org/community-projects/">OpenSearch</a>,
+  <a href="https://duckdb.org/docs/preview/guides/sql_editors/libredb_studio">DuckDB</a>
   और
-  <a href="https://opensearch.org/community-projects/">OpenSearch</a>
+  <a href="https://docs.starrocks.io/docs/integrations/IDE_integrations/LibreDB_Studio/">StarRocks</a>
   के आधिकारिक docs में भी सूचीबद्ध
 </p>
 
@@ -47,6 +51,8 @@
   <a href="https://codecov.io/github/libredb/libredb-studio"><img src="https://codecov.io/github/libredb/libredb-studio/graph/badge.svg?token=VA6CO9R7IH" alt="Coverage"></a>
   <a href="https://artifacthub.io/packages/helm/libredb-studio/libredb-studio"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/libredb-studio" alt="Artifact Hub"></a>
 </p>
+
+> यह हिन्दी README समुदाय द्वारा किया गया अनुवाद है और अंग्रेज़ी से पीछे हो सकता है। अंतर होने पर [अंग्रेज़ी संस्करण](README.md) मान्य है।
 
 ## जल्दी शुरू करें
 
@@ -90,9 +96,9 @@ LibreDB Studio दूसरा रास्ता चुनता है: **tool
 
 ## मुख्य क्षमताएँ
 
-### सोलह engines, एक interface
+### अठारह engines, एक interface
 
-PostgreSQL · MySQL · Oracle · SQL Server · SQLite · libSQL · DuckDB · MongoDB · Redis · Couchbase · ClickHouse · Apache Druid · Elasticsearch · OpenSearch · Apache Trino · Apache Cassandra
+PostgreSQL · MySQL · Oracle · SQL Server · SQLite · libSQL · DuckDB · MongoDB · Redis · Couchbase · ClickHouse · Apache Druid · Elasticsearch · OpenSearch · Trino · Apache Cassandra · Prometheus · Apache Kafka
 
 सभी SQL engines एक ही schema browser, ER diagram, schema diff और monitoring dashboard इस्तेमाल करते हैं। MongoDB और Redis SQL engines नहीं हैं, इसलिए उनमें ER diagram और schema diff नहीं है। Druid, Elasticsearch, OpenSearch और Trino दोहरे अपवाद हैं: उनके HTTP SQL interface का कोई ऐसा URI रूप नहीं है जिसे यह build पढ़ सके, इसलिए उन्हें सिर्फ़ host/port से configure किया जाता है। साथ ही, generated migration सीधे अपनी सीमा बताता है, बजाय ऐसे engine के लिए DDL बनाने के जिसकी SQL में column बदलने का कोई statement ही नहीं है। Couchbase के schemaless collections पर भी यही लागू है। Search clusters के ER diagram में सिर्फ़ boxes होते हैं, कोई line नहीं: indexes foreign keys declare नहीं करते, और engine के model में declare करने के लिए foreign key होती ही नहीं।
 
@@ -111,11 +117,13 @@ PostgreSQL · MySQL · Oracle · SQL Server · SQLite · libSQL · DuckDB · Mon
 | **Apache Druid** | कोई driver नहीं, सिर्फ़ HTTP (`POST /druid/v2/sql`) | Read-only SQL IDE, native query EXPLAIN tree, `INFORMATION_SCHEMA` introspection, `sys.*` monitoring |
 | **Elasticsearch** | कोई driver नहीं, सिर्फ़ HTTP (`POST /_sql?format=json`, port 9200) | Read-only SQL IDE, mapping पर आधारित index/field browser, cluster health और हर index के document count व storage size। न EXPLAIN, न maintenance, न slow query या session panels। Elasticsearch SQL में `OFFSET` भी नहीं है, इसलिए results का दूसरा page नहीं माँगा जा सकता |
 | **OpenSearch** | कोई driver नहीं, सिर्फ़ HTTP (`POST /_plugins/_sql`, port 9200) | Elasticsearch वाला ही provider module, वही read-only SQL IDE और browser। यहाँ `LIMIT n OFFSET m` काम करता है, इसलिए pagination भी काम करता है |
-| **Apache Trino** | कोई driver नहीं, सिर्फ़ HTTP (client protocol, `POST /v1/statement`, port 8080) | सभी configured catalogs पर पूरा SQL IDE, connection के fixed catalog की `information_schema` schema tree, `system.runtime` और `jmx` monitoring, `SHOW STATS` से असली row counts, query cancel और `kill_query` maintenance। Trino query engine है और ख़ुद डेटा store नहीं करता, इसलिए कहीं भी primary key, foreign key या index declare नहीं होते: ER diagram में सिर्फ़ boxes हैं, inline editing बंद है, और capacity panel मनगढ़ंत usage के बजाय catalogs की सूची दिखाता है। Fail हुए statements भी HTTP 200 के साथ लौटते हैं। Cluster पर authentication बंद हो तब भी plain HTTP पर password मना कर दिया जाता है |
+| **Trino** | कोई driver नहीं, सिर्फ़ HTTP (client protocol, `POST /v1/statement`, port 8080) | सभी configured catalogs पर पूरा SQL IDE, connection के fixed catalog की `information_schema` schema tree, `system.runtime` और `jmx` monitoring, `SHOW STATS` से असली row counts, query cancel और `kill_query` maintenance। Trino query engine है और ख़ुद डेटा store नहीं करता, इसलिए कहीं भी primary key, foreign key या index declare नहीं होते: ER diagram में सिर्फ़ boxes हैं, inline editing बंद है, और capacity panel मनगढ़ंत usage के बजाय catalogs की सूची दिखाता है। Fail हुए statements भी HTTP 200 के साथ लौटते हैं। Cluster पर authentication बंद हो तब भी plain HTTP पर password मना कर दिया जाता है |
 | **Apache Cassandra** | `cassandra-driver` (pure JavaScript, कोई native module नहीं) | Native protocol (port 9042) पर CQL IDE, partition key और clustering key चिह्नित करने वाला keyspace browser, `system_views` से overview, uptime और चल रहे statements। Connection में **`localDataCenter` भरना ज़रूरी है**: इसके बिना driver connect करने से मना कर देता है। न EXPLAIN (CQL grammar में यह keyword ही नहीं है), न query cancel (protocol में cancel frame नहीं है), न maintenance (compaction, repair और flush सब `nodetool` के JMX operations हैं)। और **कोई row count या size नहीं दिखाया जाता**: Cassandra सिर्फ़ flush हो चुकी files पर आधारित partition अनुमान (500 rows वाली clustered table 143 पढ़ी गई) और पूरे MiB (19,476 bytes की table `1 MiB` पढ़ी गई) दे सकता है, इसलिए ग़लत संख्या दिखाने से बेहतर है कुछ न दिखाना |
+| **Prometheus** | कोई driver नहीं, सिर्फ़ HTTP (Prometheus HTTP API, port 9090) | PromQL editor जो text को बिना बदले server तक भेजता है, नतीजे grid और chart tab में (`rate(x[5m])[1h:1m]` जैसी step वाली subquery timestamps पर lines के रूप में chart होती है: tab पहली series से खुलता है, Y-Axis menu से और series जोड़ी जा सकती हैं, हर series की एक line, और एक साथ अधिकतम आठ lines बनती हैं, उससे आगे chart "Showing first 8 of N series" दिखाता है; लेकिन chart किसी missing sample को, और numbers के बीच `NaN` या `Inf` को, 0 पर दिखाता है, इसलिए अलग-अलग समय पर scrape होने वाले targets की raw range query झूठे शून्य दिखाती है), metrics browser जिसमें label names columns हैं और metadata source है, rule groups और recording व alerting rules (firing alert tree में चिह्नित), scrape pools और targets (down target tree में चिह्नित), और health, version, uptime व TSDB statistics। Design से read-only: न admin API, न remote write, न EXPLAIN (parse endpoint अभी experimental है), न maintenance। Plain HTTP पर credential मना नहीं होता बल्कि भेज दिया जाता है, इसलिए जिस network पर आपका नियंत्रण न हो वहाँ TLS चालू करें |
+| **Apache Kafka** | `@platformatic/kafka` (pure TypeScript, port 9092) | JSON read request जो topic को partition, offset या timestamp से, सबसे पुराने offset से या नवीनतम messages पढ़ता है; keys, values और headers JSON, text या base64 में decode होते हैं और Confluent format वाला value अपने schema id से चिह्नित होता है; topic browser में partitions और non-default configs (offline या under-replicated topic चिह्नित), दोनों protocols के consumer groups और हर partition का lag, brokers और उनके configs, और health, topic count व disk size। Construction से read-only: न produce, न offset commit, न consumer group में शामिल होना, न topic बनाना। Custom CA और client certificates के साथ TLS, और SASL PLAIN या SCRAM सिर्फ़ TLS पर; SSH tunnel नहीं, क्योंकि brokers तक उनके advertised addresses पर पहुँचा जाता है |
 | **Redis** | `ioredis` | Command editor, key browser, INFO पर आधारित monitoring |
 
-> **Transport security हर engine की अलग सुविधा नहीं, सब पर लागू होने वाली क्षमता है।** SSH tunnel provider के connect होने से पहले ही बन जाता है और connection को local endpoint पर मोड़ देता है, इसलिए यह engine पर निर्भर नहीं: जिस connection में host और port हो, उस पर यह लागू होता है। Connection string से भरे गए connections (MongoDB, Couchbase और ClickHouse में यह तरीका है) में host/port नहीं होता, इसलिए वे tunnel से नहीं जाते। SQLite और DuckDB में भी दोनों नहीं होते। SSL/TLS panel अभी PostgreSQL, MySQL, SQL Server, Couchbase, ClickHouse, Druid, Elasticsearch, OpenSearch और Trino पर काम करता है। Trino पर यह वैकल्पिक नहीं है, क्योंकि coordinator plain HTTP पर password मना कर देता है। Oracle, MongoDB और Redis इस setting को नज़रअंदाज़ करते हैं, इसलिए इन तीनों में encryption इस पर निर्भर है कि connection string में क्या लिखा है, dialog में क्या चुना है इस पर नहीं।
+> **Transport security हर engine की अलग सुविधा नहीं, सब पर लागू होने वाली क्षमता है।** SSH tunnel provider के connect होने से पहले ही बन जाता है और connection को local endpoint पर मोड़ देता है, इसलिए यह engine पर निर्भर नहीं: जिस connection में host और port हो, उस पर यह लागू होता है, Kafka connection को छोड़कर: Kafka client हर broker तक उसके advertised address पर पहुँचता है, जिसे एक address forward करने वाला tunnel नहीं ले जा सकता, इसलिए Kafka connection tunnel मना कर देता है। Connection string से भरे गए connections (MongoDB, Couchbase और ClickHouse में यह तरीका है) में host/port नहीं होता, इसलिए वे tunnel से नहीं जाते। SQLite और DuckDB में भी दोनों नहीं होते। SSL/TLS panel अभी PostgreSQL, MySQL, SQL Server, Couchbase, ClickHouse, Druid, Elasticsearch, OpenSearch, Trino, Prometheus और Apache Kafka पर काम करता है। Trino पर यह वैकल्पिक नहीं है, क्योंकि coordinator plain HTTP पर password मना कर देता है। Oracle, MongoDB और Redis इस setting को नज़रअंदाज़ करते हैं, इसलिए इन तीनों में encryption इस पर निर्भर है कि connection string में क्या लिखा है, dialog में क्या चुना है इस पर नहीं।
 
 > Redis इस SQL-oriented interface में एक convention की वजह से फ़िट होता है। `getSchema()` non-blocking `SCAN` से (**कभी भी `KEYS *` से नहीं**) key prefixes को "tables" में बाँटता है, health और metrics `INFO` से आते हैं, और slow queries व sessions `SLOWLOG GET` / `CLIENT LIST` से।
 
@@ -145,14 +153,21 @@ PostgreSQL · MySQL · Oracle · SQL Server · SQLite · libSQL · DuckDB · Mon
   `src/lib/db/operations/execution.ts:129`)। साथ में read-only execution profile लगता है: PostgreSQL पर read-only
   transaction, SQLite पर हर statement के साथ दोबारा `PRAGMA query_only`, और DuckDB पर `READ_ONLY` engine handle के ऊपर
   एक SQL guard, क्योंकि सिर्फ़ वह flag `COPY … TO`, `EXPORT DATABASE` और local files पढ़ने वाले table functions को नहीं रोकता।
+  SQL Server पर किसी भी तरह का read-only transaction होता ही नहीं, इसलिए वहाँ चार परतें हैं: connection खुलते समय यह जाँचा जाता है
+  कि session का principal लिख ही नहीं सकता, फिर optimizer हर statement को चलाए बिना सिर्फ़ compile करके admit करता है,
+  rows की सीमा server पर ही लगती है, और statement एक ऐसे transaction के अंदर चलता है जिसे हमेशा rollback किया जाता है।
   Writes और DDL डेटाबेस तक पहुँचने से पहले ही मना कर दिए जाते हैं। `EXPLAIN ANALYZE` statement को सच में चलाता है,
   इसलिए default रूप से बंद है। यह pipeline सिर्फ़ Agent के लिए है: एडिटर में आप जो statements ख़ुद चलाते हैं वे सीधे
   provider को जाते हैं (`src/app/api/db/query/route.ts:44`), यहाँ की policy से नहीं गुज़रते, और ऐसा audit record नहीं बनाते।
-- **Agent mode सिर्फ़ PostgreSQL, SQLite और DuckDB पर**: read-only profile डेटाबेस के native तरीक़े से लागू होता है, इसलिए
-  यह सिर्फ़ उन providers पर है जिन्होंने इसे implement किया है: `postgres.ts:915`, `sqlite.ts:537` और `duckdb/index.ts:525`
-  का `queryReadOnly`, और कोई नहीं। बाक़ी engines पर Agent mode का run `engine-unsupported` के साथ ख़त्म होता है
-  (`src/lib/agent/runtime.ts:199`)। **Plan** mode कोई tool इस्तेमाल नहीं करता और डेटाबेस को छूता ही नहीं, इसलिए हर connection
-  पर उपलब्ध है।
+- **Agent mode सिर्फ़ PostgreSQL, SQLite, DuckDB और SQL Server पर**: read-only profile डेटाबेस के native तरीक़े से लागू होता है,
+  इसलिए यह सिर्फ़ उन providers पर है जिन्होंने इसे implement किया है: `postgres.ts`, `sqlite.ts`, `duckdb/index.ts` और `mssql.ts`
+  का `queryReadOnly`, और कोई नहीं। बाक़ी engines पर, statements भेजने वाला Agent-mode workflow शुरू होते ही मना कर दिया जाता है,
+  run बनने से पहले; और जो अनुरोध provider factory तक पहुँच जाए वह `engine-unsupported` के साथ ख़त्म होता है।
+  **Plan** mode हर connection पर खुलता है: वहाँ का model कोई tool इस्तेमाल नहीं करता, आपका कोई statement नहीं चलाता, कुछ लिखता नहीं,
+  और सिर्फ़ एक statement का मसौदा देता है जिसे आप ख़ुद चलाते हैं। उसकी GROUNDING हर engine तक पहुँचती है: PostgreSQL और SQLite पर
+  server ख़ुद catalog statements बनाता है, और बाक़ी हर connection पर उसी connection के provider से schema का ब्यौरा माँगा जाता है,
+  यानी वही read जो sidebar पहले से करता है, जिसके लिए read-only statement path चाहिए ही नहीं। इसलिए दोनों सीमाएँ अलग हैं:
+  Agent mode यही चार engines हैं, GROUNDING सारे engines, और जिस run की reading नाकाम रहे वह tables गढ़ने के बजाय यह साफ़ कह देता है।
 - **तीन workflows**: **Investigate** (सवाल का जवाब), **Optimize** (अनुमानित execution plans की तुलना, index या rewrite का सुझाव),
   **Assess** (table profiling: सिर्फ़ counts, कभी भी असली values नहीं)।
 - **अपने-आप कुछ नहीं करता**: Agent आपकी जगह run शुरू नहीं करता, एडिटर में नहीं लिखता, और अपने सुझाए statements नहीं चलाता।

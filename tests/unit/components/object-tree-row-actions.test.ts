@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { rowActions, type TreeRowActionHandlers } from "@/components/object-tree/row-actions";
 import type { TreeRowModel } from "@/components/object-tree/flatten";
+import { KafkaProvider } from "@/lib/db/providers/stream/kafka/index";
 import type { DatabaseObject, ProviderCapabilities, ProviderLabels } from "@/lib/db/types";
 
 /**
@@ -12,17 +13,20 @@ import type { DatabaseObject, ProviderCapabilities, ProviderLabels } from "@/lib
  * old flat menu could not avoid and what `CLAUDE.md` forbids one level up.
  */
 
-// The object-model half only, `Pick`-bound so renaming a field in `ProviderCapabilities`
-// fails this file rather than leaving the fixtures describing nothing.
+// The declaration fields these gates read, `Pick`-bound so renaming a field in
+// `ProviderCapabilities` fails this file rather than leaving the fixtures describing nothing.
 type Model = Partial<
   Pick<
     ProviderCapabilities,
+    | "queryLanguage"
+    | "queryDialect"
     | "objectKinds"
     | "supportsInlineRowEdit"
     | "supportsMaintenance"
     | "maintenanceOperations"
     | "maintenanceOperationSpecs"
     | "tablesAreDerivedGroupings"
+    | "keyScan"
   >
 >;
 
@@ -52,6 +56,7 @@ function allHandlers(record: string[] = []): TreeRowActionHandlers {
     onOpenMaintenance: () => record.push("maintenance"),
     onCreateObject: () => record.push("create"),
     onViewSource: () => record.push("view-source"),
+    onBrowseKeys: () => record.push("browse-keys"),
   };
 }
 
@@ -67,6 +72,26 @@ function objectRow(kindId: string): TreeRowModel {
     posInSet: 1,
     path: ["app", "x"],
     kindId,
+  };
+}
+
+/**
+ * A column row, as `flattenTree` builds one: no kind id, and a path that names the COLUMN.
+ *
+ * Built here with the id prefix the walk uses rather than an invented one, because the guard
+ * being pinned is about the row's ADDRESSING and a row that addressed itself like an object
+ * would be a different subject.
+ */
+function columnRow(): TreeRowModel {
+  return {
+    id: "column%3Aapp/x/table/order_id",
+    kind: "column",
+    label: "order_id",
+    depth: 3,
+    setSize: 1,
+    posInSet: 1,
+    path: ["app", "x", "order_id"],
+    column: { name: "order_id", type: "integer", nullable: false, isPrimary: false },
   };
 }
 
@@ -106,6 +131,28 @@ function idsFor(
 }
 
 describe("rowActions on an object row", () => {
+  test("offers a count query only for a supported relation with a handler", () => {
+    const record: DatabaseObject[] = [];
+    const handlers = { onGenerateCount: (object: DatabaseObject) => record.push(object) };
+    const actions = rowActions({ row: objectRow("table"), object: orders, capabilities: postgres, handlers });
+    expect(actions.map((action) => action.id)).toEqual(["generate-count"]);
+    actions[0].run();
+    expect(record).toEqual([orders]);
+    expect(idsFor(objectRow("table"), postgres, {})).not.toContain("generate-count");
+    expect(idsFor(objectRow("function"), postgres, handlers)).not.toContain("generate-count");
+    expect(idsFor(folderRow("table"), postgres, handlers)).not.toContain("generate-count");
+    for (const capabilities of [
+      { ...postgres, tablesAreDerivedGroupings: true },
+      { ...postgres, queryDialect: "redis" as const },
+      { ...postgres, queryDialect: "libredb" as const },
+      { ...postgres, queryLanguage: "promql" as const },
+      // A read request has no count grammar: it reads messages and counts none (#1088).
+      { ...postgres, queryDialect: "kafka" as const },
+    ]) {
+      expect(idsFor(objectRow("table"), capabilities, handlers)).not.toContain("generate-count");
+    }
+    expect(idsFor(objectRow("view"), postgres, handlers)).toEqual(["generate-count"]);
+  });
   test("a relation is offered every action the engine and the shell allow", () => {
     expect(idsFor(objectRow("table"), postgres)).toEqual([
       "generate-select",
@@ -305,6 +352,39 @@ describe("rowActions on a container row", () => {
   });
 });
 
+describe("rowActions on a column row", () => {
+  test("a column row is offered nothing", () => {
+    // The object is handed in DELIBERATELY: a resolved parent is exactly the state the refusal
+    // has to survive, and passing `undefined` here would pin nothing.
+    expect(idsFor(columnRow(), postgres, allHandlers(), orders)).toEqual([]);
+  });
+
+  test("and still nothing where the row carries its parent's kind id", () => {
+    // This is what the first line of `rowActions` is FOR, and it is the one case that can fail
+    // without it. The row above misses by CONSTRUCTION, because `flattenTree` gives a column row
+    // no kind id and the lookup below needs one; that is a property of how a column row is built
+    // today, not a statement about this function. So the fixture here is a column row that does
+    // carry one, which no walk produces and which a later change to how a column row addresses
+    // itself would produce. Without the refusal it resolves the parent's kind and offers
+    // "Vacuum Table" on `order_id`, with the table's status and row count drawn beside it.
+    expect(idsFor({ ...columnRow(), kindId: "table" }, postgres, allHandlers(), orders)).toEqual([]);
+  });
+
+  test("the control: the rows that DO get a menu still get the same one", () => {
+    // The new first line is a refusal for one row kind and must not be a refusal for any
+    // other, which a bare "a column gets nothing" cannot say on its own.
+    expect(idsFor(objectRow("table"), postgres)).toEqual([
+      "generate-select",
+      "profile",
+      "generate-code",
+      "generate-test-data",
+      "maintenance-analyze",
+      "maintenance-vacuum",
+    ]);
+    expect(idsFor(folderRow("table"), postgres)).toEqual(["create"]);
+  });
+});
+
 describe("running an action", () => {
   test("each action hands its handler the object the row was built from", () => {
     const record: string[] = [];
@@ -382,6 +462,92 @@ describe("a kind whose rows are derived groupings", () => {
 
   test("the same kind without the flag IS offered Profile", () => {
     expect(idsFor(ordinary)).toContain("profile");
+  });
+});
+
+/**
+ * Browse Keys, the ONE action that opens another READING of the row rather than acting on it.
+ *
+ * TWO declarations and no kind id, which is what makes this a gate rather than a special case:
+ * `keyScan` says the engine has a key space AND that the shell mounts a panel for it, and
+ * `tablesAreDerivedGroupings` says the relation rows are prefixes a server summarised rather than
+ * objects anybody named. Either fact alone is not enough, and every direction is pinned below.
+ */
+describe("Browse Keys is gated on the walk and on the rows being key patterns", () => {
+  const keyspace = { id: "keyspace", role: "relation", label: "Key Pattern", labelPlural: "Key Patterns" } as const;
+  const walk = { defaultCount: 500, maxCount: 1000 } as const;
+  /** Redis: it walks a key space, and its relation rows ARE the prefixes of one. */
+  const redis = capabilitiesOf({ objectKinds: [keyspace], tablesAreDerivedGroupings: true, keyScan: walk });
+  const grouping: DatabaseObject = { path: ["0", "user:*"], name: "user:*", kind: "keyspace" };
+  const groupingRow: TreeRowModel = { ...objectRow("keyspace"), path: ["0", "user:*"] };
+
+  const idsFor = (
+    capabilities: ProviderCapabilities,
+    object: DatabaseObject = grouping,
+    handlers: TreeRowActionHandlers = allHandlers(),
+    row: TreeRowModel = groupingRow,
+  ): readonly string[] => rowActions({ row, object, capabilities, handlers }).map((action) => action.id);
+
+  test("is offered on a key pattern of an engine that declares the walk", () => {
+    expect(idsFor(redis)).toEqual(["generate-select", "generate-code", "browse-keys"]);
+  });
+
+  test("is withheld from the same rows when the engine declares no key-space walk", () => {
+    // LibreDB-shaped: relation rows that are derived groupings, and no panel to show them in. The
+    // item would name a destination that does not exist.
+    const noWalk = capabilitiesOf({ objectKinds: [keyspace], tablesAreDerivedGroupings: true });
+    expect(idsFor(noWalk)).not.toContain("browse-keys");
+  });
+
+  test("is withheld from ordinary objects even on an engine that DOES declare the walk", () => {
+    // A table name is not a `MATCH` pattern: `orders` would be handed to the panel as a glob that
+    // matches one key nobody meant.
+    //
+    // The row has to be the kind the declaration actually names. This case used to pass
+    // `objectRow("keyspace")` against a declaration of `table`, so the kind lookup missed, no
+    // action was ever considered, and the empty list was true for a reason that had nothing to
+    // do with the gate. Resolving the row is what leaves `tablesAreDerivedGroupings` as the only
+    // thing standing between a table row and Browse Keys.
+    const tables = capabilitiesOf({ objectKinds: [table], keyScan: walk });
+    // Asserted whole rather than with `not.toContain`, so a gate that stopped asking whether the
+    // rows are derived groupings would offer a fourth item here and fail on it: a `not.toContain`
+    // on an empty list is the vacuous shape this case used to have.
+    expect(
+      idsFor(tables, { path: ["app", "orders"], name: "orders", kind: "table" }, allHandlers(), objectRow("table")),
+    ).toEqual(["generate-select", "profile", "generate-code"]);
+  });
+
+  test("is withheld from a routine row, because a routine is not a prefix", () => {
+    const functions = capabilitiesOf({
+      objectKinds: [keyspace, routine],
+      tablesAreDerivedGroupings: true,
+      keyScan: walk,
+    });
+    expect(
+      idsFor(functions, { path: ["0", "lib"], name: "lib", kind: "function" }, allHandlers(), objectRow("function")),
+    ).not.toContain("browse-keys");
+  });
+
+  test("is withheld when the shell passes no handler, which is how a shell says it cannot", () => {
+    expect(idsFor(redis, grouping, {})).toEqual([]);
+  });
+
+  test("hands the handler the object the row was built from, so the pattern is the row's own name", () => {
+    const seen: DatabaseObject[] = [];
+    const actions = rowActions({
+      row: groupingRow,
+      object: grouping,
+      capabilities: redis,
+      handlers: { onBrowseKeys: (target) => seen.push(target) },
+    });
+
+    expect(actions.map((action) => action.id)).toEqual(["browse-keys"]);
+    expect(actions[0].label).toBe("Browse Keys");
+    actions[0].run();
+    // The name VERBATIM, `*` and all: a key grouping already carries its glob, and a caller that
+    // appended another would address a different set of keys.
+    expect(seen).toEqual([grouping]);
+    expect(seen[0].name).toBe("user:*");
   });
 });
 
@@ -481,5 +647,73 @@ describe("View Source is gated on the kind's declared source, and on nothing els
     expect(rowActions({ row: folderRow("function"), capabilities: withSourceKinds, handlers: allHandlers() })).toEqual(
       [],
     );
+  });
+});
+
+/**
+ * The two actions whose DESTINATION speaks only some query languages (#1085).
+ *
+ * `POST /api/db/profile` writes SQL aggregates or a MongoDB `aggregate` document and nothing
+ * else, and the code generator maps columns onto table and document models. A PromQL metric
+ * is a relation, and a click on it selects its series, while neither destination has anything
+ * to say about it, so both items also ask the language gates in `src/lib/db/types.ts`, the
+ * two the mobile menu asks too. Every negative below is paired with the same declaration in a
+ * language the destination does speak, so an empty answer cannot come from a fixture that
+ * lost its kind or its handlers.
+ */
+describe("the actions whose destination speaks only some query languages", () => {
+  const metric = { id: "metric", role: "relation", label: "Metric", labelPlural: "Metrics", hasColumns: true } as const;
+  const up: DatabaseObject = { path: ["up"], name: "up", kind: "metric" };
+  const metricRow: TreeRowModel = { ...objectRow("metric"), path: ["up"] };
+
+  test("a PromQL metric is offered neither Profile nor Generate Code, and keeps Generate Query", () => {
+    const promql = capabilitiesOf({ queryLanguage: "promql", objectKinds: [metric] });
+    expect(idsFor(metricRow, promql, allHandlers(), up)).toEqual(["generate-select"]);
+  });
+
+  test("the control: the same declaration in SQL is offered both", () => {
+    const sql = capabilitiesOf({ queryLanguage: "sql", objectKinds: [metric] });
+    expect(idsFor(metricRow, sql, allHandlers(), up)).toEqual(["generate-select", "profile", "generate-code"]);
+  });
+
+  test("JSON in a dialect of its own is not profiled, and still generates code", () => {
+    // Redis-shaped WITHOUT `tablesAreDerivedGroupings`, so the language gate is the only one
+    // here that can withhold Profile.
+    const redisDialect = capabilitiesOf({ queryLanguage: "json", queryDialect: "redis", objectKinds: [table] });
+    expect(idsFor(objectRow("table"), redisDialect)).toEqual(["generate-select", "generate-code"]);
+  });
+
+  test("the control: MongoDB's JSON, with no dialect, is profiled and generates code", () => {
+    const mongodb = capabilitiesOf({ queryLanguage: "json", objectKinds: [table] });
+    expect(idsFor(objectRow("table"), mongodb)).toEqual(["generate-select", "profile", "generate-code"]);
+  });
+
+  test("a Kafka topic is offered Generate Query and View Source, and nothing that profiles, models, counts or writes its rows (#1088)", () => {
+    // The provider's own declaration, so the menu is the one a topic row is really offered: its
+    // text is a read request, which the profile route builds no statement in, whose fixed columns
+    // the generated models reject, which has no count grammar, and whose topic takes no row writes.
+    const kafka = new KafkaProvider({
+      id: "kafka-row-actions",
+      name: "Kafka",
+      type: "kafka",
+      host: "localhost",
+      port: 9092,
+      createdAt: new Date(0),
+    }).getCapabilities();
+    const topic: DatabaseObject = { path: ["orders"], name: "orders", kind: "topic" };
+    const topicRow: TreeRowModel = { ...objectRow("topic"), path: ["orders"] };
+    const handlers: TreeRowActionHandlers = { ...allHandlers(), onGenerateCount: () => {} };
+
+    expect(idsFor(topicRow, kafka, handlers, topic)).toEqual(["generate-select", "view-source"]);
+    // The control, in the one field under test: the same declaration with the dialect removed is
+    // MongoDB's JSON, which is profiled, counted and generates code, so the refusals above are the
+    // dialect's. Generate Test Data stays withheld there too: no Kafka kind declares row writes.
+    expect(idsFor(topicRow, { ...kafka, queryDialect: undefined }, handlers, topic)).toEqual([
+      "generate-select",
+      "generate-count",
+      "profile",
+      "generate-code",
+      "view-source",
+    ]);
   });
 });

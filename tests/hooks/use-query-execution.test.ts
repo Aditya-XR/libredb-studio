@@ -22,6 +22,8 @@ mock.module("@/components/QuerySafetyDialog", () => ({
 }));
 
 import { useQueryExecution } from "@/hooks/use-query-execution";
+import { resolveSqlGrammar } from "@/lib/sql/grammar";
+import { isMultiStatement } from "@/lib/sql/statement-splitter";
 import type { DatabaseConnection, QueryTab } from "@/lib/types";
 import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
 
@@ -187,6 +189,73 @@ describe("useQueryExecution", () => {
     expect(body.sql).toBe("SELECT * FROM users");
     expect(body.connection).toBeDefined();
     expect(body.connection.id).toBe("qe-pg-1");
+  });
+
+  // ── the tab's own numbered database (the #1095 review) ─────────────────────
+
+  /**
+   * A key browser activation opens its tab against ONE numbered database, and Redis has no
+   * database-qualified key syntax: `GET report:daily` cannot name it, so the number travels with the
+   * run and this is where the tab's own fact becomes a request field.
+   *
+   * A FIELD BESIDE THE CONNECTION, NOT INSIDE IT, and that is the whole of this case: a managed
+   * connection travels as an id and the server discards any connection field the caller attached
+   * (GHSA-3wh2-8x78), so a database merged into the connection object is silently dropped for every
+   * zero-config deployment - and the read runs in the SESSION's database while the tab claims it read
+   * another. Beside the connection, `POST /api/db/query` applies it after resolving the id.
+   */
+  test("a run on a tab opened against a numbered database sends that database", async () => {
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const tab = createTab({ databaseOverride: 3 });
+    const params = createDefaultParams({ tabs: [tab], currentTab: tab });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("GET report:daily");
+    });
+
+    const mainCall = fetchMock.mock.calls.find((call) => {
+      const body = JSON.parse(call[1]!.body as string);
+      // The background EXPLAIN of the same statement is a second request to the same route; the
+      // run itself is the one without a plan asked of it.
+      return body.sql === "GET report:daily" && body.explain === undefined;
+    });
+    expect(mainCall).toBeDefined();
+    const body = JSON.parse(mainCall![1]!.body as string);
+    expect(body.database).toBe(3);
+    // The control: the CONNECTION does not move at all - its saved database is still its saved one,
+    // so nothing a stored connection pins is rewritten by a tab's own walk. Only the field beside it
+    // names the run's database.
+    expect(body.connection.id).toBe("qe-pg-1");
+    expect(body.connection.host).toBe("localhost");
+    expect(body.connection.database).toBe(mockConnection.database);
+  });
+
+  test("a run on an ordinary tab keeps the connection's own database", async () => {
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const params = createDefaultParams();
+    expect("databaseOverride" in params.currentTab).toBe(false);
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users");
+    });
+
+    const mainCall = fetchMock.mock.calls.find((call) => {
+      const body = JSON.parse(call[1]!.body as string);
+      return body.sql === "SELECT * FROM users" && body.explain === undefined;
+    });
+    const body = JSON.parse(mainCall![1]!.body as string);
+    expect(body.connection.database).toBe("testdb");
+    // ABSENT is not 0 and not "the session's number": a tab with no override sends no field, so the
+    // body is byte for byte what it was before this existed.
+    expect("database" in body).toBe(false);
   });
 
   // ── executeQuery updates tab result on success ─────────────────────────────
@@ -519,6 +588,440 @@ describe("useQueryExecution", () => {
     });
   });
 
+  /**
+   * The next page of a key's tab is still that key's database.
+   *
+   * Pagination is a SECOND run of the same tab, and the tab is what carries the numbered database
+   * (`QueryTab.databaseOverride`) - so a page reached with Next has to be sent on a connection naming
+   * it, exactly as the first one was. Everything else about the page is unchanged: it is the same
+   * statement, at the offset the grid asked for.
+   */
+  test("handleLoadMore keeps the tab's own database", async () => {
+    const tabWithResults = createTab({
+      databaseOverride: 3,
+      result: {
+        ...mockQueryResult,
+        pagination: { limit: 500, offset: 0, hasMore: true, totalReturned: 500, wasLimited: true },
+      },
+      currentOffset: 500,
+    });
+
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: { ...mockQueryResult, rows: [{ id: 3, name: "Charlie" }], rowCount: 1 } },
+    });
+
+    const params = createDefaultParams({ tabs: [tabWithResults], currentTab: tabWithResults });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    await waitFor(() => {
+      const queryCall = fetchMock.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
+      );
+      expect(queryCall).toBeDefined();
+      const body = JSON.parse(queryCall![1]!.body as string);
+      expect(body.options.offset).toBe(500);
+      expect(body.database).toBe(3);
+    });
+  });
+
+  // ── result pagination (#816) ───────────────────────────────────────────────
+
+  /**
+   * A tabs array the hook can really write to, so a test can read the state BACK.
+   *
+   * The shared `createDefaultParams` mock applies the updater and throws the result
+   * away, which is enough for "setTabs was called" and cannot see what was written.
+   * Criterion 8 is entirely about what was written — the rows and `currentOffset` after
+   * a failure — so it needs this.
+   */
+  function mutableTabs(initial: QueryTab[]) {
+    const tabs = [...initial];
+    const setTabs = mock((fn: unknown) => {
+      if (typeof fn === "function") {
+        tabs.splice(0, tabs.length, ...(fn as (prev: QueryTab[]) => QueryTab[])(tabs));
+      }
+    });
+    return { tabs, setTabs };
+  }
+
+  /**
+   * Page two is the size of page one, in BOTH shells.
+   *
+   * `limit: 500` was hardcoded here. A tree click now asks for 50 rows, so a hardcoded
+   * 500 made the second page ten times the first. The size to reuse is the one the
+   * result reports, which is the one the route applied.
+   */
+  test("handleLoadMore asks for the page size the first page came back with", async () => {
+    const tabWithResults = createTab({
+      result: {
+        ...mockQueryResult,
+        pagination: { limit: 50, offset: 0, hasMore: true, totalReturned: 50, wasLimited: true },
+      },
+      currentOffset: 50,
+    });
+    const fetchMock = mockGlobalFetch({
+      "/api/db/query": { ok: true, json: { ...mockQueryResult, rows: [{ id: 3 }], rowCount: 1 } },
+    });
+    const params = createDefaultParams({ tabs: [tabWithResults], currentTab: tabWithResults });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    await waitFor(() => {
+      const queryCall = fetchMock.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
+      );
+      expect(queryCall).toBeDefined();
+      const body = JSON.parse(queryCall![1]!.body as string);
+      expect(body.options.limit).toBe(50);
+      expect(body.options.offset).toBe(50);
+    });
+  });
+
+  /**
+   * Criterion 8, in the standalone shell: a failed page must leave the rows and the
+   * offset exactly as they were, so a retry asks for the same page rather than skipping
+   * one. `use-query-adapter.test.ts` holds the mirror of this test, because the two
+   * shells render in different products and are only kept in step by being asserted
+   * separately.
+   */
+  test("a failed page keeps the loaded rows and does not advance currentOffset", async () => {
+    const existingRows = [{ id: 1 }, { id: 2 }];
+    const tabWithResults = createTab({
+      result: {
+        ...mockQueryResult,
+        rows: existingRows,
+        rowCount: 2,
+        pagination: { limit: 50, offset: 0, hasMore: true, totalReturned: 2, wasLimited: true },
+      },
+      allRows: existingRows,
+      currentOffset: 50,
+    });
+    const { tabs, setTabs } = mutableTabs([tabWithResults]);
+    mockGlobalFetch({ "/api/db/query": { ok: false, status: 500, json: { error: "connection reset" } } });
+    const params = createDefaultParams({ tabs, currentTab: tabWithResults, setTabs });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    await waitFor(() => expect(tabs[0].isLoadingMore).toBe(false));
+    // NAMED FOR WHAT FAILED, and named the same in both products (#816 review item 7).
+    // A lost page is not a lost query: the rows on screen are intact and only the next
+    // page did not arrive. Under the generic "Query Error" the user reads their own
+    // statement as having failed. `use-query-adapter.ts` already says "Load More Error";
+    // the two hooks render in different products and only stay in step by being asked
+    // the same question.
+    expect(mockToastError).toHaveBeenCalledWith("Load More Error", { description: "connection reset" });
+    expect(tabs[0].result!.rows).toHaveLength(2);
+    expect(tabs[0].allRows).toHaveLength(2);
+    expect(tabs[0].currentOffset).toBe(50);
+    // The page is what failed, not the statement, so the panel keeps its rows and says
+    // nothing inline.
+    expect(tabs[0].runError).toBeUndefined();
+  });
+
+  /**
+   * A failed NEW run is the opposite case of the page above: the statement on screen is
+   * no longer the one that last ran, so the rows it fetched may not stay under it.
+   * Measured before this: a good run, then `SELEC * FROM x`, left the first run's rows,
+   * header and `resultQuery` in the tab, and the only signal was a toast that fades, so
+   * the grid, export and inline edit all acted on the previous statement's rows.
+   */
+  test("a failed run replaces the previous result with its error, and the next success clears it", async () => {
+    const { tabs, setTabs } = mutableTabs([createTab()]);
+    mockGlobalFetch({
+      "/api/db/query": async (req) => {
+        const body = (await req.json()) as { sql: string };
+        return body.sql.startsWith("SELEC ")
+          ? { ok: false, status: 400, json: { error: 'near "SELEC": syntax error' } }
+          : { ok: true, json: mockQueryResult };
+      },
+    });
+    const params = createDefaultParams({ tabs, currentTab: tabs[0], setTabs });
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users");
+    });
+    expect(tabs[0].result?.rows).toHaveLength(2);
+
+    await act(async () => {
+      await result.current.executeQuery("SELEC * FROM x");
+    });
+
+    expect(tabs[0].isExecuting).toBe(false);
+    expect(tabs[0].runError).toBe('near "SELEC": syntax error');
+    expect(tabs[0].result).toBeNull();
+    expect(tabs[0].resultQuery).toBeUndefined();
+    expect(tabs[0].allRows).toBeUndefined();
+    expect(tabs[0].currentOffset).toBe(0);
+    // The toast stays: the inline block is the lasting signal, not the only one.
+    expect(mockToastError).toHaveBeenCalledWith("Query Error", { description: 'near "SELEC": syntax error' });
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users");
+    });
+
+    expect(tabs[0].runError).toBeUndefined();
+    expect(tabs[0].result?.rows).toHaveLength(2);
+    expect(tabs[0].resultQuery).toBe("SELECT * FROM users");
+  });
+
+  /**
+   * A superseded run's refusal belongs to a statement the tab no longer shows, so its
+   * error must not replace the rows of the run that took the tab over.
+   */
+  test("a superseded run's failure writes no error over the run that replaced it", async () => {
+    const { tabs, setTabs } = mutableTabs([createTab()]);
+    let releaseFirst: () => void = () => {};
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    mockGlobalFetch({
+      "/api/db/query": async (req) => {
+        const body = (await req.json()) as { sql: string; explain?: unknown };
+        if (body.sql !== "SELEC * FROM x" || body.explain !== undefined) return { ok: true, json: mockQueryResult };
+        await firstHeld;
+        return { ok: false, status: 400, json: { error: 'near "SELEC": syntax error' } };
+      },
+    });
+    const params = createDefaultParams({ tabs, currentTab: tabs[0], setTabs });
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    let first: Promise<boolean> | undefined;
+    act(() => {
+      first = result.current.executeQuery("SELEC * FROM x");
+    });
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users");
+    });
+    releaseFirst();
+    await act(async () => {
+      await first;
+    });
+
+    expect(tabs[0].runError).toBeUndefined();
+    expect(tabs[0].resultQuery).toBe("SELECT * FROM users");
+    expect(tabs[0].result?.rows).toHaveLength(2);
+  });
+
+  /** An EXPLAIN never owned the results panel, so landing one does not answer its error. */
+  test("an EXPLAIN that succeeds leaves the tab's run error in place", async () => {
+    const { tabs, setTabs } = mutableTabs([createTab({ runError: 'near "SELEC": syntax error' })]);
+    mockGlobalFetch({
+      "/api/db/query": {
+        ok: true,
+        json: { rows: [{ "QUERY PLAN": { plan: "Seq Scan" } }], fields: ["QUERY PLAN"], rowCount: 1, executionTime: 5 },
+      },
+    });
+    const params = createDefaultParams({ tabs, currentTab: tabs[0], setTabs });
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users", undefined, true);
+    });
+
+    expect(tabs[0].explainPlan).toBeDefined();
+    expect(tabs[0].runError).toBe('near "SELEC": syntax error');
+  });
+
+  /** The same exemption from the other side: a failed EXPLAIN takes no rows off the panel. */
+  test("an EXPLAIN that fails leaves the previous result and sets no run error", async () => {
+    const tab = createTab({
+      result: mockQueryResult,
+      resultQuery: "SELECT * FROM users",
+      allRows: mockQueryResult.rows,
+    });
+    const { tabs, setTabs } = mutableTabs([tab]);
+    mockGlobalFetch({ "/api/db/query": { ok: false, status: 400, json: { error: "EXPLAIN is not allowed here" } } });
+    const params = createDefaultParams({ tabs, currentTab: tab, setTabs });
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users", undefined, true);
+    });
+
+    expect(mockToastError).toHaveBeenCalledWith("Query Error", { description: "EXPLAIN is not allowed here" });
+    expect(tabs[0].runError).toBeUndefined();
+    expect(tabs[0].result?.rows).toHaveLength(2);
+    expect(tabs[0].resultQuery).toBe("SELECT * FROM users");
+  });
+
+  /** A thrown request, not a refused one, is the same failure to the reader. */
+  test("a request that throws replaces the previous result too", async () => {
+    const tab = createTab({
+      result: mockQueryResult,
+      resultQuery: "SELECT * FROM users",
+      allRows: mockQueryResult.rows,
+    });
+    const { tabs, setTabs } = mutableTabs([tab]);
+    globalThis.fetch = mock(async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const params = createDefaultParams({ tabs, currentTab: tab, setTabs });
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users");
+    });
+
+    expect(tabs[0].runError).toBe("Failed to fetch");
+    expect(tabs[0].result).toBeNull();
+  });
+
+  /**
+   * The owner's scope: a cancellation keeps today's behaviour and is not an error. This is
+   * the shape a server-side cancel arrives in, `createErrorResponse`'s 499 and its code.
+   */
+  test("a cancelled run leaves the previous result and sets no error", async () => {
+    const tab = createTab({
+      result: mockQueryResult,
+      resultQuery: "SELECT * FROM users",
+      allRows: mockQueryResult.rows,
+    });
+    const { tabs, setTabs } = mutableTabs([tab]);
+    mockGlobalFetch({
+      "/api/db/query": {
+        ok: false,
+        status: 499,
+        json: { error: "Query was cancelled", code: "QUERY_CANCELLED", statusCode: 499 },
+      },
+    });
+    const params = createDefaultParams({ tabs, currentTab: tab, setTabs });
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM users");
+    });
+
+    expect(tabs[0].runError).toBeUndefined();
+    expect(tabs[0].result?.rows).toHaveLength(2);
+  });
+
+  /**
+   * The word is not the signal. A message that only CONTAINS "cancelled" was read as a
+   * cancellation and kept the previous statement's rows, so an engine refusing a column or
+   * an enum value of that name looked like a cancel the user never asked for.
+   */
+  test('an engine error naming a "cancelled" column is a failure, not a cancellation', async () => {
+    const tab = createTab({
+      result: mockQueryResult,
+      resultQuery: "SELECT * FROM users",
+      allRows: mockQueryResult.rows,
+    });
+    const { tabs, setTabs } = mutableTabs([tab]);
+    mockGlobalFetch({
+      "/api/db/query": { ok: false, status: 400, json: { error: 'column "cancelled" does not exist' } },
+    });
+    const params = createDefaultParams({ tabs, currentTab: tab, setTabs });
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT cancelled FROM users");
+    });
+
+    expect(tabs[0].runError).toBe('column "cancelled" does not exist');
+    expect(tabs[0].result).toBeNull();
+    expect(tabs[0].allRows).toBeUndefined();
+    expect(mockToastError).toHaveBeenCalledWith("Query Error", { description: 'column "cancelled" does not exist' });
+  });
+
+  /**
+   * Append, not replace — and the offset advances by what THIS page returned rather than
+   * by the page size, so a short final page cannot leave a gap behind it.
+   */
+  test("a successful page appends to the rows already shown", async () => {
+    const existingRows = [{ id: 1 }, { id: 2 }];
+    const tabWithResults = createTab({
+      result: {
+        ...mockQueryResult,
+        rows: existingRows,
+        rowCount: 2,
+        pagination: { limit: 50, offset: 0, hasMore: true, totalReturned: 2, wasLimited: true },
+      },
+      allRows: existingRows,
+      currentOffset: 2,
+    });
+    const { tabs, setTabs } = mutableTabs([tabWithResults]);
+    mockGlobalFetch({
+      "/api/db/query": {
+        ok: true,
+        json: {
+          rows: [{ id: 3 }],
+          fields: ["id", "name"],
+          rowCount: 1,
+          executionTime: 5,
+          pagination: { limit: 50, offset: 2, hasMore: false, totalReturned: 1, wasLimited: true },
+        },
+      },
+    });
+    const params = createDefaultParams({ tabs, currentTab: tabWithResults, setTabs });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    await waitFor(() => expect(tabs[0].result!.rows).toHaveLength(3));
+    expect(tabs[0].result!.rows.map((row) => row.id)).toEqual([1, 2, 3]);
+    expect(tabs[0].currentOffset).toBe(3);
+    expect(tabs[0].result!.pagination!.hasMore).toBe(false);
+  });
+
+  /**
+   * A fresh run REPLACES, so the paging state of the statement before it cannot bleed
+   * into the one after it: a tab that had scrolled to offset 200 and then ran something
+   * else must not ask that new statement for row 201.
+   */
+  test("a new query resets the paging state the previous one left", async () => {
+    const tabWithResults = createTab({
+      result: {
+        ...mockQueryResult,
+        rows: [{ id: 1 }, { id: 2 }],
+        pagination: { limit: 50, offset: 150, hasMore: true, totalReturned: 2, wasLimited: true },
+      },
+      allRows: [{ id: 1 }, { id: 2 }],
+      currentOffset: 200,
+    });
+    const { tabs, setTabs } = mutableTabs([tabWithResults]);
+    mockGlobalFetch({
+      "/api/db/query": {
+        ok: true,
+        json: {
+          rows: [{ id: 9 }],
+          fields: ["id"],
+          rowCount: 1,
+          executionTime: 5,
+          pagination: { limit: 500, offset: 0, hasMore: false, totalReturned: 1, wasLimited: true },
+        },
+      },
+    });
+    const params = createDefaultParams({ tabs, currentTab: tabWithResults, setTabs });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery("SELECT * FROM orders", "tab-1");
+    });
+
+    expect(tabs[0].result!.rows).toHaveLength(1);
+    expect(tabs[0].allRows).toHaveLength(1);
+    expect(tabs[0].currentOffset).toBe(1);
+    expect(tabs[0].resultQuery).toBe("SELECT * FROM orders");
+  });
+
   // ── setBottomPanelMode changes mode ────────────────────────────────────────
 
   test("setBottomPanelMode changes mode", () => {
@@ -733,6 +1236,128 @@ describe("useQueryExecution", () => {
       (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
     );
     expect(singleCall).toBeDefined();
+  });
+
+  test("executeQuery keeps a PromQL buffer on /api/db/query, semicolons and all (#1085)", async () => {
+    // A PromQL text is ONE expression, and `#` starts a comment in it. Under the connection's SQL
+    // grammar (postgres here) the `;` inside the comment below separates two statements, so a
+    // splitter that ran would send the comment's first half on its own and the rest as a second
+    // statement. `dialectIsSql` keeps it off for every declared language but SQL.
+    const fetchMock = mockGlobalFetch({
+      "/api/db/multi-query": { ok: true, json: mockQueryResult },
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const buffer = "# rate over five minutes; per second\nrate(prometheus_http_requests_total[5m])";
+    const params = createDefaultParams({
+      metadata: {
+        ...mockMetadata,
+        capabilities: {
+          ...mockMetadata.capabilities,
+          queryLanguage: "promql",
+          supportsExplain: false,
+          explainFormat: undefined,
+        },
+      },
+    });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery(buffer);
+    });
+
+    const multiCall = fetchMock.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/multi-query"),
+    );
+    expect(multiCall).toBeUndefined();
+    const singleCall = fetchMock.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
+    );
+    expect(singleCall).toBeDefined();
+    expect(JSON.parse(singleCall![1]!.body as string).sql).toBe(buffer);
+  });
+
+  test("executeQuery keeps a Kafka buffer on /api/db/query whole, semicolons and all (#1088)", async () => {
+    // A Kafka tab's whole buffer is ONE read request, which the provider parses as JSON. Under the
+    // connection's SQL grammar the `;` below separates two statements, so a splitter that ran
+    // would send each object on its own, two reads the user never wrote as one request.
+    // `dialectIsSql` keeps it off: the declared language is JSON, whatever its dialect.
+    const fetchMock = mockGlobalFetch({
+      "/api/db/multi-query": { ok: true, json: mockQueryResult },
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const buffer = '{"topic": "orders", "from": "latest"};\n{"topic": "payments", "from": "latest"}';
+    // The premise: the splitter the hook asks does read this buffer as two statements.
+    expect(isMultiStatement(buffer, resolveSqlGrammar(mockConnection.type))).toBe(true);
+    const params = createDefaultParams({
+      metadata: {
+        ...mockMetadata,
+        capabilities: {
+          ...mockMetadata.capabilities,
+          queryLanguage: "json",
+          queryDialect: "kafka",
+          supportsExplain: false,
+          explainFormat: undefined,
+        },
+      },
+    });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery(buffer);
+    });
+
+    const multiCall = fetchMock.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/multi-query"),
+    );
+    expect(multiCall).toBeUndefined();
+    const singleCall = fetchMock.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
+    );
+    expect(singleCall).toBeDefined();
+    expect(JSON.parse(singleCall![1]!.body as string).sql).toBe(buffer);
+  });
+
+  test("the control: the same buffer on a SQL declaration IS split, so the language decides", async () => {
+    // The multi-statement answer shape the test `executeQuery uses /api/db/multi-query for
+    // multi-statement queries` above uses, since this buffer does take that route.
+    const multiResult = {
+      multiStatement: true,
+      executedCount: 2,
+      statementCount: 2,
+      hasError: false,
+      rows: [{ id: 1 }],
+      fields: ["id"],
+      rowCount: 1,
+      executionTime: 20,
+      statements: [
+        { index: 0, status: "success", rowCount: 1 },
+        { index: 1, status: "success", rowCount: 0 },
+      ],
+    };
+    const fetchMock = mockGlobalFetch({
+      "/api/db/multi-query": { ok: true, json: multiResult },
+      "/api/db/query": { ok: true, json: mockQueryResult },
+    });
+    const buffer = "# rate over five minutes; per second\nrate(prometheus_http_requests_total[5m])";
+    const params = createDefaultParams({
+      metadata: {
+        ...mockMetadata,
+        capabilities: { ...mockMetadata.capabilities, supportsExplain: false, explainFormat: undefined },
+      },
+    });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      await result.current.executeQuery(buffer);
+    });
+
+    const multiCall = fetchMock.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/multi-query"),
+    );
+    expect(multiCall).toBeDefined();
   });
 
   // ── executeQuery uses /api/db/transaction when transactionActive ───────────
@@ -1473,6 +2098,36 @@ describe("useQueryExecution", () => {
     expect(queryCalls.length).toBe(0);
   });
 
+  /**
+   * The guard restates the condition the rendered control already enforces: the button is
+   * `disabled={isLoadingMore}` in `StatsBar` and the flag is wired end to end. It reads
+   * render state, not a ref, so it is a second line behind that control rather than a
+   * replacement for it - which is what this asserts, and all it asserts. The embedded
+   * adapter has the mirror of this.
+   */
+  test("handleLoadMore does nothing while a page is already in flight", async () => {
+    const fetchMock = mockGlobalFetch({});
+    const tabLoading = createTab({
+      result: {
+        ...mockQueryResult,
+        pagination: { limit: 500, offset: 0, hasMore: true, totalReturned: 2, wasLimited: true },
+      },
+      isLoadingMore: true,
+    });
+    const params = createDefaultParams({ tabs: [tabLoading], currentTab: tabLoading });
+
+    const { result } = renderHook(() => useQueryExecution(params));
+
+    await act(async () => {
+      result.current.handleLoadMore();
+    });
+
+    const queryCalls = fetchMock.mock.calls.filter(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/db/query"),
+    );
+    expect(queryCalls.length).toBe(0);
+  });
+
   // ── handleUnlimitedQuery executes pending unlimited query ──────────────
 
   test("handleUnlimitedQuery executes pending unlimited query", async () => {
@@ -1527,7 +2182,8 @@ describe("useQueryExecution", () => {
 
   // ── "Query was cancelled" message handling ─────────────────────────────
 
-  test('shows cancellation toast for "Query was cancelled" error message', async () => {
+  test('a "Query was cancelled" message without the code is an error, not a cancellation', async () => {
+    // No server path sends this: a cancel is always the 499 and its code below.
     mockGlobalFetch({
       "/api/db/query": { ok: false, status: 500, json: { error: "Query was cancelled by user" } },
     });
@@ -1539,8 +2195,8 @@ describe("useQueryExecution", () => {
       await result.current.executeQuery("SELECT pg_sleep(60)");
     });
 
-    // Should show cancellation toast, not generic error
-    expect(mockToastSuccess).toHaveBeenCalled();
+    expect(mockToastError).toHaveBeenCalledWith("Query Error", { description: "Query was cancelled by user" });
+    expect(mockToastSuccess).not.toHaveBeenCalled();
   });
 
   test("handles QUERY_CANCELLED response code from API", async () => {
@@ -2853,8 +3509,8 @@ describe("useQueryExecution", () => {
   });
 
   /**
-   * A statement an agent run handed to the editor (§2.1, §2.5 of
-   * `docs/AGENT_ANALYST_DESIGN.md`, as reshaped by the #373 review).
+   * A statement an agent run handed to the editor (see the "Handing the answer to the
+   * editor (auto-execute)" section of `docs/AGENT.md`, as reshaped by the #373 review).
    *
    * The BOUNDARY is the feature here, and the caps ride on it. This path used to call
    * `executeQuery`, which posts to `/api/db/query` — the editor's ordinary read-WRITE

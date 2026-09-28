@@ -7,6 +7,8 @@
 > architecture, usage, and tests. If you are reading the code, extending Druid support, or authoring
 > a new provider over HTTP, start here.
 
+`DB_HTTP_BLOCK_PRIVATE_HOSTS=true` blocks loopback, private, link-local and other non-public HTTP destinations; it is off by default so local connections work.
+
 | | |
 |---|---|
 | **Status** | Implemented & shipped |
@@ -810,6 +812,22 @@ global `fetch` cannot carry a custom CA or relax verification without an undici 
 fails verification; one with a publicly-trusted certificate works. Honouring them needs the
 `node:https` path Couchbase already has, which is a follow-up rather than a limitation of the scheme.
 
+
+### 4.4 Endpoint validation and redirects
+
+`host` and `port` are validated when the transport is constructed, which happens in `connect()`, so
+a bad value fails Test Connection and never a capability read. A host must be a hostname, an IPv4
+address or an IPv6 address (bracketed or not), and a port must be an integer from 1 to 65535.
+Anything else is a `DatabaseConfigError` that names the field and does not repeat the value.
+Every request URL is built by the shared [`endpoint.ts`](../../src/lib/db/http/endpoint.ts) with
+`URL` and `URLSearchParams` and checked against the intended hostname, port and path before it is
+sent, so no value can move a request to another path or another server. A scheme's default port
+(80 for `http`, 443 for `https`) is left out of the URL the way `URL` serializes it.
+
+Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx answer becomes a
+`ConnectionError` naming the status and only the origin of its `Location`, since a followed
+redirect would take the Basic credential and the statement to wherever the server pointed.
+
 ---
 
 ## 5. Query interface
@@ -883,7 +901,8 @@ SELECT id FROM libredb_demo ORDER BY id LIMIT 2
 Ordering by `__time` works, and ordering *anything* works once there is a `GROUP BY`, because that is
 an aggregation rather than a scan. Sort in the results grid, add a `GROUP BY`, or order by `__time`.
 The provider's own generated SQL is safe by construction: `generateTableQuery` emits
-`SELECT * FROM libredb_demo LIMIT 50;` with **no** `ORDER BY`, and no provider-generated statement may
+`SELECT * FROM "libredb_demo";` with **no** `ORDER BY` — and, since #816, with no row bound either, the
+preview cap having moved into the `limit` execution option. No provider-generated statement may
 ever add one to a scan — ordering by the primary key, the obvious thing for a generator to do, would
 break every datasource browse.
 
@@ -1235,6 +1254,14 @@ every column including `__time`, are all stated once (§6 above).
 two reasons the object surface gives. Zero columns **raises**: every object of every declared kind has at
 least one column, so an empty answer means the object is not there under that name in this schema.
 
+All three kinds declare `hasColumns`, so every object row in the tree expands and there is no kind
+here whose `describeObject` answers `columns: []` (#789). That makes Druid one of the three engines
+whose conformance expectation must set `noAbstainingKinds`: the invariant's negative direction, which
+asserts that a kind declaring nothing answers no column, iterates zero times on this provider, and the
+positive direction is the only one carrying it. `lookup` is the case worth naming: it is
+`role: "config"` and it answers `k` and `v`, which is why the twisty is decided by the declaration and
+never by the role.
+
 `DatabaseObject` carries no `rowCount` and no `sizeBytes` here. Both would have to come from
 `sys.segments`, and nothing in this surface reads `sys` on purpose: a cluster running
 `druid-basic-security` grants the `sys` schema separately from the catalogs, so a row count taken
@@ -1569,6 +1596,7 @@ Both halves of that are real constraints, not scope cuts made lightly:
 | `supportsExternalQueryLimiting` | `true` | `LIMIT n` / `LIMIT n OFFSET m` are both correct Druid SQL |
 | `supportsCreateTable` | **`false`** | `CREATE` is not in the grammar; a datasource is created by ingestion ([§3.11](#311-the-three-false-capabilities-are-each-impossible-not-merely-unimplemented)) |
 | `supportsInlineRowEdit` | **`false`** | `UPDATE t SET ...` answers `Unsupported SQL statement [UPDATE]`; Druid SQL has no row-level DML ([§5.5](#55-druid-sql-cannot-write-and-the-server-says-so-clearly)) |
+| `supportsResultPagination` | **`true`** | Druid SQL takes both clauses; the shared limiter emits `LIMIT n OFFSET m` (#816) |
 | `supportsTransactions` | **`false`** | Druid SQL has no DML at all, so there is nothing for a transaction to hold; the trio and SANDBOX are withheld instead of answering HTTP 400 (#464) |
 | `declaresForeignKeys` | **`false`** | Druid has no constraints — no primary key either — and a datasource cannot reference another, so an empty relations list is the engine and not the schema |
 | `supportsMaintenance` | **`false`** | Nothing in `MaintenanceType` is reachable from Druid SQL ([§8](#8-maintenance)) |
@@ -1577,6 +1605,7 @@ Both halves of that are real constraints, not scope cuts made lightly:
 | `defaultPort` | `8888` | The Router. `8082` (Broker) is equally valid ([§3.3](#33-router-8888-or-broker-8082--both-work-identically)) |
 | `schemaRefreshPattern` | `\b(INSERT\|REPLACE)\b` | The only statements that could change a datasource — and the native engine rejects both, so in practice a query never refreshes the schema, which is correct |
 | `containerLevels` | one `schema` level | `INFORMATION_SCHEMA.SCHEMATA` reports one catalog, always `druid`, so there is no second level to add ([§6.1](#61-the-object-surface-789)) |
+| `containerPathShapes` | `exact` | Only `[schema]` addresses a container, so a shorter or a longer path is refused, by the object routes over HTTP and by this provider directly (#1147) |
 | `objectKinds` | `datasource`, `lookup`, `system_table` | And five kinds ABSENT rather than declared and zero, because `CREATE` is not in the grammar in any form ([§6.1](#61-the-object-surface-789)) |
 
 ### `getLabels()` ([`index.ts`](../../src/lib/db/providers/sql/druid/index.ts))
@@ -1959,4 +1988,4 @@ cancellation as unsupported because the provider exposes no `cancelQuery`
 - Metadata tables (`INFORMATION_SCHEMA`, `sys`): <https://druid.apache.org/docs/latest/querying/sql-metadata-tables>
 - `EXPLAIN PLAN FOR`: <https://druid.apache.org/docs/latest/querying/sql-translation>
 - Native batch ingestion: <https://druid.apache.org/docs/latest/ingestion/native-batch>
-- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [MongoDB](./mongodb.md) · [Couchbase](./couchbase.md) · [ClickHouse](./clickhouse.md) · [Apache Trino](./trino.md) · [Redis](./redis.md) · [LibreDB](./libredb.md)
+- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [MongoDB](./mongodb.md) · [Couchbase](./couchbase.md) · [ClickHouse](./clickhouse.md) · [Trino](./trino.md) · [Redis](./redis.md) · [LibreDB](./libredb.md)

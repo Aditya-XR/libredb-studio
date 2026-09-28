@@ -31,7 +31,11 @@
  *   that publishes no version is not a broken one.
  */
 
+import { endpointUrl, type HttpOrigin, httpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
+import { DatabaseConfigError } from "@/lib/db/errors";
+import { httpTransportFetch } from "@/lib/db/http/egress-policy";
 import type { DatabaseConnection } from "@/lib/db/types";
+import { isSQLiteInt64Digits } from "../sqlite-int64";
 import {
   type LibSQLBatchOutcome,
   type LibSQLExecuteOptions,
@@ -141,10 +145,6 @@ function parseJson(text: string): unknown {
   }
 }
 
-function formatHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-}
-
 /**
  * An integer the protocol sent as a decimal string, as a number where a double
  * holds it exactly and as that same string where it does not.
@@ -199,13 +199,67 @@ function decodeValue(raw: unknown): unknown {
 }
 
 /**
+ * Sending one back
+ * ----------------
+ * `decodeInteger` above is lossy in ONE direction that matters: `9007199254740993`
+ * the integer and `'9007199254740993'` the text both leave this transport as the
+ * same JavaScript string, so a value arriving in a bind carries no clue which it
+ * was. SQLite settles it by the COLUMN's affinity, and only for a column that HAS
+ * one: measured 2026-09-18 against sqld 0.24.33
+ * (`ghcr.io/tursodatabase/libsql-server:v0.24.33`, SQLite 3.45.1), on a row whose
+ * key is 9007199254740993 -
+ *
+ *   column declared   | bound as text | bound as an integer
+ *   INTEGER / NUMERIC |       matches |             matches
+ *   TEXT              |       matches |             matches
+ *   BLOB / undeclared |   NO MATCH    |             matches
+ *
+ * INTEGER and NUMERIC affinity convert the text to a number before comparing and
+ * TEXT affinity converts the integer to text, so those answer the same either way.
+ * A column declared BLOB or declared NOTHING has NO affinity: SQLite compares the
+ * operands as they stand, a text is never equal to an integer, and the row the grid
+ * just read cannot be found again - `UPDATE ... WHERE id = ?` reports 0 rows changed
+ * and the editor tells the user nothing happened. Measured here before the fix:
+ * INTEGER 1 row, TEXT 1 row, BLOB 0 rows, undeclared 0 rows.
+ *
+ * Note what this is NOT: unlike bun:sqlite, the libSQL read side never rounds - the
+ * neighbouring row is never edited on either side of this change. Hrana quotes its
+ * integers, so the damage here is a silent no-op, not a wrong write.
+ *
+ * The affinity is not knowable here - a bind is a value, with no column attached,
+ * and the protocol never names the column an operand belongs to - so the seam
+ * answers the question it CAN answer exactly: it accepts back precisely what it
+ * handed out. `decodeInteger` emits these digits for one input only, a 64-bit
+ * integer outside the safe range, so reading them back as that integer is its exact
+ * inverse and every other string is left alone.
+ *
+ * WHICH strings those are is not restated here: `../sqlite-int64.ts` states it once,
+ * with the full list of shapes that stay text, and the SQLite driver asks the same
+ * function. Restating it in each provider is how the rule drifts - the two copies this
+ * replaced already disagreed in prose about exponent form.
+ *
+ * What that costs, measured and accepted: in a column with NO affinity that
+ * genuinely stores this shape as TEXT, the bind now misses where it used to match.
+ * That is the same ambiguity read from the other end, it cannot be resolved without
+ * the affinity, and the integer reading is the one these digits exist for. A
+ * TEXT-declared column is NOT affected - TEXT affinity converts the bind back to
+ * text - so an ordinary textual key still matches as text.
+ *
+ * This is the same rule `toSQLiteBindValue` applies in `sqlite-driver.ts`, by
+ * design: the two providers hand out the same shape, so they must accept the same
+ * shape back. It is one rule in one file now rather than a rule and its copy -
+ * `tests/unit/db/sqlite-int64.test.ts` fails the build if a provider grows its own.
+ */
+
+/**
  * One JavaScript parameter as a wire value.
  *
  * `bigint` is encoded from its own decimal form rather than through `Number`, for
  * the reason `decodeInteger` states in the other direction. A boolean becomes 1
  * or 0 because that is what SQLite stores - it has no boolean type - and a `Date`
  * becomes an ISO 8601 string because that is the only form SQLite's own date
- * functions read.
+ * functions read. A STRING carrying the digits of a past-2^53 integer goes back as
+ * the integer it was read as, for the reason above; every other string is text.
  */
 function encodeValue(param: unknown): HranaValue {
   if (param === null || param === undefined) return { type: "null" };
@@ -216,6 +270,9 @@ function encodeValue(param: unknown): HranaValue {
   }
   if (param instanceof Uint8Array) return { type: "blob", base64: Buffer.from(param).toString("base64") };
   if (param instanceof Date) return { type: "text", value: param.toISOString() };
+  // Only a real string, never `String(param)` of some other object: the read side
+  // hands out strings and nothing else, so nothing else can be a value it emitted.
+  if (typeof param === "string" && isSQLiteInt64Digits(param)) return { type: "integer", value: param };
   return { type: "text", value: String(param) };
 }
 
@@ -322,13 +379,13 @@ function httpError(status: number, text: string): LibSQLTransportError {
 export class LibSQLHranaTransport implements LibSQLTransport {
   public readonly kind = "hrana-http" as const;
 
-  private readonly origin: string;
+  private readonly origin: HttpOrigin;
   private readonly authorization: string | undefined;
 
   constructor(config: DatabaseConnection) {
     const secure = config.ssl !== undefined && config.ssl.mode !== "disable";
     const port = config.port ?? (secure ? DEFAULT_TLS_PORT : DEFAULT_PORT);
-    this.origin = `${secure ? "https" : "http"}://${formatHost(config.host ?? DEFAULT_HOST)}:${port}`;
+    this.origin = httpOrigin(secure ? "https" : "http", config.host ?? DEFAULT_HOST, port);
     // The credential is a token, not a password: libSQL has no user names, and
     // Turso mints a JWT per database. A connection with no token sends no header,
     // which is what an unauthenticated local sqld expects - sending an empty
@@ -385,14 +442,17 @@ export class LibSQLHranaTransport implements LibSQLTransport {
 
   public async serverVersion(): Promise<string | null> {
     try {
-      const response = await fetch(`${this.origin}${VERSION_PATH}`, {
+      const response = await httpTransportFetch(endpointUrl(this.origin, VERSION_PATH), {
         method: "GET",
         headers: this.headers(),
+        // Not followed, like every other request: a 3xx is one more "no version".
+        redirect: "manual",
       });
       if (!response.ok) return null;
       const text = (await response.text()).trim();
       return text === "" ? null : text;
-    } catch {
+    } catch (error) {
+      if (error instanceof DatabaseConfigError) throw error;
       // A deployment without the route, and a deployment that could not be
       // reached at all, are both "no version to show" for this call. The version
       // panel's connection has already been established by the time it runs, so a
@@ -413,23 +473,28 @@ export class LibSQLHranaTransport implements LibSQLTransport {
   }
 
   private async send(path: string, body: string, timeoutMs?: number): Promise<string> {
+    const url = endpointUrl(this.origin, path);
     let response: Response;
     try {
-      response = await fetch(`${this.origin}${path}`, {
+      response = await httpTransportFetch(url, {
         method: "POST",
         headers: this.headers(),
         body,
+        // A followed redirect would carry the token to wherever it points.
+        redirect: "manual",
         // A statement that hangs would otherwise hang the request forever: fetch
         // has no default timeout. The signal covers the connect and the read,
         // which a timer wrapped around the promise would not.
         signal: timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs),
       });
     } catch (cause) {
+      if (cause instanceof DatabaseConfigError) throw cause;
       const reason = cause instanceof Error ? cause.message : String(cause);
       throw new LibSQLTransportError(`libSQL request failed: ${reason}`, 0);
     }
 
     const text = await response.text();
+    rejectRedirect(response, url);
     if (!response.ok) throw httpError(response.status, text);
     return text;
   }

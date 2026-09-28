@@ -7,11 +7,12 @@
  * flag is off.
  */
 
-import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, mock, spyOn, beforeEach, afterEach } from "bun:test";
 import { configureAgentModel, restoreAgentModel } from "../../helpers/agent-model-env";
 import { createMockRequest, parseResponseJSON } from "../../helpers/mock-next";
 import { AGENT_ENABLED_ENV } from "@/lib/agent/config";
 import { AgentRunServiceError } from "@/lib/agent/run-service";
+import { logger } from "@/lib/logger";
 import { clearRateLimitState } from "@/lib/api/rate-limit";
 import * as realAuth from "@/lib/auth";
 import * as realSeed from "@/lib/seed/resolve-connection";
@@ -120,6 +121,18 @@ const mockCancel = mock(async (runId: string) => {
   return { record, cancellationRequested: true };
 });
 
+const mockPause = mock(async (runId: string) => {
+  const record = runs.get(runId);
+  if (record === undefined) return null;
+  return { ...record, status: "paused" };
+});
+
+const mockUnpause = mock(async (runId: string) => {
+  const record = runs.get(runId);
+  if (record === undefined) return null;
+  return { ...record, status: "running" };
+});
+
 const mockStream = mock(
   async () =>
     new ReadableStream({
@@ -153,6 +166,8 @@ function installMocks(): void {
       status: mockStatus,
       cancel: mockCancel,
       stream: mockStream,
+      pause: mockPause,
+      unpause: mockUnpause,
     })),
     driveAgentRun: mockDriveAgentRun,
     // Listed although this file's routes never call it: the replacement is
@@ -164,7 +179,7 @@ function installMocks(): void {
 installMocks();
 
 const { POST } = await import("@/app/api/agent/runs/route");
-const { GET, DELETE } = await import("@/app/api/agent/runs/[runId]/route");
+const { GET, DELETE, PATCH } = await import("@/app/api/agent/runs/[runId]/route");
 const { GET: STREAM } = await import("@/app/api/agent/runs/[runId]/stream/route");
 
 function params(runId: string): { params: Promise<{ runId: string }> } {
@@ -192,6 +207,8 @@ beforeEach(() => {
   mockAdmitAgentModel.mockImplementation(async () => ({ kind: "allowed", protocol: "native" }));
   mockStart.mockClear();
   mockResolveConnection.mockClear();
+  mockPause.mockClear();
+  mockUnpause.mockClear();
 });
 
 afterEach(() => {
@@ -1144,6 +1161,143 @@ describe("DELETE /api/agent/runs/[runId]", () => {
 
     expect(res.status).toBe(404);
     expect(mockCancel).not.toHaveBeenCalled();
+  });
+});
+
+describe("PATCH /api/agent/runs/[runId]", () => {
+  test("pauses a run", async () => {
+    const res = await PATCH(
+      createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "pause" } }),
+      params("arun_1"),
+    );
+    const body = await parseResponseJSON<{ status: string }>(res);
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("paused");
+    expect(mockPause).toHaveBeenCalledWith("arun_1");
+  });
+
+  test("resumes a run and drives it again in this process", async () => {
+    const res = await PATCH(
+      createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "resume" } }),
+      params("arun_1"),
+    );
+    const body = await parseResponseJSON<{ status: string }>(res);
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("running");
+    expect(mockUnpause).toHaveBeenCalledWith("arun_1");
+    // The whole point of Resume: the run is picked up now, not at the reaper's
+    // staleness threshold.
+    expect(mockDriveAgentRun).toHaveBeenCalledWith("arun_1");
+  });
+
+  test("a resume whose re-drive fails logs the failure without failing the resume", async () => {
+    mockDriveAgentRun.mockRejectedValueOnce(new Error("model unreachable"));
+    const error = spyOn(logger, "error").mockImplementation(() => {});
+    try {
+      const res = await PATCH(
+        createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "resume" } }),
+        params("arun_1"),
+      );
+      const body = await parseResponseJSON<{ status: string }>(res);
+      // The re-drive is fire-and-forget: its failure lands on the server log, not on
+      // the response, which already answered from the ledger.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(res.status).toBe(200);
+      expect(body.status).toBe("running");
+      expect(mockDriveAgentRun).toHaveBeenCalledWith("arun_1");
+      expect(error).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  test("a resume that lost the race to the run's end answers it without driving an ended run", async () => {
+    // `unpause` answered a terminal record — another writer ended the run between the
+    // render and the click. That is a normal answer (item 5), not a run to drive:
+    // driving it would resolve a connection and build a provider for a run already over.
+    mockUnpause.mockResolvedValueOnce(fakeRun({ status: "cancelled" }));
+
+    const res = await PATCH(
+      createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "resume" } }),
+      params("arun_1"),
+    );
+    const body = await parseResponseJSON<{ status: string }>(res);
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("cancelled");
+    expect(mockUnpause).toHaveBeenCalledWith("arun_1");
+    expect(mockDriveAgentRun).not.toHaveBeenCalled();
+  });
+
+  test("a pause that fails for a reason the service cannot name still answers 500, not 409", async () => {
+    mockPause.mockRejectedValueOnce(new Error("ledger corrupted"));
+
+    const res = await PATCH(
+      createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "pause" } }),
+      params("arun_1"),
+    );
+
+    expect(res.status).toBe(500);
+  });
+
+  test("refuses an action the service has no words for", async () => {
+    const res = await PATCH(
+      createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "explode" } }),
+      params("arun_1"),
+    );
+
+    expect(res.status).toBe(400);
+  });
+
+  test("refuses a body that is not JSON", async () => {
+    const req = new Request("http://localhost:3000/api/agent/runs/arun_1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: "not-json",
+    });
+
+    const res = await PATCH(req, params("arun_1"));
+
+    expect(res.status).toBe(400);
+  });
+
+  test("reports a service refusal as a 409, never a 500", async () => {
+    mockPause.mockRejectedValueOnce(new AgentRunServiceError("RUN_NOT_RUNNING", "the run is not running"));
+
+    const res = await PATCH(
+      createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "pause" } }),
+      params("arun_1"),
+    );
+
+    expect(res.status).toBe(409);
+  });
+
+  test("refuses to pause a run that was already asked to stop, with a 409", async () => {
+    mockPause.mockRejectedValueOnce(
+      new AgentRunServiceError("RUN_CANCELLATION_PENDING", "the run has a pending cancellation"),
+    );
+
+    const res = await PATCH(
+      createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "pause" } }),
+      params("arun_1"),
+    );
+
+    expect(res.status).toBe(409);
+  });
+
+  test("another session cannot pause the run", async () => {
+    mockGetSession.mockResolvedValue({ role: "user", username: "grace" });
+
+    const res = await PATCH(
+      createMockRequest("/api/agent/runs/arun_1", { method: "PATCH", body: { action: "pause" } }),
+      params("arun_1"),
+    );
+
+    expect(res.status).toBe(404);
+    expect(mockPause).not.toHaveBeenCalled();
   });
 });
 

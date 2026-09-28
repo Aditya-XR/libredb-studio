@@ -222,6 +222,8 @@ export class DruidProvider extends SQLBaseProvider {
       // rejected with `Unsupported SQL statement [UPDATE]`. Druid SQL has no
       // row-level DML at all - a datasource changes through ingestion.
       supportsInlineRowEdit: false,
+      // `LIMIT n OFFSET m` from the shared limiter; Druid SQL accepts both clauses.
+      supportsResultPagination: true,
       // Druid SQL has no DML at all, so nothing to wrap.
       supportsTransactions: false,
       // Druid SQL has no constraints — no primary key either, which is why
@@ -253,6 +255,9 @@ export class DruidProvider extends SQLBaseProvider {
       // trigger - because `CREATE` is not in Druid's grammar in any form, so the tree
       // draws no folder for any of them.
       containerLevels: DRUID_CONTAINER_LEVELS,
+      // Only the declared depth is an address: a partial path would leave a level unbound and
+      // answer an empty folder. Read through `acceptedContainerShapes()` (#1147).
+      containerPathShapes: "exact",
       objectKinds: DRUID_OBJECT_KINDS,
     };
   }
@@ -356,7 +361,7 @@ export class DruidProvider extends SQLBaseProvider {
     const mapped = this.mapDruidError(error);
     // A rejected credential is not a connectivity problem, and saying so would
     // send the user to check their host.
-    if (mapped instanceof AuthenticationError) return mapped;
+    if (mapped instanceof AuthenticationError || mapped instanceof DatabaseConfigError) return mapped;
 
     return new ConnectionError(
       `Failed to connect to Druid: ${mapped.message}`,

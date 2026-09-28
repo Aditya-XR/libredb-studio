@@ -460,7 +460,7 @@ describe("the embedded workspace reads an object's source through the host", () 
     renderWorkspace(treeReader());
     await openTree();
     fireEvent.contextMenu(row(/orders/));
-    expect(menuItems()).toEqual(["Generate Query", "Profile Table", "Generate Code"]);
+    expect(menuItems()).toEqual(["Generate Query", "Generate Count Query", "Profile Table", "Generate Code"]);
   });
 
   test("a source-bearing routine row draws NO menu at all for a host that implements nothing", async () => {
@@ -512,7 +512,7 @@ describe("the embedded workspace reads an object's source through the host", () 
      */
     await userEvent.click(row(/orders/));
     await waitFor(() => expect(tabNames()).toEqual(["Query 1", "orders"]));
-    await waitFor(() => expect(executed).toEqual(["SELECT * FROM app.orders LIMIT 50;"]));
+    await waitFor(() => expect(executed).toEqual(["SELECT * FROM app.orders;"]));
     expect(screen.getByTestId("query-editor")).toBeTruthy();
     expect(screen.queryByTestId("source-editor")).toBeNull();
     // The negative that matters: activating a relation asks the host for no definition.
@@ -523,7 +523,7 @@ describe("the embedded workspace reads an object's source through the host", () 
     await waitFor(() => expect(screen.getByTestId("source-editor")).toBeTruthy());
     expect(asked).toEqual([["host-conn-1", ["app", "order_total(integer)"], "function"]]);
     // And the routine branch runs nothing: the statement list has not moved.
-    expect(executed).toEqual(["SELECT * FROM app.orders LIMIT 50;"]);
+    expect(executed).toEqual(["SELECT * FROM app.orders;"]);
   });
 
   test("a Source tab shows no Run toolbar and no query editor, rather than a disabled one", async () => {
@@ -2053,7 +2053,7 @@ describe("the embedded shell refuses a tab-opening gesture while a host apply is
     clickRowInDom("orders");
 
     await waitFor(() => expect(tabNamesInDom()).toEqual(["Query 1", "Source: app.order_total(integer)", "orders"]));
-    await waitFor(() => expect(executed).toEqual(["SELECT * FROM app.orders LIMIT 50;"]));
+    await waitFor(() => expect(executed).toEqual(["SELECT * FROM app.orders;"]));
   });
 
   test("a SECOND routine's row opens no Source tab while the apply is in flight", async () => {
@@ -2085,7 +2085,10 @@ describe("the embedded shell refuses a tab-opening gesture while a host apply is
     );
   });
 
-  test("the row menu's Generate Query is refused too, on the same rule and with the same words", async () => {
+  test.each([
+    { action: "Generate Query", tab: "Query: orders" },
+    { action: "Generate Count Query", tab: "Count: orders" },
+  ])("the row menu's $action is refused while an apply is pending", async ({ action, tab }) => {
     /*
      * THE FOURTH DOOR. `objectActions.onGenerateSelect` is a row action on the SAME tree the
      * activation above drives, and `tabMgr.handleGenerateSelect` ends with `setActiveTabId(newId)`
@@ -2096,7 +2099,7 @@ describe("the embedded shell refuses a tab-opening gesture while a host apply is
     const executed: string[] = [];
     await confirmAndHold(executed);
 
-    clickRowMenuItemInDom("orders", "Generate Query");
+    clickRowMenuItemInDom("orders", action);
 
     expect(tabNamesInDom()).toEqual(["Query 1", "Source: app.order_total(integer)"]);
     expect(screen.getByTestId("object-source-apply-dialog")).toBeTruthy();
@@ -2117,9 +2120,10 @@ describe("the embedded shell refuses a tab-opening gesture while a host apply is
     await click("object-source-apply-cancel");
     await waitFor(() => expect(screen.queryByTestId("object-source-apply-dialog")).toBeNull());
 
-    clickRowMenuItemInDom("orders", "Generate Query");
+    clickRowMenuItemInDom("orders", action);
 
-    await waitFor(() => expect(tabNames()).toEqual(["Query 1", "Source: app.order_total(integer)", "Query: orders"]));
+    await waitFor(() => expect(tabNames()).toEqual(["Query 1", "Source: app.order_total(integer)", tab]));
+    expect(executed).toEqual([]);
   });
 
   test("the row menu's View Source is refused too, on the same rule and with the same words", async () => {

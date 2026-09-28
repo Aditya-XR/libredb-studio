@@ -299,6 +299,36 @@ describe("BottomPanel", () => {
     expect(emptyText).not.toBeNull();
   });
 
+  /**
+   * A failed run shows its failure where the rows were, and in both shells: the embedded
+   * workspace mounts no Toaster, so this block is the only failure signal a host's user
+   * gets. It replaces the empty state too, which would otherwise read as "nothing ran".
+   */
+  test("a failed run renders its error in place of the grid", () => {
+    const props = createDefaultProps({
+      mode: "results",
+      currentTab: {
+        id: "tab-1",
+        name: "Query 1",
+        query: "SELEC * FROM x",
+        result: null,
+        runError: 'near "SELEC": syntax error',
+        isExecuting: false,
+        type: "sql" as const,
+      },
+    });
+    const { getByTestId, queryByTestId, queryByText } = render(
+      <BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />,
+    );
+
+    expect(getByTestId("run-failure").textContent).toContain("The query failed.");
+    expect(getByTestId("run-failure-message").textContent).toBe('near "SELEC": syntax error');
+    expect(queryByTestId("resultsgrid")).toBeNull();
+    expect(queryByText("Execute a query or check history")).toBeNull();
+    // Nothing to export: the rows that were on screen belonged to another statement.
+    expect(queryByText("Export")).toBeNull();
+  });
+
   test("tab click fires onSetMode with correct mode", () => {
     const onSetMode = mock(() => {});
     const props = createDefaultProps({ onSetMode });
@@ -335,6 +365,105 @@ describe("BottomPanel", () => {
     const grid = queryByTestId("resultsgrid");
     expect(grid).not.toBeNull();
     expect(grid!.textContent).toBe("ResultsGrid");
+  });
+
+  /**
+   * THE PAGINATION SEAM (#816).
+   *
+   * This panel is the single place where a provider's `supportsResultPagination`, the
+   * statement the rows came from and the dialect it is read under reach `ResultsGrid`,
+   * and both shells go through it: `Studio` and `StudioWorkspace` each render this
+   * component. Every other test in this change measures one side of the seam — the
+   * providers declare the flag, `ResultsGrid` gates on a prop it is handed, `StatsBar`
+   * renders an offer it is handed — and none of them can see the wiring between them.
+   *
+   * Measured: with `supportsResultPagination` replaced by a literal `false` at
+   * `BottomPanel.tsx:574` the whole suite stayed green, 18678 tests, because those lines
+   * execute either way and 100% line coverage cannot tell a right value from a wrong one.
+   * The Load More control could be dead on every engine, or offered on Cassandra, and
+   * nothing would say so. That is acceptance criteria 1 and 4, so they are asserted here.
+   */
+  describe("what the grid is told about paging these rows (#816)", () => {
+    const PAGED_RESULT = {
+      rows: [{ id: 1 }],
+      fields: ["id"],
+      rowCount: 1,
+      executionTime: 3,
+      pagination: { limit: 50, offset: 0, hasMore: true, totalReturned: 1, wasLimited: true },
+    };
+
+    function pagedProps(capabilities: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+      return createDefaultProps({
+        mode: "results",
+        activeConnection: { id: "c1", name: "conn", type: "postgres", createdAt: new Date(0) },
+        metadata: { capabilities },
+        currentTab: {
+          id: "tab-1",
+          name: "Query 1",
+          query: "SELECT * FROM orders WHERE id > 5",
+          resultQuery: "SELECT * FROM orders",
+          result: PAGED_RESULT,
+          isExecuting: false,
+          type: "sql" as const,
+        },
+        onLoadMore: mock(() => {}),
+        ...overrides,
+      });
+    }
+
+    test("the flag the grid gates on is the provider's own", () => {
+      const props = pagedProps({ supportsResultPagination: true });
+      render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+
+      expect(capturedResultsGridProps.supportsResultPagination).toBe(true);
+    });
+
+    test("a provider that cannot page hands down its false, not an absent flag", () => {
+      // Criterion 4. `false` and `undefined` render identically — the grid gates on
+      // `=== true` — so only reading the value back tells a provider that declared it
+      // cannot page from a panel that forgot to ask.
+      const props = pagedProps({ supportsResultPagination: false });
+      render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+
+      expect(capturedResultsGridProps.supportsResultPagination).toBe(false);
+    });
+
+    test("the ordering notice is read from the statement THESE rows came from, in its dialect", () => {
+      // `resultQuery` and not `query`: the editor buffer is rewritten on every keystroke,
+      // and the condition being stated is about the rows on screen (#881's rule).
+      const props = pagedProps({ supportsResultPagination: true });
+      render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+
+      expect(capturedResultsGridProps.resultQuery).toBe("SELECT * FROM orders");
+      expect(capturedResultsGridProps.databaseType).toBe("postgres");
+    });
+
+    /**
+     * The export dialog and the grid speak about the SAME offer.
+     *
+     * `hasMore` alone is not it. Since the preview cap left the SQL text, a 50-row table
+     * preview on Cassandra or Elasticsearch fills its bound exactly and the route answers
+     * `hasMore: true` — while those providers declare `supportsResultPagination: false`
+     * and the grid offers no control. The shortfall sentence would then tell the user to
+     * "load them first" about an action that exists nowhere in the product.
+     */
+    test.each([
+      [true, "More rows are still on the server — load them first to include them."],
+      [false, null],
+    ])("with paging %p the export dialog's shortfall follows the grid's offer", async (supported, shortfall) => {
+      const props = pagedProps({ supportsResultPagination: supported });
+      const { getByText } = render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+
+      await userEvent.click(getByText("Export"));
+      const scope = within(document.body as HTMLElement).getByTestId("export-scope");
+
+      expect(capturedResultsGridProps.supportsResultPagination).toBe(supported);
+      if (shortfall === null) {
+        expect(scope.textContent).toBe("Writes all 1 row.");
+      } else {
+        expect(scope.textContent).toContain(shortfall);
+      }
+    });
   });
 
   test('History tab renders QueryHistory component when mode="history"', () => {
@@ -689,12 +818,37 @@ describe("BottomPanel", () => {
       expect(capturedResultsGridProps.result).toEqual(ARTIFACT_RESULT);
     });
 
+    test("a hydrated result still wins over the tab's own failed run", () => {
+      const props = hydratedProps({
+        currentTab: {
+          id: "tab-1",
+          name: "Q",
+          query: "SELEC 1",
+          result: null,
+          runError: "syntax error",
+          isExecuting: false,
+          type: "sql" as const,
+        },
+      });
+      const { getByTestId, queryByTestId } = render(
+        <BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />,
+      );
+
+      expect(getByTestId("resultsgrid")).toBeTruthy();
+      expect(capturedResultsGridProps.result).toEqual(ARTIFACT_RESULT);
+      expect(queryByTestId("run-failure")).toBeNull();
+    });
+
     test("a hydrated result is read-only: nothing offers to edit it or page it", () => {
       const props = hydratedProps({ editingEnabled: true });
       render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
 
       expect(capturedResultsGridProps.editingEnabled).toBe(false);
       expect(capturedResultsGridProps.onLoadMore).toBeUndefined();
+      // And the ordering notice is withheld with the control: these rows are an agent
+      // run's, and the tab's own statement did not produce them, so naming it here would
+      // state a fact about the wrong statement (#816).
+      expect(capturedResultsGridProps.resultQuery).toBeUndefined();
     });
 
     // B34: the menu used to be hidden here, because the export serialized the tab's

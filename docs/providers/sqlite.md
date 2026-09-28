@@ -51,7 +51,7 @@ for a web-based editor:
   connect time — see [Runtime & driver selection](#runtime--driver-selection). All packaged
   distribution channels — the official Docker image, `npx @libredb/studio`, the Homebrew tap, the
   `.deb`/`.rpm` packages, and the standalone tarballs — run the built app with `node server.js` (the
-  Docker image's runner stage is `node:26.8.2-trixie-slim`; the other channels bundle their own pinned
+  Docker image's runner stage is `node:26.9.0-trixie-slim`; the other channels bundle their own pinned
   Node 24 runtime), so they all use `node:sqlite`. `bun:sqlite` is used for local development
   (`bun dev`) and the test suite, where Next.js runs directly under Bun. Only on a runtime with
   neither driver does `connect()` throw a `DatabaseConfigError`.
@@ -77,8 +77,11 @@ SQLite driver by runtime:
 - **Identical behaviour:** the adapter exposes the exact `bun:sqlite`-shaped surface the provider
   uses (`exec` / `prepare().all/get/run` / `close`) and bridges the small `node:sqlite` deltas
   (`get()` miss returns `null` not `undefined`; `run().changes` normalized to `number`;
-  `close(throwOnError)` is bun's flag for "release the file now" and node:sqlite needs none), so
-  results and error mapping are the same under both runtimes.
+  `close(throwOnError)` is bun's flag for "release the file now" and node:sqlite needs none; the
+  big-integer flag is `safeIntegers` on bun and `readBigInts` on node,
+  [§3.6](#36-a-64-bit-integer-survives-the-round-trip-in-both-directions); the declared column types
+  are `columnNames` + `declaredTypes` on bun and one `columns()` on node,
+  [§5](#declared-column-types)), so results and error mapping are the same under both runtimes.
 - **Why not `better-sqlite3`?** Bun refuses to load it outright, and its native binding must match
   the installing runtime's ABI (a bun-installed binding fails under Node). The built-in drivers
   need no native dependency at all. (`better-sqlite3` remains the *storage-layer* driver.)
@@ -169,7 +172,8 @@ directories are created on connect.
 — FK enforcement on, WAL for better
 concurrency, NORMAL sync for a speed/durability balance. The agent read-only profile runs a
 different open sequence entirely — `journal_mode = WAL` is itself a write and fails on a read-only
-handle ([§12.1](#121-where-the-boundary-is)).
+handle ([§12.1](#121-where-the-boundary-is)). So does an existing file this process cannot write
+([§3.7](#37-a-database-file-this-process-cannot-write)).
 
 `disconnect()` closes with `close(true)`, and the argument is load-bearing. Bare `close()` on
 `bun:sqlite` is `sqlite3_close_v2`: with any statement still unfinalized the connection becomes a
@@ -240,6 +244,121 @@ The `scope` parameter is declared on the interface and ignored here, because thi
 `inTransaction` reports the handle's state and never who opened it, so a request whose own statements left nothing open still rolls back a concurrent request's `BEGIN`, and that request is told nothing.
 That is the D87 shape on a single connection and it is NOT closed: closing it needs the transaction owned by a call scope rather than by a client, which is a design change and not a parameter, so it is recorded here rather than worked around.
 `redis.md` §5.2a and `duckdb.md` carry the same residual for the same reason, and the three were checked rather than inferred from one another.
+
+### 3.6 A 64-bit integer survives the round trip, in both directions
+
+SQLite's `INTEGER` is a signed 64-bit value and a JavaScript `number` is not, so an id past 2^53 does
+not survive a naive read. **Both built-in drivers got it wrong, and they got it wrong differently** —
+measured 2026-09-18 reading `9007199254740993` back with each driver's own DEFAULTS, bun:sqlite under
+Bun 1.4.0 (SQLite 3.51.0) and node:sqlite under Node 24.14.0 (SQLite 3.51.2):
+
+| Driver, defaults | Reading `9007199254740993` |
+|---|---|
+| `bun:sqlite` | `9007199254740992` (number) — silently the value the row BESIDE it reads |
+| `node:sqlite` | throws `ERR_OUT_OF_RANGE: Value is too large to be represented as a JavaScript number: 9007199254740992` |
+
+Two spellings of one defect, and the silent one is the dangerous half: the grid showed two rows
+carrying the same id, and the inline editor's `UPDATE … WHERE id = <that key>` then edited the
+NEIGHBOURING row and reported success.
+
+**The flag alone is not the fix.** Each driver can hand every integer back as a `BigInt` and each
+spells the request its own way — bun `safeIntegers`, node `readBigInts` — but it is all-or-nothing:
+`1`, `COUNT(*)` and every PRAGMA column become `BigInt` too, and `JSON.stringify`, which is how every
+row reaches the browser, refuses a `BigInt` outright. So both adapters set their own spelling and
+[`sqlite-driver.ts`](../../src/lib/db/providers/sql/sqlite-driver.ts) converts back at the one seam
+every row crosses — `prepare()`, the provider's only row-returning entry point (`exec()` returns
+nothing), wrapped by `withoutBigInts()` so `all()`, `get()` and `run()` are covered alike. Measured
+through both adapters in the same pass, with identical answers:
+
+| Value read | Answered as |
+|---|---|
+| `1` | `1` (number) |
+| `COUNT(*)` over two rows | `2` (number) |
+| `9007199254740991` (`Number.MAX_SAFE_INTEGER`) | `9007199254740991` (number) |
+| `9007199254740992` | `"9007199254740992"` |
+| `9007199254740993` | `"9007199254740993"` |
+| `-9007199254740992` | `"-9007199254740992"` |
+| `9223372036854775807` (INT64's own maximum) | `"9223372036854775807"` |
+
+The boundary is `Number.MAX_SAFE_INTEGER`: what fits comes back AS a number, what does not comes back
+as its decimal string with every digit kept, and **nothing outside the adapter ever sees a `BigInt`**.
+That is the same shape the MySQL provider answers for a wide `BIGINT`
+([mysql.md §3.7](./mysql.md#37-a-bigint-past-253-arrives-as-a-string)), deliberately: the two hand out
+one shape.
+
+**And the same string is accepted back**, which is what completes the edit. The conversion above is
+lossy in ONE direction: `9007199254740993` the integer and `'9007199254740993'` the text both leave
+here as the same JavaScript string, so a value arriving in a bind carries no clue which it was. SQLite
+settles that by the COLUMN's affinity, and only for a column that HAS one. Measured the same day on
+both drivers, against a row whose key is `9007199254740993`:
+
+| Column declared | Bound as text (what the read used to hand back) | Bound as a 64-bit integer (what it does now) |
+|---|---|---|
+| `INTEGER` / `NUMERIC` | 1 row | 1 row |
+| `TEXT` | 1 row | 1 row |
+| `BLOB` | **0 rows** | 1 row |
+| no type at all | **0 rows** | 1 row |
+
+`INTEGER` and `NUMERIC` affinity convert the text to a number before comparing and `TEXT` affinity
+converts the integer to text, so those answer the same either way. A column declared `BLOB` or
+declared NOTHING has NO affinity: SQLite compares the operands as they stand, a text is never equal to
+an integer, and **the row the grid had just read could not be found again** — the `UPDATE` reported 0
+rows changed and the editor told the user nothing had happened. That is the case the round trip could
+not serve at all before, not a case it served wrongly.
+
+The affinity is not knowable at a bind — a bind is a value with no column attached — so
+`toSQLiteBindValue()` answers the question it CAN answer exactly: it accepts back precisely what the
+read hands out, and leaves every other string alone. The bound and the digit shape it tests against
+live in [`sqlite-int64.ts`](../../src/lib/db/providers/sql/sqlite-int64.ts) rather than in this
+driver, because libsql must accept the same shape back and a rule written twice is a rule two copies
+can break silently; `tests/unit/db/sqlite-int64.test.ts` fails the build if a provider grows its own.
+Measured, string by string:
+
+| Bound string | Sent as | Why |
+|---|---|---|
+| `"9007199254740993"`, `"-9007199254740993"`, `"9223372036854775807"` | a 64-bit integer | the only shape the read emits |
+| `"1"`, `"9007199254740991"` | text | inside the safe range the read hands out a NUMBER, so digits are the caller's own text |
+| `"007"`, `"+7"`, `" 7"`, `""`, `"7.0"`, `"9e15"` | text | shapes the read cannot emit |
+| `"99999999999999999999"`, `"9223372036854775808"` | text | wider than SQLite's own `INTEGER`, so no row could match as a number either |
+
+End to end, on both drivers: reading the two ids and then `UPDATE`ing on the one that was read
+changes exactly one row — the target — in an `INTEGER`, `NUMERIC`, `TEXT`, `BLOB` and undeclared
+column alike, and the neighbour is untouched in all five.
+
+**What it costs, measured and accepted.** A row written ELSEWHERE as TEXT in a column with no
+affinity now misses where it used to match: measured, `INSERT INTO na VALUES ('9007199254740993', …)`
+into `CREATE TABLE na (id, label TEXT)` stores storage class `text`, reads back as those digits, and
+the `UPDATE` keyed on them reports 0 rows. That is the same ambiguity read from the other end, it
+cannot be resolved without the affinity, and the integer reading is the one these digits exist for. A
+`TEXT`-declared column is NOT affected — `TEXT` affinity converts the bind back to text — so an
+ordinary textual key still matches as text, `'007'` included (measured: both match, both stored as
+`text`). A value written through THIS provider into a no-affinity column is stored as an integer and
+round-trips consistently.
+
+### 3.7 A database file this process cannot write
+
+A read-only Docker mount (`:ro`), or a file owned by another user, cannot take the [§3.2](#32-pragmas-on-connect) sequence: `journal_mode = WAL` is a write, and WAL keeps its `-wal` and `-shm` files beside the database.
+Before this, such a file could not be opened at all, and health, inventory and counts all failed with "attempt to write a readonly database".
+
+So `connect()` first asks the filesystem, through `access(W_OK)`, whether it may write an existing file and its directory.
+When either answer is `EACCES`, `EPERM` or `EROFS`, it opens the file with SQLite's own read-only open: no `create`, no `journal_mode = WAL`, no `synchronous`, only `foreign_keys = ON`.
+It logs that decision once, at info, with the path.
+Any other answer from `access()` is raised as a `ConnectionError`, not read as read-only.
+A missing file, `:memory:` and a writable file keep the §3.2 sequence exactly.
+
+Reads, health, the object surface and counts work as on any file.
+A write is refused by SQLite itself, and `query()` raises it as a `QueryError` that names the file and why: "SQLite database `<path>` is open read-only because this process cannot write the file or its directory: attempt to write a readonly database".
+`query_only` is not set: this is the editor, and the file's permissions are the boundary, not the agent profile of [§12](#12-agent-read-only-execution-profile-328).
+
+A file already in WAL journal mode, with no `-shm` file beside it, still cannot be opened when its directory is unwritable: SQLite reads one only with a `-shm` file beside it, and has nowhere to make one (measured on `bun:sqlite` and `node:sqlite`, 2026-09-26).
+That includes any file this editor has written, because §3.2 leaves the file in WAL mode.
+`connect()` then fails with a `ConnectionError` that says so and names the two ways out: run `PRAGMA journal_mode = DELETE` on the file where it is writable, or make its directory writable.
+SQLite's own words for that refusal differ by build: the library bundled on Linux answers the file alone with "attempt to write a readonly database", Apple's libsqlite3 on macOS answers "unable to open database file", and so does Linux when a `-wal` is left beside the file with no `-shm` (measured on the macos-latest runner and on Linux, 2026-09-26).
+So the reason is not read from those words but from the file's header, where bytes 18 and 19 are 2 in WAL mode, and SQLite's words follow it.
+A file this process cannot even read gets SQLite's words alone.
+
+Both drivers take the same path.
+The tests use a real file with mode 0444 in a directory with mode 0555, and are skipped as root, where modes restrict nothing, and on Windows, which enforces no directory mode; the Linux CI job runs as an ordinary user and covers them.
 
 ---
 
@@ -353,6 +472,55 @@ real closer so the run never terminates (`SELECT [a]] FROM t`), a confirmation p
 #297 asks about text the reader cannot resolve. Both are on statements the server refuses, and both are
 pinned by tests rather than left to be discovered.
 `EXPLAIN QUERY PLAN` is supported (`supportsExplain: true`, `explainFormat: "sqlite-queryplan"`) — the UI renders the plan as a tree; SQLite reports no per-node cost or timing metrics, so none are shown.
+
+### Declared column types
+
+`QueryResult.columnTypes` names the type each result column was DECLARED with
+(`sqlite3_column_decltype`). **This provider never filled it before** — so the SQL-DDL export named a
+column by the JavaScript type of its value, and the inline editor had nothing to read a key's width
+from. `query()` and `queryReadOnly()` both carry it now
+([`sqlite.ts`](../../src/lib/db/providers/sql/sqlite.ts)).
+
+Both drivers publish the declaration and spell it differently — bun:sqlite `columnNames` beside
+`declaredTypes`, node:sqlite one `columns()` answering both — so
+[`sqlite-driver.ts`](../../src/lib/db/providers/sql/sqlite-driver.ts) bridges them into a single
+`declaredColumns()`, exactly as it bridges `inTransaction` and the big-integer flag, and
+`declaredColumnTypes()` ([column-types.ts](../../src/lib/db/providers/sql/column-types.ts)) turns
+that into the field the way the four code-reporting drivers already do.
+
+**It is read AFTER the rows.** Measured 2026-09-18: bun:sqlite THROWS *Statement must be executed
+before accessing declaredTypes* until the statement has run, while node:sqlite answers either way — so
+after the rows is the one order both drivers accept, and that is why the declarations are read off the
+same statement object that produced them. A statement that matched NO rows still answers
+(`SELECT i, r FROM dt WHERE i = -1` → `INTEGER`, `REAL`, zero rows), so an empty result is described
+rather than guessed at, and a write answers an EMPTY list on both drivers.
+
+**An absent declaration stays absent rather than becoming a guess.** SQLite declares nothing for
+anything it computed, and the key is simply omitted. Measured over one statement, identically on both
+drivers:
+
+| Result column | Declared |
+|---|---|
+| `i INTEGER`, `r REAL`, `txt TEXT`, `n NUMERIC`, `b BLOB`, `ts DATETIME` | `INTEGER`, `REAL`, `TEXT`, `NUMERIC`, `BLOB`, `DATETIME` — the schema's own words, unchanged |
+| a column declared with no type at all | *absent* |
+| an expression (`i + 1`) | *absent* |
+| a literal (`42`) | *absent* |
+| an aggregate (`COUNT(*)`) | *absent* |
+| a function call (`upper(txt)`) | *absent* |
+| every column of a PRAGMA (`PRAGMA table_info`) | *absent* |
+
+**NOT bun:sqlite's `columnTypes`, which is a different question wearing a similar name.** Measured the
+same day on the same table: it reports the RUNTIME storage class of the row just read, so the `REAL`
+column answers `FLOAT` where its declaration is `REAL`, and the UNDECLARED column holding `7` answers
+`INTEGER` where there is no declaration at all. It also throws on anything that is not a read-only
+statement — *columnTypes is not available for non-read-only statements* — `PRAGMA journal_mode`
+included. Reading it here would have typed every float column wrong and broken every PRAGMA this
+provider runs.
+
+A 64-bit id is where the two features meet: it leaves as the decimal string
+[§3.6](#36-a-64-bit-integer-survives-the-round-trip-in-both-directions) prints, and it is still
+declared `INTEGER`, so the export writes an `INTEGER` column rather than the `TEXT` a value-shaped
+guess would produce.
 
 ---
 
@@ -487,6 +655,12 @@ measured, `index_info` answers `name = NULL, cid = -2` - so half an engine's ind
 themselves and the other half would silently describe themselves wrongly. A trigger's body is source
 text, which is Phase 2's Source tab.
 
+`hasColumns: true` is declared on `table` and `view` and on no other kind (#789), so those are the
+only rows the object tree gives a twisty to; `index` and `trigger` declare nothing and stay leaves,
+which is what their three empty arrays say. This engine declares zero container levels, so the path
+a column row is read at is the bare object name, or the parent table's name plus the trigger's for
+the one attached kind.
+
 For a `table` and a `view`:
 
 | Data | Source | Note |
@@ -572,6 +746,34 @@ CTE rather than joining a temporary of it, which is safe because a name is uniqu
 with columns and both are addressed `[name]` under a zero-level container; `trigger` is the one kind
 here that nests, and it has no columns.
 
+
+#### Column defaults: the value, with the catalog text kept alongside (#1029)
+
+SQLite reports a column default as the expression AS WRITTEN, through `PRAGMA table_info`'s `dflt_value`. A string
+default therefore arrives quoted, with SQL standard quote doubling, while a number and an
+expression arrive bare. Measured 2026-09-21 on SQLite 3.53.2 through `bun:sqlite`:
+
+| DDL | the value the column defaults to | catalog text |
+| --- | --- | --- |
+| `DEFAULT 'NULL'` | `NULL` | `'NULL'` |
+| `DEFAULT 'abc'` | `abc` | `'abc'` |
+| `DEFAULT ''` | the empty string | `''` |
+| `DEFAULT 'it''s'` | `it's` | `'it''s'` |
+| `DEFAULT 'a\b'` | `a\b` | `'a\b'` |
+| `DEFAULT 42` | `42` | `42` |
+| `DEFAULT CURRENT_TIMESTAMP` | the expression | `CURRENT_TIMESTAMP` |
+| no default | none | SQL NULL |
+
+Each column carries both readings. `defaultValue` is the value, decoded by `unquoteLiteral()`
+(`src/lib/sql/values.ts`) with this dialect's `"standard"` escaping, so `'it''s'` reads as
+`it's` and a backslash stays ordinary data. Text that is not exactly one complete literal,
+a number or an expression, passes through unchanged. `defaultExpression` is the
+catalog text itself, which is always valid SQL here and is what the schema-diff migration
+generator writes after the word `DEFAULT`; without it, a decoded `abc` would be emitted as
+`DEFAULT abc`. The empty string default stays the empty string, never `undefined`, and a
+column with no default carries neither field. `readCatalogDefault()` is local to this
+provider, the way per-provider normalization is everywhere else in this tree; the escape
+knowledge it relies on is the shared part.
 
 #### No `rowCount` and no `sizeBytes` on a listed object
 
@@ -707,8 +909,8 @@ Minimal by nature — SQLite keeps almost no server-style runtime statistics.
 
 | Method | Source | Notes |
 |--------|--------|-------|
-| `getHealth()` | `fs.statSync` / page PRAGMAs, `PRAGMA integrity_check`, `PRAGMA journal_mode` | reports integrity + journal mode as info rows; `activeConnections: 1`, cache-hit `N/A` |
-| `getOverview()` | `sqlite_version()`, file size, `sqlite_master` counts | `uptime: N/A`, `maxConnections: 1` |
+| `getHealth()` | `fs.statSync` / page PRAGMAs, `PRAGMA integrity_check`, `PRAGMA journal_mode` | reports integrity + journal mode as info rows; `activeConnections: 1`, cache-hit `N/A`; `databaseSize` reads `"N/A"`, never a formatted `0`, when the size read fails — [§7.3](#73-when-the-database-size-is-not-measurable) |
+| `getOverview()` | `sqlite_version()`, file size, `sqlite_master` counts | `uptime: N/A`, `maxConnections: 1`; `databaseSizeBytes` is **omitted** and `databaseSize` stays `N/A`, never a `0`, when the size read fails — [§7.3](#73-when-the-database-size-is-not-measurable) |
 | `getPerformanceMetrics()` | — | **no cache-hit ratio, no QPS, no buffer-pool usage** — all three are omitted, so both monitoring tabs show "N/A / Not measured" for them ([§7.1](#71-there-is-no-cache-hit-ratio-and-there-cannot-be)); only `deadlocks: 0` is reported, which is a fact about the engine |
 | `getSlowQueries()` | — | always `[]` (SQLite has no query stats) |
 | `getActiveSessions()` | — | the single current process session |
@@ -819,12 +1021,60 @@ fabrication in a different digit, which is why the fields are absent rather than
 `totalSize`/`totalSizeBytes` remain required by `TableStats`, so they carry the same `"N/A"` / `0`
 placeholder `indexSize` already used, and every consumer gates on the absent `tableSizeBytes`.
 
+### 7.3 When the database size is not measurable
+
+`getHealth()` and `getOverview()` share one private reader, `readDatabaseSizeBytes()`, which sizes the
+database two ways, by `dbPath`:
+
+```ts
+// File-backed
+return fs.statSync(dbPath).size;
+// :memory: — no file to stat
+const result = sizeStmt.get() as { size?: number }; // SELECT (page_count * page_size) as size ...
+return typeof result?.size === "number" ? result.size : undefined;
+```
+
+Through 0.16.2 there was no shared reader: each method read the size itself, and the two drifted.
+`getOverview()`'s local was initialized to `0` and each `catch` left it there, so a `statSync` throwing
+— the file not yet created on connect, a permission refusal, any other reason a stat can fail — or the
+`:memory:` PRAGMA read throwing published a measured-looking zero indistinguishable from a genuinely
+empty database (#546). `getHealth()` caught the same two failures to two different strings, `"Unknown"`
+for the file branch and `"N/A"` for the `:memory:` branch. And the `:memory:` success path in both
+was `result?.size || 0`, which reads as "kept a real zero" but cannot actually tell one apart from
+`sizeStmt.get()` returning no row, or a row whose `size` came back `undefined` — `as { size: number }`
+is a cast, not a check, so nothing upstream ruled either out (caught in review on #1050, before either
+shipped). `DatabaseOverview.databaseSizeBytes` is optional precisely so a read that never answered can
+say nothing instead — *"absence and zero are different facts"*, its docblock in
+[`src/lib/db/types.ts`](../../src/lib/db/types.ts) — and until now neither method could say it
+correctly.
+
+The monitoring **Storage** tab
+([`src/components/monitoring/tabs/StorageTab.tsx`](../../src/components/monitoring/tabs/StorageTab.tsx))
+is what the `getOverview()` half buys: it keys its whole breakdown off `databaseSizeBytes !== undefined`,
+so on the absence it renders "No storage size information available." On the fabricated `0` it drew the
+breakdown instead, against a total that contradicted the real per-table bytes `getTableStats()` reports
+separately. The `getHealth()` half buys agreement between panels: before this, one unmeasurable SQLite
+database could show `"N/A"` on the Overview card and `"Unknown"` on Health, two sentences about the
+same absence.
+
+**`databaseSize`, the formatted string, moves with the same figure in both methods.** Each initializes
+to `"N/A"` and only `formatBytes()` replaces it — one wording, from one reader, everywhere this size is
+shown.
+
+A database that really measures `0` is a **reading** and is kept: `typeof result?.size === "number"`
+lets a real zero-page `:memory:` result through exactly as before, and (in principle) a zero-length file
+still reaches `formatBytes(0)`. The absence is spelled `=== undefined` (a type check on the `:memory:`
+arm, not a falsy test) plus a conditional spread in `getOverview()`'s return — a falsy test would erase
+that very measurement, which is the mistake `|| 0` was making.
+
 ---
 
 ## 8. Maintenance
 
-`runMaintenance(type, target?)` ([`sqlite.ts`](../../src/lib/db/providers/sql/sqlite.ts)); `analyze`
-and `reindex` targets are quoted via `escapeIdentifier()`:
+`runMaintenance(type, target?, container?)` ([`sqlite.ts`](../../src/lib/db/providers/sql/sqlite.ts)); `analyze`
+and `reindex` targets are quoted via `escapeIdentifier()`. A `container` is deliberately ignored
+(#772): SQLite resolves a bare name against the attached database it was opened on, always `main`
+for this provider, and the file has no second namespace to name.
 
 | Type | Action |
 |------|--------|
@@ -881,6 +1131,7 @@ answers with nothing both while it is in flight and when it failed.
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `supportsCreateTable` | `true` (from base) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core SQLite DML |
+| `supportsResultPagination` | `true` — `LIMIT n OFFSET m` from the shared limiter (#816) |
 | `supportsTransactions` | **`false`** — SQLite HAS `BEGIN`, but this provider holds no session across two requests, so `POST /api/db/transaction` refuses the call. The flag describes the provider's surface, not the engine, and the trio and SANDBOX toggle are withheld rather than offered and then failed (#464) |
 | `declaresForeignKeys` | `true` — inherited from the base capabilities; `PRAGMA foreign_key_list` reads them whether or not enforcement is on |
 | `singleWriterFile` | **absent (not `true`)** — SQLite is a file engine and is *not* single-writer at OPEN. Measured 2026-08-25 on `bun:sqlite`: a second `new Database(path, { readwrite: true })` on a WAL file this process already holds both opens and writes, because SQLite takes its file locks per transaction. LibreDB declares the flag and SQLite must not: the whole point of the agent profile here is a SECOND, `readonly: true` handle on the same file ([§12.1](#121-where-the-boundary-is)), and declaring it would have made the factory hand the agent the writable one instead |
@@ -890,6 +1141,7 @@ answers with nothing both while it is in flight and when it failed.
 | `defaultPort` | `null` |
 | `schemaRefreshPattern` | `(CREATE\|DROP\|ALTER\|TRUNCATE)\b` (from base) |
 | `containerLevels` | **`[]`** — SQLite has no container level at all, which `containerDepth()` reads as 0 ([§6.1](#61-the-object-surface-789)) |
+| `containerPathShapes` | `exact`: with no container level, only the empty path `[]` addresses a container, so any segment is refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
 | `objectKinds` | `table`, `view`, `index`, `trigger` — no routine kind of any spelling ([§6.1](#61-the-object-surface-789)) |
 
 ### Labels
@@ -921,7 +1173,8 @@ sends no target, so `runMaintenance('reindex')` here runs a bare `REINDEX`
 ## 10. Error handling
 
 SQLite uses the shared `mapDatabaseError()` ([errors.ts](../../src/lib/db/errors.ts)) with **no**
-SQLite-specific branches:
+SQLite-specific branches; the provider names the read-only file cases itself
+([§3.7](#37-a-database-file-this-process-cannot-write)):
 
 | Situation | Error |
 |-----------|-------|
@@ -929,6 +1182,9 @@ SQLite-specific branches:
 | NUL byte in path | `DatabaseConfigError` ("Invalid database path: NUL bytes are not allowed") |
 | Selected driver unavailable (no `bun:sqlite` / `node:sqlite` on this runtime) | `DatabaseConfigError` ("SQLite driver … is not available…") |
 | Open failure | `ConnectionError` |
+| Write check on an existing file fails with anything but `EACCES` / `EPERM` / `EROFS` | `ConnectionError` with the filesystem's message |
+| WAL-mode file in a directory this process cannot write | `ConnectionError` naming WAL and the two ways out |
+| Write statement on a file opened read-only because it is not writable | `QueryError` ("SQLite database `<path>` is open read-only because …") |
 | Statement errors whose message matches a heuristic (e.g. *syntax error*, *no such column*) | `QueryError` |
 | Other engine errors | generic `QueryError` / `DatabaseError` with the original message |
 
@@ -967,7 +1223,11 @@ SQL execution, schema PRAGMAs, maintenance, and monitoring end-to-end.
 ### 11.2 Coverage
 
 Validation, connect/disconnect, path handling (NUL rejection, `..` acceptance), query (read +
-write), capabilities, health, maintenance
+write), 64-bit integers past 2^53 (both ids read whole, the `UPDATE` landing on the row that was
+read, no `BigInt` on any public path, ordinary integers and PRAGMA columns unchanged, and the same
+on the agent read-only path), declared column types (the computed column that declares nothing, the
+empty result, the write, two columns of one name, the storage-class trap, and what the SQL export and
+the row editor read off them), capabilities, health, maintenance
 (vacuum/analyze/reindex/check), overview, performance, active sessions, slow queries,
 table/index/storage stats, `getMonitoringData`, `prepareQuery`, and labels. For the object surface
 ([§6.1](#61-the-object-surface-789)): the declared kinds, the conformance contract, the tree's root
@@ -1184,6 +1444,12 @@ not apply to SQLite ([§3.4](#34-no-transactions-api-no-cancellation-no-pool)).
   ([§7.2](#72-per-table-size-depends-on-the-sqlite-build-behind-the-driver)). `getIndexStats()` still reports
   `indexSize: "N/A"` per index even where `dbstat` exists — the per-table index bytes it feeds the
   Storage tab are measured, the per-index rows are not yet.
+- **A key declared `REAL` still cannot hold a 64-bit id**, and nothing here can change that: `REAL`
+  affinity converts on INSERT, so the collapse happens in the FILE before any driver sees it.
+  Measured 2026-09-18 — `9007199254740992` and `9007199254740993` inserted into a `REAL` column both
+  read back as `9007199254740992` with storage class `real`, so the two rows are genuinely
+  indistinguishable on disk ([§3.6](#36-a-64-bit-integer-survives-the-round-trip-in-both-directions)
+  repairs the INTEGER case only).
 - **`:memory:` is ephemeral** — data is lost on disconnect; intended for trials/tests.
 - **Single schema (`main`)** — `ATTACH`ed databases are not surfaced.
 - **No path sandboxing (by design).** `getDatabasePath()` validates only that the path contains
@@ -1206,6 +1472,7 @@ not apply to SQLite ([§3.4](#34-no-transactions-api-no-cancellation-no-pool)).
 
 - Drivers: [`bun:sqlite`](https://bun.sh/docs/api/sqlite) (Bun built-in) · [`node:sqlite`](https://nodejs.org/api/sqlite.html) (Node built-in)
 - Driver adapter: [`src/lib/db/providers/sql/sqlite-driver.ts`](../../src/lib/db/providers/sql/sqlite-driver.ts)
+- 64-bit integer bound, shared with libsql: [`src/lib/db/providers/sql/sqlite-int64.ts`](../../src/lib/db/providers/sql/sqlite-int64.ts)
 - Source: [`src/lib/db/providers/sql/sqlite.ts`](../../src/lib/db/providers/sql/sqlite.ts)
 - SQL base: [`src/lib/db/providers/sql/sql-base.ts`](../../src/lib/db/providers/sql/sql-base.ts)
 - Query limiter: [`src/lib/db/utils/query-limiter.ts`](../../src/lib/db/utils/query-limiter.ts)
@@ -1214,4 +1481,4 @@ not apply to SQLite ([§3.4](#34-no-transactions-api-no-cancellation-no-pool)).
 - Storage-layer SQLite (the *other* SQLite — `better-sqlite3`): [`src/lib/storage/providers/sqlite.ts`](../../src/lib/storage/providers/sqlite.ts)
 - Tests: [`tests/integration/db/sqlite-provider.test.ts`](../../tests/integration/db/sqlite-provider.test.ts)
 - API contract: [`docs/API_DOCS.md`](../API_DOCS.md)
-- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [Apache Trino](./trino.md) · [Redis](./redis.md)
+- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [Trino](./trino.md) · [Redis](./redis.md)

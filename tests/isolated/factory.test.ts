@@ -123,6 +123,10 @@ const mockPgPool = {
   on: () => {},
 };
 
+// The provider imports `types` from pg for its per-pool parsers, so the mock has to export
+// it. These rows never reach a parser, and the real registry is passed rather than a stub.
+const { types: realPgTypes } = await import("pg");
+
 mock.module("pg", () => ({
   default: {
     Pool: class {
@@ -136,6 +140,7 @@ mock.module("pg", () => ({
       return mockPgPool;
     }
   },
+  types: realPgTypes,
 }));
 
 const mockMysqlPool = {
@@ -530,6 +535,30 @@ describe("createDatabaseProvider", () => {
     expect(provider.type).toBe("cassandra");
   });
 
+  test('creates provider for type "prometheus"', async () => {
+    // No `database`: the server holds one TSDB and every API read is addressed to it, so the
+    // helper's default database is cleared. Building the provider reads nothing from the network,
+    // so it is built, and declares its language, with no server running.
+    const conn = makeConnection("prometheus", { port: 9090, database: undefined });
+    const provider = await createDatabaseProvider(conn);
+    expect(provider).toBeDefined();
+    expect(provider.type).toBe("prometheus");
+    expect(provider.getCapabilities().queryLanguage).toBe("promql");
+  });
+
+  test('creates provider for type "kafka"', async () => {
+    // No `database`: one connection is one cluster. The constructor validates nothing and opens
+    // nothing, since the connection's rules run in connect() before any client exists, so the
+    // provider is built, and declares its language and dialect, with no broker running.
+    const conn = makeConnection("kafka", { port: 9092, database: undefined });
+    const provider = await createDatabaseProvider(conn);
+    expect(provider).toBeDefined();
+    expect(provider.type).toBe("kafka");
+    expect(provider.getCapabilities().queryLanguage).toBe("json");
+    expect(provider.getCapabilities().queryDialect).toBe("kafka");
+    expect(provider.isConnected()).toBe(false);
+  });
+
   test('creates provider for type "libredb"', async () => {
     // A path the platform owns rather than a hardcoded "/tmp/...", which is not a directory
     // on Windows at all. Nothing opens this file: `createDatabaseProvider` constructs and
@@ -750,6 +779,136 @@ describe("getOrCreateProvider", () => {
   });
 });
 
+// ─── The cache key may not be a string the caller typed (GHSA-3wh2-8x78-jfw4) ──
+//
+// Reported privately 2026-09-20 and reproduced here before anything was changed.
+//
+// `getOrCreateProvider` keyed `providerCache` on `connection.id`, and that id arrives in the
+// request body: `resolveConnection` (`src/lib/seed/resolve-connection.ts:22-24`) hands an inline
+// `connection` back verbatim, id included, so any signed-in caller can name any id. Naming one
+// another session already opened returned THAT session's live provider, still authenticated as
+// them, without ever comparing the credentials the caller sent. A `seed:` id is an operator-chosen
+// slug like `prod`, so it is guessable, and the role filter that guards the `connectionId` path
+// is not on the inline one.
+//
+// `connection.id` was already known here to be caller-typed: `connectionFingerprint`'s docblock
+// (`src/lib/db/connection-fingerprint.ts`) records the same measurement as its reason for NOT
+// sealing a plan to the id. The provider cache was the other half of that lesson.
+//
+// These run on the real sqlite driver, against two real files. The victim's row is the whole
+// assertion: reading it through the attacker's call is the vulnerability, and no bookkeeping
+// count can stand in for it.
+
+describe("getOrCreateProvider cache isolation", () => {
+  let dir: string;
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "libredb-factory-hijack-"));
+  });
+
+  afterAll(async () => {
+    await clearProviderCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The connection the victim opened: a real file holding one secret row. */
+  async function openVictim(id: string): Promise<DatabaseProvider> {
+    const victim = await getOrCreateProvider(
+      makeConnection("sqlite", { id, database: join(dir, `${id.replace(/\W/g, "_")}-victim.db`) }),
+    );
+    await victim.query("CREATE TABLE customers (card TEXT)");
+    await victim.query("INSERT INTO customers (card) VALUES ('4111-1111-1111-1111')");
+    return victim;
+  }
+
+  test("a caller naming another session's connection id never reaches that session's provider", async () => {
+    const victim = await openVictim("seed:prod");
+
+    // The attacker's request: the victim's id, their own empty file, unrelated credentials.
+    const attacker = await getOrCreateProvider(
+      makeConnection("sqlite", {
+        id: "seed:prod",
+        database: join(dir, "attacker.db"),
+        user: "attacker",
+        password: "attacker",
+      }),
+    );
+
+    expect(attacker).not.toBe(victim);
+    // Their own file is empty, so the victim's table must not exist on it.
+    await expect(attacker.query("SELECT card FROM customers")).rejects.toThrow();
+  });
+
+  test("the execution-profile cache is keyed the same way, not on the id alone", async () => {
+    const victim = await getOrCreateProvider(
+      makeConnection("sqlite", { id: "seed:agent", database: join(dir, "agent-victim.db") }),
+    );
+    await victim.query("CREATE TABLE customers (card TEXT)");
+    await victim.query("INSERT INTO customers (card) VALUES ('4111-1111-1111-1111')");
+
+    // The same forgery on the agent path: `profiledCacheKey` framed the id straight from the
+    // request too, so an attacker naming it reached whatever that profile had already opened.
+    const seeded = await acquireExecutionProfileProvider(
+      makeConnection("sqlite", { id: "seed:agent", database: join(dir, "agent-victim.db") }),
+      "agent-read-only",
+    );
+    // Give the attacker a real but unrelated database. The read-only profile opens sqlite
+    // read-only and so cannot create one, and a provider that never opened would pass the
+    // assertion below for the wrong reason - it must reach ITS OWN file and find no such table.
+    const attackerFile = join(dir, "agent-attacker.db");
+    const own = await getOrCreateProvider(makeConnection("sqlite", { id: "attacker-own", database: attackerFile }));
+    await own.query("CREATE TABLE unrelated (x TEXT)");
+    await removeProvider("attacker-own");
+
+    const attacker = await acquireExecutionProfileProvider(
+      makeConnection("sqlite", { id: "seed:agent", database: attackerFile, password: "wrong" }),
+      "agent-read-only",
+    );
+
+    expect(attacker).not.toBe(seeded);
+    // The control: the attacker's provider really is open and serving its own file.
+    expect(await attacker.queryReadOnly!("SELECT x FROM unrelated", { ...AGENT_BUDGET })).toMatchObject({ rows: [] });
+    await expect(attacker.queryReadOnly!("SELECT card FROM customers", { ...AGENT_BUDGET })).rejects.toThrow();
+  });
+
+  test("a caller naming another session's connection id cannot evict that session's provider", async () => {
+    const victim = await openVictim("seed:reports");
+
+    // Under the old key, a differing queryTimeout disconnected and deleted the entry the
+    // victim was using: denial of service on the same forgeable id.
+    await getOrCreateProvider(
+      makeConnection("sqlite", {
+        id: "seed:reports",
+        database: join(dir, "reports-attacker.db"),
+        queryTimeout: 1_234,
+      }),
+    );
+
+    expect(victim.isConnected()).toBe(true);
+    const rows = await victim.query("SELECT card FROM customers");
+    expect(rows.rows).toHaveLength(1);
+  });
+
+  test("two connections that differ only in their SASL mechanism are never handed one provider", async () => {
+    // Kafka keeps a SCRAM credential per mechanism, so the mechanism decides which stored secret
+    // the broker checks the password against: it changes who a connection authenticates as, and
+    // `credentialDigest` frames it. The field is inert on sqlite, which is what lets the real
+    // driver stand in here: only the cache key can tell these records apart.
+    const database = join(dir, "sasl-mechanism.db");
+    const record = (saslMechanism: DatabaseConnection["saslMechanism"]) =>
+      makeConnection("sqlite", { id: "seed:events", database, user: "reader", password: "same", saslMechanism });
+
+    const none = await getOrCreateProvider(record(undefined));
+    const sha256 = await getOrCreateProvider(record("SCRAM-SHA-256"));
+    const sha512 = await getOrCreateProvider(record("SCRAM-SHA-512"));
+
+    expect(new Set([none, sha256, sha512]).size).toBe(3);
+    // The control that the cache is still a cache: the same record asked for twice is one provider.
+    expect(await getOrCreateProvider(record("SCRAM-SHA-512"))).toBe(sha512);
+    expect(await getOrCreateProvider(record(undefined))).toBe(none);
+  });
+});
+
 // ─── removeProvider ────────────────────────────────────────────────────────
 
 describe("removeProvider", () => {
@@ -812,6 +971,42 @@ describe("clearProviderCache", () => {
     expect(getProviderCacheStats().size).toBe(0);
     expect(prov1.isConnected()).toBe(false);
     expect(prov2.isConnected()).toBe(false);
+  });
+
+  /*
+   * `connection.id` is a string the caller typed - that is this file's other security group and
+   * the whole of GHSA-3wh2-8x78-jfw4 - so every log line that INTERPOLATES one is a place a
+   * caller writes into the log. A newline forges a whole entry; `createDatabaseProvider` has
+   * sanitized `type` and `name` for that reason since long before this.
+   */
+  test("a connection id cannot forge a log line when a disconnect rejects", async () => {
+    const forged = 'evil%s\n[DB] Creating admin provider for "prod"';
+    const provider = await getOrCreateProvider(makeConnection("sqlite", { id: forged, database: ":memory:" }));
+    provider.disconnect = async () => {
+      throw new Error("disconnect failed");
+    };
+
+    const calls: unknown[][] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => void calls.push(args);
+    try {
+      await clearProviderCache();
+    } finally {
+      console.error = realError;
+    }
+
+    // The control: the line was written, and it named this connection.
+    const mine = calls.filter((args) => args.some((arg) => String(arg).includes("evil")));
+    expect(mine).toHaveLength(1);
+    expect(mine.flat().every((arg) => !String(arg).includes("\n"))).toBe(true);
+
+    /*
+     * The id is an ARGUMENT, never part of the first one. `console.error`'s first argument is a
+     * format string, so an id carrying `%s` would otherwise consume the error beside it - which
+     * is what `js/tainted-format-string` names, and what stripping control characters does not
+     * address. A constant first argument cannot be a format attack at all.
+     */
+    expect(String(mine[0]![0])).not.toContain("evil");
   });
 
   test("logs and continues when a provider disconnect rejects during clear", async () => {
@@ -1103,7 +1298,8 @@ describe("acquireExecutionProfileProvider", () => {
     // one, while `agent-operations` sends none and calls the curated reporting methods
     // every provider implements. Asserting them together is what keeps a later
     // simplification from collapsing the two.
-    const connection = makeConnection("redis", { id: "redis-operations" });
+    // A Redis database is a number: the shared fixture's "testdb" is refused at connect.
+    const connection = makeConnection("redis", { id: "redis-operations", database: "0" });
 
     const refused: unknown = await acquireExecutionProfileProvider(connection, "agent-read-only").catch(
       (e: unknown) => e,
@@ -1607,7 +1803,7 @@ describe("single-writer file reuse", () => {
       database: join(dir, "..", basename(dir), "borrowed.duckdb"),
     });
     // Relative TO THE CWD, deliberately, and not to the file's own directory. `fileIdentity`
-    // normalises with `path.resolve` (src/lib/db/factory.ts:301), which resolves against
+    // normalises with `path.resolve` (src/lib/db/factory.ts:385), which resolves against
     // `process.cwd()`, so a spelling relative to anything else would name a different file and
     // this assertion would fail on every platform rather than exercise the borrow.
     //

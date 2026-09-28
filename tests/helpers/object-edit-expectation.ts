@@ -35,6 +35,9 @@ export const EXPECTED_EDIT_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   "druid",
   "duckdb",
   "elasticsearch",
+  // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: Kafka has writes, and this product
+  // declines them in v1 by decision (#1088 sections 2 and 4.6), which docs/providers/kafka.md names.
+  "kafka",
   "libredb",
   "libsql",
   "mongodb",
@@ -42,6 +45,9 @@ export const EXPECTED_EDIT_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   "mysql",
   "opensearch",
   "oracle",
+  // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: the product offers no write
+  // path to Prometheus at all (#1085 sections 2 and 4.5), which docs/providers/prometheus.md names.
+  "prometheus",
   "sqlite",
 ] as const);
 

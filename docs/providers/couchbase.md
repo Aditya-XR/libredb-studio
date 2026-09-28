@@ -6,6 +6,8 @@
 > design, architecture, usage, and tests. If you are reading the code, extending Couchbase support,
 > or authoring a new provider, start here.
 
+`DB_HTTP_BLOCK_PRIVATE_HOSTS=true` blocks loopback, private, link-local and other non-public HTTP destinations; it is off by default so local connections work.
+
 | | |
 |---|---|
 | **Status** | Implemented & shipped |
@@ -273,8 +275,14 @@ name, and the key is not part of the result at all. Generated queries therefore 
 and project the key ([`query-generators.ts`](../../src/lib/query-generators.ts)):
 
 ```sql
-SELECT META(d).id AS __id, d.* FROM `travel`.`inventory`.`hotel` AS d LIMIT 50;
+SELECT META(d).id AS __id, d.* FROM `travel`.`inventory`.`hotel` AS d;
 ```
+
+It carries no row bound. Since #816 the preview cap travels as the `limit` execution option rather
+than as text in the statement, so the limiter can recognise the bound as its own and advance it for
+page two; a bound in the statement is indistinguishable from one the user typed, and a self-bounded
+statement comes back unrewritten with the requested offset discarded. This provider declares
+`supportsResultPagination: true`, so the results grid offers Load More over the preview.
 
 The alias `__id` matches `COUCHBASE_DOCUMENT_KEY_COLUMN` in the introspection module
 ([`introspect.ts`](../../src/lib/db/providers/document/couchbase/introspect.ts)), so the schema tree
@@ -490,6 +498,32 @@ explicit `ssl.rejectUnauthorized` always wins
 (`buildTlsMaterial()`,
 [`http-transport.ts`](../../src/lib/db/providers/document/couchbase/http-transport.ts)).
 
+
+### 4.4 Endpoint validation and redirects
+
+`host` and `port` are validated when the transport is constructed, which happens in `connect()`, so
+a bad value fails Test Connection and never a capability read. A host must be a hostname, an IPv4
+address or an IPv6 address (bracketed or not), and a port must be an integer from 1 to 65535.
+Anything else is a `DatabaseConfigError` that names the field and does not repeat the value.
+Every request URL is built by the shared [`endpoint.ts`](../../src/lib/db/http/endpoint.ts) with
+`URL` and `URLSearchParams` and checked against the intended hostname, port and path before it is
+sent, so no value can move a request to another path or another server. A scheme's default port
+(80 for `http`, 443 for `https`) is left out of the URL the way `URL` serializes it.
+
+Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx answer becomes a
+`ConnectionError` naming the status and only the origin of its `Location`, since a followed
+redirect would take the Basic credential and the statement to wherever the server pointed.
+
+The host a request finally uses can come from somewhere other than the form: an SRV record for a
+host with no port, or the node addresses `/pools/default/nodeServices` reports
+([§3.3](#33-ports-are-discovered-not-configured)). Both go through the same builder, so an address
+the cluster reports that is not a valid host or port fails the query with a `DatabaseConfigError`
+before it is sent.
+
+The TLS path uses `node:https`, which does not follow a redirect on its own; a test pins that. A 3xx
+there is reported as an HTTP failure, `Couchbase request failed with HTTP 302`, rather than as the
+`ConnectionError` above.
+
 ---
 
 ## 5. Query interface
@@ -640,6 +674,9 @@ provider in [`index.ts`](../../src/lib/db/providers/document/couchbase/index.ts)
 | `function` | routine | `[bucket, scope, function]` | `system:functions`, and the only kind here declaring `hasSource` ([§6b](#6b-object-source-789)) |
 | `index` | config, `attachedTo: collection` | `[bucket, scope, collection, index]` | `system:indexes` |
 
+A bucket alone is a real address as well as a bucket and a scope, and the declaration states it as `containerPathShapes: "prefixes"` ([§9](#9-capabilities--labels)).
+A bucket-level container carries no scope, and that is absent rather than `_default`, because `_default` is a real scope holding real collections.
+
 A collection declares `acceptsRowWrites: true`. That is the per-kind fact and it is deliberately
 separate from the engine-wide `supportsInlineRowEdit: false` this provider also declares: the
 results grid's `UPDATE ... SET` cannot address a document through the `__id` projection
@@ -758,6 +795,12 @@ A rejected `INFER` yields **no columns rather than an error**: the collection be
 7014) and the user lacking SELECT on it are both ordinary states. The fixture leaves `hotel` and
 `bookings` empty so that stays measured. `foreignKeys` is always `[]` for the same reason
 `declaresForeignKeys: false` is declared: SQL++ has no referential constraint.
+
+`collection` is the only kind declaring `hasColumns`, so it is the only object row the desktop
+object tree gives a twisty to; `function` and `index` declare nothing, are leaves there, and the
+tree derives no read for them, which is the same fact the table above states by answering `[]`.
+An empty collection and an `INFER` the caller has no SELECT grant for both reach the tree as an
+open row reporting `No columns reported`, because neither is an error on this engine.
 
 A function's BODY is read by `readObjectSource` instead ([§6b](#6b-object-source-789)), not by
 `describeObject`. A function's parameter list and an index's keys as a first-class detail remain
@@ -1073,13 +1116,20 @@ edge one. Omitted, the same panels render `N/A` / "Not measured" and score the c
 
 ## 8. Maintenance
 
-`runMaintenance(type, target?)`
+`runMaintenance(type, target?, container?)`
 ([`index.ts`](../../src/lib/db/providers/document/couchbase/index.ts)). All three operations
 **require** a target.
 
+A `container` is the row's `schemaName` (#772), and the keyspace it addresses is decided from it:
+the bucket's own name (the only Tables row this provider has, `getTableStats()`) means the
+bucket's default collection, so the row's Analyze button addresses `` `bucket`.`_default`.`_default` ``
+rather than a scope that does not exist; any other container is the SCOPE the collection sits in,
+used as one instead of being parsed back out of the display name. Without a container the
+display-name rule stands: `scope.collection`, or the default scope for a bare name.
+
 | Type | Couchbase action | Notes |
 |------|------------------|-------|
-| `analyze` | `UPDATE STATISTICS FOR <keyspace> INDEX ALL` | **Enterprise Edition only.** A Community cluster answers "'Update Statistics' is an enterprise level feature." — returned verbatim as a failed result, not swallowed or reworded |
+| `analyze` | `UPDATE STATISTICS FOR <keyspace> INDEX ALL` | **Enterprise Edition only.** A Community cluster answers "'Update Statistics' is an enterprise level feature.", returned verbatim as a failed result, not swallowed or reworded. The success reply names the same keyspace the statement addressed (``Updated statistics for `travel`.`inventory`.`hotel` ``), so a row whose target is the bucket cannot report as if the bucket itself had been touched (#1091 review) |
 | `reindex` | `BUILD INDEX ON <keyspace>(...)` over the keyspace's deferred indexes | Reports "No deferred indexes on X" when there are none |
 | `kill` | `DELETE FROM system:active_requests WHERE requestId = $1` | Target is the request id shown in active sessions |
 
@@ -1131,12 +1181,16 @@ stays absent, and that card never renders either.
 | `supportsExternalQueryLimiting` | `true` |
 | `supportsCreateTable` | `false` |
 | `supportsInlineRowEdit` | `false` — SQL++ has `UPDATE <keyspace> SET ... WHERE ...`, but the shared editor's `WHERE <pk> = <value>` would filter on `__id`, the key **projection alias**, which is not a document field ([§13](#13-known-limitations--future-work)) |
+| `supportsResultPagination` | `true` — SQL++ takes `LIMIT n OFFSET m`, and this provider's `prepareQuery` routes through the shared limiter to emit it (#816) |
 | `supportsTransactions` | `false` — the query service is reached over stateless HTTP and no session spans two requests, so the transaction trio and SANDBOX are not offered (#464) |
 | `declaresForeignKeys` | `false` — SQL++ has no referential constraint; collections are schemaless and the columns reported here are inferred from a document sample |
 | `supportsMaintenance` | `true` |
 | `maintenanceOperations` | `['analyze', 'reindex', 'kill']` |
 | `supportsConnectionString` | `true` |
 | `defaultPort` | `8091` |
+| `containerLevels` | two levels, `catalog` labelled Bucket then `schema` labelled Scope ([§6a.1](#6a1-what-is-declared)) |
+| `containerPathShapes` | `prefixes`: `[bucket]` and `[bucket, scope]` both address a container, because a bucket alone is a real address ([§6a.1](#6a1-what-is-declared)); the empty path and a longer path are both refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
+| `objectKinds` | `collection`, `function`, `index` ([§6a](#6a-the-object-surface-789)) |
 | `schemaRefreshPattern` | `\b(CREATE\|DROP\|ALTER)\s+(COLLECTION\|SCOPE\|INDEX)\b` |
 
 `supportsCreateTable: false` is deliberate: `CreateTableModal` builds `CREATE TABLE` from a column
@@ -1397,4 +1451,4 @@ Everything else:
 - USE clause (`USE KEYS`): <https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/hints.html>
 - INFER: <https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/infer.html>
 - EXPLAIN: <https://docs.couchbase.com/server/current/n1ql/n1ql-language-reference/explain.html>
-- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [MongoDB](./mongodb.md) · [Apache Trino](./trino.md) · [Redis](./redis.md) · [LibreDB](./libredb.md)
+- Sibling provider docs: [PostgreSQL](./postgres.md) · [MySQL](./mysql.md) · [Oracle](./oracle.md) · [SQL Server](./mssql.md) · [SQLite](./sqlite.md) · [MongoDB](./mongodb.md) · [Trino](./trino.md) · [Redis](./redis.md) · [LibreDB](./libredb.md)

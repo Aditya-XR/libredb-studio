@@ -58,7 +58,7 @@ import { ElasticsearchProvider, OpenSearchProvider } from "@/lib/db/providers/sq
 import { SearchHttpTransport } from "@/lib/db/providers/sql/search/http-transport";
 import { type SearchErrorCategory, SearchTransportError } from "@/lib/db/providers/sql/search/transport";
 import type { ProviderCapabilities } from "@/lib/db/types";
-import { ConnectionError, QueryCancelledError, QueryError, TimeoutError } from "@/lib/db/errors";
+import { ConnectionError, DatabaseConfigError, QueryCancelledError, QueryError, TimeoutError } from "@/lib/db/errors";
 import { isSourcePartUnavailable } from "@/lib/db/object-kinds";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 
@@ -942,16 +942,47 @@ describe("OpenSearch faults", () => {
 });
 
 // ============================================================================
+// API key auth is Elasticsearch-only (#708)
+// ============================================================================
+
+describe("OpenSearchProvider refuses an API key pair", () => {
+  test("connect refuses a pair rather than dropping it with no error", async () => {
+    // Seed/types and the seed projection used to take the pair with no type gate,
+    // and the transport then sent Basic (or nothing) as if the key had never been
+    // set. Refuse at the transport instead: nothing here has measured whether
+    // OpenSearch's security plugin accepts Authorization: ApiKey.
+    const provider = new OpenSearchProvider(
+      makeConnection({ apiKeyId: "seed-key-id", apiKeySecret: "seed-key-secret" }),
+    );
+
+    await expect(provider.connect()).rejects.toBeInstanceOf(DatabaseConfigError);
+    await expect(provider.connect()).rejects.toThrow(/does not accept API key authentication/);
+  });
+
+  test("a half-filled pair is refused the same way, not treated as leftover Basic", async () => {
+    const provider = new OpenSearchProvider(makeConnection({ apiKeyId: "seed-key-id", user: "admin" }));
+
+    await expect(provider.connect()).rejects.toBeInstanceOf(DatabaseConfigError);
+  });
+});
+
+// ============================================================================
 // One implementation, two type-ids
 // ============================================================================
 
 describe("OpenSearchProvider shares the Elasticsearch implementation", () => {
-  test("declares the same capabilities as the other type-id, except the one declared divergence", () => {
+  test("declares the same capabilities as the other type-id, except the two declared divergences", () => {
     // The guard: one implementation serves both type-ids, so a capability that
     // differs without being deliberate means a behaviour difference was smuggled
-    // into the wrong place. `identifierQuoting` is the ONE exception, and it is
-    // subtracted here explicitly rather than by relaxing the comparison, so a
-    // second divergence still fails this test.
+    // into the wrong place. `identifierQuoting` and `supportsResultPagination` are
+    // the ONLY exceptions, and they are subtracted here explicitly rather than by
+    // relaxing the comparison, so a third divergence still fails this test.
+    //
+    // Why supportsResultPagination diverges: OpenSearch SQL accepts an `OFFSET`
+    // clause and Elasticsearch SQL does not (`ELASTICSEARCH_PRODUCT.acceptsOffsetClause`
+    // is false, and `prepareQuery` throws rather than answering page two with page
+    // one). The declaration reads `this.product.acceptsOffsetClause` so it cannot
+    // drift from the refusal it describes (#816).
     //
     // Why it diverges: measured on OpenSearch 3.8.0, a double-quoted identifier is
     // a STRING LITERAL, so `WHERE "customer" = 'acme'` answers HTTP 200 with
@@ -959,14 +990,22 @@ describe("OpenSearchProvider shares the Elasticsearch implementation", () => {
     // derives its dialect from `defaultPort`, and both products are 9200 - so
     // without a declared quote style the generated query would silently return no
     // rows for data that exists.
-    const { identifierQuoting: osQuoting, ...opensearch } = new OpenSearchProvider(makeConnection()).getCapabilities();
-    const { identifierQuoting: esQuoting, ...elasticsearch } = new ElasticsearchProvider(
-      makeConnection({ type: ELASTICSEARCH }),
-    ).getCapabilities();
+    const {
+      identifierQuoting: osQuoting,
+      supportsResultPagination: osPaging,
+      ...opensearch
+    } = new OpenSearchProvider(makeConnection()).getCapabilities();
+    const {
+      identifierQuoting: esQuoting,
+      supportsResultPagination: esPaging,
+      ...elasticsearch
+    } = new ElasticsearchProvider(makeConnection({ type: ELASTICSEARCH })).getCapabilities();
 
     expect(opensearch).toEqual(elasticsearch);
     expect(osQuoting).toBe("backtick");
     expect(esQuoting).toBe("double");
+    expect(osPaging).toBe(true);
+    expect(esPaging).toBe(false);
     expect(opensearch.queryLanguage).toBe("sql");
     expect(opensearch.supportsExplain).toBe(false);
     // Neither grammar has BEGIN and both are reached over stateless HTTP (#464).
@@ -1359,6 +1398,43 @@ describe("object surface", () => {
         .map((kind) => kind.id)
         .sort(),
     ).toEqual(["alias", "index", "stream"]);
+  });
+
+  test("declares columns on exactly the kinds that resolve to a mapping", async () => {
+    const provider = await connectProvider();
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    // ONE declaration constant serves both type-ids, so this expectation is written out
+    // here rather than compared against the other product's, for the same reason the
+    // source test above is. The three kinds are the ones `describeObject` reads
+    // `_mapping` for (`search/index.ts:1251`, gated on `SEARCH_MAPPED_KINDS` at `:478`).
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["alias", "index", "stream"]);
+    // The other direction, so a kind added later cannot quietly gain a twisty. A pipeline
+    // and a template are JSON documents with no field list at all.
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["pipeline", "template"]);
+
+    // The declaration against the engine's own answer, one kind each way. A data stream
+    // row's columns are the mapping of its CURRENT backing index, which is what the
+    // transport takes (`search/http-transport.ts:1266`).
+    const stream = await provider.describeObject(["probe_stream"], "stream");
+    expect(stream.columns.length).toBeGreaterThan(0);
+    for (const column of stream.columns) {
+      expect(typeof column.name).toBe("string");
+      expect(column.name.trim()).not.toBe("");
+      expect(typeof column.type).toBe("string");
+      expect(column.type.trim()).not.toBe("");
+    }
+    expect((await provider.describeObject(["probe_pipeline"], "pipeline")).columns).toEqual([]);
   });
 
   // --------------------------------------------------------------------------

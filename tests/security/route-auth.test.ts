@@ -221,27 +221,35 @@ const ROUTES_OUTSIDE_API = ["health"];
  * here is exactly the hand-maintained-inventory drift this enumeration exists to prevent, and
  * the sanity check below fails if a key does not match a route that actually exists.
  *
- * One entry (`agent/drive`) is NOT in that category and says so in its own reason: it does reach
- * a provider, and it is exempt from THIS enumeration only because the enumeration probes with a
- * POST carrying no credential and asserts guardRoute's exact 401 body. That route cannot have a
- * user session by construction - it is the durable transport's callback - so it authenticates
- * with a server-minted single-purpose credential instead, and the same "no credential, no work"
- * property is proven against it in tests/api/agent/drive.test.ts. An exemption whose reason is a
- * different verified control is the only kind allowed here; "it has no auth" never is.
+ * Two entries (`agent/drive` and `mcp`) are NOT in that category and say so in their own reasons:
+ * each does reach a provider, and each is exempt from THIS enumeration only because the
+ * enumeration probes with a POST carrying no credential and asserts guardRoute's exact 401 body.
+ * Neither takes a user session. `agent/drive` is the durable transport's callback and verifies a
+ * server-minted single-purpose credential, proven in tests/api/agent/drive.test.ts; `mcp` is
+ * called by an MCP client of the user's own and verifies a scoped bearer token, because a session
+ * cookie must not open a machine API, proven in tests/security/mcp-auth.test.ts. An exemption
+ * whose reason is a different verified control is the only kind allowed here; "it has no auth"
+ * never is.
  */
 const ROUTES_WITHOUT_A_PROVIDER: Record<string, string> = {
+  "admin/accounts":
+    "reads and writes the app's own account registry on the storage backend (STORAGE_PROVIDER), not a user database or LLM provider",
+  "admin/accounts/[email]":
+    "same account registry as admin/accounts, one account at a time (PATCH and DELETE, no POST export)",
   "admin/audit": "reads/writes the in-process audit ring buffer only; no database or LLM provider",
   "agent/config":
     "answers whether the agent runtime is enabled, from process.env alone; no database or LLM provider (GET, no POST export). It still requires a session — a bare getSession() like connections/managed, because metering a visibility probe out of the ai bucket would spend a run's budget on rendering a panel — and tests/api/agent/config.test.ts proves an unauthenticated caller learns nothing about the flag",
   "agent/drive":
     "reaches a provider, but is the durable transport's callback and can have no user session: it verifies a server-minted single-purpose credential and its 401 body differs from guardRoute's on purpose (tests/api/agent/drive.test.ts)",
   "agent/runs/[runId]":
-    "reads and cancels one run's own durable ledger; no database or LLM provider (GET/DELETE, no POST export). Its session check is guardRoute, through src/lib/api/agent-run-access.ts",
+    "reads, cancels, pauses and resumes one run's own durable ledger; the resume action drives the run in-process, which reaches a provider, but the route still requires a session (guardRoute, through src/lib/api/agent-run-access.ts)",
   "agent/runs/[runId]/artifacts/[correlationId]":
     "hands back rows one run already stored, from process memory; no database or LLM provider is reached to answer it (GET, no POST export). Same guardRoute path as above, through src/lib/api/agent-run-access.ts, and tests/api/agent/artifacts.test.ts proves an unauthenticated caller gets 401 and reads nothing",
   "agent/runs/[runId]/stream":
     "follows one run's own durable ledger; no database or LLM provider (GET, no POST export). Same guardRoute path as above",
   "auth/login": "authenticates the credential itself; a session cannot be required before one exists",
+  "auth/totp":
+    "enrols a TOTP secret on the caller's own stored account; the storage backend is not a user database or LLM provider",
   "auth/logout": "clears the session cookie unconditionally; touches no provider either way",
   "auth/me": "reads the caller's own session claims only (GET, no POST export)",
   "auth/oidc/callback": "completes the OIDC exchange that CREATES the session (GET, no POST export)",
@@ -249,6 +257,7 @@ const ROUTES_WITHOUT_A_PROVIDER: Record<string, string> = {
   "connections/managed": "reads seed config metadata only; never opens a database connection (GET, no POST export)",
   health:
     "liveness only: returns a fixed body and touches nothing, so there is no provider to require a session for (GET, no POST export). The connection-scoped check is POST /api/db/health, which is not on this list",
+  mcp: "reaches a provider, but is called by an MCP client of the user's own and verifies a scoped bearer token instead of a session (src/lib/mcp/bearer.ts): its 401 body differs from guardRoute's on purpose, and tests/security/mcp-auth.test.ts proves that no refused identity constructs a provider",
   storage: "reaches the app's own storage backend (STORAGE_PROVIDER), not a user database or LLM provider (GET only)",
   "storage/[collection]": "same storage backend as above, scoped to the caller's own data (PUT, no POST export)",
   "storage/config": "publicly documents whether server storage is enabled; no session, no provider (GET only)",
@@ -341,11 +350,11 @@ describe("routes that reach a provider require a session", () => {
     { label: "a handleSchemaRequest() call", pattern: /\bhandleSchemaRequest\s*\(/ },
   ];
 
-  // The one allowlist entry whose reason does NOT claim to be provider-free (see the doc comment
-  // on ROUTES_WITHOUT_A_PROVIDER). Skipping it is itself verified below - the assertion requires
-  // the entry's reason to still say so, so this set cannot quietly grow into a second unchecked
+  // The two allowlist entries whose reasons do NOT claim to be provider-free (see the doc comment
+  // on ROUTES_WITHOUT_A_PROVIDER). Skipping them is itself verified below - the assertion requires
+  // each entry's reason to still say so, so this set cannot quietly grow into a second unchecked
   // allowlist.
-  const ALLOWLISTED_BUT_REACHES_A_PROVIDER = ["agent/drive"];
+  const ALLOWLISTED_BUT_REACHES_A_PROVIDER = ["agent/drive", "mcp"];
 
   /** Blanks out comments while preserving line numbering, so a mention in prose is not a hit. */
   function withoutComments(source: string): string {
@@ -416,7 +425,9 @@ describe("routes that reach a provider require a session", () => {
     "@/hooks/use-connection-payload": "shapes a connection record for the client; opens nothing",
     "@/lib/agent/config": `reads the agent runtime's env config and ${PROVIDER_NAMING_HELPER} (@/lib/llm/utils/config) to validate the model id, which resolves config rather than calling a model`,
     "@/lib/agent/model-tuning": "the per-model tuning table; data only",
-    "@/lib/agent/runtime": `the run loop, and it ${PROVIDER_NAMING_HELPER} - but the artifacts route imports only readAgentArtifact, which reads the in-process ExecutionArtifactStore`,
+    "@/lib/agent/runtime": `the run loop, and it ${PROVIDER_NAMING_HELPER} - the artifacts route imports only readAgentArtifact (the in-process ExecutionArtifactStore), and agent/runs/[runId] imports driveAgentRun, which the resume action uses to drive the run`,
+    "@/lib/agent/run-service": `the run lifecycle service (pause/unpause/cancel/status), and it ${PROVIDER_NAMING_HELPER} (@/lib/db/operations/execution) - but only for releaseExecutionRun, which releases the run's in-process budget and artifacts, never a database or model`,
+    "@/lib/api/account-response": "maps account-registry failures to HTTP responses; opens nothing",
     "@/lib/api/agent-run-access": "resolves a run id to its ledger behind guardRoute; reads no provider",
     "@/lib/api/client-address": "parses the forwarded-for chain for the audit record",
     "@/lib/api/liveness": "builds the fixed liveness body; imports nothing and touches nothing",
@@ -428,10 +439,14 @@ describe("routes that reach a provider require a session", () => {
     "@/lib/auth-compare": "constant-time credential comparison",
     "@/lib/auth-errors": "the auth failure taxonomy",
     "@/lib/config/base-path": "prefixes redirect URLs and cookie paths; these routes use no fetch or provider",
-    "@/lib/local-auth": "the local email/password credential store",
+    "@/lib/local-accounts":
+      "the local account registry on the app's storage backend; opens no user database or LLM provider",
+    "@/lib/password-hash": "scrypt for stored account passwords; no provider",
     "@/lib/logger": "structured logging",
     "@/lib/oidc": "the OIDC discovery and PKCE exchange",
     "@/lib/seed": "reads seed connection metadata from config; never connects",
+    "@/lib/storage/connection-secrets":
+      "the credential field classification; withoutSecretFields copies a connection record without its secrets and opens nothing",
     "@/lib/storage/factory": "the app's own storage backend (STORAGE_PROVIDER), not a user database",
     "@/lib/storage/types": "the storage backend's interfaces",
     "@/lib/totp": "second-factor verification: an HMAC over the submitted code and an in-process spent-step map",

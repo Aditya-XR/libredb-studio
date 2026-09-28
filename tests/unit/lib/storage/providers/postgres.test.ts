@@ -42,6 +42,7 @@ mock.module("pg", () => ({
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 import { PostgresStorageProvider } from "@/lib/storage/providers/postgres";
+import { LastAdminError } from "@/lib/storage/types";
 
 describe("PostgresStorageProvider", () => {
   let provider: ServerStorageProvider;
@@ -381,5 +382,187 @@ describe("PostgresStorageProvider", () => {
   test("the storage pool carries exactly one error listener", async () => {
     await provider.initialize();
     expect(mockPool.listenerCount("error")).toBe(1);
+  });
+
+  test("initialize creates the accounts table", async () => {
+    await provider.initialize();
+    const sql = (mockQuery.mock.calls as unknown[][])[0][0] as string;
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS accounts");
+  });
+
+  test("lists and reads accounts", async () => {
+    await provider.initialize();
+    mockQuery.mockClear();
+    const row = {
+      email: "ada@example.com",
+      password_hash: "scrypt$16384$8$1$salt$key",
+      role: "admin",
+      totp_secret: "SECRET",
+      totp_pending: null,
+      disabled: 1,
+      session_version: 3,
+      created_at: "2026-09-25T00:00:00.000Z",
+      updated_at: "2026-09-25T00:00:00.000Z",
+    };
+    mockQuery.mockResolvedValueOnce({ rows: [row] });
+    const listed = await provider.listAccounts();
+    expect(listed).toEqual([
+      {
+        email: "ada@example.com",
+        passwordHash: row.password_hash,
+        role: "admin",
+        totpSecret: "SECRET",
+        totpPending: null,
+        disabled: true,
+        sessionVersion: 3,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      },
+    ]);
+    expect((mockQuery.mock.calls as unknown[][])[0][0]).toContain("FROM accounts");
+
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...row, role: "user", disabled: 0, totp_secret: null }] });
+    const one = await provider.getAccount("ada@example.com");
+    expect(one?.role).toBe("user");
+    expect(one?.disabled).toBe(false);
+    expect(one?.totpSecret).toBeNull();
+
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    expect(await provider.getAccount("missing@example.com")).toBeNull();
+  });
+
+  test("rejects an accounts row whose role is not admin or user", async () => {
+    await provider.initialize();
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          email: "ada@example.com",
+          password_hash: "h",
+          role: "owner",
+          totp_secret: null,
+          totp_pending: null,
+          disabled: 0,
+          session_version: 0,
+          created_at: "t",
+          updated_at: "t",
+        },
+      ],
+    });
+    await expect(provider.listAccounts()).rejects.toThrow(/role owner/);
+  });
+
+  test("rejects an accounts row whose session_version is not a whole number", async () => {
+    await provider.initialize();
+    const row = {
+      email: "ada@example.com",
+      password_hash: "h",
+      role: "user",
+      totp_secret: null,
+      totp_pending: null,
+      disabled: 0,
+      created_at: "t",
+      updated_at: "t",
+    };
+    for (const session_version of ["x", -1, 1.5]) {
+      mockQuery.mockResolvedValueOnce({ rows: [{ ...row, session_version }] });
+      await expect(provider.getAccount("ada@example.com")).rejects.toThrow(/session_version/);
+    }
+  });
+
+  test("writes account inserts, updates and deletes", async () => {
+    await provider.initialize();
+    mockQuery.mockClear();
+    const account = {
+      email: "ada@example.com",
+      passwordHash: "scrypt$hash",
+      role: "user" as const,
+      totpSecret: null,
+      totpPending: null,
+      disabled: false,
+      sessionVersion: 0,
+      createdAt: "t",
+      updatedAt: "t",
+    };
+    await provider.insertAccount(account);
+    expect((mockQuery.mock.calls as unknown[][])[0][0]).toContain("INSERT INTO accounts");
+
+    const clientQuery = mock(async (): Promise<{ rows: unknown[] }> => ({ rows: [] }));
+    const release = mock(() => {});
+    mockPool.connect = mock(async () => ({ query: clientQuery, release }));
+    await provider.updateAccount({ ...account, disabled: true });
+    await provider.deleteAccount(account.email);
+    const sql = (clientQuery.mock.calls as unknown[][]).map((call) => call[0] as string);
+    expect(sql[0]).toBe("BEGIN");
+    expect(sql[1]).toContain("UPDATE accounts");
+    expect(sql[2]).toBe("COMMIT");
+    expect(sql[3]).toBe("BEGIN");
+    expect(sql[4]).toContain("DELETE FROM accounts");
+    expect(sql[5]).toContain("DELETE FROM user_storage");
+    expect(sql[6]).toBe("COMMIT");
+    // An unguarded write takes no lock on the admin rows.
+    expect(sql.some((statement) => statement.includes("FOR UPDATE"))).toBe(false);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  test("a guarded write locks the enabled admins first and commits when one remains", async () => {
+    await provider.initialize();
+    const clientQuery = mock(
+      async (sql: string): Promise<{ rows: unknown[] }> =>
+        sql.includes("COUNT(*)") ? { rows: [{ n: 1 }] } : { rows: [] },
+    );
+    const release = mock(() => {});
+    mockPool.connect = mock(async () => ({ query: clientQuery, release }));
+    await provider.deleteAccount("ada@example.com", { keepEnabledAdmin: true });
+    const sql = (clientQuery.mock.calls as unknown[][]).map((call) => call[0] as string);
+    expect(sql[0]).toBe("BEGIN");
+    expect(sql[1]).toContain("FOR UPDATE");
+    expect(sql[2]).toContain("DELETE FROM accounts");
+    expect(sql[4]).toContain("COUNT(*)");
+    expect(sql[5]).toBe("COMMIT");
+  });
+
+  test("a guarded write that would leave no enabled admin rolls back with LastAdminError", async () => {
+    await provider.initialize();
+    const clientQuery = mock(
+      async (sql: string): Promise<{ rows: unknown[] }> =>
+        sql.includes("COUNT(*)") ? { rows: [{ n: "0" }] } : { rows: [] },
+    );
+    const release = mock(() => {});
+    mockPool.connect = mock(async () => ({ query: clientQuery, release }));
+    const account = {
+      email: "ada@example.com",
+      passwordHash: "scrypt$hash",
+      role: "user" as const,
+      totpSecret: null,
+      totpPending: null,
+      disabled: false,
+      sessionVersion: 3,
+      createdAt: "t",
+      updatedAt: "t",
+    };
+    await expect(provider.updateAccount(account, { keepEnabledAdmin: true })).rejects.toBeInstanceOf(LastAdminError);
+    const sql = (clientQuery.mock.calls as unknown[][]).map((call) => call[0] as string);
+    expect(sql).toContain("ROLLBACK");
+    expect(sql).not.toContain("COMMIT");
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  test("deleteAccount rolls back when the row delete fails, so no rows are orphaned", async () => {
+    await provider.initialize();
+    const clientQuery = mock(async (sql: string): Promise<{ rows: unknown[] }> => {
+      if (sql.includes("DELETE FROM user_storage")) throw new Error("row delete refused");
+      return { rows: [] };
+    });
+    const release = mock(() => {});
+    mockPool.connect = mock(async () => ({ query: clientQuery, release }));
+    await expect(provider.deleteAccount("ada@example.com")).rejects.toThrow(/row delete refused/);
+    const sql = (clientQuery.mock.calls as unknown[][]).map((call) => call[0] as string);
+    expect(sql).toContain("ROLLBACK");
+    expect(sql).not.toContain("COMMIT");
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+  test("account reads fail before initialize", async () => {
+    const fresh = new PostgresStorageProvider("postgresql://localhost:5432/test");
+    await expect(fresh.listAccounts()).rejects.toThrow(/not initialized/);
   });
 });

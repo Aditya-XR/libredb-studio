@@ -28,6 +28,7 @@ import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
 import { createCanonicalOperationRegistry } from "@/lib/db/operations/descriptors";
 import { createTargetScope } from "@/lib/db/operations/policy";
+import { KafkaProvider } from "@/lib/db/providers/stream/kafka/index";
 import type { DatabaseProvider, ProviderCapabilities, ProviderLabels } from "@/lib/db/types";
 import { KEY_PATTERN_LABELS, SEARCH_INDEX_LABELS, TABLE_LABELS } from "../fixtures/provider-labels";
 import { LLMAuthError, LLMStreamError } from "@/lib/llm/types";
@@ -1517,6 +1518,56 @@ describe("planning mode runs no statement of the user's", () => {
       });
 
       /*
+        #1085: a third language takes the non-SQL arm of `planningStatementContract`, and that arm
+        says nothing that is only true of JSON. The connection stays this describe's `mongodb`
+        fixture, because the type reaches only the two sentences that name the engine; what is
+        under test is which arm the LANGUAGE selects.
+      */
+      test("a PromQL engine takes the same neutral contract, and is never told to write SQL", async () => {
+        const { rules } = await planOnProvider("promql");
+
+        expect(rules).toContain("database's own query language");
+        expect(rules).toContain("This engine speaks no SQL");
+        expect(rules).toContain("those are the names of its own objects and of the fields inside them");
+        // The SQL arm's opening and its SQL-only name rule, neither of which may also be present.
+        expect(rules).not.toContain("Produce ONE runnable statement: the statement that answers the question.");
+        expect(rules).not.toContain("and no column name that is not in that inventory");
+      });
+
+      /*
+        #1088: Kafka declares `"json"`, so it takes the same neutral arm, and the one fact about how
+        its statement is written is its provider's `statementLanguage` label, stated verbatim after
+        that arm's opening: the read request's schema, which is this product's own, with its keys as
+        the label quotes them. The labels are the ones the provider ships, so the sentence that
+        reaches the model is the one under test. The non-SQL name rule stays beside it, and the
+        label's clause is what answers it: the inventory's columns are not keys of the request.
+      */
+      test("a Kafka engine is told its read request's keys, after the neutral contract", async () => {
+        const labels = new KafkaProvider({
+          id: "kafka-plan",
+          name: "Kafka",
+          type: "kafka",
+          host: "localhost",
+          port: 9092,
+          createdAt: new Date(0),
+        }).getLabels();
+        const { rules } = await planOnProvider("json", labels);
+
+        expect(rules).toContain("database's own query language");
+        expect(rules).toContain("Write it in the JSON read request this editor executes");
+        for (const key of ['"topic"', '"partition"', '"from"', '"limit"', '{"offset"', '{"timestamp"']) {
+          expect(rules, key).toContain(key);
+        }
+        expect(rules).toContain("Use no name that is not in that inventory");
+        expect(rules).toContain("not keys of the request");
+        // The label adds to the contract rather than replacing it: the neutral opening comes first.
+        expect(rules.indexOf("own query language")).toBeLessThan(rules.indexOf("Write it in the JSON read request"));
+        // The SQL arm's opening and its SQL-only name rule, neither of which may also be present.
+        expect(rules).not.toContain("Produce ONE runnable statement: the statement that answers the question.");
+        expect(rules).not.toContain("and no column name that is not in that inventory");
+      });
+
+      /*
         The gap a live run found, and the reason it is a LABEL rather than a branch on
         the engine name. Measured 2026-08-19 in the browser: a plan run on an
         OpenSearch connection, told only "produce ONE runnable statement", answered
@@ -2680,6 +2731,42 @@ describe("planning mode runs no statement of the user's", () => {
       expect(draftedIn(events)).toBeUndefined();
     });
 
+    /*
+      #1085. `promql` is a language tag that names the `prometheus` type-id, the one every PromQL
+      server this product reaches connects through, so on this suite's PostgreSQL connection a
+      PromQL block is written for another engine exactly as the `mysql` one above is. Read as
+      naming no engine, it was recorded as this run's statement: stamped `postgres`, judged by
+      the SQL guard, its identifier check reporting no unknown table in a text that names none,
+      and the run scored answered without ever being asked for the SQL.
+    */
+    test("a PromQL block is not recorded as a PostgreSQL run's statement, and the run is asked for one", async () => {
+      const events = await planWith(fenced("pg_replication_lag_seconds > 30", "promql"));
+
+      expect(draftedIn(events)).toBeUndefined();
+      expect(events.filter((event) => event.kind === "guidance-issued").map((event) => event.notice)).toContain(
+        "plan-statement",
+      );
+      expect(events.find((event) => event.kind === "run-finished")).toMatchObject({
+        goalVerdict: { outcome: "unanswered", unmet: ["no-statement"] },
+      });
+    });
+
+    test("a PromQL block written before the run's own statement does not hide it", async () => {
+      const closing = [
+        fenced("pg_replication_lag_seconds > 30", "promql"),
+        "",
+        "```postgres",
+        "SELECT title FROM film;",
+        "```",
+      ];
+
+      expect(draftedIn(await planWith(closing.join("\n")))).toMatchObject({
+        sql: "SELECT title FROM film;",
+        dialect: "postgres",
+        readOnly: true,
+      });
+    });
+
     test("an explicit refusal drafts no statement, and is not recorded as one", async () => {
       const events = await planWith("NO STATEMENT: nothing in the inventory records payments.");
 
@@ -3019,6 +3106,162 @@ describe("cancellation is honoured at the next checkpoint", () => {
     // answering); the model's own statement never reached the database.
     expect(modelStatements(b.queryReadOnly)).toEqual([]);
     expect(kindsOf(await eventsOf(b.store, run.runId))).toContain("run-finished");
+  });
+});
+
+describe("pause is honoured at the next checkpoint", () => {
+  test("a pause asked for while the model was thinking leaves the run paused before the statement", async () => {
+    const b = boot(freshDataDir());
+    const run = await startRun(b);
+    const script = scriptedModel(async () => {
+      // Recorded while the model "answers": the loop's next checkpoint is the step.
+      await b.service.pause(run.runId);
+      return chatToolCallStream("run_read_query", JSON.stringify({ sql: "SELECT id FROM orders" }));
+    });
+
+    const result = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: b.resources,
+    });
+
+    expect(result.status).toBe("paused");
+    expect(result.stopReason).toBeNull();
+    // The context capture ran (the pause was recorded after it, while the model was
+    // answering); the model's own statement never reached the database.
+    expect(modelStatements(b.queryReadOnly)).toEqual([]);
+    const kinds = kindsOf(await eventsOf(b.store, run.runId));
+    expect(kinds).toContain("run-paused");
+    expect(kinds).not.toContain("run-finished");
+  });
+
+  test("a pause while the model was thinking reaches a draftless tool at runStep's checkpoint", async () => {
+    const b = boot(freshDataDir());
+    const run = await startRun(b);
+    const script = scriptedModel(async () => {
+      await b.service.pause(run.runId);
+      return chatToolCallStream("inspect_schema", JSON.stringify({ table: "orders" }));
+    });
+
+    const result = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: b.resources,
+    });
+
+    expect(result.status).toBe("paused");
+    expect(result.stopReason).toBeNull();
+    expect(modelStatements(b.queryReadOnly)).toEqual([]);
+    expect(kindsOf(await eventsOf(b.store, run.runId))).not.toContain("run-finished");
+  });
+
+  test("a pause that lands mid-step stops the drive at the loop's next checkpoint", async () => {
+    let runId = "";
+    let service: AgentRunService | null = null;
+    const b = boot(freshDataDir(), {
+      answer: async (sql) => {
+        if (runId !== "" && String(sql).includes("SELECT id FROM orders")) {
+          await service?.pause(runId);
+        }
+        return queryResult();
+      },
+    });
+    service = b.service;
+    const run = await startRun(b);
+    runId = run.runId;
+    const script = scriptedModel(callsTool("run_read_query", { sql: "SELECT id FROM orders" }), reportOn());
+
+    const result = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: b.resources,
+    });
+
+    expect(result.status).toBe("paused");
+    expect(result.stopReason).toBeNull();
+    expect(kindsOf(await eventsOf(b.store, run.runId))).not.toContain("run-finished");
+  });
+
+  test("a pause while the model composes its report keeps the run paused and the report", async () => {
+    const b = boot(freshDataDir());
+    const run = await startRun(b);
+    const script = scriptedModel(callsTool("run_read_query", { sql: "SELECT id FROM orders" }), async (turn) => {
+      // Recorded while the model "answers" its final turn: the report it already
+      // composed must still land, and the drive must not finish the run over it.
+      await b.service.pause(run.runId);
+      return chatToolCallStream(
+        "compose_report",
+        JSON.stringify({
+          claims: [
+            {
+              claim: "The orders report scans the whole table.",
+              evidence: [{ source: "artifact", correlationId: correlationIdIn(turn.transcript) }],
+            },
+          ],
+        }),
+        "call_report",
+      );
+    });
+
+    const result = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: b.resources,
+    });
+
+    expect(result.status).toBe("paused");
+    expect(result.stopReason).toBeNull();
+    const kinds = kindsOf(await eventsOf(b.store, run.runId));
+    expect(kinds).toContain("report-composed");
+    expect(kinds).not.toContain("run-finished");
+  });
+
+  test("a pause asked for while the model was thinking leaves a profile_table call paused too", async () => {
+    const b = boot(freshDataDir(), {
+      describesSchema: async () => [
+        {
+          name: "orders",
+          columns: [{ name: "customerId", type: "string", nullable: true, isPrimary: false }],
+          indexes: [],
+          foreignKeys: [],
+        },
+      ],
+    });
+    const run = await startRun(b, "agent", "database-assessment");
+    const script = scriptedModel(async () => {
+      await b.service.pause(run.runId);
+      return chatToolCallStream("profile_table", JSON.stringify({ table: "orders" }));
+    });
+
+    const result = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: b.resources,
+    });
+
+    expect(result.status).toBe("paused");
+    expect(result.stopReason).toBeNull();
+    expect(kindsOf(await eventsOf(b.store, run.runId))).not.toContain("run-finished");
+  });
+
+  test("a run already paused before its drive is left paused, not failed", async () => {
+    const b = boot(freshDataDir());
+    const run = await startRun(b);
+    await b.service.markRunning(run.runId);
+    await b.service.pause(run.runId);
+    const script = scriptedModel(answersProse("never asked"));
+
+    const result = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: b.resources,
+    });
+
+    expect(result.status).toBe("paused");
+    expect(result.stopReason).toBeNull();
+    // The model is never asked: a paused run gets no turn.
+    expect(script.turns).toHaveLength(0);
+    expect(kindsOf(await eventsOf(b.store, run.runId))).not.toContain("run-finished");
   });
 });
 

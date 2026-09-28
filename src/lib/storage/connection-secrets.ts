@@ -42,6 +42,9 @@ export const CONNECTION_FIELDS: Record<keyof DatabaseConnection, FieldClass> = {
   // A DATABASE NAME (`admin`), not a credential. The password that authenticates
   // against it is the secret, and it is classified above.
   authSource: "public",
+  // A SASL MECHANISM NAME (`SCRAM-SHA-512`), which a broker's own configuration lists in the
+  // clear. It says how the password is checked; the password is the secret, classified above.
+  saslMechanism: "public",
   schema: "public",
   queryTimeout: "public",
   // A display preference: whether this browser reads the catalog when the connection
@@ -51,6 +54,11 @@ export const CONNECTION_FIELDS: Record<keyof DatabaseConnection, FieldClass> = {
   seedId: "public",
   agentUser: "public",
   agentPassword: "secret",
+  // Not `user`'s twin. `user` is a name an operator chose and can re-type; this is one
+  // generated, opaque half of a credential pair, so leaving it readable narrows what a
+  // leak has to guess from two values to one. See the field's own doc in types.ts.
+  apiKeyId: "secret",
+  apiKeySecret: "secret",
 };
 
 export const SSL_FIELDS: Record<keyof SSLConfig, FieldClass> = {
@@ -202,6 +210,17 @@ function openOrDrop(value: string): string | undefined {
  */
 export function encryptConnections(connections: DatabaseConnection[]): DatabaseConnection[] {
   return connections.map((connection) => walkConnection(connection, sealIfPlaintext).connection);
+}
+
+/**
+ * A copy with every secret field removed, for a reader that may use a connection but must not
+ * hold its credentials: the browser, for a managed seed it opens by id
+ * (GET /api/connections/managed). The same maps and walker as encryption, so a field classified
+ * secret tomorrow is withheld here without a second list to remember. An empty value stays, as it
+ * does in the walker: there is nothing in it to withhold.
+ */
+export function withoutSecretFields<T extends DatabaseConnection>(connection: T): T {
+  return walkConnection(connection, () => undefined).connection as T;
 }
 
 export interface ConnectionReadResult {

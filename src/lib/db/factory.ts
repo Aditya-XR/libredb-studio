@@ -14,6 +14,7 @@ import { DatabaseConfigError, ExecutionProfileError } from "./errors";
 import { createSSHTunnel, closeSSHTunnel, hasTunnel } from "@/lib/ssh/tunnel";
 import type { TunnelInfo } from "@/lib/ssh/tunnel";
 import { readSecret } from "@/lib/storage/encryption";
+import { providerCacheKey } from "./provider-cache-key";
 import { TUNNEL_FAR_END, type WithTunnelFarEnd } from "@/lib/types";
 import { logger } from "@/lib/logger";
 import * as path from "path";
@@ -62,13 +63,23 @@ import * as path from "path";
  * const result = await provider.query('SELECT * FROM users');
  * await provider.disconnect();
  */
+/**
+ * Strip the control characters a log line's framing is made of, so a caller-supplied value
+ * cannot write a line of its own.
+ *
+ * Hoisted out of `createDatabaseProvider`, where it guarded `type` and `name`, once
+ * `connection.id` was established to be caller-supplied too (GHSA-3wh2-8x78-jfw4 - see
+ * {@link providerCacheKey}). Every site below that INTERPOLATES an id into a message uses it;
+ * the ids passed as structured logger FIELDS do not need it, because a field is never parsed
+ * as part of the line.
+ */
+const sanitize = (v: string) => v.replace(/[\r\n]/g, " ").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
+
 export async function createDatabaseProvider(
   connection: DatabaseConnection,
   options: ProviderOptions = {},
   execution: ProviderExecutionContext = {},
 ): Promise<DatabaseProvider> {
-  // Sanitize user-controlled values to prevent log injection
-  const sanitize = (v: string) => v.replace(/[\r\n]/g, " ").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
   console.log(`[DB] Creating ${sanitize(connection.type)} provider for "${sanitize(connection.name || "")}"`);
 
   // Explicit overrides (such as the connectivity probe) take precedence over saved settings.
@@ -108,7 +119,7 @@ export async function createDatabaseProvider(
 
     case "mssql": {
       const { MSSQLProvider } = await import("./providers/sql/mssql");
-      return new MSSQLProvider(connection, options);
+      return new MSSQLProvider(connection, options, execution);
     }
 
     case "clickhouse": {
@@ -177,6 +188,24 @@ export async function createDatabaseProvider(
       return new RedisProvider(connection, options);
     }
 
+    // Time-series stores - dynamically imported
+    case "prometheus": {
+      // The explicit /index specifier keeps this dynamic import statically
+      // analysable: a bare directory resolves only at runtime, which the bundler
+      // cannot trace into a chunk.
+      const { PrometheusProvider } = await import("./providers/timeseries/prometheus/index");
+      return new PrometheusProvider(connection, options);
+    }
+
+    // Message logs - dynamically imported
+    case "kafka": {
+      // The explicit /index specifier keeps this dynamic import statically
+      // analysable: a bare directory resolves only at runtime, which the bundler
+      // cannot trace into a chunk.
+      const { KafkaProvider } = await import("./providers/stream/kafka/index");
+      return new KafkaProvider(connection, options);
+    }
+
     // Embedded databases - dynamically imported
     case "libredb": {
       const { LibreDBProvider } = await import("./providers/embedded/libredb");
@@ -188,7 +217,7 @@ export async function createDatabaseProvider(
         // This list is NOT type-checked against the union - a new case above with no
         // entry here is silent - so it is kept in the same order as the cases and
         // tests/isolated/factory.test.ts pins individual names in it by regex.
-        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, mssql, clickhouse, druid, trino, cassandra, elasticsearch, opensearch, mongodb, couchbase, redis, libredb`,
+        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, mssql, clickhouse, druid, trino, cassandra, elasticsearch, opensearch, mongodb, couchbase, redis, prometheus, kafka, libredb`,
         connection.type,
       );
   }
@@ -301,6 +330,12 @@ interface CachedProvider {
   provider: DatabaseProvider;
   lastUsed: number;
   /**
+   * The connection this entry serves. It is NOT the cache key - see
+   * {@link providerCacheKey} for why the key may not be a string the caller typed. Every
+   * "which entries serve connection X" question matches on this field.
+   */
+  connectionId: string;
+  /**
    * The file this entry holds open, when the provider declares
    * `ProviderCapabilities.singleWriterFile` - see `findOpenSingleWriterProvider`.
    * `null` on every other provider, which is all of them but one.
@@ -390,19 +425,30 @@ export function findOpenSingleWriterProvider(connection: DatabaseConnection): Da
 // Keyed by (connection id, execution profile).
 // ============================================================================
 
-interface ProfiledCachedProvider extends CachedProvider {
-  connectionId: string;
-}
+type ProfiledCachedProvider = CachedProvider;
 
 const profiledProviderCache = new Map<string, ProfiledCachedProvider>();
 
-function profiledCacheKey(connectionId: string, profile: ExecutionProfile): string {
-  return `${profile}::${connectionId}`;
+/**
+ * The profiled cache's key, which is the shared cache's key with the profile framed onto it
+ * (GHSA-3wh2-8x78-jfw4). It used to be `${profile}::${connection.id}`, so it carried the same
+ * forgeable id and was reachable by the same forgery - reproduced on this path too, in
+ * `tests/isolated/factory.test.ts`. {@link providerCacheKey} states the whole argument.
+ *
+ * The profile stays in the key because the two caches' isolation is per profile: an
+ * `agent-read-only` acquisition may never be served what `agent-operations` opened.
+ *
+ * Exported for one caller that must join concurrent first acquisitions on exactly this key
+ * without deriving a second one: src/lib/mcp/context.ts.
+ */
+export async function profiledCacheKey(connection: DatabaseConnection, profile: ExecutionProfile): Promise<string> {
+  const key = await providerCacheKey(connection);
+  return `${profile.length}:${profile}${key}`;
 }
 
 /** True when any provider — shared or profiled — still serves this connection. */
 function connectionStillServed(connectionId: string): boolean {
-  if (providerCache.has(connectionId)) return true;
+  if (Array.from(providerCache.values()).some((entry) => entry.connectionId === connectionId)) return true;
   return Array.from(profiledProviderCache.values()).some((entry) => entry.connectionId === connectionId);
 }
 
@@ -423,17 +469,24 @@ export async function evictIdleProviders(maxIdleMs: number = IDLE_TIMEOUT_MS): P
   const now = Date.now();
   let evicted = 0;
 
-  for (const [id, entry] of providerCache) {
+  for (const [key, entry] of providerCache) {
     if (now - entry.lastUsed >= maxIdleMs) {
-      logger.info(`[DB] Evicting idle provider: ${id} (idle ${Math.round((now - entry.lastUsed) / 60000)}min)`);
+      const id = entry.connectionId;
+      logger.info(
+        `[DB] Evicting idle provider: ${sanitize(id)} (idle ${Math.round((now - entry.lastUsed) / 60000)}min)`,
+      );
       try {
         await entry.provider.disconnect();
       } catch (error) {
-        logger.warn(`[DB] Error disconnecting idle provider ${id}`, { connectionId: id, error: String(error) });
+        logger.warn(`[DB] Error disconnecting idle provider ${sanitize(id)}`, {
+          connectionId: id,
+          error: String(error),
+        });
       }
-      providerCache.delete(id);
+      providerCache.delete(key);
       // Close the shared tunnel only when nothing serves the connection
-      // anymore — a live profiled provider still needs it.
+      // anymore — a live profiled provider still needs it, and so does another
+      // entry of this connection opened with different credentials.
       if (!connectionStillServed(id)) {
         try {
           await closeSSHTunnel(id);
@@ -449,11 +502,11 @@ export async function evictIdleProviders(maxIdleMs: number = IDLE_TIMEOUT_MS): P
   // connection id, so it is closed only once nothing serves that connection.
   for (const [key, entry] of profiledProviderCache) {
     if (now - entry.lastUsed >= maxIdleMs) {
-      logger.info(`[DB] Evicting idle profiled provider: ${key}`);
+      logger.info(`[DB] Evicting idle profiled provider: ${sanitize(entry.connectionId)}`);
       try {
         await entry.provider.disconnect();
       } catch (error) {
-        logger.warn(`[DB] Error disconnecting idle profiled provider ${key}`, {
+        logger.warn(`[DB] Error disconnecting idle profiled provider ${sanitize(entry.connectionId)}`, {
           connectionId: entry.connectionId,
           error: String(error),
         });
@@ -502,7 +555,7 @@ export async function getOrCreateProvider(
   connection: DatabaseConnection,
   options: ProviderOptions = {},
 ): Promise<DatabaseProvider> {
-  const cacheKey = connection.id;
+  const cacheKey = await providerCacheKey(connection);
 
   // Check cache
   const cached = providerCache.get(cacheKey);
@@ -555,7 +608,7 @@ export async function getOrCreateProvider(
   // Cache it, remembering the file when this engine admits only one handle on it -
   // that is what lets the callers that would otherwise open a second one find this.
   const singleWriterFile = provider.getCapabilities().singleWriterFile === true ? fileIdentity(connection) : null;
-  providerCache.set(cacheKey, { provider, lastUsed: Date.now(), singleWriterFile });
+  providerCache.set(cacheKey, { provider, connectionId: connection.id, lastUsed: Date.now(), singleWriterFile });
 
   // Start idle sweep if not already running
   startIdleSweep();
@@ -585,7 +638,8 @@ export type ExecutionProfile = "agent-read-only" | "agent-operations" | "agent-h
  * without stating both. The second field is the engine gate, and it is a PROPERTY OF
  * THE PROFILE rather than of the factory: `agent-read-only` sends model-authored
  * statements, so it is served only where the engine itself can bound one, and only
- * `postgres.ts` and `sqlite.ts` implement that. `agent-operations` sends no statement
+ * the providers of AGENT_EXECUTION_ENGINES implement that: PostgreSQL, SQLite, DuckDB
+ * and SQL Server (`src/lib/agent/engine-support.ts`). `agent-operations` sends no statement
  * at all — it calls the curated reporting methods every provider implements — so
  * requiring a read-only STATEMENT path of it would refuse an engine over a capability
  * the profile never uses. `agent-handover` sends a statement too — the one a run
@@ -676,7 +730,7 @@ export async function acquireExecutionProfileProvider(
     throw new ExecutionProfileError(`Unknown execution profile: ${String(profile)}`, "UNSUPPORTED_PROFILE");
   }
 
-  const cacheKey = profiledCacheKey(connection.id, profile);
+  const cacheKey = await profiledCacheKey(connection, profile);
   const cached = profiledProviderCache.get(cacheKey);
   if (cached && cached.provider.config.queryTimeout !== connection.queryTimeout) {
     try {
@@ -773,15 +827,17 @@ export async function acquireExecutionProfileProvider(
  * not leave a stale agent pool running under the old configuration.
  */
 export async function removeProvider(connectionId: string): Promise<void> {
-  const cached = providerCache.get(connectionId);
-
-  if (cached) {
+  // A connection can hold more than one entry now - one per distinct server-and-credentials
+  // it was opened with - so this removes every entry serving it, the way the profiled loop
+  // below always has.
+  for (const [key, entry] of providerCache) {
+    if (entry.connectionId !== connectionId) continue;
     try {
-      await cached.provider.disconnect();
+      await entry.provider.disconnect();
     } catch (error) {
-      logger.warn(`Error disconnecting provider ${connectionId}`, { connectionId, error: String(error) });
+      logger.warn(`Error disconnecting provider ${sanitize(connectionId)}`, { connectionId, error: String(error) });
     }
-    providerCache.delete(connectionId);
+    providerCache.delete(key);
   }
 
   for (const [key, entry] of profiledProviderCache) {
@@ -789,7 +845,10 @@ export async function removeProvider(connectionId: string): Promise<void> {
     try {
       await entry.provider.disconnect();
     } catch (error) {
-      logger.warn(`Error disconnecting profiled provider ${key}`, { connectionId, error: String(error) });
+      logger.warn(`Error disconnecting profiled provider ${sanitize(connectionId)}`, {
+        connectionId,
+        error: String(error),
+      });
     }
     profiledProviderCache.delete(key);
   }
@@ -798,7 +857,7 @@ export async function removeProvider(connectionId: string): Promise<void> {
   try {
     await closeSSHTunnel(connectionId);
   } catch (error) {
-    logger.warn(`Error closing SSH tunnel for ${connectionId}`, { connectionId, error: String(error) });
+    logger.warn(`Error closing SSH tunnel for ${sanitize(connectionId)}`, { connectionId, error: String(error) });
   }
 }
 
@@ -814,17 +873,19 @@ export async function clearProviderCache(): Promise<void> {
 
   const disconnectPromises: Promise<void>[] = [];
 
-  for (const [id, entry] of providerCache) {
+  for (const entry of providerCache.values()) {
     disconnectPromises.push(
       entry.provider.disconnect().catch((error) => {
-        console.error(`[DB] Error disconnecting provider ${id}:`, error);
+        // The id is an argument, never part of the first one: `console.error`'s first argument
+        // is a format string, and a constant cannot be a format attack (js/tainted-format-string).
+        console.error("[DB] Error disconnecting provider", sanitize(entry.connectionId), error);
       }),
     );
   }
   for (const [key, entry] of profiledProviderCache) {
     disconnectPromises.push(
       entry.provider.disconnect().catch((error) => {
-        console.error(`[DB] Error disconnecting profiled provider ${key}:`, error);
+        console.error("[DB] Error disconnecting profiled provider", sanitize(entry.connectionId), error);
       }),
     );
   }
@@ -840,7 +901,9 @@ export async function clearProviderCache(): Promise<void> {
 export function getProviderCacheStats(): { size: number; connections: string[] } {
   return {
     size: providerCache.size,
-    connections: Array.from(providerCache.keys()),
+    // The ids, never the keys: a key is a digest, and this is observability for
+    // "which connections are open".
+    connections: Array.from(providerCache.values(), (entry) => entry.connectionId),
   };
 }
 

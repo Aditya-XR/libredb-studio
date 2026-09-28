@@ -54,11 +54,36 @@ export const sqlQueryReadDescriptor: RegistrableOperationDescriptor = {
   },
 };
 
+/**
+ * Estimating plan inspection.
+ *
+ * It requires NO provider capability, and that is a correction rather than a
+ * relaxation. `supportsExplain` is the EDITOR's capability: it is what decides
+ * whether the Explain button and tab are rendered and which strategy module in
+ * `src/lib/explain` reads the result. The agent's plan path does not go through
+ * any of that. `composed-sql.ts` says so in its own header: the editor's PostgreSQL
+ * strategy is deliberately not reused here, because its `buildSql` always emits the
+ * EXECUTING form. The agent composes its own estimating form per dialect, and
+ * `composeEstimatingExplain` REFUSES a dialect it has not verified
+ * (`UNSUPPORTED_DIALECT`) before this descriptor is ever resolved, so the real gate
+ * was never this line.
+ *
+ * Keeping it here denied the one engine where the two facts differ: SQL Server has a
+ * verified estimating plan for the agent (`SET SHOWPLAN_ALL`, which the read-only
+ * profile already compiles for every statement it admits) and no editor Explain, so
+ * `supportsExplain` is honestly false while `inspect_plan` is honestly available.
+ * Measured before the change: a `query-optimization` run on SQL Server had
+ * `inspect_plan` denied `CAPABILITY_UNSUPPORTED` and finished `unanswered` with
+ * `no-plan-evidence`: the workflow could not complete on that engine at all.
+ *
+ * `sqlExplainAnalyzeDescriptor` below keeps the requirement, and the asymmetry is the
+ * point: the executing form is the editor's own statement, run on the editor's terms.
+ */
 export const sqlExplainEstimateDescriptor: RegistrableOperationDescriptor = {
   id: PLAN_INSPECTION_ID,
   riskClass: 0,
   accessLevel: "metadata-read",
-  requiredCapabilities: ["supportsExplain"],
+  requiredCapabilities: [],
   resourceCost: "light",
   supportsDryRun: false,
   requiresApproval: false,

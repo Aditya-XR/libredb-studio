@@ -184,6 +184,16 @@ describe("DuckDBProvider capabilities", () => {
     expect(capabilities.singleWriterFile).toBe(true);
   });
 
+  test("pages with LIMIT n OFFSET m", () => {
+    // #816: declared true because `prepareQuery` really applies a positive offset.
+    // Measured across every type-id in tests/unit/db/result-pagination-capability.test.ts.
+    expect(capabilities.supportsResultPagination).toBe(true);
+
+    const pageTwo = new DuckDBProvider(makeConfig()).prepareQuery("SELECT * FROM t", { limit: 50, offset: 50 });
+    expect(pageTwo.query).toBe("SELECT * FROM t LIMIT 50 OFFSET 50");
+    expect(pageTwo.wasLimited).toBe(true);
+  });
+
   test("declares double-quote identifier quoting rather than relying on the null-port heuristic", () => {
     // `defaultPort: null` is shared with sqlite, and query-generators.ts derives the
     // dialect from the port unless the capability is declared.
@@ -810,17 +820,17 @@ describe("runMaintenance()", () => {
   });
 
   /*
-    The other side of that default, and the reason D49 exists.
+    The other side of that default.
 
     A caller that sends a BARE name for a table living outside `main` gets `main`, and the
     engine refuses because that table is not there. The refusal is the CORRECT behaviour for
     this provider - guessing which schema the caller meant would act on a table nobody named -
     so it is pinned here rather than repaired: the repair belongs to the caller.
 
-    Measured in the browser on 2026-08-27: the Tables panel's per-row Analyze button sends
+    Measured in the browser on 2026-08-27: the Tables panel's per-row Analyze button sent
     `table.tableName` without the `table.schemaName` it renders beside it, so clicking it on the
-    `analytics.events` row produced exactly this refusal. That is a shared-component defect
-    reaching all twelve providers that implement `runMaintenance`, filed as D49.
+    `analytics.events` row produced exactly this refusal. #772 repaired the caller, which now
+    sends the schema as the container (the test below).
   */
   test("a bare target naming a table outside main is refused, and the message names the real one", async () => {
     provider = await seededMemoryProvider();
@@ -836,6 +846,28 @@ describe("runMaintenance()", () => {
     provider = await seededMemoryProvider();
 
     await expect(provider.runMaintenance("optimize", "customers")).rejects.toThrow(/takes no target/);
+  });
+
+  // #772: `schemaName` is the schema on DuckDB exactly as it is on PostgreSQL, and a caller
+  // that sends it gets that schema directly - never a re-split of the name.
+  test("a container qualifies the target instead of the main fallback", async () => {
+    provider = await seededMemoryProvider();
+
+    await expect(provider.runMaintenance("analyze", "events", "analytics")).resolves.toMatchObject({ success: true });
+  });
+
+  test("a container is used whole even when it contains a dot", async () => {
+    provider = await seededMemoryProvider();
+    await provider.query('CREATE SCHEMA "odd.schema"');
+    await provider.query('CREATE TABLE "odd.schema".events (id BIGINT)');
+
+    await expect(provider.runMaintenance("analyze", "events", "odd.schema")).resolves.toMatchObject({ success: true });
+  });
+
+  test("a bare target with no container still falls back to main", async () => {
+    provider = await seededMemoryProvider();
+
+    await expect(provider.runMaintenance("analyze", "customers")).resolves.toMatchObject({ success: true });
   });
 
   test.each(["reindex", "check", "kill"] as const)("%s is refused with the reason it is not offered", async (type) => {
@@ -1384,7 +1416,7 @@ describe("object surface", () => {
    * docblock) this test is what refuses it until a read exists.
    *
    * All four are `sql` and not a dialect id. `plsql`, `tsql` and `cql` are not registrable
-   * ids in the installed monaco-editor 0.56.0 bundle and DuckDB has no id of its own
+   * ids in the installed monaco-editor 0.57.0 bundle and DuckDB has no id of its own
    * either, so `sql` is the honest choice rather than a compromise here: DuckDB's dialect
    * is PostgreSQL-shaped and the text the engine publishes is ordinary SQL.
    */
@@ -1408,6 +1440,45 @@ describe("object surface", () => {
         .map((kind) => kind.id)
         .sort(),
     ).toEqual([]);
+  });
+
+  /**
+   * `hasColumns` against the engine's own answer, on the two kinds that decide it (#789).
+   *
+   * The declaration is what draws the twisty in the object tree, so a kind declaring it and
+   * answering nothing is a twisty that opens on nothing, and a kind answering columns while
+   * declaring nothing hides them behind a leaf with nothing on screen to say so. On this engine
+   * the fact is not a transcription: `describeObject` returns three empty arrays for anything
+   * whose role is not `relation` (`sql/duckdb/index.ts:959-961`), so `table` and `view` are the
+   * two kinds that can answer at all, and `macro` and `sequence` cannot.
+   */
+  test("declares columns on exactly the kinds describeObject answers columns for", async () => {
+    const kinds = new DuckDBProvider(makeConfig()).getCapabilities().objectKinds ?? [];
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["table", "view"]);
+    // The other direction: a kind that abstains declares nothing at all, not `false`.
+    expect(kinds.filter((kind) => kind.hasColumns !== true).map((kind) => kind.hasColumns)).toEqual([
+      undefined,
+      undefined,
+    ]);
+
+    const provider = await seededObjectProvider();
+    try {
+      const view = await provider.describeObject(["memory", "main", "customer_names"], "view");
+      expect(view.columns.length).toBeGreaterThan(0);
+      for (const column of view.columns) {
+        expect(typeof column.name === "string" && column.name.trim() !== "").toBe(true);
+        expect(typeof column.type === "string" && column.type.trim() !== "").toBe(true);
+      }
+
+      expect((await provider.describeObject(["memory", "analytics", "recent_events"], "macro")).columns).toEqual([]);
+    } finally {
+      await provider.disconnect();
+    }
   });
 
   test("satisfies the shared object surface contract", async () => {
@@ -1555,6 +1626,24 @@ describe("DuckDB object containers, listings and detail", () => {
     const provider = await seededObjectProvider();
     try {
       expect(await provider.listContainers(["memory", "main"])).toEqual([]);
+    } finally {
+      await provider.disconnect();
+    }
+  });
+
+  test("a parent is a tree cursor, so a catalog lists its schemas even when only exact addresses are declared", async () => {
+    const provider = await seededObjectProvider();
+    try {
+      // `containerPathShapes` governs the paths an object read ADDRESSES. A listing parent is
+      // not one: `[database]` is where the tree is, so an address check would refuse it here.
+      spyOn(provider, "getCapabilities").mockReturnValue({
+        ...new DuckDBProvider(makeConfig()).getCapabilities(),
+        containerPathShapes: "exact",
+      });
+      expect((await provider.listContainers(["memory"])).map((container) => container.path)).toEqual([
+        ["memory", "analytics"],
+        ["memory", "main"],
+      ]);
     } finally {
       await provider.disconnect();
     }
@@ -1809,7 +1898,15 @@ describe("DuckDB object containers, listings and detail", () => {
         columns: [
           { name: "id", type: "INTEGER", nullable: false, isPrimary: true },
           { name: "name", type: "VARCHAR", nullable: false, isPrimary: false },
-          { name: "note", type: "VARCHAR", nullable: true, isPrimary: false, defaultValue: "'none'" },
+          // The catalog reports `'none'`; the value is `none`, and the text is kept (#1029).
+          {
+            name: "note",
+            type: "VARCHAR",
+            nullable: true,
+            isPrimary: false,
+            defaultValue: "none",
+            defaultExpression: "'none'",
+          },
         ],
         indexes: [],
         foreignKeys: [],
@@ -3138,5 +3235,76 @@ describe("DuckDB object statements: what the fixture cannot show", () => {
       (value) => (typeof value === "string" ? Number(value) : undefined),
     );
     expect(counts).toEqual({ table: { count: 7 }, macro: { count: 0 } });
+  });
+});
+
+/**
+ * Column defaults as DuckDB's catalog reports them (#1029).
+ *
+ * `information_schema.columns.column_default` is the expression AS WRITTEN, with SQL
+ * standard quote doubling, identical to SQLite on every string, number and expression
+ * row. A generated column reports its expression there too. Measured on DuckDB v1.5.5
+ * through `@duckdb/node-api`:
+ *
+ *   DEFAULT 'abc'                         -> 'abc'
+ *   DEFAULT 'it''s'                       -> 'it''s'
+ *   DEFAULT ''                            -> ''
+ *   DEFAULT 42                            -> 42
+ *   DEFAULT CURRENT_TIMESTAMP             -> CURRENT_TIMESTAMP
+ *   GENERATED ALWAYS AS (id * 2) VIRTUAL  -> CAST((id * 2) AS INTEGER)
+ */
+describe("DuckDBProvider column defaults (#1029)", () => {
+  const DDL = `CREATE TABLE column_defaults (
+    id INTEGER PRIMARY KEY,
+    def_null_string VARCHAR DEFAULT 'NULL',
+    def_text VARCHAR DEFAULT 'abc',
+    def_empty VARCHAR DEFAULT '',
+    def_quote VARCHAR DEFAULT 'it''s',
+    def_backslash VARCHAR DEFAULT 'a\\b',
+    def_number INTEGER DEFAULT 42,
+    def_expression TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    def_generated INTEGER GENERATED ALWAYS AS (id * 2) VIRTUAL
+  )`;
+
+  const EXPECTED: Record<string, { defaultValue?: string; defaultExpression?: string }> = {
+    id: {},
+    def_null_string: { defaultValue: "NULL", defaultExpression: "'NULL'" },
+    def_text: { defaultValue: "abc", defaultExpression: "'abc'" },
+    def_empty: { defaultValue: "", defaultExpression: "''" },
+    def_quote: { defaultValue: "it's", defaultExpression: "'it''s'" },
+    def_backslash: { defaultValue: "a\\b", defaultExpression: "'a\\b'" },
+    def_number: { defaultValue: "42", defaultExpression: "42" },
+    def_expression: { defaultValue: "CURRENT_TIMESTAMP", defaultExpression: "CURRENT_TIMESTAMP" },
+    def_generated: { defaultValue: "CAST((id * 2) AS INTEGER)", defaultExpression: "CAST((id * 2) AS INTEGER)" },
+  };
+
+  const defaultsOf = (columns: readonly { name: string; defaultValue?: string; defaultExpression?: string }[]) =>
+    Object.fromEntries(
+      columns.map((column) => [
+        column.name,
+        {
+          ...(column.defaultValue === undefined ? {} : { defaultValue: column.defaultValue }),
+          ...(column.defaultExpression === undefined ? {} : { defaultExpression: column.defaultExpression }),
+        },
+      ]),
+    );
+
+  test("a string default is reported as its value, with the catalog text kept alongside", async () => {
+    const provider = new DuckDBProvider(makeConfig());
+    await provider.connect();
+    try {
+      await provider.query(DDL);
+
+      const single = await provider.describeObject(["memory", "main", "column_defaults"], "table");
+      expect(defaultsOf(single.columns)).toEqual(EXPECTED);
+
+      // The bulk read goes through the same mapper; asserting it too is what catches a fix
+      // applied to one read and not the other, the mistake #795 had to correct.
+      const batch = await provider.describeObjects(["memory", "main"], "table");
+      const bulk = batch.details.find((detail) => detail.path.at(-1) === "column_defaults")!;
+      expect(defaultsOf(bulk.columns)).toEqual(EXPECTED);
+    } finally {
+      await provider.disconnect();
+    }
   });
 });

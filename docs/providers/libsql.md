@@ -7,6 +7,8 @@
 > same SQLite. This document is the single reference point for the libSQL provider: design,
 > architecture, usage, and tests.
 
+`DB_HTTP_BLOCK_PRIVATE_HOSTS=true` blocks loopback, private, link-local and other non-public HTTP destinations; it is off by default so local connections work.
+
 | | |
 |---|---|
 | **Status** | Implemented & shipped |
@@ -129,7 +131,7 @@ path uses, so the error reader handles both. 400 is in the provider's authentica
 401 and 403 for that reason: keying only on 401 would report a malformed token as a connection
 failure.
 
-### 3.4 Integers arrive as decimal strings, and they stay exact
+### 3.4 Integers arrive as decimal strings, and the same digits go back as integers
 
 Hrana quotes every integer — `{"type":"integer","value":"2000"}` — which is the protocol protecting
 64-bit values from a double. `decodeInteger` returns a `number` when the value is exactly
@@ -139,6 +141,71 @@ Trino version of the same lesson).
 
 The one place a wide integer IS parsed to a double is `readNumber` in `introspect.ts`, and only for
 display statistics: a row count above 2^53 is 9 quadrillion rows. Result CELLS never pass through it.
+
+**Sending one back.** Reading exactly is only half an edit. `decodeInteger` is lossy in ONE direction:
+`9007199254740993` the integer and `'9007199254740993'` the text both leave this transport as the same
+JavaScript string, so a value arriving in a bind carries no clue which it was. SQLite settles that by
+the COLUMN's affinity, and only for a column that HAS one. Measured 2026-09-18 against sqld 0.24.33
+(`ghcr.io/tursodatabase/libsql-server:v0.24.33`, SQLite 3.45.1), on a row whose key is
+`9007199254740993`, sending each bind over `POST /v2/pipeline` both ways:
+
+| Column declared | `{"type":"text"}` (what the read used to send back) | `{"type":"integer"}` (what it sends now) |
+|---|---|---|
+| `INTEGER` / `NUMERIC` | 1 row | 1 row |
+| `TEXT` | 1 row | 1 row |
+| `BLOB` | **0 rows** | 1 row |
+| no type at all | **0 rows** | 1 row |
+
+`INTEGER` and `NUMERIC` affinity convert the text to a number before comparing and `TEXT` affinity
+converts the integer to text, so those answer the same either way. A column declared `BLOB` or
+declared NOTHING has NO affinity: SQLite compares the operands as they stand, a text is never equal to
+an integer, and **the row the grid had just read could not be found again** — `UPDATE … WHERE id = ?`
+reported 0 rows changed and the editor told the user nothing had happened.
+
+Note what this is NOT. Unlike `bun:sqlite`, the read side here never rounds — Hrana quotes its
+integers — so the damage was a silent NO-OP, never a write onto the neighbouring row
+([sqlite.md §3.6](./sqlite.md#36-a-64-bit-integer-survives-the-round-trip-in-both-directions) is the
+other half of that comparison).
+
+The affinity is not knowable at a bind — a bind is a value, and the protocol never names the column an
+operand belongs to — so `encodeValue` answers the question it CAN answer exactly: **it accepts back
+precisely what `decodeInteger` hands out**, and leaves every other string as text. The bound and the
+digit shape it tests against are read from
+[`sqlite-int64.ts`](../../src/lib/db/providers/sql/sqlite-int64.ts), which the SQLite driver reads
+too: both providers hand out the same shape, so they must accept the same shape back. Those digits are
+emitted for one input only, a 64-bit integer outside the safe range, so reading them back as that
+integer is the exact inverse:
+
+| Bound string | Sent as | Why |
+|---|---|---|
+| `"9007199254740993"`, `"-9007199254740993"`, `"9223372036854775807"` | `{"type":"integer"}` | the only shape the read emits |
+| `"1"`, `"9007199254740991"` | `{"type":"text"}` | inside the safe range the read hands out a NUMBER, never digits, so such a string is the caller's own text |
+| `"007"`, `"+7"`, `" 7"`, `""`, `"7.0"`, `"9e15"` | `{"type":"text"}` | shapes the read cannot emit |
+| `"99999999999999999999"`, `"9223372036854775808"` | `{"type":"text"}` | wider than SQLite's own `INTEGER`, so no row could match as a number either |
+
+Only a real `string` is tested, never `String(param)` of some other object: the read side hands out
+strings and nothing else, so nothing else can be a value it emitted.
+
+**The round trip, end to end through the provider against that live server.** Two rows with ids
+`9007199254740992` and `9007199254740993`, read back and then edited on the id that was read:
+
+| Column declared | Read back | `UPDATE` on the read key | Rows afterwards |
+|---|---|---|---|
+| `INTEGER` | `"9007199254740992"`, `"9007199254740993"` | 1 row | `…992=neighbour`, `…993=edited` |
+| `TEXT` | the same two | 1 row | the same |
+| `BLOB` | the same two | 1 row | the same |
+| no type at all | the same two | 1 row | the same |
+
+Ordinary values are untouched in the same pass: `SELECT 1` is still the number `1` and `COUNT(*)`
+still a number. A genuinely textual all-digit key is still text — `'9007199254740993'` and `'007'` in
+a `TEXT PRIMARY KEY` both match, and `typeof(id)` reads `text` for both — because `TEXT` affinity
+converts the bind back to text.
+
+What that costs, measured and accepted: in a column with NO affinity that genuinely stores this shape
+as TEXT, the bind now misses where it used to match. That is the same ambiguity read from the other
+end, it cannot be resolved without the affinity, and the integer reading is the one these digits exist
+for. This is the same rule `toSQLiteBindValue` applies in the SQLite driver, by design — the two
+providers hand out the same shape, so they accept the same shape back.
 
 ### 3.5 The server refuses four statements, so four controls are withheld
 
@@ -168,7 +235,7 @@ first day.
 `sqlite.ts` implements `queryReadOnly` by setting `query_only` and verifying the readback, per
 statement — that is what refuses `VACUUM INTO '<path>'` from a read-only handle. libSQL has no such
 lever: the pragma is refused on both deployments. So this provider implements **no** `queryReadOnly`,
-and the agent read-only profile stays PostgreSQL, SQLite and DuckDB.
+and the agent read-only profile stays PostgreSQL, SQLite, DuckDB and SQL Server.
 
 That is a gap with an engine-side answer when it is wanted: Turso mints **read-only tokens**
 (`turso db tokens create --read-only`) and the API can `block_writes` on a database. Both are
@@ -305,6 +372,25 @@ turso db tokens create <database> --read-only  # read-only, the engine-side answ
 
 A self-hosted `sqld` started without authentication takes no token at all, and sending an empty one
 is a 400 rather than an anonymous connection — so a connection with no token sends no header.
+
+
+### 4.4 Endpoint validation and redirects
+
+`host` and `port` are validated when the transport is constructed, which happens in `connect()`, so
+a bad value fails Test Connection and never a capability read. A host must be a hostname, an IPv4
+address or an IPv6 address (bracketed or not), and a port must be an integer from 1 to 65535.
+Anything else is a `DatabaseConfigError` that names the field and does not repeat the value.
+Every request URL is built by the shared [`endpoint.ts`](../../src/lib/db/http/endpoint.ts) with
+`URL` and `URLSearchParams` and checked against the intended hostname, port and path before it is
+sent, so no value can move a request to another path or another server. A scheme's default port
+(80 for `http`, 443 for `https`) is left out of the URL the way `URL` serializes it.
+
+Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx answer becomes a
+`ConnectionError` naming the status and only the origin of its `Location`, since a followed
+redirect would take the token and the statement to wherever the server pointed.
+
+`serverVersion()` answers `null` for every failure by contract ([§3.10](#310-the-version-panel-names-what-the-deployment-publishes)),
+so a redirect from `/version` is one more "no version to show". It is still not followed.
 
 ---
 
@@ -477,6 +563,12 @@ holding only the second shape makes this predicate look untestable when it is no
 An `index` and a `trigger` answer three empty arrays without touching the network, which is a true fact
 about those kinds rather than a failed read.
 
+`table` and `view` are therefore the only kinds here that declare `hasColumns`, so they are the only rows
+the object tree gives a twisty and expands into column rows; `index` and `trigger` declare nothing and stay
+leaves, which is what `describeObject()` answering no column for them means (#789).
+Both deployments this one type-id serves, self-hosted sqld and Turso Cloud, read the same pragmas through
+the same transport, so the declaration is one fact about the engine and not per deployment.
+
 For a `table` and a `view` the reads are batched, and that is where this provider stops being
 [sqlite.ts](../../src/lib/db/providers/sql/sqlite.ts): there every read is a call into a file handle, and
 here every read is an HTTP request.
@@ -575,6 +667,36 @@ placeholders by where they appear in the statement text and the select list is w
 file dispatches on statement text and never counted binds, so the suite was green while every
 `describeObject()` foreign key read would have failed against a real server. The bind arity is now
 pinned by an assertion in that suite.
+
+#### Column defaults: the value, with the catalog text kept alongside (#1029)
+
+libSQL reports a column default as the expression AS WRITTEN, through `pragma_table_xinfo`'s `dflt_value`, identical to SQLite's on every row below. A string
+default therefore arrives quoted, with SQL standard quote doubling, while a number and an
+expression arrive bare. Measured 2026-09-21 on SQLite 3.53.2 through `bun:sqlite`, the engine libSQL forks. The payloads this suite
+replays, captured from sqld 0.24.33 (SQLite 3.47.0), carry `customers.country` as `'TR'`,
+quoted the same way, and #1029 measured `@libsql/client` identical on every row:
+
+| DDL | the value the column defaults to | catalog text |
+| --- | --- | --- |
+| `DEFAULT 'NULL'` | `NULL` | `'NULL'` |
+| `DEFAULT 'abc'` | `abc` | `'abc'` |
+| `DEFAULT ''` | the empty string | `''` |
+| `DEFAULT 'it''s'` | `it's` | `'it''s'` |
+| `DEFAULT 'a\b'` | `a\b` | `'a\b'` |
+| `DEFAULT 42` | `42` | `42` |
+| `DEFAULT CURRENT_TIMESTAMP` | the expression | `CURRENT_TIMESTAMP` |
+| no default | none | SQL NULL |
+
+Each column carries both readings. `defaultValue` is the value, decoded by `unquoteLiteral()`
+(`src/lib/sql/values.ts`) with this dialect's `"standard"` escaping, so `'it''s'` reads as
+`it's` and a backslash stays ordinary data. Text that is not exactly one complete literal,
+a number or an expression, passes through unchanged. `defaultExpression` is the
+catalog text itself, which is always valid SQL here and is what the schema-diff migration
+generator writes after the word `DEFAULT`; without it, a decoded `abc` would be emitted as
+`DEFAULT abc`. The empty string default stays the empty string, never `undefined`, and a
+column with no default carries neither field. `readCatalogDefault()` is local to this
+provider, the way per-provider normalization is everywhere else in this tree; the escape
+knowledge it relies on is the shared part.
 
 #### No `rowCount` and no `sizeBytes` on a listed object
 
@@ -744,6 +866,9 @@ Measured through the provider against both deployments (fixture: 2 tables, 3 and
 | `check` | globally | `PRAGMA integrity_check`, and the ANSWER is read — a corrupt database reports damage in its row while the statement itself succeeds |
 | `vacuum`, `analyze`, `optimize`, `kill` | withheld | Refused by the server (§3.5); a direct API call is refused by the provider with the reason |
 
+A `container` is deliberately ignored (#772): a libSQL connection resolves names against its one
+attached database, exactly as `sqlite.ts` does.
+
 ---
 
 ## 9. Capabilities & labels
@@ -758,12 +883,14 @@ Measured through the provider against both deployments (fixture: 2 tables, 3 and
 | `explainFormat` | `"sqlite-queryplan"` | SQLite's 4-column `id/parent/notused/detail` query plan strategy |
 | `supportsConnectionString` | `true` | `libsql://<database>-<org>.turso.io?authToken=<jwt>` |
 | `supportsInlineRowEdit` | `true` | Results grid inline edits supported |
+| `supportsResultPagination` | `true` | `LIMIT n OFFSET m`, the grammar it shares with SQLite (#816) |
 | `supportsTransactions` | `false` | Stateless request stream closed with each statement; no interactive session held |
 | `maintenanceOperations` | `["reindex", "check"]` | Only `REINDEX` and `PRAGMA integrity_check` are permitted by server allowlist |
 | `maintenanceOperationSpecs` | `reindex` (`perEntity: true`, `global: true`), `check` (`perEntity: false`, `global: true`) | Placement rules for per-table and global maintenance actions |
 | `supportsCreateTable` | `true` | `CREATE TABLE` works as an ordinary SQL statement |
 | `schemaRefreshPattern` | `"(CREATE\|DROP\|ALTER\|TRUNCATE\|REINDEX)\\b"` | Matches statements that modify schema or index metadata |
 | `containerLevels` | `[]` | Zero-container engine; bare object names throughout ([§6.1](#61-the-object-surface-789)) |
+| `containerPathShapes` | `exact` | Only the empty path `[]` addresses a container, so any segment is refused, by the object routes over HTTP and by this provider directly (#1147) |
 | `objectKinds` | `LIBSQL_OBJECT_KINDS` | `table` (relation, `acceptsRowWrites`), `view` (relation), `index` (config), `trigger` (attached) |
 
 ### Labels — overridden (`getLabels()`, [`src/lib/db/providers/sql/libsql/index.ts`](../../src/lib/db/providers/sql/libsql/index.ts))
@@ -875,6 +1002,7 @@ await provider.disconnect();
 | No WAL size on the Storage tab | No statement reports it, and `PRAGMA wal_checkpoint` is refused | The engine's |
 | Turso Database (the Rust engine) is not reachable | It publishes no server image and ships in-process | Revisit when a server image exists |
 | No `function` object kind | `CREATE FUNCTION ... LANGUAGE wasm` is refused by the server's parser and `libsql_wasm_func_table` does not exist (§6.1) | The engine's. Declare the kind if a build ever accepts it |
+| A no-affinity column holding these digits as TEXT cannot be keyed on | The bind is a value with no column attached, so the transport cannot read the affinity that would settle it (§3.4) | Ours, and accepted: the integer reading is the one the digits exist for |
 | The object surface reads `main` only | `ATTACH` is refused outright and a declaration is read off a provider that never connects | Ours, and Phase 1's scope |
 
 ---

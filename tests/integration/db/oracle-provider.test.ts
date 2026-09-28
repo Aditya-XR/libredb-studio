@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:
 import {
   callerBoundTruncationReason,
   isSourcePartUnavailable,
+  kindHasColumns,
   sourceBoundTruncationReason,
 } from "@/lib/db/object-kinds";
 import type oracledb from "oracledb";
@@ -585,6 +586,123 @@ describe("OracleProvider", () => {
       expect(provider.isConnected()).toBe(true);
     });
 
+    // -------------------------------------------------------------------------
+    // A failed connect must not orphan its pool (#1102).
+    //
+    // `createPool` resolves before anything is dialled in Thin mode, so the
+    // failure lands on the test borrow below and the pool already exists. Dropping
+    // the reference there leaves oracledb's background creator looping toward
+    // `poolMin` with no backoff and nothing able to stop it - measured at ~14,000
+    // connect attempts and one full core per second.
+    //
+    // These four arms count `close` calls rather than assert on `this.pool`
+    // alone: a pool can be unreferenced and still running, which is the defect.
+    // -------------------------------------------------------------------------
+
+    test("a getConnection failure closes the pool it just created", async () => {
+      const closeFn = mock(() => Promise.resolve());
+      const pool = {
+        getConnection: async () => {
+          throw new Error("NJS-503: connection to host 127.0.0.1 port 1521 could not be established");
+        },
+        close: closeFn,
+        connectionsOpen: 0,
+        connectionsInUse: 0,
+      };
+      mockCreatePoolFn = async () => pool;
+
+      await expect(provider.connect()).rejects.toThrow(ConnectionError);
+
+      expect(closeFn).toHaveBeenCalledTimes(1);
+      expect(closeFn).toHaveBeenCalledWith(0);
+      expect(provider.isConnected()).toBe(false);
+    });
+
+    test("the NJS-138 config path closes the pool too", async () => {
+      const closeFn = mock(() => Promise.resolve());
+      const pool = {
+        getConnection: async () => {
+          throw new Error(
+            "NJS-138: connections to this database server version are not supported by node-oracledb in Thin mode",
+          );
+        },
+        close: closeFn,
+        connectionsOpen: 0,
+        connectionsInUse: 0,
+      };
+      mockCreatePoolFn = async () => pool;
+
+      await expect(provider.connect()).rejects.toThrow(DatabaseConfigError);
+
+      expect(closeFn).toHaveBeenCalledTimes(1);
+      expect(closeFn).toHaveBeenCalledWith(0);
+      expect(provider.isConnected()).toBe(false);
+    });
+
+    test("a connect retried after a closed failure creates a new pool", async () => {
+      let createPoolCalls = 0;
+      let failFirst = true;
+
+      mockCreatePoolFn = async () => {
+        createPoolCalls += 1;
+        const shouldFail = failFirst;
+        failFirst = false;
+
+        return {
+          getConnection: async () => {
+            if (shouldFail) {
+              throw new Error("NJS-503: connection to host 127.0.0.1 port 1521 could not be established");
+            }
+            return createMockConnection();
+          },
+          close: async () => {},
+          connectionsOpen: 0,
+          connectionsInUse: 0,
+        };
+      };
+
+      await expect(provider.connect()).rejects.toThrow(ConnectionError);
+      expect(provider.isConnected()).toBe(false);
+
+      // `this.pool` has to be cleared, not just closed. Left set, the `if (this.pool)`
+      // guard at the top of connect() returns without dialling and without an error,
+      // so a caller that retries believes it is connected to nothing.
+      await provider.connect();
+
+      expect(createPoolCalls).toBe(2);
+      expect(provider.isConnected()).toBe(true);
+    });
+
+    test("a close that itself rejects does not replace the connect error", async () => {
+      const closeFn = mock(() => Promise.reject(new Error("NJS-501: connection is busy")));
+
+      mockCreatePoolFn = async () => ({
+        getConnection: async () => {
+          throw new Error("NJS-503: connection to host 127.0.0.1 port 1521 could not be established");
+        },
+        close: closeFn,
+        connectionsOpen: 0,
+        connectionsInUse: 0,
+      });
+
+      let caught: unknown;
+      try {
+        await provider.connect();
+      } catch (error) {
+        caught = error;
+      }
+
+      // The caller acts on the connect failure. A close failure is cleanup noise
+      // and must not become the reason a connect was refused.
+      expect(caught).toBeInstanceOf(ConnectionError);
+      expect((caught as Error).message).toContain("NJS-503");
+      expect((caught as Error).message).not.toContain("NJS-501");
+      // Asserting the close was attempted is what makes this arm fail on the
+      // unfixed code: without it the old path passes by never calling close.
+      expect(closeFn).toHaveBeenCalledTimes(1);
+      expect(provider.isConnected()).toBe(false);
+    });
+
     test("disconnect closes pool and marks disconnected", async () => {
       await provider.connect();
       await provider.disconnect();
@@ -994,9 +1112,10 @@ describe("OracleProvider", () => {
       // The declaration and its one consumer, so a future edit that drops the field is a
       // failure here rather than an ORA-00933 the next user meets by clicking.
       const caps = provider.getCapabilities();
-      expect(generateTableQuery(["APP", "APP_CUSTOMERS"], caps)).toBe(
-        "SELECT * FROM APP.APP_CUSTOMERS FETCH FIRST 50 ROWS ONLY",
-      );
+      // The polarity of this guard is unchanged: no trailing `;`, because that is what
+      // Oracle answers ORA-00933 for. What moved is the row bound, which #816 took out of
+      // the generated text and into the `limit` execution option.
+      expect(generateTableQuery(["APP", "APP_CUSTOMERS"], caps)).toBe("SELECT * FROM APP.APP_CUSTOMERS");
       expect(generateSelectQuery(["APP", "APP_CUSTOMERS"], [], caps)).toBe(
         "SELECT\n  *\nFROM APP.APP_CUSTOMERS\nWHERE 1=1\nFETCH FIRST 100 ROWS ONLY",
       );
@@ -1018,6 +1137,9 @@ describe("OracleProvider", () => {
       // `UPDATE t SET c = v WHERE pk = v` is core Oracle DML — the shape the inline
       // row editor builds (#269).
       expect(caps.supportsInlineRowEdit).toBe(true);
+      // `OFFSET m ROWS FETCH NEXT n ROWS ONLY` from this provider's own override; page
+      // one is `FETCH FIRST n ROWS ONLY` (#816).
+      expect(caps.supportsResultPagination).toBe(true);
       // One held connection carries the transaction, so the trio is offered (#464).
       expect(caps.supportsTransactions).toBe(true);
       // Inherited from the base capabilities: this engine declares foreign keys, so
@@ -1427,6 +1549,67 @@ describe("OracleProvider", () => {
       expect(captured).toContain('ALTER INDEX "SYS_C008646" REBUILD');
       expect(captured).toContain('ALTER INDEX "U9_PROBE_NAME_IX" REBUILD');
       expect(captured.some((sql) => sql.includes('ALTER INDEX "U9_PROBE" REBUILD'))).toBe(false);
+    });
+
+    // #1091 review: with an owner the index list comes from `ALL_INDEXES`, which answers for
+    // any schema - but a bare `ALTER INDEX "X" REBUILD` rebuilds in the CONNECTED user's
+    // schema, which is not the schema the list was read from. The rebuild names the owner.
+    test("optimize with an owner rebuilds in THAT schema rather than the connected one", async () => {
+      const captured: string[] = [];
+      let indexQueryBinds: unknown;
+      mockExecuteFn = async (sql: string, binds?: unknown) => {
+        captured.push(sql);
+        const upper = sql.toUpperCase();
+        if (upper.includes("ALL_INDEXES") && upper.includes("TABLE_NAME =")) {
+          indexQueryBinds = binds;
+          return {
+            rows: [{ INDEX_NAME: "IDX_RPT_CITY" }],
+            metaData: [{ name: "INDEX_NAME" }],
+          };
+        }
+        return defaultExecute(sql);
+      };
+
+      await provider.connect();
+      const result = await provider.runMaintenance("optimize", "RPT_CUSTOMERS", "REPORTING");
+
+      expect(result.success).toBe(true);
+      // Both arguments are bound: owner first, then the table name.
+      expect(indexQueryBinds).toEqual(["REPORTING", "RPT_CUSTOMERS"]);
+      expect(captured).toContain('ALTER INDEX "REPORTING"."IDX_RPT_CITY" REBUILD');
+      // The unqualified spelling is what rebuilt in the wrong schema; it must not appear.
+      expect(captured.some((sql) => sql.includes('ALTER INDEX "IDX_RPT_CITY" REBUILD'))).toBe(false);
+    });
+
+    test("analyze with an owner gathers statistics FOR that owner", async () => {
+      let capturedSql = "";
+      mockExecuteFn = async (sql: string) => {
+        capturedSql = sql;
+        return defaultExecute(sql);
+      };
+
+      await provider.connect();
+      const result = await provider.runMaintenance("analyze", "RPT_CUSTOMERS", "REPORTING");
+
+      expect(result.success).toBe(true);
+      // The owner is an inline-escaped literal because DBMS_STATS takes no binds; `USER`
+      // would mean the connected user, which is the wrong schema here.
+      expect(capturedSql).toContain("GATHER_TABLE_STATS('REPORTING', 'RPT_CUSTOMERS')");
+      expect(capturedSql).not.toContain("GATHER_TABLE_STATS(USER");
+    });
+
+    test("without an owner the owner position stays USER", async () => {
+      let capturedSql = "";
+      mockExecuteFn = async (sql: string) => {
+        capturedSql = sql;
+        return defaultExecute(sql);
+      };
+
+      await provider.connect();
+      await provider.runMaintenance("analyze", "USERS");
+
+      // The bare-name reading is unchanged: the connected user is the owner.
+      expect(capturedSql).toContain("GATHER_TABLE_STATS(USER, 'USERS')");
     });
 
     test("optimize on a table with no rebuildable index succeeds having rebuilt nothing", async () => {
@@ -2635,7 +2818,7 @@ describe("object surface", () => {
       .sort();
     // All nine, because DBMS_METADATA.GET_DDL answers every one of them and the translation
     // table this provider already ships names a metadata type for each. `sql` and NOT
-    // `plsql`: measured, `plsql` is not among the 89 language ids monaco-editor 0.56.0
+    // `plsql`: measured, `plsql` is not among the 89 language ids monaco-editor 0.57.0
     // registers, and an unregistered id degrades to plain text silently (#789).
     expect(declared).toEqual([
       ["function", "sql"],
@@ -2655,6 +2838,27 @@ describe("object surface", () => {
         .map((kind) => kind.id)
         .sort(),
     ).toEqual([]);
+  });
+
+  test("declares columns on exactly the kinds describeObject resolves as relations", () => {
+    const kinds = makeProvider().getCapabilities().objectKinds ?? [];
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns === true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["materialized_view", "table", "view"]);
+    // The other direction, and `sequence` is the entry that matters. This provider gates
+    // describeObject on the ROLE (`oracle.ts:2000`), so an Oracle sequence answers no
+    // columns at all - the opposite of PostgreSQL's sequence, which answers last_value,
+    // log_cnt and is_called. Same kind id, opposite answer, which is why the fact is
+    // declared per provider and never derived from the role or from the id (#789).
+    expect(
+      kinds
+        .filter((kind) => kind.hasColumns !== true)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(["function", "package", "procedure", "sequence", "synonym", "trigger"]);
   });
 
   test("the container is the connecting user, and other owners are reachable", async () => {
@@ -2870,7 +3074,7 @@ describe("object surface", () => {
       //
       // The rows are the DRIVER'S rows and the naming is left to `oracle.ts`, which spells
       // a flat name BARE: the read is scoped to the connection owner by `WHERE OWNER = :1`
-      // (`oracle.ts:1516`), so the owner is a fact about the statement rather than a
+      // (`oracle.ts:1492`), so the owner is a fact about the statement rather than a
       // qualifier on the answer, and every name comes back unqualified against a
       // `[owner, name]` path. A fixture that returned `APP.APP_ORDERS` would assert a
       // spelling this provider never produces.
@@ -2985,7 +3189,7 @@ describe("object surface", () => {
 /**
  * The rest of the object surface: the dictionary reads behind each kind, the detail row,
  * and the refusals. Kept out of the block above so `-t "object surface"` still runs
- * exactly the five conformance tests.
+ * exactly the six conformance tests.
  */
 describe("Oracle object listing and detail", () => {
   beforeEach(() => {
@@ -3488,6 +3692,43 @@ describe("Oracle object listing and detail", () => {
         { name: "ID", type: "NUMBER", nullable: true, isPrimary: false, defaultValue: undefined },
       ]);
     }
+    await provider.disconnect();
+  });
+
+  test("hasColumns is declared on exactly the kinds whose describeObject answers a column", async () => {
+    // The declaration is a CLIENT GATE: the tree draws a twisty on a kind that declares it
+    // and draws none on a kind that does not, so a declaration that disagrees with this
+    // provider's own answer either opens on nothing or hides columns that exist, and the
+    // second says nothing on screen. Checked against the answer rather than transcribed.
+    mockExecuteFn = async (sql: string) => {
+      if (!sql.includes("ALL_TAB_COLUMNS")) return { rows: [] };
+      return { rows: [{ COLUMN_NAME: "ID", DATA_TYPE: "NUMBER", NULLABLE: "Y", DATA_DEFAULT: null }] };
+    };
+    const provider = makeProvider({ user: "app" });
+    await provider.connect();
+
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+    const answered: string[] = [];
+    for (const kind of kinds) {
+      const detail = await provider.describeObject(["APP", "APP_ORDERS"], kind.id);
+      for (const column of detail.columns) {
+        // Both fields, because the tree feeds the name to `pathKey`, which calls
+        // `replaceAll` on it, and renders the type as the row's trailing text.
+        expect(typeof column.name === "string" && column.name.trim() !== "").toBe(true);
+        expect(typeof column.type === "string" && column.type.trim() !== "").toBe(true);
+      }
+      if (detail.columns.length > 0) answered.push(kind.id);
+    }
+    expect(answered.sort()).toEqual(["materialized_view", "table", "view"]);
+    expect(
+      kinds
+        .filter(kindHasColumns)
+        .map((kind) => kind.id)
+        .sort(),
+    ).toEqual(answered.sort());
+    // The abstainer spelled out at its own object: a sequence is listed, is describable and
+    // carries nothing to expand.
+    expect((await provider.describeObject(["APP", "APP_INVOICE_SEQ"], "sequence")).columns).toEqual([]);
     await provider.disconnect();
   });
 

@@ -34,20 +34,20 @@ channel count.
 
 ## Coverage snapshot
 
-**36 channels · 31 live · 4 pending · 1 deprecated**
+**40 channels · 33 live · 6 pending · 1 deprecated**
 
-Live channels by platform: **Linux 8 · macOS 3 · Windows 4 · Container 5 · Kubernetes 4 · Cloud 13**
+Live channels by platform: **Linux 9 · macOS 3 · Windows 4 · Container 6 · Kubernetes 4 · Cloud 13**
 
 | Category | Live | Pending | Deprecated |
 | --- | ---: | ---: | ---: |
 | Registries & releases | 2 | 0 | 0 |
 | Containers | 2 | 0 | 0 |
-| Kubernetes & operators | 3 | 0 | 0 |
+| Kubernetes & operators | 3 | 1 | 0 |
 | Package managers | 5 | 0 | 1 |
 | OS / desktop packages | 3 | 0 | 0 |
-| PaaS catalogs (listed) | 9 | 3 | 0 |
+| PaaS catalogs (listed) | 11 | 3 | 0 |
 | Deploy recipes | 3 | 0 | 0 |
-| Cloud marketplaces | 4 | 1 | 0 |
+| Cloud marketplaces | 4 | 2 | 0 |
 
 <!-- END:CHANNEL-SCORECARD -->
 
@@ -64,6 +64,7 @@ Live channels by platform: **Linux 8 · macOS 3 · Windows 4 · Container 5 · K
 | [Helm chart](https://artifacthub.io/packages/helm/libredb-studio/libredb-studio) | Kubernetes & operators | Kubernetes | live | Automated, every release | [HELM_CHART.md](HELM_CHART.md) |
 | [OperatorHub / OpenShift](https://operatorhub.io/operator/libredb-studio-operator) | Kubernetes & operators | Kubernetes | live | Automated PR, every release | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Rancher Partner Charts](https://www.suse.com/pcsc/viewVersionPage?versionID=26969) | Kubernetes & operators | Kubernetes | live | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
+| [ZopDev Helm Charts](https://github.com/zopdev/helm-charts) | Kubernetes & operators | Kubernetes | pending | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Chocolatey](https://community.chocolatey.org/packages/libredb-studio) | Package managers | Windows | live | Automated, every release | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [FlatPark (Flatpak)](https://flatpark.org/) | Package managers | Linux | live | Manual, every release | [packaging/flatpark/README.md](../packaging/flatpark/README.md) |
 | [Homebrew tap](https://github.com/libredb/homebrew-tap) | Package managers | Linux, macOS | live | Automated, every release | [DISTRIBUTION.md](DISTRIBUTION.md) |
@@ -78,10 +79,12 @@ Live channels by platform: **Linux 8 · macOS 3 · Windows 4 · Container 5 · K
 | [Cosmos servapp marketplace](https://github.com/azukaar/cosmos-servapps-official) | PaaS catalogs (listed) | Cloud | live | Manual, on demand | [deploy/cosmos/README.md](../deploy/cosmos/README.md) |
 | [Dokploy template catalog](https://templates.dokploy.com) | PaaS catalogs (listed) | Cloud | live | Manual, on demand | [deploy/dokploy/README.md](../deploy/dokploy/README.md) |
 | [Kubero template catalog](https://www.kubero.dev/templates) | PaaS catalogs (listed) | Cloud | live | Manual, on demand | [deploy/kubero/README.md](../deploy/kubero/README.md) |
+| [1Panel community store](https://github.com/okxlin/appstore/tree/localApps/apps/libredb-studio) | PaaS catalogs (listed) | Container | live | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Railway one-click template](https://railway.com/deploy/libredb-studio) | PaaS catalogs (listed) | Cloud | live | Manual, on demand | [deploy/railway/PUBLISH.md](../deploy/railway/PUBLISH.md) |
 | [Sealos App Store template](https://sealos.io/products/app-store/libredb-studio) | PaaS catalogs (listed) | Cloud | live | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [TrueNAS SCALE apps](https://apps.truenas.com/catalog/libredb-studio_community/) | PaaS catalogs (listed) | Container | live | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Unraid Community Apps](https://ca.unraid.net/apps/libredb-studio-0a5x41a1cy1kay) | PaaS catalogs (listed) | Container | live | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
+| [YunoHost](https://apps.yunohost.org/app/libredb_studio) | PaaS catalogs (listed) | Linux | live | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Easypanel template catalog](https://easypanel.io/templates) | PaaS catalogs (listed) | Cloud | pending | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Portainer app templates](https://github.com/portainer/templates) | PaaS catalogs (listed) | Container | pending | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Umbrel App Store](https://github.com/getumbrel/umbrel-apps) | PaaS catalogs (listed) | Container | pending | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
@@ -92,6 +95,7 @@ Live channels by platform: **Linux 8 · macOS 3 · Windows 4 · Container 5 · K
 | [Azure Marketplace](https://marketplace.microsoft.com/en-us/product/libredb.libredb-studio) | Cloud marketplaces | Cloud | live | Manual, on demand | [deploy/azure/README.md](../deploy/azure/README.md) |
 | [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/libredb-studio) | Cloud marketplaces | Cloud | live | Manual, on demand | [deploy/digitalocean/README.md](../deploy/digitalocean/README.md) |
 | [Google Cloud Marketplace](https://console.cloud.google.com/marketplace/product/libredb-public/libredb-studio) | Cloud marketplaces | Kubernetes, Cloud | live | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
+| [Civo Kubernetes Marketplace](https://github.com/civo/kubernetes-marketplace) | Cloud marketplaces | Kubernetes | pending | Manual, on demand | [DISTRIBUTION.md](DISTRIBUTION.md) |
 | [Koyeb One-Click Apps catalog](https://www.koyeb.com/deploy) | Cloud marketplaces | Cloud | pending | Manual, on demand | [deploy/koyeb/CATALOG_SUBMISSION.md](../deploy/koyeb/CATALOG_SUBMISSION.md) |
 
 <!-- END:CHANNEL-TABLE -->

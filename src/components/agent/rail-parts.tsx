@@ -24,8 +24,12 @@ import type { AgentPlanStatementView } from "./timeline";
  * established while its twin still says the right thing.
  */
 
-/** A run that is over cannot be asked for anything, so nothing is offered for it. */
-export const LIVE_STATUSES: ReadonlySet<AgentRunStatus> = new Set<AgentRunStatus>(["queued", "running"]);
+/**
+ * A run that has not ended: queued, running, or paused. Controls that act on a
+ * run at all — stop, show-result, keeping the rail open — key off this, because a
+ * paused run is not terminal and still holds its budget, artifacts and stream.
+ */
+export const OPEN_STATUSES: ReadonlySet<AgentRunStatus> = new Set<AgentRunStatus>(["queued", "running", "paused"]);
 
 /**
  * An ⓘ whose text is in the accessibility tree whether or not it is open.

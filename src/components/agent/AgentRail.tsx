@@ -50,6 +50,7 @@ import {
   type AgentRunWorkflowType,
   type AgentThreadContext,
 } from "@/lib/agent/types";
+import { AGENT_TERMINAL_STATUSES } from "@/lib/agent/types";
 /*
   Type-only, and deliberately so: `workflow-classifier.ts` imports the AI SDK and the
   model adapter, so a value import would pull the server's model stack into this
@@ -68,7 +69,7 @@ import { ConsentCard } from "./ConsentCard";
   live here. Same components, same comments, same accessible names — see
   `rail-parts.tsx` for why a second copy was not the answer.
 */
-import { guardReading, guardSummaryLine, HydrationControls, InfoNote, LIVE_STATUSES, QuotedBlock } from "./rail-parts";
+import { guardReading, guardSummaryLine, HydrationControls, InfoNote, OPEN_STATUSES, QuotedBlock } from "./rail-parts";
 import { SafetyStrip } from "./SafetyStrip";
 import {
   type AgentBudgetGauge,
@@ -808,7 +809,7 @@ function ChangeWorkflowButton({
   );
 }
 
-export function AgentRail({
+export const AgentRail = React.memo(function AgentRail({
   connectionId: connection,
   connectionName,
   connectionType = null,
@@ -1220,7 +1221,7 @@ export function AgentRail({
     */
     const continueTarget = decided.replacesOpenRun
       ? run.thread?.steps.at(-1)?.runId
-      : run.runId !== null && !LIVE_STATUSES.has(run.timeline.status)
+      : run.runId !== null && AGENT_TERMINAL_STATUSES.has(run.timeline.status)
         ? run.runId
         : undefined;
     // Two reasons the rail withholds an id it has, and it OWNS both sentences: the
@@ -1448,7 +1449,7 @@ export function AgentRail({
    * long as this holds — the same window the stop control is offered in, because both
    * are asking about a run the server still has open.
    */
-  const runOpen = run.runId !== null && LIVE_STATUSES.has(run.timeline.status);
+  const runOpen = run.runId !== null && OPEN_STATUSES.has(run.timeline.status);
 
   /** Whether the objective is a box to type in or a line saying what was asked. */
   const objectiveEditable = !runOpen || editingObjective;
@@ -1580,6 +1581,12 @@ export function AgentRail({
     A host with no `onShowArtifact` is left alone and nothing is recorded as delivered,
     so nothing claims a result was shown; a host that gains the callback later still
     gets the answer.
+
+    A resumed run can compose a SECOND report, and both entries carry `isAnswer`, so a
+    host receives each answer as it arrives — two deliveries for one run, not one.
+    Noted rather than deduplicated: a second composition is a second statement from
+    the model, and folding the two together would be the rail deciding which answer
+    the user meant.
   */
   const shownAnswerRunId = useRef<string | null>(null);
   const shownAnswers = useRef<Set<string>>(new Set());
@@ -1603,22 +1610,20 @@ export function AgentRail({
   }, [run.runId, run.timeline.items, onShowArtifact]);
 
   /*
-    Stopping is the only control offered, and the two that are absent are absent
-    because the service cannot honour them rather than because they are unfinished:
-
-      - There is no PAUSE anywhere in `AgentRunService`. A run holds a database
-        connection and a budget while it is running, and "hold all of that
-        indefinitely" is not a capability this milestone built.
-      - RESUME exists (`POST /api/agent/drive`) but is authenticated by a
-        server-minted, single-purpose credential a browser never holds — it is the
-        seam for a machine producer (`docs/BACKLOG.md` B9), not a user control.
-
-    Neither is rendered even as a disabled button: a disabled control reads as a
-    capability that happens to be unavailable right now, which would be a claim
-    about this build that is not true.
+    Pause and resume are offered only where the service can honour them: pause on a
+    live, running run and resume on a paused one. Neither is rendered as a disabled
+    button — a disabled control reads as a capability that happens to be unavailable
+    right now, which would be a claim about this build that is not true — so the two
+    controls appear and disappear with the run's status rather than standing in for
+    a capability the service cannot honour.
   */
   const canStop =
-    run.runId !== null && LIVE_STATUSES.has(run.timeline.status) && !run.timeline.stopRequested && !run.isStopping;
+    run.runId !== null && OPEN_STATUSES.has(run.timeline.status) && !run.timeline.stopRequested && !run.isStopping;
+  // Pause and resume are offered only where the service can honour them: pause on
+  // a live, running run; resume on a paused one.
+  const canPause =
+    run.runId !== null && run.timeline.status === "running" && !run.timeline.stopRequested && !run.isStopping;
+  const canResume = run.runId !== null && run.timeline.status === "paused";
 
   /*
     A verdict about the model is a verdict about ONE mode (#331 T4).
@@ -1666,16 +1671,18 @@ export function AgentRail({
     scoped to the run that recorded it — so the run id is bound here rather than
     threaded through every item.
 
-    It is offered only while the run is LIVE, and that is the same rule the stop
-    control follows rather than a caution: a run's stored rows live in this process
-    and are released the moment the run ends (`releaseExecutionRun`), so on a finished
-    run every one of these controls could only answer "no longer held". The note in
-    the report section is what explains the absence; applying a drafted statement is
-    unaffected, because the ledger keeps the statement for as long as the timeline.
+    It is offered only while the run is OPEN — queued, running or paused — and that is
+    the same rule the stop control follows rather than a caution: a run's stored rows
+    live in this process and are released the moment the run ends
+    (`releaseExecutionRun`), so on a finished run every one of these controls could only
+    answer "no longer held". A paused run still holds its rows (B83), so the control is
+    still offered. The note in the report section is what explains the absence; applying
+    a drafted statement is unaffected, because the ledger keeps the statement for as long
+    as the timeline.
   */
   const activeRunId = run.runId;
   const showArtifact =
-    onShowArtifact === undefined || activeRunId === null || !LIVE_STATUSES.has(run.timeline.status)
+    onShowArtifact === undefined || activeRunId === null || !OPEN_STATUSES.has(run.timeline.status)
       ? undefined
       : (correlationId: string, chartSpec: AgentChartSpec | undefined) =>
           // The key is absent rather than undefined when there is no chart: the
@@ -1771,9 +1778,11 @@ export function AgentRail({
     the other arrangement would have bought.
   */
   useEffect(() => {
-    const live = run.runId === null || LIVE_STATUSES.has(run.timeline.status);
-    timelineLive.current = live;
-    if (live) {
+    // OPEN, not LIVE: a paused run is still following its own end, so it must not
+    // spend the once-per-run answer reveal the way a finished run does.
+    const open = run.runId === null || OPEN_STATUSES.has(run.timeline.status);
+    timelineLive.current = open;
+    if (open) {
       pinToNewest();
       return;
     }
@@ -2531,6 +2540,26 @@ export function AgentRail({
             </span>
           )}
           <div className="flex items-center gap-1">
+            {canPause && (
+              <button
+                type="button"
+                data-testid="agent-pause"
+                onClick={() => void run.pause()}
+                className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-brand-tint/15 text-brand-bright hover:bg-brand-tint/25 transition-colors"
+              >
+                Pause
+              </button>
+            )}
+            {canResume && (
+              <button
+                type="button"
+                data-testid="agent-resume"
+                onClick={() => void run.resume()}
+                className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-brand-tint/15 text-brand-bright hover:bg-brand-tint/25 transition-colors"
+              >
+                Resume
+              </button>
+            )}
             {canStop && (
               <button
                 type="button"
@@ -2746,18 +2775,21 @@ export function AgentRail({
             ))}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5 text-[0.625rem] text-fg-subtle">
             {/*
-              What the measured figures above are: a floor, per drive. The claim qualifies
-              the gauges, so it sits with them.
+              What the measured figures above are: a floor, and cumulative across the run's
+              drives rather than per drive (#999). The claim qualifies the gauges, so it sits
+              with them.
             */}
             <span className="inline-flex items-center gap-0.5">
               What is counted
               <InfoNote title="What these figures count" testId="agent-budget-spend">
                 <span data-testid="agent-budget-caveats" className="block">
-                  Every ceiling is per drive, so a run resumed after a restart starts each of them again and these
-                  totals can read past a single drive&apos;s ceiling. What is counted comes from the run&apos;s ledger,
-                  which records less than the server charges: the schema capture&apos;s catalog reads are not itemized,
-                  and a completed read reports the engine&apos;s own elapsed time rather than the span the budget was
-                  charged. So a spend shown here is a floor, never a ceiling.
+                  A resumed run continues its spend rather than starting again: the statement and database-time ceilings
+                  are folded from this run&apos;s own ledger, and the run deadline is wall clock from the moment the run
+                  opened, so time it spends paused or between drives is spent against it. Repair attempts are the
+                  exception and are counted per drive. What is counted comes from the run&apos;s ledger, which records
+                  less than the server charges: the schema capture&apos;s catalog reads are not itemized, and a
+                  completed read reports the engine&apos;s own elapsed time rather than the span the budget was charged.
+                  So a spend shown here is a floor, never a ceiling.
                   {/*
                     The one remaining gap in the database-time figure, and it is per RUN
                     rather than a standing claim (#512). A failed
@@ -2993,4 +3025,4 @@ export function AgentRail({
       {content}
     </div>
   );
-}
+});
