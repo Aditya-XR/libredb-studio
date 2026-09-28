@@ -30,10 +30,7 @@ const LANGUAGES: { id: Language; label: string; ext: string }[] = [
 ];
 
 export function toPascalCase(str: string): string {
-  return str
-    .replace(/[_-](\w)/g, (_, c) => c.toUpperCase())
-    .replace(/^\w/, (c) => c.toUpperCase())
-    .replace(/s$/, ""); // Remove trailing 's' (pluralized table name)
+  return str.replace(/[_-](\w)/g, (_, c) => c.toUpperCase()).replace(/^\w/, (c) => c.toUpperCase());
 }
 
 /**
@@ -59,13 +56,17 @@ export function toPascalCase(str: string): string {
  * rescue it — the surviving stem names the wrong thing, or nothing — and it
  * would break the other five, so the Unicode classes stand and the Prisma output
  * for such a name is left where it already was before this function existed.
+ *
+ * The trailing `s` strip singularizes a table name (`users` gives `User`) and lives HERE,
+ * not in `toPascalCase()`: that one also names fields, and a field must keep the column's
+ * name, or `status` becomes `statu` and the generated type no longer describes the row (#1138).
  */
 export function toIdentifier(str: string): string {
   // The trim is `^_|_$`, not `^_+|_+$`: the collapse above has already reduced
   // every run of separators to ONE underscore, so a repeated quantifier here can
   // never match more — it only adds the backtracking that makes the pattern
   // super-linear on a long run of separators (SonarCloud S5852).
-  const result = toPascalCase(str.replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_|_$/g, ""));
+  const result = toPascalCase(str.replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_|_$/g, "")).replace(/s$/, "");
   if (!/^\p{L}/u.test(result)) return result ? `T${result}` : "Record";
   return result;
 }
