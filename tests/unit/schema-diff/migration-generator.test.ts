@@ -1674,3 +1674,59 @@ describe("a MySQL column's declared type reaches the DDL (#1033)", () => {
     expect(sql).toContain("ADD COLUMN `c_unsigned` int unsigned;");
   });
 });
+
+describe("an Oracle column's declared type reaches the DDL (#1139)", () => {
+  /**
+   * Columns of the table `docker/oracle-init/01-object-fixture.sql` creates, as the provider
+   * now reads them back: `type` is the declaration built from `ALL_TAB_COLUMNS` and
+   * `baseType` is `DATA_TYPE` beside it.
+   *
+   * `diffSchemas` fills `ColumnDiff.targetType` from `ColumnSchema.type`, and the generator
+   * interpolates it verbatim, so this asserts the provider reading, the diff and the statement
+   * together.
+   */
+  const target: StoredObject[] = [
+    {
+      name: "COLUMN_TYPES",
+      columns: [
+        { name: "C_VARCHAR2", type: "VARCHAR2(20 BYTE)", baseType: "VARCHAR2", nullable: true, isPrimary: false },
+        { name: "C_VARCHAR2_CHAR", type: "VARCHAR2(20 CHAR)", baseType: "VARCHAR2", nullable: true, isPrimary: false },
+        { name: "C_NVARCHAR2", type: "NVARCHAR2(10)", baseType: "NVARCHAR2", nullable: true, isPrimary: false },
+        { name: "C_CHAR", type: "CHAR(2 BYTE)", baseType: "CHAR", nullable: true, isPrimary: false },
+        { name: "C_RAW", type: "RAW(16)", baseType: "RAW", nullable: true, isPrimary: false },
+        { name: "C_NUMBER_PS", type: "NUMBER(12,2)", baseType: "NUMBER", nullable: true, isPrimary: false },
+        { name: "C_NUMBER_STAR", type: "NUMBER(*,2)", baseType: "NUMBER", nullable: true, isPrimary: false },
+        { name: "C_FLOAT", type: "FLOAT(10)", baseType: "FLOAT", nullable: true, isPrimary: false },
+        { name: "C_TIMESTAMP", type: "TIMESTAMP(3)", nullable: true, isPrimary: false },
+        { name: "C_DATE", type: "DATE", nullable: true, isPrimary: false },
+      ],
+      indexes: [],
+    },
+  ];
+
+  test("CREATE TABLE carries every length, precision and scale", () => {
+    const sql = generateMigrationSQL(diffSchemas([], target), "oracle");
+
+    expect(sql).toContain(`"C_VARCHAR2" VARCHAR2(20 BYTE)`);
+    expect(sql).toContain(`"C_VARCHAR2_CHAR" VARCHAR2(20 CHAR)`);
+    expect(sql).toContain(`"C_NVARCHAR2" NVARCHAR2(10)`);
+    expect(sql).toContain(`"C_CHAR" CHAR(2 BYTE)`);
+    expect(sql).toContain(`"C_RAW" RAW(16)`);
+    expect(sql).toContain(`"C_NUMBER_PS" NUMBER(12,2)`);
+    expect(sql).toContain(`"C_NUMBER_STAR" NUMBER(*,2)`);
+    expect(sql).toContain(`"C_FLOAT" FLOAT(10)`);
+    expect(sql).toContain(`"C_TIMESTAMP" TIMESTAMP(3)`);
+    expect(sql).toContain(`"C_DATE" DATE`);
+    // The defect this replaces: a bare DATA_TYPE. `CREATE TABLE t (x VARCHAR2)` is ORA-00906.
+    expect(sql).not.toMatch(/"C_VARCHAR2" VARCHAR2[^(]/);
+  });
+
+  test("ALTER TABLE ... ADD carries them too, because one column reading feeds both", () => {
+    const source: StoredObject[] = [{ name: "COLUMN_TYPES", columns: [], indexes: [] }];
+    const sql = generateMigrationSQL(diffSchemas(source, target), "oracle");
+
+    expect(sql).toContain(`ADD ("C_VARCHAR2" VARCHAR2(20 BYTE));`);
+    expect(sql).toContain(`ADD ("C_RAW" RAW(16));`);
+    expect(sql).toContain(`ADD ("C_NUMBER_PS" NUMBER(12,2));`);
+  });
+});

@@ -107,6 +107,60 @@ const { OracleProvider } = await import("@/lib/db/providers/sql/oracle");
 // Default mock execute implementation
 // ---------------------------------------------------------------------------
 
+/**
+ * `ALL_TAB_COLUMNS` type columns for the mocked column rows. The provider builds a column's
+ * declaration from all of them (#1139), so a row with `DATA_TYPE` alone is a row this
+ * provider's reads never receive.
+ */
+const NUMBER_BARE = {
+  DATA_TYPE: "NUMBER",
+  DATA_LENGTH: 22,
+  DATA_PRECISION: null,
+  DATA_SCALE: null,
+  CHAR_LENGTH: 0,
+  CHAR_USED: null,
+};
+const NUMBER_10 = {
+  DATA_TYPE: "NUMBER",
+  DATA_LENGTH: 22,
+  DATA_PRECISION: 10,
+  DATA_SCALE: 0,
+  CHAR_LENGTH: 0,
+  CHAR_USED: null,
+};
+const NUMBER_12_2 = {
+  DATA_TYPE: "NUMBER",
+  DATA_LENGTH: 22,
+  DATA_PRECISION: 12,
+  DATA_SCALE: 2,
+  CHAR_LENGTH: 0,
+  CHAR_USED: null,
+};
+const VARCHAR2_100 = {
+  DATA_TYPE: "VARCHAR2",
+  DATA_LENGTH: 100,
+  DATA_PRECISION: null,
+  DATA_SCALE: null,
+  CHAR_LENGTH: 100,
+  CHAR_USED: "B",
+};
+const VARCHAR2_200 = {
+  DATA_TYPE: "VARCHAR2",
+  DATA_LENGTH: 200,
+  DATA_PRECISION: null,
+  DATA_SCALE: null,
+  CHAR_LENGTH: 200,
+  CHAR_USED: "B",
+};
+const DATE_ROW = {
+  DATA_TYPE: "DATE",
+  DATA_LENGTH: 7,
+  DATA_PRECISION: null,
+  DATA_SCALE: null,
+  CHAR_LENGTH: 0,
+  CHAR_USED: null,
+};
+
 function defaultExecute(sql: string) {
   const upper = sql.toUpperCase();
 
@@ -301,7 +355,7 @@ function defaultExecute(sql: string) {
         {
           TABLE_NAME: "USERS",
           COLUMN_NAME: "ID",
-          DATA_TYPE: "NUMBER",
+          ...NUMBER_BARE,
           NULLABLE: "N",
           DATA_DEFAULT: null,
           COLUMN_ID: 1,
@@ -309,7 +363,7 @@ function defaultExecute(sql: string) {
         {
           TABLE_NAME: "USERS",
           COLUMN_NAME: "NAME",
-          DATA_TYPE: "VARCHAR2",
+          ...VARCHAR2_100,
           NULLABLE: "Y",
           DATA_DEFAULT: null,
           COLUMN_ID: 2,
@@ -317,7 +371,7 @@ function defaultExecute(sql: string) {
         {
           TABLE_NAME: "ORDERS",
           COLUMN_NAME: "ID",
-          DATA_TYPE: "NUMBER",
+          ...NUMBER_BARE,
           NULLABLE: "N",
           DATA_DEFAULT: null,
           COLUMN_ID: 1,
@@ -3051,13 +3105,12 @@ describe("object surface", () => {
         if (sql.includes("SELECT d.NAME FROM described d")) return { rows: described.map((NAME) => ({ NAME })) };
         if (sql.includes("ALL_TAB_COLUMNS")) {
           return {
-            rows: described.map((NAME) => ({
-              OBJECT_NAME: NAME,
-              COLUMN_NAME: "ID",
-              DATA_TYPE: "NUMBER",
-              NULLABLE: "N",
-              DATA_DEFAULT: null,
-            })),
+            rows: described.map((NAME) =>
+              Object.assign({ OBJECT_NAME: NAME, COLUMN_NAME: "ID" }, NUMBER_BARE, {
+                NULLABLE: "N",
+                DATA_DEFAULT: null,
+              }),
+            ),
           };
         }
         return { rows: [] };
@@ -3093,14 +3146,13 @@ describe("object surface", () => {
       }
       if (sql.includes("ALL_TAB_COLUMNS")) {
         return {
-          rows: ["APP_ORDERS", "APP_CUSTOMERS"].map((TABLE_NAME) => ({
-            TABLE_NAME,
-            COLUMN_NAME: "ID",
-            DATA_TYPE: "NUMBER",
-            NULLABLE: "N",
-            DATA_DEFAULT: null,
-            COLUMN_ID: 1,
-          })),
+          rows: ["APP_ORDERS", "APP_CUSTOMERS"].map((TABLE_NAME) =>
+            Object.assign({ TABLE_NAME, COLUMN_NAME: "ID" }, NUMBER_BARE, {
+              NULLABLE: "N",
+              DATA_DEFAULT: null,
+              COLUMN_ID: 1,
+            }),
+          ),
         };
       }
       if (sql.includes("CONSTRAINT_TYPE = 'P'")) {
@@ -3247,7 +3299,7 @@ describe("Oracle object listing and detail", () => {
     const bound: unknown[][] = [];
     mockExecuteFn = async (_sql: string, params?: unknown[]) => {
       bound.push(params ?? []);
-      return { rows: [{ NAME: "REPORT_DAILY", STATUS: "VALID", COLUMN_NAME: "REPORT_DAY", DATA_TYPE: "DATE" }] };
+      return { rows: [{ NAME: "REPORT_DAILY", STATUS: "VALID", COLUMN_NAME: "REPORT_DAY", ...DATE_ROW }] };
     };
     const provider = makeProvider({ user: "app" });
     await provider.connect();
@@ -3588,9 +3640,9 @@ describe("Oracle object listing and detail", () => {
       if (sql.includes("ALL_TAB_COLUMNS")) {
         return {
           rows: [
-            { COLUMN_NAME: "ID", DATA_TYPE: "NUMBER", NULLABLE: "N", DATA_DEFAULT: null },
-            { COLUMN_NAME: "TOTAL", DATA_TYPE: "NUMBER", NULLABLE: "Y", DATA_DEFAULT: "0 " },
-            { COLUMN_NAME: "NOTE", DATA_TYPE: "VARCHAR2", NULLABLE: "Y", DATA_DEFAULT: null },
+            { COLUMN_NAME: "ID", ...NUMBER_10, NULLABLE: "N", DATA_DEFAULT: null },
+            { COLUMN_NAME: "TOTAL", ...NUMBER_12_2, NULLABLE: "Y", DATA_DEFAULT: "0 " },
+            { COLUMN_NAME: "NOTE", ...VARCHAR2_200, NULLABLE: "Y", DATA_DEFAULT: null },
           ],
         };
       }
@@ -3620,10 +3672,17 @@ describe("Oracle object listing and detail", () => {
     const detail = await provider.describeObject(["REPORTING", "REPORT_DAILY"], "table");
     expect(detail.path).toEqual(["REPORTING", "REPORT_DAILY"]);
     expect(detail.columns).toEqual([
-      { name: "ID", type: "NUMBER", nullable: false, isPrimary: true, defaultValue: undefined },
+      { name: "ID", type: "NUMBER(10)", baseType: "NUMBER", nullable: false, isPrimary: true, defaultValue: undefined },
       // DATA_DEFAULT is a LONG carrying the source text with its trailing whitespace.
-      { name: "TOTAL", type: "NUMBER", nullable: true, isPrimary: false, defaultValue: "0" },
-      { name: "NOTE", type: "VARCHAR2", nullable: true, isPrimary: false, defaultValue: undefined },
+      { name: "TOTAL", type: "NUMBER(12,2)", baseType: "NUMBER", nullable: true, isPrimary: false, defaultValue: "0" },
+      {
+        name: "NOTE",
+        type: "VARCHAR2(200 BYTE)",
+        baseType: "VARCHAR2",
+        nullable: true,
+        isPrimary: false,
+        defaultValue: undefined,
+      },
     ]);
     expect(detail.indexes).toEqual([
       { name: "REPORT_DAILY_PK", columns: ["ID"], unique: true },
@@ -3679,7 +3738,7 @@ describe("Oracle object listing and detail", () => {
   test("a view and a materialized view describe from the same column dictionary a table does", async () => {
     mockExecuteFn = async (sql: string) => {
       if (!sql.includes("ALL_TAB_COLUMNS")) return { rows: [] };
-      return { rows: [{ COLUMN_NAME: "ID", DATA_TYPE: "NUMBER", NULLABLE: "Y", DATA_DEFAULT: null }] };
+      return { rows: [{ COLUMN_NAME: "ID", ...NUMBER_BARE, NULLABLE: "Y", DATA_DEFAULT: null }] };
     };
     const provider = makeProvider({ user: "app" });
     await provider.connect();
@@ -3702,7 +3761,7 @@ describe("Oracle object listing and detail", () => {
     // second says nothing on screen. Checked against the answer rather than transcribed.
     mockExecuteFn = async (sql: string) => {
       if (!sql.includes("ALL_TAB_COLUMNS")) return { rows: [] };
-      return { rows: [{ COLUMN_NAME: "ID", DATA_TYPE: "NUMBER", NULLABLE: "Y", DATA_DEFAULT: null }] };
+      return { rows: [{ COLUMN_NAME: "ID", ...NUMBER_BARE, NULLABLE: "Y", DATA_DEFAULT: null }] };
     };
     const provider = makeProvider({ user: "app" });
     await provider.connect();
@@ -3790,14 +3849,14 @@ describe("Oracle bulk column read", () => {
             {
               OBJECT_NAME: "APP_ORDERS",
               COLUMN_NAME: "ID",
-              DATA_TYPE: "NUMBER",
+              ...NUMBER_BARE,
               NULLABLE: "N",
               DATA_DEFAULT: null,
             },
             {
               OBJECT_NAME: "APP_ORDERS",
               COLUMN_NAME: "TOTAL",
-              DATA_TYPE: "NUMBER",
+              ...NUMBER_BARE,
               NULLABLE: "Y",
               DATA_DEFAULT: "0 ",
             },
@@ -3918,8 +3977,8 @@ describe("Oracle bulk column read", () => {
       if (sql.includes("ALL_TAB_COLUMNS")) {
         return {
           rows: [
-            { COLUMN_NAME: "ID", DATA_TYPE: "NUMBER", NULLABLE: "N", DATA_DEFAULT: null },
-            { COLUMN_NAME: "TOTAL", DATA_TYPE: "NUMBER", NULLABLE: "Y", DATA_DEFAULT: "0 " },
+            { COLUMN_NAME: "ID", ...NUMBER_BARE, NULLABLE: "N", DATA_DEFAULT: null },
+            { COLUMN_NAME: "TOTAL", ...NUMBER_BARE, NULLABLE: "Y", DATA_DEFAULT: "0 " },
           ],
         };
       }
@@ -4184,6 +4243,327 @@ describe("Oracle bulk column read", () => {
     const batch = await provider.describeObjects(["APP"], "table");
 
     expect(batch.details.map((detail) => detail.path)).toEqual(listed.map((object) => object.path));
+    await provider.disconnect();
+  });
+});
+
+/**
+ * #1139: a column's `type` is its declaration, built from the length, precision and scale
+ * columns of `ALL_TAB_COLUMNS`, and `baseType` is `DATA_TYPE` beside it where the two differ.
+ *
+ * Every row below is the dictionary row Oracle Database 21c XE answers for the column of
+ * `APP.COLUMN_TYPES` (`docker/oracle-init/01-object-fixture.sql`) with the same name, so the
+ * doubles answer what the engine answers. `tests/live/oracle-column-type.ts` replays the
+ * declarations at that server.
+ */
+describe("Oracle column type declaration (#1139)", () => {
+  beforeEach(() => {
+    mockConnCloseFn = async () => {};
+    mockBreakFn = async () => {};
+    mockPoolCloseFn = async () => {};
+    mockCreatePoolFn = async () => createMockPool();
+  });
+
+  type Dictionary = {
+    DATA_TYPE: string;
+    DATA_LENGTH: number;
+    DATA_PRECISION: number | null;
+    DATA_SCALE: number | null;
+    CHAR_LENGTH: number;
+    CHAR_USED: "B" | "C" | null;
+  };
+  const cases: Array<{ name: string; row: Dictionary; type: string; baseType?: string }> = [
+    {
+      name: "C_VARCHAR2",
+      row: {
+        DATA_TYPE: "VARCHAR2",
+        DATA_LENGTH: 20,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 20,
+        CHAR_USED: "B",
+      },
+      type: "VARCHAR2(20 BYTE)",
+      baseType: "VARCHAR2",
+    },
+    {
+      name: "C_VARCHAR2_CHAR",
+      row: {
+        DATA_TYPE: "VARCHAR2",
+        DATA_LENGTH: 80,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 20,
+        CHAR_USED: "C",
+      },
+      type: "VARCHAR2(20 CHAR)",
+      baseType: "VARCHAR2",
+    },
+    {
+      name: "C_NVARCHAR2",
+      row: {
+        DATA_TYPE: "NVARCHAR2",
+        DATA_LENGTH: 20,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 10,
+        CHAR_USED: "C",
+      },
+      type: "NVARCHAR2(10)",
+      baseType: "NVARCHAR2",
+    },
+    {
+      name: "C_CHAR",
+      row: {
+        DATA_TYPE: "CHAR",
+        DATA_LENGTH: 2,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 2,
+        CHAR_USED: "B",
+      },
+      type: "CHAR(2 BYTE)",
+      baseType: "CHAR",
+    },
+    {
+      name: "C_CHAR_CHAR",
+      row: {
+        DATA_TYPE: "CHAR",
+        DATA_LENGTH: 12,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 3,
+        CHAR_USED: "C",
+      },
+      type: "CHAR(3 CHAR)",
+      baseType: "CHAR",
+    },
+    {
+      name: "C_NCHAR",
+      row: {
+        DATA_TYPE: "NCHAR",
+        DATA_LENGTH: 6,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 3,
+        CHAR_USED: "C",
+      },
+      type: "NCHAR(3)",
+      baseType: "NCHAR",
+    },
+    {
+      name: "C_RAW",
+      row: {
+        DATA_TYPE: "RAW",
+        DATA_LENGTH: 16,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "RAW(16)",
+      baseType: "RAW",
+    },
+    {
+      name: "C_NUMBER",
+      row: {
+        DATA_TYPE: "NUMBER",
+        DATA_LENGTH: 22,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "NUMBER",
+    },
+    {
+      name: "C_NUMBER_P",
+      row: { DATA_TYPE: "NUMBER", DATA_LENGTH: 22, DATA_PRECISION: 10, DATA_SCALE: 0, CHAR_LENGTH: 0, CHAR_USED: null },
+      type: "NUMBER(10)",
+      baseType: "NUMBER",
+    },
+    {
+      name: "C_NUMBER_PS",
+      row: { DATA_TYPE: "NUMBER", DATA_LENGTH: 22, DATA_PRECISION: 12, DATA_SCALE: 2, CHAR_LENGTH: 0, CHAR_USED: null },
+      type: "NUMBER(12,2)",
+      baseType: "NUMBER",
+    },
+    {
+      name: "C_NUMBER_STAR",
+      row: {
+        DATA_TYPE: "NUMBER",
+        DATA_LENGTH: 22,
+        DATA_PRECISION: null,
+        DATA_SCALE: 2,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "NUMBER(*,2)",
+      baseType: "NUMBER",
+    },
+    {
+      name: "C_NUMBER_NEG",
+      row: { DATA_TYPE: "NUMBER", DATA_LENGTH: 22, DATA_PRECISION: 5, DATA_SCALE: -2, CHAR_LENGTH: 0, CHAR_USED: null },
+      type: "NUMBER(5,-2)",
+      baseType: "NUMBER",
+    },
+    {
+      // INTEGER is NUMBER(*,0) to the dictionary, and that is the declaration that recreates it.
+      name: "C_INTEGER",
+      row: {
+        DATA_TYPE: "NUMBER",
+        DATA_LENGTH: 22,
+        DATA_PRECISION: null,
+        DATA_SCALE: 0,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "NUMBER(*,0)",
+      baseType: "NUMBER",
+    },
+    {
+      name: "C_FLOAT",
+      row: {
+        DATA_TYPE: "FLOAT",
+        DATA_LENGTH: 22,
+        DATA_PRECISION: 10,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "FLOAT(10)",
+      baseType: "FLOAT",
+    },
+    {
+      name: "C_FLOAT_DEFAULT",
+      row: {
+        DATA_TYPE: "FLOAT",
+        DATA_LENGTH: 22,
+        DATA_PRECISION: 126,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "FLOAT(126)",
+      baseType: "FLOAT",
+    },
+    {
+      // DATA_TYPE already carries the fractional precision, so it is the declaration.
+      name: "C_TIMESTAMP",
+      row: {
+        DATA_TYPE: "TIMESTAMP(3)",
+        DATA_LENGTH: 11,
+        DATA_PRECISION: null,
+        DATA_SCALE: 3,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "TIMESTAMP(3)",
+    },
+    {
+      name: "C_INTERVAL",
+      row: {
+        DATA_TYPE: "INTERVAL DAY(3) TO SECOND(2)",
+        DATA_LENGTH: 11,
+        DATA_PRECISION: 3,
+        DATA_SCALE: 2,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "INTERVAL DAY(3) TO SECOND(2)",
+    },
+    {
+      name: "C_DATE",
+      row: {
+        DATA_TYPE: "DATE",
+        DATA_LENGTH: 7,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "DATE",
+    },
+    {
+      name: "C_CLOB",
+      row: {
+        DATA_TYPE: "CLOB",
+        DATA_LENGTH: 4000,
+        DATA_PRECISION: null,
+        DATA_SCALE: null,
+        CHAR_LENGTH: 0,
+        CHAR_USED: null,
+      },
+      type: "CLOB",
+    },
+  ];
+
+  const expected = cases.map(({ name, type, baseType }) => ({
+    name,
+    type,
+    ...(baseType === undefined ? {} : { baseType }),
+    nullable: true,
+    isPrimary: false,
+    defaultValue: undefined,
+  }));
+
+  function columnRows(objectName?: string): Record<string, unknown>[] {
+    return cases.map(({ name, row }) =>
+      Object.assign(objectName === undefined ? {} : { OBJECT_NAME: objectName }, { COLUMN_NAME: name }, row, {
+        NULLABLE: "Y",
+        DATA_DEFAULT: null,
+      }),
+    );
+  }
+
+  test("describeObject() reports every column as declared, with DATA_TYPE as baseType where the two differ", async () => {
+    mockExecuteFn = async (sql: string) => (sql.includes("ALL_TAB_COLUMNS") ? { rows: columnRows() } : { rows: [] });
+    const provider = new OracleProvider({ ...baseConfig, user: "app" });
+    await provider.connect();
+
+    const detail = await provider.describeObject(["APP", "COLUMN_TYPES"], "table");
+    expect(detail.columns).toEqual(expected);
+    // `toEqual` treats an undefined property as absent, and the rule is that it IS absent.
+    for (const name of ["C_NUMBER", "C_TIMESTAMP", "C_INTERVAL", "C_DATE", "C_CLOB"]) {
+      expect(Object.hasOwn(detail.columns.find((column) => column.name === name)!, "baseType")).toBe(false);
+    }
+    await provider.disconnect();
+  });
+
+  test("describeObjects() reports the same declarations", async () => {
+    mockExecuteFn = async (sql: string) => {
+      if (!sql.includes("WITH described AS")) return { rows: [] };
+      if (sql.includes("SELECT d.NAME FROM described d")) return { rows: [{ NAME: "COLUMN_TYPES" }] };
+      if (sql.includes("ALL_TAB_COLUMNS")) return { rows: columnRows("COLUMN_TYPES") };
+      return { rows: [] };
+    };
+    const provider = new OracleProvider({ ...baseConfig, user: "app" });
+    await provider.connect();
+
+    const batch = await provider.describeObjects(["APP"], "table");
+    expect(batch.details).toHaveLength(1);
+    expect(batch.details[0].columns).toEqual(expected);
+    await provider.disconnect();
+  });
+
+  test("both reads select the dictionary columns the declaration is built from", async () => {
+    const columnReads: string[] = [];
+    mockExecuteFn = async (sql: string) => {
+      if (sql.includes("ALL_TAB_COLUMNS")) columnReads.push(sql);
+      if (sql.includes("SELECT d.NAME FROM described d")) return { rows: [{ NAME: "COLUMN_TYPES" }] };
+      return { rows: [] };
+    };
+    const provider = new OracleProvider({ ...baseConfig, user: "app" });
+    await provider.connect();
+
+    await provider.describeObject(["APP", "COLUMN_TYPES"], "table");
+    await provider.describeObjects(["APP"], "table");
+    expect(columnReads).toHaveLength(2);
+    for (const sql of columnReads) {
+      for (const column of ["DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "CHAR_LENGTH", "CHAR_USED"]) {
+        expect(sql).toContain(column);
+      }
+    }
     await provider.disconnect();
   });
 });

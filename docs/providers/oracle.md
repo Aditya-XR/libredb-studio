@@ -631,8 +631,10 @@ already a string. The two `INTERVAL` types were left alone by that change too an
 Oracle is the one engine of the four whose driver hands over a NAME rather than a wire code:
 `result.metaData[].dbTypeName`. It is passed through into `QueryResult.columnTypes` verbatim
 ([column-types.ts](../../src/lib/db/providers/sql/column-types.ts)), keyed by the column name in
-`fields`, by both `query()` and `queryInTransaction()`, and it is uppercase - the same spelling
-`ALL_TAB_COLUMNS.DATA_TYPE` uses, so a declared type reads like the schema tree's entry.
+`fields`, by both `query()` and `queryInTransaction()`, and it is uppercase.
+It is not the schema tree's `type`, which is a column's full declaration, such as `VARCHAR2(20 BYTE)` ([§7](#a-columns-type-is-its-declaration-built-from-the-dictionary-1139)).
+For most types it is the `ALL_TAB_COLUMNS.DATA_TYPE` spelling, which the tree reports as `baseType ?? type`.
+The exceptions, measured on 21c XE, are `FLOAT`, which reads `NUMBER` here, and the `TIMESTAMP` and `INTERVAL` types, which lose the precision `DATA_TYPE` carries: a `TIMESTAMP(3)` column reads `TIMESTAMP` here and `TIMESTAMP(3)` in the tree.
 
 Measured on Oracle AI Database 26ai Free over the probe table, verbatim from `oracledb`:
 
@@ -907,7 +909,7 @@ The dictionary views every object read draws on:
 | Data | Source view(s) |
 |------|----------------|
 | Tables + row estimate | `ALL_TABLES` (`NUM_ROWS`) |
-| Columns | `ALL_TAB_COLUMNS` (`isPrimary` derived from PK set; `nullable` = `NULLABLE = 'Y'`) |
+| Columns | `ALL_TAB_COLUMNS` (`type` built from `DATA_TYPE` and its length, precision and scale columns, #1139; `isPrimary` derived from PK set; `nullable` = `NULLABLE = 'Y'`) |
 | Primary keys | `ALL_CONSTRAINTS` + `ALL_CONS_COLUMNS` (`CONSTRAINT_TYPE = 'P'`) |
 | Foreign keys | `ALL_CONSTRAINTS` (type `'R'`) joined to the referenced constraint's columns |
 | Indexes | `ALL_INDEXES` + `ALL_IND_COLUMNS` (`unique` = `UNIQUENESS = 'UNIQUE'`) |
@@ -1286,6 +1288,89 @@ END;
 /
 ```
 
+#### A column's type is its declaration, built from the dictionary (#1139)
+
+`ALL_TAB_COLUMNS.DATA_TYPE` has no length, precision or scale: a `VARCHAR2(20)` reads `VARCHAR2` and
+a `NUMBER(12,2)` reads `NUMBER`.
+The schema-diff migration generator writes `ColumnSchema.type` into `CREATE TABLE` and
+`ALTER TABLE ... ADD (...)` as it is, so a type read from `DATA_TYPE` alone breaks the migration.
+A bare `VARCHAR2`, `NVARCHAR2` or `RAW` is refused with ORA-00906.
+A bare `CHAR` or `NUMBER` is worse, because Oracle accepts it and creates a different column:
+`CHAR(1)`, or a `NUMBER` with no precision or scale.
+
+Both column reads therefore also select `DATA_LENGTH`, `DATA_PRECISION`, `DATA_SCALE`, `CHAR_LENGTH`
+and `CHAR_USED`, and `declaredType()` in `oracle.ts` builds the declaration with this rule:
+
+| `DATA_TYPE` | Declaration |
+| --- | --- |
+| `VARCHAR2`, `CHAR` | `<DATA_TYPE>(<CHAR_LENGTH> BYTE)` when `CHAR_USED` is `B`, `<DATA_TYPE>(<CHAR_LENGTH> CHAR)` when it is `C` |
+| `NVARCHAR2`, `NCHAR` | `<DATA_TYPE>(<CHAR_LENGTH>)` |
+| `RAW` | `RAW(<DATA_LENGTH>)` |
+| `NUMBER` | `NUMBER` when precision and scale are both null, `NUMBER(*,<s>)` when only precision is null, `NUMBER(<p>)` when scale is 0, otherwise `NUMBER(<p>,<s>)` |
+| `FLOAT` | `FLOAT(<DATA_PRECISION>)` |
+| anything else | `DATA_TYPE` as it is |
+
+`ColumnSchema.type` is that declaration, and `ColumnSchema.baseType` is `DATA_TYPE`.
+`baseType` is OMITTED where the two are equal, which is the rule the MySQL and SQL Server providers
+follow too.
+`type` is what a reader sees and what DDL writes.
+`baseType` is what a reader that decides on a type family matches against, and the code generator
+and the test data generator already read `baseType ?? type`.
+
+Measured on Oracle Database 21c Express Edition over `APP.COLUMN_TYPES`, which the fixture creates:
+
+| Declared | `DATA_TYPE` | `type` | `baseType` |
+| --- | --- | --- | --- |
+| `VARCHAR2(20)`, `VARCHAR2(20 BYTE)` | `VARCHAR2` | `VARCHAR2(20 BYTE)` | `VARCHAR2` |
+| `VARCHAR2(20 CHAR)` | `VARCHAR2` | `VARCHAR2(20 CHAR)` | `VARCHAR2` |
+| `NVARCHAR2(10)` | `NVARCHAR2` | `NVARCHAR2(10)` | `NVARCHAR2` |
+| `CHAR(2)` | `CHAR` | `CHAR(2 BYTE)` | `CHAR` |
+| `CHAR(3 CHAR)` | `CHAR` | `CHAR(3 CHAR)` | `CHAR` |
+| `NCHAR(3)` | `NCHAR` | `NCHAR(3)` | `NCHAR` |
+| `RAW(16)` | `RAW` | `RAW(16)` | `RAW` |
+| `NUMBER` | `NUMBER` | `NUMBER` | absent |
+| `NUMBER(10)` | `NUMBER` | `NUMBER(10)` | `NUMBER` |
+| `NUMBER(12,2)` | `NUMBER` | `NUMBER(12,2)` | `NUMBER` |
+| `NUMBER(*,2)` | `NUMBER` | `NUMBER(*,2)` | `NUMBER` |
+| `NUMBER(5,-2)` | `NUMBER` | `NUMBER(5,-2)` | `NUMBER` |
+| `INTEGER` | `NUMBER` | `NUMBER(*,0)` | `NUMBER` |
+| `FLOAT(10)` | `FLOAT` | `FLOAT(10)` | `FLOAT` |
+| `FLOAT` | `FLOAT` | `FLOAT(126)` | `FLOAT` |
+| `TIMESTAMP(3)` | `TIMESTAMP(3)` | `TIMESTAMP(3)` | absent |
+| `TIMESTAMP(6) WITH TIME ZONE` | the same | the same | absent |
+| `INTERVAL DAY(3) TO SECOND(2)` | the same | the same | absent |
+| `DATE`, `CLOB`, `BLOB`, `BINARY_DOUBLE` | the same | the same | absent |
+
+A table created from the built declarations has `ALL_TAB_COLUMNS` rows identical to the fixture's,
+23 of 23.
+The `TIMESTAMP` and `INTERVAL` types need no rule, because `DATA_TYPE` already carries their
+precision.
+
+`BYTE` is written even though `DBMS_METADATA.GET_DDL` leaves it out.
+Under `NLS_LENGTH_SEMANTICS = CHAR`, a bare `VARCHAR2(20)` is created with `CHAR_USED = C`, measured,
+so a migration without `BYTE` would change the column on such a target.
+A computed view column is safe with this rule: `COUNT(*)`, `1/3` and `N * 2` report a null precision
+and scale and read as `NUMBER`, and `SUBSTR(A, 1, 3)` reads as `VARCHAR2(12 BYTE)`.
+
+`QueryResult.columnTypes` does NOT change.
+It comes from the driver ([§5.4](#54-declared-column-types)), and there a computed result column
+reports precision 0 or scale -127, so it stays `DATA_TYPE`'s spelling on purpose.
+
+`tests/live/oracle-column-type.ts` ([§12.4](#124-optional-verifying-against-a-live-oracle)) holds
+this against a real server.
+It replays the generated `CREATE TABLE` under `NLS_LENGTH_SEMANTICS = CHAR`, requires an accept,
+and compares the new table's `ALL_TAB_COLUMNS` rows with the fixture's.
+It then replays the `DATA_TYPE`-only definition that this replaces and requires ORA-00906.
+
+One consequence for the schema diff, measured and accepted rather than repaired.
+`diffColumns()` compares `type`, and a snapshot saved before this change stored `DATA_TYPE`.
+So every column whose declaration now differs from `DATA_TYPE` reports one false
+`Type changed: VARCHAR2 → VARCHAR2(20 BYTE)` and one `MODIFY` that changes nothing.
+A column whose declaration is `DATA_TYPE`, such as `DATE`, `CLOB` or a bare `NUMBER`, compares equal
+and reports nothing, and a new snapshot clears the rest.
+Comparing `baseType` instead would also hide a real `VARCHAR2(20)` → `VARCHAR2(40)`, which is the
+change this section exists to carry.
+
 ### Object source (#789)
 
 `readObjectSource(path, kind, limit?)` answers ONE object's definition text as a document of named
@@ -1550,7 +1635,8 @@ mounted at `/container-entrypoint-initdb.d` by the `oracle` service in `database
 creates two owners so the lifted confinement is observable, one object of every declared kind, the
 three trigger cases above, the package whose body does not compile, and the wrapped-PL/SQL block with
 the four plain units that imitate it and the fifth, INVALID one that carries the keyword without the
-marker ([Object source](#object-source-789)). Connect as `APP` /
+marker ([Object source](#object-source-789)). `APP.COLUMN_TYPES` has one column per row of the
+column type rule ([§7](#a-columns-type-is-its-declaration-built-from-the-dictionary-1139)). Connect as `APP` /
 `Password123!` on service `XEPDB1`.
 
 It also seeds ROWS, two in `APP.APP_CUSTOMERS` and two in `REPORTING.REPORT_DAILY`, and those are
@@ -1979,6 +2065,16 @@ owner-scoped would look correct.
 ```bash
 docker compose -f database-compose.yml up -d oracle
 # then connect to localhost:1521 / XEPDB1 as APP / Password123!
+```
+
+The live guard for the column type rule
+([§7](#a-columns-type-is-its-declaration-built-from-the-dictionary-1139)) reads the same fixture.
+Its subject is what the ENGINE creates from a declaration, which a mock cannot settle. It CREATES
+and DROPS throwaway tables in the connecting user's schema, so point it at a disposable server:
+
+```bash
+LIBREDB_LIVE_ORACLE_URL='oracle://app:Password123!@127.0.0.1:1521/XEPDB1' \
+  bun tests/live/oracle-column-type.ts
 ```
 
 ---

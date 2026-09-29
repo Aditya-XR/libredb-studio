@@ -474,7 +474,8 @@ const LIST_TRIGGERS_SQL = `SELECT o.OBJECT_NAME AS NAME, t.TABLE_NAME AS PARENT,
 // ----------------------------------------------------------------------------
 
 /** Columns. Answers for a table, a view and a materialized view's container alike. */
-const OBJECT_COLUMNS_SQL = `SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_DEFAULT
+const OBJECT_COLUMNS_SQL = `SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, CHAR_LENGTH, CHAR_USED,
+                NULLABLE, DATA_DEFAULT
          FROM ALL_TAB_COLUMNS
          WHERE OWNER = :1 AND TABLE_NAME = :2
          ORDER BY COLUMN_ID`;
@@ -876,7 +877,8 @@ function bulkDetailSql(
   const owner = bounded ? ":4" : ":3";
   return {
     columns: `${described}
-         SELECT d.NAME AS OBJECT_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT
+         SELECT d.NAME AS OBJECT_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE,
+                c.CHAR_LENGTH, c.CHAR_USED, c.NULLABLE, c.DATA_DEFAULT
          FROM described d
          JOIN ALL_TAB_COLUMNS c ON c.OWNER = ${owner} AND c.TABLE_NAME = d.NAME
          ORDER BY d.NAME, c.COLUMN_ID`,
@@ -1159,13 +1161,18 @@ interface DetailRows {
  */
 function objectDetailFromRows(path: readonly string[], owner: string, rows: DetailRows): ObjectDetail {
   const primaryKey = new Set(rows.primaryKey.map((row) => String(row.COLUMN_NAME)));
-  const columns: ColumnSchema[] = rows.columns.map((row) => ({
-    name: String(row.COLUMN_NAME),
-    type: String(row.DATA_TYPE),
-    nullable: String(row.NULLABLE) === "Y",
-    isPrimary: primaryKey.has(String(row.COLUMN_NAME)),
-    defaultValue: measuredDefault(row.DATA_DEFAULT),
-  }));
+  const columns: ColumnSchema[] = rows.columns.map((row) => {
+    const dataType = String(row.DATA_TYPE);
+    const type = declaredType(row);
+    return {
+      name: String(row.COLUMN_NAME),
+      type,
+      ...(type === dataType ? {} : { baseType: dataType }),
+      nullable: String(row.NULLABLE) === "Y",
+      isPrimary: primaryKey.has(String(row.COLUMN_NAME)),
+      defaultValue: measuredDefault(row.DATA_DEFAULT),
+    };
+  });
 
   // One entry per index, its columns in COLUMN_POSITION order, which is the order both
   // statements return them in.
@@ -1209,6 +1216,41 @@ function byObjectName<T extends BulkRow>(rows: readonly T[]): Map<string, T[]> {
 function isMissingOracleMaintainedError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return error.message.includes("ORA-00904") && error.message.includes("ORACLE_MAINTAINED");
+}
+
+/**
+ * A column's type as a `CREATE TABLE` writes it, built from one `ALL_TAB_COLUMNS` row (#1139).
+ *
+ * `DATA_TYPE` alone has no length, precision or scale. A bare `VARCHAR2`, `NVARCHAR2` or `RAW`
+ * is ORA-00906, and a bare `CHAR` or `NUMBER` creates a different column without an error.
+ *
+ * `BYTE` is written although `DBMS_METADATA.GET_DDL` leaves it out: under
+ * `NLS_LENGTH_SEMANTICS = CHAR` a bare `VARCHAR2(20)` is created with character semantics.
+ * `NUMBER` with a null precision and scale stays bare, which is also what a computed view
+ * column such as `COUNT(*)` reports. The `TIMESTAMP` and `INTERVAL` types already carry
+ * their precision in `DATA_TYPE`, so they are returned as they are.
+ */
+function declaredType(row: Record<string, unknown>): string {
+  const dataType = String(row.DATA_TYPE);
+  const precision = row.DATA_PRECISION ?? null;
+  const scale = row.DATA_SCALE ?? null;
+  switch (dataType) {
+    case "VARCHAR2":
+    case "CHAR":
+      return `${dataType}(${String(row.CHAR_LENGTH)} ${row.CHAR_USED === "C" ? "CHAR" : "BYTE"})`;
+    case "NVARCHAR2":
+    case "NCHAR":
+      return `${dataType}(${String(row.CHAR_LENGTH)})`;
+    case "RAW":
+      return `RAW(${String(row.DATA_LENGTH)})`;
+    case "NUMBER":
+      if (precision === null) return scale === null ? "NUMBER" : `NUMBER(*,${String(scale)})`;
+      return Number(scale) === 0 ? `NUMBER(${String(precision)})` : `NUMBER(${String(precision)},${String(scale)})`;
+    case "FLOAT":
+      return `FLOAT(${String(precision)})`;
+    default:
+      return dataType;
+  }
 }
 
 /** `ALL_TAB_COLUMNS.DATA_DEFAULT` is a LONG holding source text, trailing spaces included. */
