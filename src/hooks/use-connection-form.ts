@@ -335,6 +335,11 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     sshPrivateKey: setSSHPrivateKey,
     sshPassphrase: setSSHPassphrase,
   };
+  const resetConnectionFields = () => {
+    for (const key of Object.keys(CONNECTION_FORM_DEFAULTS) as (keyof ConnectionFormDefaults)[]) {
+      (resetSetters[key] as (value: ConnectionFormDefaults[typeof key]) => void)(CONNECTION_FORM_DEFAULTS[key]);
+    }
+  };
 
   const isEditMode = !!editConnection;
 
@@ -376,6 +381,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       // this the previous target's degraded-save acknowledgement carried over and the
       // next connection was saved on its first click having reported nothing (#1180).
       withdrawTransientState();
+      resetConnectionFields();
       setType(editConnection.type);
       setName(editConnection.name);
       setHost(editConnection.host || "localhost");
@@ -464,9 +470,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       withdrawTransientState();
       if (!editConnection) {
         // Every connection-scoped field, from the same object that seeded it (#1125).
-        for (const key of Object.keys(CONNECTION_FORM_DEFAULTS) as (keyof ConnectionFormDefaults)[]) {
-          (resetSetters[key] as (value: ConnectionFormDefaults[typeof key]) => void)(CONNECTION_FORM_DEFAULTS[key]);
-        }
+        resetConnectionFields();
       }
     }
   }

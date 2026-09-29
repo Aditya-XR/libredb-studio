@@ -443,6 +443,104 @@ describe("useConnectionForm", () => {
     }
   });
 
+  describe("an edit target replaced by another without passing through null (#1156)", () => {
+    const securedOracle: DatabaseConnection = {
+      id: "ora-x",
+      name: "Oracle X",
+      type: "oracle",
+      host: "ora.x",
+      port: 1521,
+      serviceName: "XPDB",
+      createdAt: new Date(),
+      ssl: {
+        mode: "verify-full",
+        caCert: "-----BEGIN CERTIFICATE-----ca",
+        clientCert: "-----BEGIN CERTIFICATE-----client",
+        clientKey: "client-key-pem",
+      },
+      sshTunnel: {
+        enabled: true,
+        host: "bastion.x",
+        port: 2222,
+        username: "tunneluser",
+        authMethod: "privateKey",
+        privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
+        passphrase: "key-passphrase",
+      },
+    };
+    const plainPostgres: DatabaseConnection = {
+      id: "pg-y",
+      name: "Postgres Y",
+      type: "postgres",
+      host: "pg.y",
+      port: 5432,
+      createdAt: new Date(),
+    };
+
+    const expectPlainTarget = async (
+      result: { current: ReturnType<typeof useConnectionForm> },
+      onConnect: ReturnType<typeof mock>,
+    ) => {
+      expect(result.current.name).toBe("Postgres Y");
+      for (const key of [
+        "showSSL",
+        "sslMode",
+        "caCert",
+        "clientCert",
+        "clientKey",
+        "showSSH",
+        "sshEnabled",
+        "sshHost",
+        "sshPort",
+        "sshUsername",
+        "sshAuthMethod",
+        "sshPassword",
+        "sshPrivateKey",
+        "sshPassphrase",
+        "showAdvanced",
+        "serviceName",
+        "instanceName",
+        "mongoConnectionMode",
+      ] as const) {
+        expect({ key, value: result.current[key] }).toEqual({ key, value: CONNECTION_FORM_DEFAULTS[key] });
+      }
+
+      await act(async () => {
+        await result.current.handleConnect();
+      });
+      expect(onConnect).toHaveBeenCalledTimes(1);
+      const saved = onConnect.mock.calls[0][0] as DatabaseConnection;
+      expect(saved.ssl).toBeUndefined();
+      expect(saved.sshTunnel).toBeUndefined();
+      expect(saved.serviceName).toBeUndefined();
+    };
+
+    test("kept across the close", async () => {
+      const onConnect = mock((_connection: DatabaseConnection) => {});
+      const props = { ...defaultProps, onConnect, onTestConnection: async () => ({ success: true }) };
+      const { result, rerender } = renderHook((p) => useConnectionForm(p), {
+        initialProps: { ...props, isOpen: true, editConnection: securedOracle },
+      });
+      expect(result.current.sshEnabled).toBe(true);
+      rerender({ ...props, isOpen: false, editConnection: securedOracle });
+      rerender({ ...props, isOpen: true, editConnection: plainPostgres });
+
+      await expectPlainTarget(result, onConnect);
+    });
+
+    test("swapped while open", async () => {
+      const onConnect = mock((_connection: DatabaseConnection) => {});
+      const props = { ...defaultProps, onConnect, onTestConnection: async () => ({ success: true }) };
+      const { result, rerender } = renderHook((p) => useConnectionForm(p), {
+        initialProps: { ...props, isOpen: true, editConnection: securedOracle },
+      });
+      expect(result.current.sshEnabled).toBe(true);
+      rerender({ ...props, isOpen: true, editConnection: plainPostgres });
+
+      await expectPlainTarget(result, onConnect);
+    });
+  });
+
   /**
    * A dialog can mount already closed with an edit target — the shell renders this hook
    * whether or not the dialog is on screen — and that mount must apply the target, in
@@ -2366,10 +2464,7 @@ describe("useConnectionForm", () => {
     expect("sshTunnel" in onConnect.mock.calls[0][0]).toBe(false);
   });
 
-  test("a tunnel left in the dialog's state by the connection edited before is not sent for a Kafka edit", async () => {
-    // The dialog's SSH state carries from one edit target to the next and survives the close
-    // reset (a pre-existing leak, recorded in docs/BACKLOG.md). The write gate is what keeps it
-    // off a Kafka connection.
+  test("a Kafka edit after a tunnelled one opens with the tunnel off", async () => {
     const fetchMock = mockGlobalFetch({
       "/api/db/test-connection": { ok: true, json: { success: true, latency: 5 } },
     });
@@ -2403,9 +2498,8 @@ describe("useConnectionForm", () => {
     rerender({ ...defaultProps, isOpen: false, editConnection: tunnelledPostgres });
     rerender({ ...defaultProps, isOpen: true, editConnection: kafkaWithoutTunnel });
 
-    // The leak itself: the Kafka edit opens with the PostgreSQL connection's tunnel still on.
     expect(result.current.type).toBe("kafka");
-    expect(result.current.sshEnabled).toBe(true);
+    expect(result.current.sshEnabled).toBe(false);
 
     await act(async () => {
       await result.current.handleTestConnection();
