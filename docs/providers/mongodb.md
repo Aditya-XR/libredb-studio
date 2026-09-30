@@ -248,7 +248,11 @@ The paste box now reads the URI's own TLS options, and maps them by the rule sta
 | `tls=false` / `ssl=false` | `disable` |
 | `mongodb+srv://` with no TLS parameter | `verify-system` — SRV implies TLS in the driver itself |
 | `tlsInsecure=true` / `tlsAllowInvalidCertificates=true` alongside TLS | `require` — both turn `rejectUnauthorized` off |
+| `tlsCAFile=<path>` alongside TLS | `verify-ca` — the chain is pinned to that CA, and the paste banner points at the CA field for its contents; the two relaxing options above still win |
 | a non-boolean value (`tls=maybe`) | nothing; the paste banner quotes the parameter |
+
+`tlsCAFile` stays in the URI, and the driver reads that path on the server when it connects, so in a container the console's `tlsCAFile=global-bundle.pem` fails with `ENOENT` (#842).
+A certificate pasted into the CA field wins over it: the driver loads the file only when no `ca` option is set (`options.ca ??=` in mongodb 7.6.0's `mongo_client.js`).
 
 `tls=true` was deliberately **ignored** before this: the only non-`disable` mode that needed no PEM
 was `require`, i.e. `rejectUnauthorized: false`, and because the options object is a second channel

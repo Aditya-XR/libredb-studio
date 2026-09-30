@@ -2745,6 +2745,46 @@ describe("useConnectionForm", () => {
     expect(result.current.mongoConnectionMode).toBe("connectionString");
   });
 
+  // #842: an unescaped "@" in the credentials makes the auth/host split ambiguous.
+  test("handlePasteConnectionString warns instead of guessing at ambiguous MongoDB credentials", () => {
+    const { result } = renderHook(() => useConnectionForm(defaultProps));
+
+    act(() => {
+      result.current.setPasteInput("mongodb://user:p@ss:w#rd@realhost/db");
+    });
+    act(() => {
+      result.current.handlePasteConnectionString();
+    });
+
+    expect(result.current.testResult!.tone).toBe("warning");
+    expect(result.current.testResult!.message).toContain("more than one unescaped");
+    // the guess is not written into the fields - they stay at the form's own defaults
+    expect(result.current.host).toBe("localhost");
+    expect(result.current.user).toBe("");
+    expect(result.current.password).toBe("");
+  });
+
+  // #842: AWS DocumentDB's own console gives out `tlsCAFile=global-bundle.pem`, a path on
+  // the machine that pasted it, not the one running the server process.
+  test("handlePasteConnectionString warns when a MongoDB URI carries a file-path TLS parameter", () => {
+    const { result } = renderHook(() => useConnectionForm(defaultProps));
+
+    act(() => {
+      result.current.setPasteInput("mongodb://user:pass@host:27017/db?tls=true&tlsCAFile=global-bundle.pem");
+    });
+    act(() => {
+      result.current.handlePasteConnectionString();
+    });
+
+    expect(result.current.testResult!.tone).toBe("warning");
+    expect(result.current.testResult!.message).toContain("tlsCAFile=global-bundle.pem");
+    expect(result.current.testResult!.message).toContain("CA field");
+    // the mode that shows the CA box and says to paste into it
+    expect(result.current.sslMode).toBe("verify-ca");
+    // the fields that could be read were still filled in
+    expect(result.current.host).toBe("host");
+  });
+
   // ── handlePasteConnectionString for Couchbase ──────────────────────────
 
   test("handlePasteConnectionString sets Couchbase bucket and connectionString mode", () => {
