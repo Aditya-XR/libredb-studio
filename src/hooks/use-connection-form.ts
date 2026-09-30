@@ -757,7 +757,11 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     // Auto-switch DB type
     setType(parsed.type);
     if (parsed.host) setHost(parsed.host);
-    if (parsed.port) setPort(parsed.port);
+    // A parse with no port (an np:/lpc: server, #1211) still switched the type above, so
+    // the port is that type's default, as the type buttons in ConnectionModal set it,
+    // rather than the previous engine's.
+    const port = parsed.port || getDBConfig(parsed.type).defaultPort;
+    if (port) setPort(port);
     if (parsed.user) setUser(parsed.user);
     if (parsed.password) setPassword(parsed.password);
     if (parsed.database) setDatabase(parsed.database);
@@ -790,6 +794,15 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
         tone: "warning",
         message:
           'Username and password could not be read: the credentials hold more than one unescaped "@", so where the host starts is ambiguous. Percent-encode it (%40) in the Connection URI field, or switch to Host / Port and fill in the fields directly.',
+      });
+      return;
+    }
+    // tedious reaches SQL Server over TCP only (#1211), so a named-pipes or shared-memory
+    // server was not written into Host; the form keeps the host it had.
+    if (parsed.unsupportedServerProtocol) {
+      setTestResult({
+        tone: "warning",
+        message: `Server not applied: "${parsed.unsupportedServerProtocol}:" is a SQL Server protocol this connection cannot use, because it connects over TCP only. The other fields were filled in. Enter the server's host name and TCP port in Host / Port.`,
       });
       return;
     }

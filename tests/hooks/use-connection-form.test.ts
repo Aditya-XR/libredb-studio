@@ -16,6 +16,7 @@ const DEFAULT_PORTS: Record<string, string> = {
   redis: "6379",
   couchbase: "8091",
   kafka: "9092",
+  mssql: "1433",
 };
 
 // The engines whose addressing fields diverge from the networked default. Spelled out
@@ -2762,6 +2763,26 @@ describe("useConnectionForm", () => {
     expect(result.current.host).toBe("localhost");
     expect(result.current.user).toBe("");
     expect(result.current.password).toBe("");
+  });
+
+  // #1211: tedious reaches SQL Server over TCP only, so an np:/lpc: server cannot be honoured.
+  test("handlePasteConnectionString warns instead of filling host from a named-pipes server", () => {
+    const { result } = renderHook(() => useConnectionForm(defaultProps));
+
+    act(() => {
+      result.current.setPasteInput("Server=np:myserver;Database=mydb;");
+    });
+    act(() => {
+      result.current.handlePasteConnectionString();
+    });
+
+    expect(result.current.type).toBe("mssql");
+    expect(result.current.testResult!.tone).toBe("warning");
+    expect(result.current.testResult!.message).toContain('"np:"');
+    expect(result.current.host).toBe("localhost");
+    // The form opened on PostgreSQL; its 5432 must not survive the switch to SQL Server.
+    expect(result.current.port).toBe("1433");
+    expect(result.current.database).toBe("mydb");
   });
 
   // #842: AWS DocumentDB's own console gives out `tlsCAFile=global-bundle.pem`, a path on

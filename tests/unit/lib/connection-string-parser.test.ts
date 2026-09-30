@@ -650,6 +650,42 @@ describe("parseConnectionString", () => {
       expect(result!.password).toBe("pass123");
     });
 
+    test("strips the tcp: protocol prefix the Azure portal writes in Server", () => {
+      const result = parseConnectionString(
+        "Server=tcp:myserver.database.windows.net,1433;Initial Catalog=mydb;Persist Security Info=False;User ID=myuser;Password=secret;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;",
+      );
+      expect(result!.host).toBe("myserver.database.windows.net");
+      expect(result!.port).toBe("1433");
+      expect(result!.database).toBe("mydb");
+      expect(result!.user).toBe("myuser");
+      expect(result!.sslMode).toBe("verify-full");
+    });
+
+    test("strips the tcp: prefix case-insensitively and without a port", () => {
+      const result = parseConnectionString("Server=TCP:myserver;Database=mydb;");
+      expect(result!.host).toBe("myserver");
+      expect(result!.port).toBe("1433");
+    });
+
+    test("keeps a host that only starts with the letters tcp", () => {
+      expect(parseConnectionString("Server=tcp-gateway,1433;")!.host).toBe("tcp-gateway");
+    });
+
+    test("reports a named-pipes server instead of writing it into host", () => {
+      const result = parseConnectionString("Server=np:myserver;Database=mydb;User Id=sa;");
+      expect(result!.host).toBeUndefined();
+      expect(result!.port).toBeUndefined();
+      expect(result!.unsupportedServerProtocol).toBe("np");
+      expect(result!.database).toBe("mydb");
+      expect(result!.user).toBe("sa");
+    });
+
+    test("reports a shared-memory server, keeping the prefix as it was pasted", () => {
+      const result = parseConnectionString("Server=LPC:myserver;");
+      expect(result!.host).toBeUndefined();
+      expect(result!.unsupportedServerProtocol).toBe("LPC");
+    });
+
     test("handles Data Source alias", () => {
       const result = parseConnectionString("Data Source=db-host,1450;Database=app;");
       // "Data Source=..." starts with "Data", not "Server", so it won't match /^Server\s*=/i

@@ -325,6 +325,12 @@ values matched case-insensitively because ADO.NET writes `True`:
 Any other spelling of either keyword is reported in the paste banner and leaves the form's SSL Mode
 untouched rather than falling back to `disable`.
 
+A `tcp:` protocol prefix on `Server`, which the Azure portal writes in every ADO.NET string it hands
+out (`Server=tcp:<server>.database.windows.net,1433;…`), is dropped before the host and port are split.
+tedious resolves the value as a hostname, so a kept prefix failed as `getaddrinfo ENOTFOUND tcp:…`.
+`np:` (named pipes) and `lpc:` (shared memory) are protocols tedious cannot speak, so Host is left
+as it was and the paste banner says the server was not applied.
+
 `verify-system` is not produced by this parser: `Encrypt=True` with `TrustServerCertificate` off is
 `verify-full` already, and since all three verifying modes build the same tedious call, translating it
 to the newer name would change the wording on the form without changing a single option on the wire.

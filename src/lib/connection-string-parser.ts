@@ -70,6 +70,13 @@ export interface ParsedConnection {
    * guess; `connectionString` still carries the original paste unchanged.
    */
   credentialsAmbiguous?: boolean;
+  /**
+   * The SqlClient protocol prefix of an ADO.NET `Server` that tedious cannot speak, kept as
+   * it was pasted (`np` for named pipes, `lpc` for shared memory). tedious reaches SQL
+   * Server over TCP only (#1211), so `host` and `port` are left unset rather than filled
+   * with `np:myserver`, which would only fail later as a misleading `ENOTFOUND`.
+   */
+  unsupportedServerProtocol?: string;
 }
 
 /**
@@ -564,16 +571,28 @@ function parseADONetString(input: string): ParsedConnection | null {
     });
 
     const host = params["server"] || params["data source"] || "localhost";
-    const [hostPart, portPart] = host.split(",");
+    const rest = {
+      user: params["user id"] || params["uid"] || undefined,
+      password: params["password"] || params["pwd"] || undefined,
+      database: params["database"] || params["initial catalog"] || undefined,
+      ...readADONetTLS((key) => params[key]),
+    };
+
+    // SqlClient accepts a protocol prefix on the server, and the Azure portal always
+    // writes one (`tcp:<server>.database.windows.net,1433`). tedious resolves the value
+    // as a hostname, so a kept prefix fails as ENOTFOUND. TCP is the only protocol
+    // tedious speaks: `tcp:` is dropped, `np:` and `lpc:` are reported instead of guessed.
+    const protocol = /^(tcp|np|lpc):/i.exec(host);
+    if (protocol && protocol[1].toLowerCase() !== "tcp") {
+      return { type: "mssql", unsupportedServerProtocol: protocol[1], ...rest };
+    }
+    const [hostPart, portPart] = host.slice(protocol ? protocol[0].length : 0).split(",");
 
     return {
       type: "mssql",
       host: hostPart || "localhost",
       port: portPart || "1433",
-      user: params["user id"] || params["uid"] || undefined,
-      password: params["password"] || params["pwd"] || undefined,
-      database: params["database"] || params["initial catalog"] || undefined,
-      ...readADONetTLS((key) => params[key]),
+      ...rest,
     };
   } catch {
     return null;
