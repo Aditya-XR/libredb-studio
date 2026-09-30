@@ -174,17 +174,26 @@ function makeSavedChart(overrides: Partial<SavedChartConfig> = {}): SavedChartCo
 }
 
 function createDefaultProps(overrides: Partial<Record<string, unknown>> = {}) {
+  // The panel no longer receives the whole tab (X5), so a `currentTab` override is
+  // unpacked into the granular fields the panel reads; the rest is spread untouched.
+  const { currentTab, ...rest } = overrides;
+  const tab = (currentTab ?? {}) as {
+    query?: string;
+    result?: unknown;
+    runError?: string;
+    resultQuery?: string;
+    explainPlan?: unknown;
+  };
   return {
     mode: "results" as BottomPanelMode,
     onSetMode: mock(() => {}),
-    currentTab: {
-      id: "tab-1",
-      name: "Query 1",
-      query: "SELECT 1",
-      result: null,
-      isExecuting: false,
-      type: "sql" as const,
-    },
+    result: tab.result ?? null,
+    explainPlan: tab.explainPlan,
+    // The shell hands the statement only while the explain view is open (X5); a fixture
+    // passes it regardless, since the panel reads it only in that view.
+    explainQuery: tab.query ?? "SELECT 1",
+    resultQuery: tab.resultQuery,
+    runError: tab.runError,
     schema: [],
     schemaContext: "[]",
     activeConnection: null,
@@ -212,7 +221,7 @@ function createDefaultProps(overrides: Partial<Record<string, unknown>> = {}) {
     isLoadingMore: false,
     onExportResults: mock(() => {}),
     onCopyResults: mock(() => {}),
-    ...overrides,
+    ...rest,
   };
 }
 

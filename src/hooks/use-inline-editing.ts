@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import type { DatabaseConnection, QueryResult, QueryTab } from "@/lib/types";
 import type { CellChange } from "@/components/ResultsGrid";
 import { useToast } from "@/hooks/use-toast";
+import { useStableCallback } from "@/hooks/use-stable-callback";
 import { quoteIdentifier } from "@/lib/sql/identifier";
 import { resolveUpdateTarget, selectsPlainColumn } from "@/lib/sql/update-target";
 import { positionalPlaceholder, quoteLiteral } from "@/lib/sql/values";
@@ -812,7 +813,10 @@ export function useInlineEditing({
     });
   }, []);
 
-  const handleApplyChanges = useCallback(async () => {
+  // One identity for the memoized BottomPanel (X5): the apply reads `currentTab`, which the
+  // shell hands in anew on every keystroke, so a `useCallback` over it re-rendered the panel
+  // once per keystroke. It is only ever called from a click, never during a render.
+  const handleApplyChanges = useStableCallback(async () => {
     if (!activeConnection || pendingChanges.length === 0) return;
 
     // A pending change addresses its row BY POSITION, so it only means anything against
@@ -1087,7 +1091,7 @@ export function useInlineEditing({
           ? `${updates(statements.length)} accepted. Run the query again to see the saved rows.`
           : `${updates(statements.length)} accepted. The results are up to date.`,
     });
-  }, [activeConnection, currentTab, pendingChanges, executeQuery, toast, transactionActive]);
+  });
 
   const handleDiscardChanges = useCallback(() => {
     setPendingChanges([]);

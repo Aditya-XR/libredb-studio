@@ -261,6 +261,31 @@ describe("useTabManager", () => {
     expect(result.current.activeTabId).toBe("default");
   });
 
+  // X5: the shell hands `closeTab` to the memoized tab bar and `updateCurrentTab` to the
+  // memoized mobile header, so a keystroke, which writes the query into the tabs, must not
+  // mint either of them anew. `closeTab` must still close against the tabs as they are now.
+  test("a query write keeps closeTab and updateCurrentTab, and closeTab reads the latest tabs", () => {
+    const { result } = renderHook(() => useTabManager({ activeConnection: null, metadata: null, schema: [] }));
+    act(() => {
+      result.current.addTab();
+    });
+    const closeTab = result.current.closeTab;
+    const updateCurrentTab = result.current.updateCurrentTab;
+
+    act(() => {
+      result.current.updateCurrentTab({ query: "SELECT 1" });
+    });
+    expect(result.current.closeTab).toBe(closeTab);
+    expect(result.current.updateCurrentTab).toBe(updateCurrentTab);
+
+    const secondTabId = result.current.tabs[1].id;
+    act(() => {
+      closeTab(secondTabId, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    expect(result.current.tabs.map((tab) => tab.id)).toEqual(["default"]);
+    expect(result.current.activeTabId).toBe("default");
+  });
+
   test("closeTab does nothing when only 1 tab remains", () => {
     const { result } = renderHook(() =>
       useTabManager({

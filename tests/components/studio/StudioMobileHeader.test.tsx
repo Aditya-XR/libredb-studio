@@ -109,7 +109,6 @@ describe("StudioMobileHeader", () => {
     isAdmin: true,
     activeMobileTab: "editor" as const,
     isExecuting: false,
-    currentQuery: "SELECT 1",
     queryEditorRef: {
       current: {
         format: mock(() => {}),
@@ -349,7 +348,10 @@ describe("StudioMobileHeader", () => {
     expect((writeText.mock.calls as unknown[][])[0][0]).toBe("SELECT 1");
   });
 
-  test("Copy Query falls back to currentQuery when the editor has no value", () => {
+  test("Copy Query writes an empty string when the editor has no value", () => {
+    // The header no longer receives `currentQuery` (X5): the copy reads the editor handle
+    // alone, so an empty editor copies an empty string rather than a fallback that no
+    // longer exists.
     const writeText = mock(async () => {});
     Object.defineProperty(globalThis.navigator, "clipboard", {
       value: { writeText },
@@ -362,13 +364,11 @@ describe("StudioMobileHeader", () => {
         getValue: mock(() => ""),
       },
     };
-    const { queryByText } = render(
-      <StudioMobileHeader {...defaults} queryEditorRef={emptyEditorRef} currentQuery="SELECT 2" />,
-    );
+    const { queryByText } = render(<StudioMobileHeader {...defaults} queryEditorRef={emptyEditorRef} />);
     fireEvent.click(queryByText("Copy Query")!.closest('[role="menuitem"]')!);
 
     expect(writeText).toHaveBeenCalledTimes(1);
-    expect((writeText.mock.calls as unknown[][])[0][0]).toBe("SELECT 2");
+    expect((writeText.mock.calls as unknown[][])[0][0]).toBe("");
   });
 
   // B43: this item reached `navigator.clipboard` unguarded, which is undefined over plain

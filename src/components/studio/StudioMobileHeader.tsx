@@ -50,7 +50,6 @@ interface StudioMobileHeaderProps {
   isAdmin: boolean;
   activeMobileTab: "database" | "schema" | "editor";
   isExecuting: boolean;
-  currentQuery: string;
   queryEditorRef: RefObject<QueryEditorRef | null>;
   transactionActive: boolean;
   playgroundMode: boolean;
@@ -99,7 +98,6 @@ export const StudioMobileHeader = React.memo(function StudioMobileHeader({
   isAdmin,
   activeMobileTab,
   isExecuting,
-  currentQuery,
   queryEditorRef,
   transactionActive,
   playgroundMode,
@@ -297,7 +295,11 @@ export const StudioMobileHeader = React.memo(function StudioMobileHeader({
                     // that API is absent over plain HTTP off loopback, which several
                     // distribution channels are, and this menu closes on click — a toast is
                     // the only place left to say the clipboard is still empty.
-                    const query = queryEditorRef.current?.getValue() || currentQuery;
+                    // The header no longer receives `currentQuery` (X5): it changed on every
+                    // keystroke and re-rendered this memoized header, and the fallback it
+                    // provided was dead — the editor is mounted on every surface that can
+                    // reach this menu item.
+                    const query = queryEditorRef.current?.getValue() ?? "";
                     void writeToClipboard(query).then((copied) => {
                       if (!copied) toast.error("Could not copy the query — select the text and copy it yourself");
                     });

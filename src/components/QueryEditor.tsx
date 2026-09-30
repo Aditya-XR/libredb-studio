@@ -239,8 +239,12 @@ export const QueryEditor = forwardRef<QueryEditorRef, QueryEditorProps>(
       // Nobody here wrote this, so it came from outside: a query loaded from history or
       // the saved list, a generated statement. It replaces the buffer, which makes every
       // outstanding echo a description of text that no longer exists.
+      //
+      // Equal text is still a no-op: re-applying an incoming `value` the buffer already
+      // holds would replace the model's content, dropping the undo stack and moving the
+      // caret for nothing. The document-change arm above makes the same distinction.
       echoes.values = [];
-      editor.setValue(value);
+      if (value !== editor.getValue()) editor.setValue(value);
     }, [value, documentId]);
 
     // Update editor options when line numbers toggle changes

@@ -1019,6 +1019,42 @@ describe("useInlineEditing", () => {
     });
   });
 
+  /*
+   * X5: the shell hands `handleApplyChanges` to the memoized BottomPanel, and every keystroke
+   * gives the shell a new `currentTab` (the query is written into it). A handler that changed
+   * identity with the tab re-rendered the panel once per keystroke, measured at 27 renders
+   * for 27 keystrokes in a real browser.
+   */
+  test("handleApplyChanges keeps one identity when the tab's query changes, and applies against the latest tab", async () => {
+    const { result, rerender } = renderHook(
+      ({ tab }: { tab: QueryTab }) =>
+        useInlineEditing({
+          activeConnection: makeConnection(),
+          currentTab: tab,
+          executeQuery: mockExecuteQuery as (sql: string) => void,
+        }),
+      { initialProps: { tab: makeTab() } },
+    );
+    const first = result.current.handleApplyChanges;
+
+    rerender({ tab: makeTab({ query: "SELECT * FROM users WHERE id > 0" }) });
+    expect(result.current.handleApplyChanges).toBe(first);
+
+    act(() => {
+      result.current.handleCellChange(makeChange());
+    });
+    expect(result.current.handleApplyChanges).toBe(first);
+
+    await act(async () => {
+      await first();
+    });
+    const sent = (mockExecuteQuery as ReturnType<typeof mock>).mock.calls.map((call) => call[0] as string);
+    expect(updateCalls()).toHaveLength(1);
+    // The refresh re-runs the statement the tab holds NOW, so the stable identity did not
+    // freeze the handler on the first render's tab.
+    expect(sent.at(-1)).toBe("SELECT * FROM users WHERE id > 0");
+  });
+
   test("does not re-run the query when a row was refused", async () => {
     const failing = mock((_sql: string) => Promise.resolve(false));
     const { result } = renderHook(() =>

@@ -1257,6 +1257,27 @@ describe("QueryEditor", () => {
     expect(editor.value).toBe("SELECT 1 FROM t");
   });
 
+  test("an external value the buffer already holds is not re-applied (equal text is a no-op)", () => {
+    // The external-write arm of the value-sync effect: with no echo outstanding, an
+    // incoming `value` the buffer already holds would still replace the model's content
+    // and drop the undo stack, so the arm must skip equal text the same way the
+    // document-change arm does.
+    const props = createDefaultProps({ value: "SELECT 1" });
+    const { queryByTestId, rerender } = render(React.createElement(QueryEditor, props));
+    const editor = queryByTestId("mock-monaco-editor") as HTMLTextAreaElement;
+
+    act(() => {
+      fireEvent.change(editor, { target: { value: "SELECT 2" } });
+    });
+    capturedSetValues = [];
+
+    act(() => {
+      rerender(React.createElement(QueryEditor, { ...props, value: "SELECT 2" }));
+    });
+    expect(capturedSetValues).toEqual([]);
+    expect(editor.value).toBe("SELECT 2");
+  });
+
   test("text this editor sent up earlier still applies when it comes back as an external change", () => {
     // Loading the same statement again from history or the saved list is an external
     // write that happens to carry text the user typed a moment ago. Once the parent has

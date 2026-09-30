@@ -3,7 +3,7 @@
 import type { CsvDelimiter } from "@/lib/export/csv";
 
 import React, { useMemo } from "react";
-import type { DatabaseConnection, QueryTab, QueryResult } from "@/lib/types";
+import type { DatabaseConnection, QueryResult } from "@/lib/types";
 import type { DetailedObject } from "@/lib/db/detailed-object";
 import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
 import type { MaskingConfig } from "@/lib/data-masking";
@@ -165,7 +165,17 @@ function ChartDashboard({ result }: { result: QueryResult | null }) {
 interface BottomPanelProps {
   mode: BottomPanelMode;
   onSetMode: (mode: BottomPanelMode) => void;
-  currentTab: QueryTab;
+  // What the panel draws of the tab, and nothing else (X5). The panel used to be handed
+  // the whole `QueryTab`, whose identity changes on every keystroke because
+  // `onContentChange` rewrites the query into the tab; these are the fields it reads.
+  result: QueryResult | null;
+  explainPlan: unknown;
+  // The statement the explain view pairs with its plan. The shells hand it only while that
+  // view is open: anywhere else it would be a prop that changes on every keystroke and
+  // re-renders this memoized panel for a view that is not on screen (X5).
+  explainQuery?: string;
+  resultQuery: string | undefined;
+  runError: string | undefined;
   schema: readonly DetailedObject[];
   schemaContext: string;
   activeConnection: DatabaseConnection | null;
@@ -224,7 +234,11 @@ interface BottomPanelProps {
 export const BottomPanel = React.memo(function BottomPanel({
   mode,
   onSetMode,
-  currentTab,
+  result,
+  explainPlan,
+  explainQuery,
+  resultQuery,
+  runError,
   schema,
   schemaContext,
   activeConnection,
@@ -248,7 +262,7 @@ export const BottomPanel = React.memo(function BottomPanel({
   agentArtifact = null,
   onDismissAgentArtifact,
 }: BottomPanelProps) {
-  const explainInput = useMemo(() => resolveExplainPlan(currentTab.explainPlan), [currentTab.explainPlan]);
+  const explainInput = useMemo(() => resolveExplainPlan(explainPlan), [explainPlan]);
 
   /*
     An agent artifact is shown in ONE surface — the one the RUN's own record names,
@@ -283,7 +297,7 @@ export const BottomPanel = React.memo(function BottomPanel({
     ((mode === "results" && hydratedResult !== null) ||
       (mode === "explain" && hydratedPlan !== null) ||
       (mode === "charts" && hydratedChart !== null));
-  const displayedResult = hydratedResult ?? currentTab.result;
+  const displayedResult = hydratedResult ?? result;
   /**
    * What an export must be attributed to: the artifact when the run's rows are the
    * ones on screen, null when they are the tab's own. Only the results surface has an
@@ -525,7 +539,7 @@ export const BottomPanel = React.memo(function BottomPanel({
           <React.Suspense fallback={<ViewLoading label="Loading the panel" />}>
             {mode === "pivot" ? (
               <PivotTable
-                result={currentTab.result}
+                result={result}
                 onLoadQuery={(q) => {
                   onLoadQuery(q);
                   onSetMode("results");
@@ -558,11 +572,11 @@ export const BottomPanel = React.memo(function BottomPanel({
                 }}
               />
             ) : mode === "charts" ? (
-              <DataCharts result={hydratedChart ?? currentTab.result} spec={hydratedChartSpec} />
+              <DataCharts result={hydratedChart ?? result} spec={hydratedChartSpec} />
             ) : mode === "schemadiff" ? (
               <SchemaDiff schema={schema} connection={activeConnection} />
             ) : mode === "dashboard" ? (
-              <ChartDashboard result={currentTab.result} />
+              <ChartDashboard result={result} />
             ) : mode === "explain" ? (
               <VisualExplain
                 plan={hydratedPlan ?? explainInput}
@@ -573,7 +587,7 @@ export const BottomPanel = React.memo(function BottomPanel({
               explanation of a statement that never produced it; with no query the view
               says so itself instead.
             */
-                query={hydratedPlan === null ? currentTab.query : undefined}
+                query={hydratedPlan === null ? explainQuery : undefined}
                 schemaContext={schemaContext}
                 databaseType={activeConnection?.type}
                 onLoadQuery={(q) => {
@@ -590,7 +604,7 @@ export const BottomPanel = React.memo(function BottomPanel({
                 // The statement these ROWS came from, for the ordering notice. Withheld
                 // for a hydrated result for the same reason `onLoadMore` is: those rows
                 // are an agent run's, and the tab's own statement did not produce them.
-                resultQuery={hydratedHere ? undefined : currentTab.resultQuery}
+                resultQuery={hydratedHere ? undefined : resultQuery}
                 databaseType={activeConnection?.type}
                 maskingEnabled={maskingEnabled}
                 onToggleMasking={onToggleMasking}
@@ -602,7 +616,7 @@ export const BottomPanel = React.memo(function BottomPanel({
                 onApplyChanges={onApplyChanges}
                 onDiscardChanges={onDiscardChanges}
               />
-            ) : currentTab.runError !== undefined ? (
+            ) : runError !== undefined ? (
               /*
                 The tab's last run failed, and its failure stands where its rows would.
                 After the grid, so a hydrated result keeps its precedence, and before the
@@ -625,7 +639,7 @@ export const BottomPanel = React.memo(function BottomPanel({
                   className="mt-1 max-w-xl break-words whitespace-pre-wrap font-mono text-xs text-destructive"
                   data-testid="run-failure-message"
                 >
-                  {currentTab.runError}
+                  {runError}
                 </p>
               </div>
             ) : (

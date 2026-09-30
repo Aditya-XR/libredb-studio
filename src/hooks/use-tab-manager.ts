@@ -11,6 +11,7 @@ import { objectPathLabel, pathKey } from "@/lib/db/object-path";
 import { resolveTabType } from "@/lib/editor/tab-language";
 import { logger } from "@/lib/logger";
 import { newLocalId } from "@/lib/ids";
+import { useStableCallback } from "@/hooks/use-stable-callback";
 
 /** A tab `closeTab` removed, where it sat, and the workspace it sat in, so its Undo can put it back (#747). */
 interface ClosedTab {
@@ -349,29 +350,29 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
     setActiveTabId(closed.tab.id);
   }, []);
 
-  const closeTab = useCallback(
-    (id: string, e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (tabs.length === 1) return;
-      const index = tabs.findIndex((t) => t.id === id);
-      if (index === -1) return;
-      const closed: ClosedTab = { tab: tabs[index], index, nextTabId: tabs[index + 1]?.id ?? null, workspaceKey };
+  // One identity for the strip, whose memoized bar must not re-render on a keystroke (X5):
+  // the handler reads `tabs` and `activeTabId`, both of which change with the query on
+  // every keystroke, so a plain `useCallback` would mint a new function each time.
+  const closeTab = useStableCallback((id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (tabs.length === 1) return;
+    const index = tabs.findIndex((t) => t.id === id);
+    if (index === -1) return;
+    const closed: ClosedTab = { tab: tabs[index], index, nextTabId: tabs[index + 1]?.id ?? null, workspaceKey };
 
-      // The last-tab guard is evaluated again inside the updater, against the state actually
-      // being written: two closes batched into one commit both pass the check above.
-      setTabs((prev) => (prev.length === 1 ? prev : prev.filter((t) => t.id !== id)));
-      if (activeTabId === id) {
-        const remaining = tabs.filter((t) => t.id !== id);
-        setActiveTabId(remaining[remaining.length - 1].id);
-      }
+    // The last-tab guard is evaluated again inside the updater, against the state actually
+    // being written: two closes batched into one commit both pass the check above.
+    setTabs((prev) => (prev.length === 1 ? prev : prev.filter((t) => t.id !== id)));
+    if (activeTabId === id) {
+      const remaining = tabs.filter((t) => t.id !== id);
+      setActiveTabId(remaining[remaining.length - 1].id);
+    }
 
-      const toastId = toast(`Closed "${closed.tab.name}"`, {
-        action: { label: "Undo", onClick: () => reopenClosedTab(closed) },
-      });
-      undoToastIdsRef.current.push(toastId);
-    },
-    [tabs, activeTabId, workspaceKey, reopenClosedTab],
-  );
+    const toastId = toast(`Closed "${closed.tab.name}"`, {
+      action: { label: "Undo", onClick: () => reopenClosedTab(closed) },
+    });
+    undoToastIdsRef.current.push(toastId);
+  });
 
   /**
    * Open a tab holding the statement for one object and RUN it, or focus the one already open

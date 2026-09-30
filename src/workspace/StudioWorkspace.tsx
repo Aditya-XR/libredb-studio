@@ -23,6 +23,7 @@ import { findKind, kindHasSource, relationKindIds } from "@/lib/db/object-kinds"
 import { objectPathLabel } from "@/lib/db/object-path";
 import { useToast } from "@/hooks/use-toast";
 import { useTabManager } from "@/hooks/use-tab-manager";
+import { useTabSummaries } from "@/hooks/use-tab-summaries";
 import { useConnectionAdapter } from "@/workspace/hooks/use-connection-adapter";
 import { useQueryAdapter } from "@/workspace/hooks/use-query-adapter";
 import { type StudioWorkspaceProps, DEFAULT_WORKSPACE_FEATURES } from "@/workspace/types";
@@ -803,6 +804,18 @@ export function StudioWorkspace({
 
   const noop = useCallback(() => {}, []);
 
+  // Stable across keystrokes (X5): the loader gates on a boolean and writes through
+  // `updateCurrentTab`, whose identity depends only on the active tab id.
+  const handleLoadQuery = useCallback(
+    (q: string) => {
+      if (!runsTheActiveTab) return;
+      tabMgr.updateCurrentTab({ query: q });
+    },
+    [runsTheActiveTab, tabMgr.updateCurrentTab],
+  );
+
+  const tabBarTabs = useTabSummaries(tabMgr.tabs);
+
   return (
     <div
       data-studio-workspace=""
@@ -850,7 +863,7 @@ export function StudioWorkspace({
             {/* No desktop/mobile headers — platform provides its own */}
 
             <StudioTabBar
-              tabs={tabMgr.tabs}
+              tabs={tabBarTabs}
               activeTabId={tabMgr.activeTabId}
               editingTabId={tabMgr.editingTabId}
               editingTabName={tabMgr.editingTabName}
@@ -1048,7 +1061,11 @@ export function StudioWorkspace({
                       <BottomPanel
                         mode={queryExec.bottomPanelMode}
                         onSetMode={queryExec.setBottomPanelMode}
-                        currentTab={tabMgr.currentTab}
+                        result={tabMgr.currentTab.result}
+                        explainPlan={tabMgr.currentTab.explainPlan}
+                        explainQuery={queryExec.bottomPanelMode === "explain" ? tabMgr.currentTab.query : undefined}
+                        resultQuery={tabMgr.currentTab.resultQuery}
+                        runError={tabMgr.currentTab.runError}
                         schema={conn.schema}
                         schemaContext={conn.schemaContext}
                         activeConnection={conn.activeConnection}
@@ -1064,10 +1081,7 @@ export function StudioWorkspace({
                         onCellChange={noop as never}
                         onApplyChanges={noop}
                         onDiscardChanges={noop}
-                        onLoadQuery={(q) => {
-                          if (!runsTheActiveTab) return;
-                          tabMgr.updateCurrentTab({ query: q });
-                        }}
+                        onLoadQuery={handleLoadQuery}
                         onLoadMore={
                           tabMgr.currentTab.result?.pagination?.hasMore ? queryExec.handleLoadMore : undefined
                         }
