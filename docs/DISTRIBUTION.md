@@ -803,6 +803,34 @@ sudo systemctl restart libredb-studio        # apply configuration changes
 - Removal (`apt remove` / `rpm -e`) stops and disables the service; upgrades restart it if it
   is running (standard systemd maintainer scripts, `packaging/linux/scripts/`).
 
+## Arch Linux (AUR)
+
+`libredb-studio-bin` repackages the prebuilt standalone tarball for Arch Linux and its derivatives
+(x86_64 and aarch64). It installs the same launcher, systemd unit and `/etc/libredb-studio/env`
+template as the `.deb` and `.rpm`, so the operating notes in the section above (configuration,
+state directory, `journalctl`) apply unchanged:
+
+```bash
+paru -S libredb-studio-bin        # or yay, or a manual makepkg from the AUR clone
+sudo systemctl enable --now libredb-studio
+journalctl -u libredb-studio      # first run prints the generated admin password here
+```
+
+- **Node.js comes from the distribution**, not from the package: it depends on
+  `nodejs-lts-krypton` (24.x, which provides `/usr/bin/node`) and links the launcher's
+  `node/bin/node` to it. Arch's plain `nodejs` is on 26.x; the 24.x line is the same pin the
+  Homebrew formula uses (`node@24`). The two cannot be installed together.
+- **Status.** The package is staged in [`packaging/aur/`](../packaging/aur) and the channel is
+  `pending` in `distribution/channels.yaml` until the first push to the AUR ([#971](https://github.com/libredb/libredb-studio/issues/971)).
+  The AUR account is the project's, registered with `channels@libredb.org`, and the first push is
+  made by hand from it.
+- **Updates are automatic once the channel is live.** The `aur` job in `release-artifacts.yml`
+  renders the `PKGBUILD` for each stable tag, builds and lints it in an Arch container, and pushes
+  it over SSH with the `AUR_SSH_PRIVATE_KEY` secret. The release switchboard reports the channel
+  as enabled only while it is `live`, so flipping the status is the switch. Details and the manual
+  first push: [`packaging/aur/README.md`](../packaging/aur/README.md#releases).
+- **What was verified**, and what was not, is listed in that README.
+
 ## Snap
 
 Published on the [Snap Store](https://snapcraft.io/libredb-studio) for amd64 and arm64 (live
@@ -1409,6 +1437,7 @@ setups still publish the rest:
 | `CHOCO_API_KEY` | The chocolatey job: `choco pack` + `choco push` to `https://push.chocolatey.org/` (API key of the `libredb` community account) | Chocolatey publish skipped; the win32 zip still attaches to the release |
 | — | Every row above whose channel is switchable also needs `update.ci_enabled: true` in [`distribution/channels.yaml`](../distribution/channels.yaml): the secret says CI *can* publish, the flag says it *should*. See [Turning a channel's automation off](#turning-a-channels-automation-off) | Channel skipped with a notice; the release publishes normally |
 | `OPERATOR_CATALOG_TOKEN` | The `submit-catalogs` job in `operator-release.yml`: bundle PRs to `k8s-operatorhub/community-operators` and `redhat-openshift-ecosystem/community-operators-prod`. Classic PAT with `public_repo` on an account in the operator's upstream `ci.yaml` reviewers list, because that login is what upstream authorizes | Catalog submission skipped with a notice |
+| `AUR_SSH_PRIVATE_KEY` | The aur job: render, build and `git push` of `libredb-studio-bin` to `ssh://aur@aur.archlinux.org/libredb-studio-bin.git`. The private half of the SSH key registered on the project's AUR account (`channels@libredb.org`). Runs only while the `aur` channel is `live` | AUR push skipped |
 | `WINGETCREATE_GITHUB_TOKEN` | The winget job: `wingetcreate update --submit` PRs to `microsoft/winget-pkgs`. Classic PAT with `public_repo` scope — wingetcreate does not support fine-grained PATs | winget submission skipped |
 
 The chocolatey and winget jobs run strictly **after** `publish-release`: both channels download
@@ -1671,8 +1700,10 @@ here as the worked example because it is the case the switch was built for.
 The release workflow reads it (`distribution-check.mjs --ci-outputs` in the `channels` job, whose
 outputs each channel's availability step consults), so **the edit is the whole switch** — no
 secret to delete, no workflow change, and the decision is reviewable in a diff next to the
-channel's `status` and note. A channel is published only when its flag says `true` *and* its
-secret is present.
+channel's `status` and note. A channel is published only when its flag says `true`, its
+`status` is `live`, *and* its secret is present. The status half is what lets a channel be staged
+before its account exists: the AUR package landed while the channel was `pending` (#971), and
+setting it `live` is what starts its publish job.
 
 Three deliberate constraints:
 
