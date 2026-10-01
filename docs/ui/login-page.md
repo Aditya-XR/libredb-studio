@@ -216,7 +216,7 @@ The login page follows the app's premium dark aesthetic:
 | Variable | Default | Effect on Login |
 |----------|---------|-----------------|
 | `NEXT_PUBLIC_AUTH_PROVIDER` | `local` | `"oidc"` → SSO button, `"local"` → email/password form |
-| `NEXT_PUBLIC_APP_VERSION` | — | Displayed in footer as `v{version}` |
+| `NEXT_PUBLIC_APP_VERSION` | From `package.json` | Set by `next.config.ts` at build time (not user-configurable); displayed in footer as `v{version}` |
 | `PASSKEY_ORIGIN` | unset | With local auth and a server store, a valid origin shows "Use a passkey" on a page at exactly that origin; unset or invalid shows none |
 | `STORAGE_PROVIDER` | `local` | Passkeys need `sqlite` or `postgres`; with `local` the page shows no passkey button |
 | `AUTH_BOOTSTRAP` | on | `off`/`false`/`0` (case-insensitive) disables zero-config credential generation — and secret generation with it. A missing `ADMIN_PASSWORD` then surfaces the 503 error above; a missing `JWT_SECRET` stops the server at boot in production, because nothing would produce one and every login would be 503 |
