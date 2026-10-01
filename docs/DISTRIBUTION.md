@@ -12,7 +12,7 @@ how the release pipeline publishes each channel. For a one-line-per-channel over
 | Homebrew | macOS / Linux workstations | [Homebrew](#homebrew) |
 | .deb / .rpm | Debian/Ubuntu and RHEL/Fedora servers (systemd) | [Linux packages (.deb / .rpm)](#linux-packages-deb--rpm) |
 | Snap | Ubuntu and other snapd systems | [Snap](#snap) |
-| Windows (winget / Chocolatey / portable zip) | Windows workstations | [Windows](#windows-winget--chocolatey--portable-zip) |
+| Windows (winget / Chocolatey / Scoop / portable zip) | Windows workstations | [Windows](#windows-winget--chocolatey--scoop--portable-zip) |
 | Desktop app (AppImage, .deb, FlatPark) | Linux desktops - an application window, no browser tab | [Desktop app](#desktop-app-appimage-debian-package-flatpark) |
 | Unraid | An Unraid server - one click from the Apps tab | [Unraid](#unraid-community-applications) |
 | Sealos | One-click managed Kubernetes, nothing to install locally | [Sealos](#sealos-app-store) |
@@ -638,7 +638,7 @@ rebuilt archive never invalidates a previously printed admin password.
   `scripts/build-standalone-payload.sh` (checksum verification is skipped and the archive is
   re-extracted on every run).
 - On Windows the launcher downloads the win32 zip and extracts it with the built-in
-  `System32\tar.exe` (bsdtar); see [Windows](#windows-winget--chocolatey--portable-zip)
+  `System32\tar.exe` (bsdtar); see [Windows](#windows-winget--chocolatey--scoop--portable-zip)
   ([issue #114](https://github.com/libredb/libredb-studio/issues/114)).
 - Versions released before the standalone tarballs existed have no artifacts; the launcher
   detects this (HTTP 404) and suggests `npx @libredb/studio@latest`.
@@ -922,7 +922,7 @@ to server-side Postgres, uncomment the `STORAGE_PROVIDER` / `STORAGE_POSTGRES_UR
 Full variable reference: [`.env.example`](../.env.example). OIDC setup details:
 [`docs/OIDC.md`](OIDC.md). Storage providers: [`docs/STORAGE.md`](STORAGE.md).
 
-## Windows (winget / Chocolatey / portable zip)
+## Windows (winget / Chocolatey / Scoop / portable zip)
 
 The win32-x64 standalone zip is built and attached to every
 [GitHub release](https://github.com/libredb/libredb-studio/releases) since 0.9.59.
@@ -933,6 +933,17 @@ release now submits its update PR automatically. **Chocolatey is live as well**:
 (0.9.59) was approved by a community moderator on 2026-08-24, so `choco install libredb-studio`
 resolves from the community repository and every release packs and pushes automatically (track
 [issue #114](https://github.com/libredb/libredb-studio/issues/114)).
+
+**Scoop is live too**: the Extras bucket listing
+([ScoopInstaller/Extras#18786](https://github.com/ScoopInstaller/Extras/pull/18786)) merged on
+2026-09-25.
+This repository's release CI does nothing for it.
+The bucket's Excavator workflow checks our release feed every four hours and rewrites the
+manifest's version, URL and hash itself.
+It finds releases through the manifest's `checkver` regex, `releases/tag/([\d.]+)"`, and the hash
+through the release's `SHA256SUMS`.
+Renaming the release tag shape, the zip, or `SHA256SUMS` therefore stops Scoop updates without any
+failure in this repository.
 
 > **Chocolatey was switched off in the inventory until its moderation cleared**
 > (`update.ci_enabled` in [`distribution/channels.yaml`](../distribution/channels.yaml) — see
@@ -954,6 +965,10 @@ winget install LibreDB.Studio
 # Chocolatey
 choco install libredb-studio
 
+# Scoop (Extras bucket)
+scoop bucket add extras
+scoop install extras/libredb-studio
+
 # Then, from any terminal - first run prints the generated admin credentials
 libredb-studio
 ```
@@ -967,8 +982,7 @@ libredb-studio
 > use stays permitted, and `choco install libredb-studio` is unchanged when it resolves from an
 > internal mirror. winget carries no equivalent restriction.
 
-Open http://127.0.0.1:3000 and log in with the printed credentials. Both packages install the
-same standalone zip: the server payload, a bundled private Node.js runtime (`node\node.exe`),
+Open http://127.0.0.1:3000 and log in with the printed credentials. All three packages install the same standalone zip: the server payload, a bundled private Node.js runtime (`node\node.exe`),
 and the `libredb-studio.exe` launcher — nothing else to install.
 
 The launcher mirrors the Linux packages' contract:
@@ -1575,7 +1589,7 @@ pin or editing a channel entry is always a human commit.
 | 1 | Packaged formats owned by this repo, CI-published | Helm, Homebrew tap, Snap, .deb/.rpm, desktop AppImage |
 | 2 | LibreDB-owned copies and listings, bumped by hand | Railway, Koyeb button, Fly.io config, Render Blueprint, Unraid CA template |
 | 3 | Upstream community catalogs, bumped via PR | CapRover official, Dokploy, Cosmos, Kubero, Sealos, TrueNAS SCALE |
-| 4 | Partner or curated catalogs (not self-serve) | Rancher partner charts, Koyeb catalog, DigitalOcean, Google Cloud Marketplace, winget, Chocolatey, Flathub |
+| 4 | Partner or curated catalogs (not self-serve) | Rancher partner charts, Koyeb catalog, DigitalOcean, Google Cloud Marketplace, winget, Chocolatey, Scoop, Flathub |
 
 **Categories** (`category` on every channel) are the business-facing buckets rendered in
 [`docs/CHANNELS.md`](CHANNELS.md): `registries-releases`, `containers`,

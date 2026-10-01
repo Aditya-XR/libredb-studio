@@ -1386,7 +1386,7 @@ jobs:
             echo ""
             echo "\`Approved\` means it is installable now; anything else means it is queued for"
             echo "human moderation and \`choco install libredb-studio\` still serves the previous"
-            echo "version. See [DISTRIBUTION.md](https://github.com/libredb/libredb-studio/blob/main/docs/DISTRIBUTION.md#windows-winget--chocolatey--portable-zip)."
+            echo "version. See [DISTRIBUTION.md](https://github.com/libredb/libredb-studio/blob/main/docs/DISTRIBUTION.md#windows-winget--chocolatey--scoop--portable-zip)."
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$PUSH_OUTCOME" != "success" ]; then
             echo "::warning::choco push for ${VERSION} did not succeed (outcome: ${PUSH_OUTCOME}). A 403 here is normally the moderation queue - too many unapproved versions - and not a fault in this release, which published correctly. Push the back version by hand once the queue drains."
