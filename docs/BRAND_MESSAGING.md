@@ -127,7 +127,7 @@ Facts drift. Provider counts, channel counts and competitor editions all change,
 | Eighteen database engines | One reference document per engine: PostgreSQL, MySQL, Oracle, SQL Server, SQLite, libSQL, DuckDB, MongoDB, Redis, Couchbase, ClickHouse, Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Prometheus, Apache Kafka. A nineteenth, `libredb.md`, is the embedded provider and is not an external engine. The count is derived, not written: `SHIPPED` in `src/lib/db/compatibility.ts` is an exhaustive record over `DatabaseType`, so the compiler refuses a missing id: read the count from there, minus `libredb` | `docs/providers/`, `src/lib/db/compatibility.ts` | 2026-09-23 |
 | Published as an embeddable npm package | `"name": "@libredb/studio"`, version 0.16.1 | `package.json` | 2026-09-19 |
 | MIT licensed | "MIT License / Copyright (c) 2025 LibreDB" | `LICENSE` | 2026-08-07 |
-| 40 distribution channels, 33 live | "40 channels · 33 live · 6 pending · 1 deprecated" | `docs/CHANNELS.md` | 2026-09-28 |
+| 42 distribution channels, 34 live | "42 channels · 34 live · 7 pending · 1 deprecated" | `docs/CHANNELS.md` | 2026-10-01 |
 | One-click deployment on managed platforms | Railway, Dokploy, CapRover, DigitalOcean and Sealos are listed channels | `docs/CHANNELS.md` | 2026-08-07 |
 | Usable from a phone | Dedicated mobile navigation and mobile card and table result views | `src/components/MobileNav.tsx`, `src/components/results-grid/ResultCard.tsx` | 2026-08-07 |
 | 100% line coverage enforced as a CI gate | `coverage:check` runs `scripts/check-coverage.mjs` against the merged lcov | `package.json` | 2026-08-07 |
