@@ -1065,6 +1065,34 @@ channels:
         version is waiting on human moderation rather than that the push failed; the release run's
         job summary reports the push outcome and that version's PackageStatus. Trusted status is
         what removes the wait - docs/BACKLOG.md REL3.
+  
+  - id: scoop
+    name: Scoop Extras bucket (extras/libredb-studio)
+    short_name: Scoop
+    status: live
+    category: package-managers
+    platforms: [windows]
+    runtime: channel_supplied
+    tier: 4
+    kind: package-manager
+    update:
+      method: upstream_pr
+      sla: every_release
+    links:
+      first_pr: https://github.com/ScoopInstaller/Extras/pull/18786
+      catalog: https://github.com/ScoopInstaller/Extras/blob/master/bucket/libredb-studio.json
+      upstream_repo: https://github.com/ScoopInstaller/Extras
+      docs: docs/DISTRIBUTION.md
+    pin:
+      strategy: remote_file
+      url: https://raw.githubusercontent.com/ScoopInstaller/Extras/master/bucket/libredb-studio.json
+      extract: '"version"\s*:\s*"(\d+\.\d+\.\d+)"'
+      note: Listed since 0.16.2 (scoop install extras/libredb-studio), merged in ScoopInstaller/Extras#18786.
+        Our release CI does not publish it. The bucket's own Excavator workflow runs every four hours,
+        reads our releases.atom through the manifest's checkver regex and rewrites version, url and hash
+        itself, taking the hash from the release SHA256SUMS. A drift row for a few hours after a release
+        is that schedule. A longer one means the bump failed, most likely because a release tag or asset
+        name changed shape.
 
   - id: flathub
     name: Flathub community catalog (org.libredb.Studio)
