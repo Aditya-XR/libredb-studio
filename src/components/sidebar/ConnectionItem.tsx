@@ -1,10 +1,18 @@
 import React from "react";
 import { DatabaseConnection, ENVIRONMENT_LABELS } from "@/lib/types";
-import { Lock, Trash2, Pencil, Copy, Star, GripVertical } from "lucide-react";
+import { Lock, Trash2, Pencil, Copy, Star, GripVertical, FolderInput, Check } from "lucide-react";
 import { getDBIcon } from "@/lib/db-ui-config";
-import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ReadOnlyMarker } from "@/components/read-only-marker";
 import { cn } from "@/lib/utils";
+
+const NO_GROUPS: { id: string; name: string }[] = [];
 
 interface ConnectionItemProps {
   connection: DatabaseConnection;
@@ -15,6 +23,14 @@ interface ConnectionItemProps {
   onDuplicate?: (conn: DatabaseConnection) => void;
   isFavorite?: boolean;
   onToggleFavorite?: (id: string) => void;
+  /**
+   * The "Move to group" menu (#1170) appears only when a parent hands over `onMoveToGroup`.
+   * `currentGroupId` marks the group the connection is in; null means Ungrouped.
+   */
+  groups?: { id: string; name: string }[];
+  currentGroupId?: string | null;
+  onMoveToGroup?: (connectionId: string, groupId: string | null) => void;
+  onMoveToNewGroup?: (connectionId: string) => void;
   /**
    * Reordering is opt-in per render: the handle and the `draggable` wiring appear only when
    * a parent hands over a drag id, so a caller that has not wired reordering (or a list of
@@ -39,6 +55,10 @@ export const ConnectionItem = React.memo(function ConnectionItem({
   onDuplicate,
   isFavorite = false,
   onToggleFavorite,
+  groups = NO_GROUPS,
+  currentGroupId = null,
+  onMoveToGroup,
+  onMoveToNewGroup,
   draggable = false,
   isDragging = false,
   isDragOver = false,
@@ -145,6 +165,39 @@ export const ConnectionItem = React.memo(function ConnectionItem({
           </button>
         )}
         {conn.readOnly === true && <ReadOnlyMarker />}
+        {onMoveToGroup && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                className="p-1 rounded opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 transition-opacity hover:bg-brand-tint/20 hover:text-brand"
+                aria-label="Move to group"
+                title="Move to group"
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                <FolderInput strokeWidth={1.5} className="w-3 h-3" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+              {groups.map((group) => (
+                <DropdownMenuItem key={group.id} onSelect={() => onMoveToGroup(conn.id, group.id)}>
+                  <Check className={cn("w-3 h-3", currentGroupId !== group.id && "invisible")} />
+                  {group.name}
+                </DropdownMenuItem>
+              ))}
+              <DropdownMenuItem onSelect={() => onMoveToGroup(conn.id, null)}>
+                <Check className={cn("w-3 h-3", currentGroupId !== null && "invisible")} />
+                Ungrouped
+              </DropdownMenuItem>
+              {onMoveToNewGroup && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={() => onMoveToNewGroup(conn.id)}>New group...</DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {conn.managed && (
           <div
             data-testid={`managed-lock-${conn.seedId || conn.id}`}
