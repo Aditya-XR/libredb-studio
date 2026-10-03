@@ -42,13 +42,13 @@ const formatJson = (text: string): string => JSON.stringify(JSON.parse(text), nu
  * no formatter, because the SQL formatter rewrites their text (`up == 0` became `up = = 0`, #1085).
  */
 export const DIALECT_EDITORS: Readonly<Record<QueryTab["type"], DialectEditor>> = Object.freeze({
-  sql: { monacoId: "sql", format: formatSql },
-  mongodb: { monacoId: "json", format: formatJson },
-  libredb: { monacoId: "libredb" },
-  redis: { monacoId: "redis" },
-  promql: { monacoId: "promql" },
-  kafka: { monacoId: "json", format: formatJson },
-  etcd: { monacoId: "etcd" },
+  sql: Object.freeze({ monacoId: "sql", format: formatSql }),
+  mongodb: Object.freeze({ monacoId: "json", format: formatJson }),
+  libredb: Object.freeze({ monacoId: "libredb" }),
+  redis: Object.freeze({ monacoId: "redis" }),
+  promql: Object.freeze({ monacoId: "promql" }),
+  kafka: Object.freeze({ monacoId: "json", format: formatJson }),
+  etcd: Object.freeze({ monacoId: "etcd" }),
 });
 
 /**

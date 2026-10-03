@@ -46,6 +46,12 @@ describe("QUERY_DIALECTS", () => {
   test("is frozen, so no reader can change another reader's answer at run time", () => {
     expect(Object.isFrozen(QUERY_DIALECTS)).toBe(true);
   });
+
+  test("freezes every record too, so no reader can turn one dialect's gate on at run time", () => {
+    for (const [dialect, spec] of Object.entries(QUERY_DIALECTS)) {
+      expect(Object.isFrozen(spec), `the ${dialect} record is mutable`).toBe(true);
+    }
+  });
 });
 
 describe("registeredDialect, dialectSpec and declaresDialect", () => {

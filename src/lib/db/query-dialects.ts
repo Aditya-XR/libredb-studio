@@ -38,10 +38,30 @@ export interface DialectSpec {
  * mode, which `DIALECT_EDITORS` says, and not here: this record is keyed by dialect, that one by tab type.
  */
 export const QUERY_DIALECTS: Readonly<Record<QueryDialect, DialectSpec>> = Object.freeze({
-  libredb: { tabType: "libredb", offersColumnProfiling: false, offersCodeGeneration: true, offersCountQuery: false },
-  redis: { tabType: "redis", offersColumnProfiling: false, offersCodeGeneration: true, offersCountQuery: false },
-  kafka: { tabType: "kafka", offersColumnProfiling: false, offersCodeGeneration: false, offersCountQuery: false },
-  etcd: { tabType: "etcd", offersColumnProfiling: false, offersCodeGeneration: false, offersCountQuery: false },
+  libredb: Object.freeze({
+    tabType: "libredb",
+    offersColumnProfiling: false,
+    offersCodeGeneration: true,
+    offersCountQuery: false,
+  }),
+  redis: Object.freeze({
+    tabType: "redis",
+    offersColumnProfiling: false,
+    offersCodeGeneration: true,
+    offersCountQuery: false,
+  }),
+  kafka: Object.freeze({
+    tabType: "kafka",
+    offersColumnProfiling: false,
+    offersCodeGeneration: false,
+    offersCountQuery: false,
+  }),
+  etcd: Object.freeze({
+    tabType: "etcd",
+    offersColumnProfiling: false,
+    offersCodeGeneration: false,
+    offersCountQuery: false,
+  }),
 });
 
 /**

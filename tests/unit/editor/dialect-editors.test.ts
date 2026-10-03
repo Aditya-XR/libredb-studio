@@ -56,6 +56,12 @@ describe("DIALECT_EDITORS", () => {
   test("is frozen", () => {
     expect(Object.isFrozen(DIALECT_EDITORS)).toBe(true);
   });
+
+  test("freezes every record too, so no reader can change a tab type's language or formatter at run time", () => {
+    for (const [tabType, editor] of Object.entries(DIALECT_EDITORS)) {
+      expect(Object.isFrozen(editor), `the ${tabType} record is mutable`).toBe(true);
+    }
+  });
 });
 
 describe("the formatters", () => {
