@@ -12,7 +12,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import type { AddressInfo, Server as NetServer, Socket } from "node:net";
+import { type AddressInfo, createServer as createTcpServer, type Server as NetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TLSSocket } from "node:tls";
@@ -272,4 +272,13 @@ export async function gzipOfZeros(bytes: number): Promise<Buffer> {
   gzip.end();
   await ended;
   return Buffer.concat(parts);
+}
+
+/** A TCP listener that counts what it accepts and closes it at once: the proxy every proxy variable names. */
+export function countingListener(): Promise<Listener> {
+  return observe(
+    createTcpServer((socket) => socket.destroy()),
+    [],
+    "127.0.0.1",
+  );
 }
