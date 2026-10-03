@@ -16,6 +16,7 @@ import type { AddressInfo, Server as NetServer, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TLSSocket } from "node:tls";
+import { constants, createGzip } from "node:zlib";
 
 export interface Seen {
   readonly method: string;
@@ -249,4 +250,26 @@ export function streamingAnswer(bytes: number): Handler {
     };
     write();
   };
+}
+
+/** A gzip stream of `bytes` zero bytes, compressed as a stream so the zeros are never held whole: about 1 MB per GiB. */
+export async function gzipOfZeros(bytes: number): Promise<Buffer> {
+  const gzip = createGzip({ level: constants.Z_BEST_COMPRESSION });
+  const parts: Buffer[] = [];
+  gzip.on("data", (part: Buffer) => parts.push(part));
+  const ended = new Promise<void>((resolve, reject) => {
+    gzip.on("end", resolve);
+    gzip.on("error", reject);
+  });
+  const zeros = Buffer.alloc(16 * 1024 * 1024);
+  for (let left = bytes; left > 0; left -= zeros.length) {
+    const piece = left >= zeros.length ? zeros : zeros.subarray(0, left);
+    if (!gzip.write(piece)) {
+      // oxlint-disable-next-line no-await-in-loop -- backpressure: one 16 MiB piece in the compressor at a time.
+      await new Promise((resolve) => gzip.once("drain", resolve));
+    }
+  }
+  gzip.end();
+  await ended;
+  return Buffer.concat(parts);
 }

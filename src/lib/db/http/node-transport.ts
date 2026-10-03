@@ -37,7 +37,7 @@ import {
 import { Agent as HttpsAgent, type AgentOptions as HttpsAgentOptions, request as httpsRequest } from "node:https";
 import { urlToHttpOptions } from "node:url";
 import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
-import { endpointUrl, type HttpOrigin } from "@/lib/db/http/endpoint";
+import { endpointUrl, type HttpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { SSLConfig, SSLMode } from "@/lib/types";
 
 /** The SSL / TLS panel as node:https takes it. */
@@ -205,6 +205,18 @@ function tooLarge(limit: number): TransportError {
   );
 }
 
+/** A content-encoding token named in a refusal; anything else is described, never echoed. */
+const ENCODING_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$/;
+
+function encodingRefusal(encoding: string): TransportError {
+  const name = encoding.trim();
+  const named = ENCODING_TOKEN.test(name) ? name : "that is not a single token";
+  return new TransportError(
+    "encoding",
+    `The server answered with content-encoding ${named}, and this transport reads identity only, so the response was not read`,
+  );
+}
+
 function isPositiveInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 1;
 }
@@ -307,6 +319,21 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
             answer.on("error", failWith);
             // Set on every answer a ClientRequest receives; the type is shared with server-side requests.
             const status = answer.statusCode ?? 0;
+            try {
+              // The shared refusal reads a fetch-shaped status and Location, so the adapter hands it those two.
+              const location = answer.headers.location;
+              rejectRedirect({ status, headers: new Headers(location === undefined ? {} : { location }) }, request.url);
+            } catch (refusal) {
+              // Released unread: fail() destroys the answer, so no redirect is followed and no body is read.
+              fail(new TransportError("redirect", (refusal as Error).message));
+              return;
+            }
+            const encoding = answer.headers["content-encoding"];
+            if (encoding !== undefined && encoding.trim().toLowerCase() !== "identity") {
+              // Refused before a byte of the body is read, so maxResponseBytes always counts the bytes that are parsed.
+              fail(encodingRefusal(encoding));
+              return;
+            }
             const chunks: Buffer[] = [];
             let received = 0;
             answer.on("data", (chunk: Buffer) => {

@@ -6,8 +6,10 @@
  * the connections they accept and record every request that reaches them, so "nothing was sent" is measured.
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import { join } from "node:path";
 import { DatabaseConfigError } from "@/lib/db/errors";
 import { endpointUrl, httpOrigin } from "@/lib/db/http/endpoint";
 import {
@@ -20,6 +22,7 @@ import {
 import {
   closeAll,
   eventually,
+  gzipOfZeros,
   httpListener,
   jsonAnswer,
   type Listener,
@@ -372,5 +375,97 @@ describe("bounded, stoppable and never resent", () => {
     expect(error.message).toBe("The request failed before a complete response arrived (ERR_INVALID_CHAR)");
     expect(error.message).not.toContain(SECRET);
     expect(listener.accepted()).toBe(0);
+  });
+});
+
+describe("redirects and content-encoding", () => {
+  const ENCODED = (named: string) =>
+    `The server answered with content-encoding ${named}, and this transport reads identity only, so the response was not read`;
+
+  test("a 307 to another port is refused naming only the target origin, and the second listener sees nothing", async () => {
+    const target = await httpListener(jsonAnswer(200, '{"result":true}'));
+    const listener = await httpListener((_request, response) => {
+      response.writeHead(307, {
+        location: `http://127.0.0.1:${target.port}/collections/c/points?api-key=${SECRET}`,
+      });
+      response.end("moved");
+    });
+    const { transport, url } = connect(listener);
+    const error = await failure(() =>
+      transport.request({ ...get(url("/collections/c/points")), method: "POST", body: '{"points":[]}' }),
+    );
+    expect(error).toBeInstanceOf(TransportError);
+    expect((error as TransportError).kind).toBe("redirect");
+    expect(error.message).toBe(
+      `The server answered HTTP 307, a redirect to http://127.0.0.1:${target.port}, and redirects are not followed`,
+    );
+    expect(target.accepted()).toBe(0);
+    await eventually(() => listener.open() === 0, "the redirect's socket to be released");
+  });
+
+  test.each([301, 302, 303, 307, 308])(
+    "HTTP %p to the same origin is refused too, and not followed",
+    async (status) => {
+      const listener = await httpListener((_request, response) => {
+        response.writeHead(status, { location: "/elsewhere" });
+        response.end();
+      });
+      const { transport, url } = connect(listener);
+      const error = await failure(() => transport.request(get(url("/"))));
+      expect((error as TransportError).kind).toBe("redirect");
+      expect(error.message).toBe(
+        `The server answered HTTP ${status}, a redirect to http://127.0.0.1:${listener.port}, and redirects are not followed`,
+      );
+      expect(listener.seen).toHaveLength(1);
+    },
+  );
+
+  test("a 3xx with no Location is refused naming the absence", async () => {
+    const listener = await httpListener((_request, response) => {
+      response.writeHead(300);
+      response.end();
+    });
+    const { transport, url } = connect(listener);
+    const error = await failure(() => transport.request(get(url("/"))));
+    expect(error.message).toBe(
+      "The server answered HTTP 300, a redirect with no Location header, and redirects are not followed",
+    );
+  });
+
+  test("a gzip answer that would inflate to 1 GiB, about 1 MB on the wire, is refused naming the encoding, with nothing inflated and the socket closed", async () => {
+    const bomb = await gzipOfZeros(1024 * MIB);
+    expect(bomb.length).toBeLessThan(2 * MIB);
+    const listener = await httpListener((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip" });
+      response.end(bomb);
+    });
+    const { transport, url } = connect(listener);
+    const before = process.memoryUsage().rss;
+    const error = await failure(() => transport.request(get(url("/"), { maxResponseBytes: 8 * MIB })));
+    expect((error as TransportError).kind).toBe("encoding");
+    expect(error.message).toBe(ENCODED("gzip"));
+    expect(listener.seen[0].headers["accept-encoding"]).toBe("identity");
+    expect(process.memoryUsage().rss - before).toBeLessThan(256 * MIB);
+    await eventually(() => listener.open() === 0, "the encoded answer's socket to close");
+  }, 30_000);
+
+  test.each(["identity", "IDENTITY"])("content-encoding %p is read", async (encoding) => {
+    const listener = await httpListener(jsonAnswer(200, "{}", { "content-encoding": encoding }));
+    const { transport, url } = connect(listener);
+    expect((await transport.request(get(url("/")))).text).toBe("{}");
+  });
+
+  test("an encoding that is not a single token is described, never echoed", async () => {
+    const listener = await httpListener(jsonAnswer(200, "{}", { "content-encoding": `x-${SECRET}, gzip` }));
+    const { transport, url } = connect(listener);
+    const error = await failure(() => transport.request(get(url("/"))));
+    expect((error as TransportError).kind).toBe("encoding");
+    expect(error.message).toBe(ENCODED("that is not a single token"));
+    expect(error.message).not.toContain(SECRET);
+  });
+
+  test("the module never imports node:zlib, so nothing it reads is ever inflated", () => {
+    const source = readFileSync(join(import.meta.dir, "../../../../src/lib/db/http/node-transport.ts"), "utf8");
+    expect(source).not.toMatch(/from "(node:)?zlib"|require\("(node:)?zlib"\)/);
   });
 });
