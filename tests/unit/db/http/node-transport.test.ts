@@ -238,6 +238,24 @@ describe("refused before any socket", () => {
   });
 
   test.each([
+    ["Content-Length", "content-length"],
+    ["Transfer-Encoding", "transfer-encoding"],
+    ["Host", "host"],
+  ])("a connection header %p, which frames or addresses every request, is refused by name", (name, named) => {
+    const error = refusal(() =>
+      createNodeTransport({
+        origin: httpOrigin("http", "127.0.0.1", 6333),
+        tls: null,
+        maxSockets: 1,
+        headers: { [name]: "5-secret" },
+      }),
+    );
+    expect(error).toBeInstanceOf(DatabaseConfigError);
+    expect(error.message).toBe(`Invalid headers: ${named} is set by the transport for each request`);
+    expect(error.message).not.toContain("secret");
+  });
+
+  test.each([
     ["an https origin with no TLS material", "https" as const, null],
     ["an http origin with TLS material", "http" as const, { rejectUnauthorized: true, identity: "127.0.0.1" }],
   ])("%s", (_label, scheme, tls) => {

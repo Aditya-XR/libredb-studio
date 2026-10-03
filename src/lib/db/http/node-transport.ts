@@ -289,9 +289,25 @@ function retryAfterOf(value: string | undefined): string | null {
   return value === undefined ? null : value.slice(0, MAX_RETRY_AFTER_LENGTH);
 }
 
-/** Header names in lower case, so the transport's own headers below replace a caller's whatever its spelling. */
+/**
+ * Headers that frame or address a request, which node:http sets from the body and the URL. Set once per connection
+ * they would apply to every request: a content-length on a GET with no body makes the server wait for bytes that never
+ * come, and a host sends the request to another virtual host than the origin names.
+ */
+const TRANSPORT_HEADERS: ReadonlySet<string> = new Set(["content-length", "transfer-encoding", "host"]);
+
+/**
+ * Header names in lower case, so the transport's own headers below replace a caller's whatever its spelling; a header
+ * the transport sets for each request is refused by name, never its value.
+ */
 function lowerCased(headers: Readonly<Record<string, string>>): Record<string, string> {
-  return Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
+  const lowered = Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value] as const);
+  for (const [name] of lowered) {
+    if (TRANSPORT_HEADERS.has(name)) {
+      throw new DatabaseConfigError(`Invalid headers: ${name} is set by the transport for each request`);
+    }
+  }
+  return Object.fromEntries(lowered);
 }
 
 function requestHeaders(
