@@ -6,19 +6,9 @@ import { appFetch } from "@/lib/config/base-path";
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Sidebar, ConnectionsList } from "@/components/sidebar";
 import { type TreeRowActionHandlers } from "@/components/object-tree";
-import { objectAtPath } from "@/lib/db/detailed-object";
 import { objectPathLabel, objectPathQuery } from "@/lib/db/object-path";
-import { MobileNav } from "@/components/MobileNav";
-import { CommandPalette } from "@/components/CommandPalette";
 import { QueryEditor, QueryEditorRef } from "@/components/QueryEditor";
-import { ShortcutsDialog, type ShortcutsDialogRef } from "@/components/ShortcutsDialog";
-import { DataImportModal } from "@/components/DataImportModal";
-import { QuerySafetyDialog } from "@/components/QuerySafetyDialog";
-import { DataProfiler } from "@/components/DataProfiler";
-import { CodeGenerator } from "@/components/CodeGenerator";
-import { TestDataGenerator } from "@/components/TestDataGenerator";
-import { CreateTableModal } from "@/components/CreateTableModal";
-import { SaveQueryModal } from "@/components/SaveQueryModal";
+import type { ShortcutsDialogRef } from "@/components/ShortcutsDialog";
 import {
   StudioMobileHeader,
   StudioDesktopHeader,
@@ -26,6 +16,8 @@ import {
   QueryToolbar,
   BottomPanel,
 } from "@/components/studio/index";
+import { StudioModals } from "@/components/studio/StudioModals";
+import { StudioOverlays } from "@/components/studio/StudioOverlays";
 import { AgentRail } from "@/components/agent/AgentRail";
 import { DatabaseConnection, type ColumnSchema, SavedQuery } from "@/lib/types";
 import type { DatabaseObject } from "@/lib/db/types";
@@ -76,18 +68,9 @@ import {
 } from "@/lib/data-masking";
 import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { TriangleAlert, Database, Plus, Trash2 } from "lucide-react";
+import { Database, Plus } from "lucide-react";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-
 /*
   The ERD, split out of the first load.
 
@@ -101,13 +84,6 @@ import {
 */
 const SchemaDiagram = React.lazy(
   lazyRetry(() => import("@/components/SchemaDiagram").then((m) => ({ default: m.SchemaDiagram }))),
-);
-
-// The connection modal owns `framer-motion` (its expandable fields animate in and out),
-// so it is split out of the shell's first load the same way the diagram is (X5). It is
-// mounted only while a connection modal is actually on screen.
-const ConnectionModal = React.lazy(
-  lazyRetry(() => import("@/components/ConnectionModal").then((m) => ({ default: m.ConnectionModal }))),
 );
 
 // The schema explorer (and its `TableItem`/`ColumnList` children) own `framer-motion`,
@@ -739,24 +715,72 @@ export default function Studio() {
     [isAdmin, router],
   );
 
-  const handleSaveQuery = useCallback(
-    (name: string, description: string, tags: string[]) => {
-      if (!conn.activeConnection) return;
-      const newSavedQuery: SavedQuery = {
-        id: newLocalId(),
-        name,
-        query: tabMgr.currentTab.query,
-        description,
-        connectionType: conn.activeConnection.type,
-        tags,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-      storage.saveQuery(newSavedQuery);
-      setSavedKey((prev) => prev + 1);
-      toast({ title: "Query Saved", description: `"${name}" has been added to your saved queries.` });
+  // One identity for the memoized surface this reaches (X5): the statement is read at the point
+  // of use, the save, rather than captured from the tab on every keystroke.
+  const handleSaveQuery = useStableCallback((name: string, description: string, tags: string[]) => {
+    if (!conn.activeConnection) return;
+    const newSavedQuery: SavedQuery = {
+      id: newLocalId(),
+      name,
+      query: tabMgr.currentTab.query,
+      description,
+      connectionType: conn.activeConnection.type,
+      tags,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    storage.saveQuery(newSavedQuery);
+    setSavedKey((prev) => prev + 1);
+    toast({ title: "Query Saved", description: `"${name}" has been added to your saved queries.` });
+  });
+
+  // === Modal and overlay handlers (handed to `StudioModals`) ===
+  // Each is a trivial `useCallback` so the extracted surface keeps one identity where it can
+  // (X5); the dialogs themselves are closed by default and render nothing, so the stabilisation
+  // is hygiene, not a keystroke budget item.
+  const closeCreateTable = useCallback(() => setIsCreateTableModalOpen(false), []);
+  const closeSaveQuery = useCallback(() => setIsSaveQueryModalOpen(false), []);
+  const closeImport = useCallback(() => setIsImportModalOpen(false), []);
+  const closeSafety = useCallback(() => queryExec.setSafetyCheckQuery(null), [queryExec.setSafetyCheckQuery]);
+  const proceedSafety = useCallback(() => {
+    if (queryExec.safetyCheckQuery) queryExec.forceExecuteQuery(queryExec.safetyCheckQuery);
+  }, [queryExec.safetyCheckQuery, queryExec.forceExecuteQuery]);
+  const closeProfiler = useCallback(() => setProfilerPath(null), []);
+  const closeCodeGen = useCallback(() => setCodeGenPath(null), []);
+  const closeTestData = useCallback(() => setTestDataPath(null), []);
+  const runModalStatement = useCallback((sql: string) => queryExec.executeQuery(sql), [queryExec.executeQuery]);
+
+  const handleConnect = useCallback(
+    (c: DatabaseConnection) => {
+      storage.saveConnection(c);
+      const userConns = storage.getConnections();
+      const managedConns = conn.connections.filter((mc) => mc.managed && !userConns.some((uc) => uc.id === mc.id));
+      conn.setConnections([...managedConns, ...userConns]);
+      conn.setActiveConnection(c);
+      closeConnectionModal();
     },
-    [conn.activeConnection, tabMgr.currentTab.query, toast],
+    [conn.connections, conn.setConnections, conn.setActiveConnection, closeConnectionModal],
+  );
+
+  const handleNavigateMonitoring = useCallback(() => router.push("/monitoring"), [router]);
+  const handleFormatQuery = useCallback(() => queryEditorRef.current?.format(), []);
+  const handleShowShortcuts = useCallback(() => shortcutsDialogRef.current?.open(), []);
+  const openAgentSheet = useCallback(() => setIsAgentSheetOpen(true), []);
+  const handleLoadSavedQuery = useCallback(
+    (q: string) => {
+      if (!runsTheActiveTab) return;
+      tabMgr.updateCurrentTab({ query: q });
+      queryExec.setBottomPanelMode("results");
+    },
+    [runsTheActiveTab, tabMgr.updateCurrentTab, queryExec.setBottomPanelMode],
+  );
+  const handleLoadHistoryQuery = useCallback(
+    (q: string) => {
+      if (!runsTheActiveTab) return;
+      tabMgr.updateCurrentTab({ query: q });
+      queryExec.setBottomPanelMode("results");
+    },
+    [runsTheActiveTab, tabMgr.updateCurrentTab, queryExec.setBottomPanelMode],
   );
 
   /**
@@ -1504,204 +1528,78 @@ export default function Studio() {
       */}
       {agentEnabled && isMobile && agentRail}
 
-      {/* Modals */}
-      {(isConnectionModalOpen || editingConnection !== null) && (
-        // The dialog has no place of its own in the layout, so its failure notice covers
-        // the shell the way the dialog would have, and Close hands the shell back.
-        <ChunkBoundary label="The connection dialog" className="fixed inset-0 z-50" onDismiss={closeConnectionModal}>
-          <React.Suspense fallback={null}>
-            <ConnectionModal
-              isOpen={isConnectionModalOpen}
-              onClose={closeConnectionModal}
-              onConnect={(c) => {
-                storage.saveConnection(c);
-                const userConns = storage.getConnections();
-                const managedConns = conn.connections.filter(
-                  (mc) => mc.managed && !userConns.some((uc) => uc.id === mc.id),
-                );
-                conn.setConnections([...managedConns, ...userConns]);
-                conn.setActiveConnection(c);
-                closeConnectionModal();
-              }}
-              editConnection={editingConnection}
-            />
-          </React.Suspense>
-        </ChunkBoundary>
-      )}
-      <CreateTableModal
-        isOpen={isCreateTableModalOpen}
-        onClose={() => setIsCreateTableModalOpen(false)}
-        onTableCreated={(sql) => queryExec.executeQuery(sql)}
-        dbType={conn.activeConnection?.type}
-      />
-      <SaveQueryModal
-        isOpen={isSaveQueryModalOpen}
-        onClose={() => setIsSaveQueryModalOpen(false)}
-        onSave={handleSaveQuery}
-        defaultQuery={tabMgr.currentTab.query}
-      />
-      <DataImportModal
-        isOpen={isImportModalOpen}
-        onClose={() => setIsImportModalOpen(false)}
-        onImport={(sql) => queryExec.executeQuery(sql)}
-        tables={conn.schema}
-        capabilities={metadata?.capabilities}
-        databaseType={conn.activeConnection?.type}
-      />
-      <QuerySafetyDialog
-        isOpen={!!queryExec.safetyCheckQuery}
-        query={queryExec.safetyCheckQuery || ""}
+      {/* The modal surface both shells draw, in `StudioModals`. */}
+      <StudioModals
+        activeConnection={conn.activeConnection}
+        schema={conn.schema}
         schemaContext={conn.schemaContext}
+        capabilities={metadata?.capabilities}
         databaseType={conn.activeConnection?.type}
         connectionName={conn.activeConnection?.name}
-        onClose={() => queryExec.setSafetyCheckQuery(null)}
-        onProceed={() => {
-          if (queryExec.safetyCheckQuery) queryExec.forceExecuteQuery(queryExec.safetyCheckQuery);
-        }}
-      />
-      <DataProfiler
-        isOpen={profilerPath !== null}
-        onClose={() => setProfilerPath(null)}
-        tablePath={profilerPath ?? []}
-        tableSchema={objectAtPath(conn.schema, profilerPath)}
-        connection={conn.activeConnection}
-        schemaContext={conn.schemaContext}
-        databaseType={conn.activeConnection?.type}
-      />
-      <CodeGenerator
-        isOpen={codeGenPath !== null}
-        onClose={() => setCodeGenPath(null)}
-        tablePath={codeGenPath ?? []}
-        tableSchema={objectAtPath(conn.schema, codeGenPath)}
-        databaseType={conn.activeConnection?.type}
-      />
-      <TestDataGenerator
-        isOpen={testDataPath !== null}
-        onClose={() => setTestDataPath(null)}
-        tablePath={testDataPath ?? []}
-        tableSchema={objectAtPath(conn.schema, testDataPath)}
-        databaseType={conn.activeConnection?.type}
-        capabilities={metadata?.capabilities}
-        onExecuteQuery={(q) => queryExec.executeQuery(q)}
+        showSaveQuery
+        saveQueryModalOpen={isSaveQueryModalOpen}
+        onCloseSaveQuery={closeSaveQuery}
+        onSaveQuery={handleSaveQuery}
+        defaultQuery={tabMgr.currentTab.query}
+        showImport
+        importModalOpen={isImportModalOpen}
+        onCloseImport={closeImport}
+        onImport={runModalStatement}
+        safetyCheckQuery={queryExec.safetyCheckQuery}
+        onCloseSafety={closeSafety}
+        onProceedSafety={proceedSafety}
+        showCodeGenerator
+        profilerPath={profilerPath}
+        onCloseProfiler={closeProfiler}
+        codeGenPath={codeGenPath}
+        onCloseCodeGen={closeCodeGen}
+        showTestDataGenerator
+        testDataPath={testDataPath}
+        onCloseTestData={closeTestData}
+        onExecuteTestData={runModalStatement}
+        unlimitedWarningOpen={queryExec.unlimitedWarningOpen}
+        onUnlimitedWarningChange={queryExec.setUnlimitedWarningOpen}
+        onLoadAll={queryExec.handleUnlimitedQuery}
       />
 
-      {/* Unlimited Query Warning */}
-      <AlertDialog open={queryExec.unlimitedWarningOpen} onOpenChange={queryExec.setUnlimitedWarningOpen}>
-        <AlertDialogContent className="bg-overlay border-hairline max-w-sm p-0 gap-0 overflow-hidden">
-          <div className="px-6 pt-6 pb-4">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500/20 to-red-500/10 flex items-center justify-center shrink-0">
-                <TriangleAlert strokeWidth={1.5} className="w-5 h-5 text-warning" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <AlertDialogTitle className="text-[0.8125rem] font-medium text-fg mb-1">
-                  Load all results?
-                </AlertDialogTitle>
-                <AlertDialogDescription className="text-xs text-fg-muted leading-relaxed">
-                  This may slow down your browser. Max <span className="text-fg-tertiary">100K</span> rows will be
-                  loaded.
-                </AlertDialogDescription>
-              </div>
-            </div>
-          </div>
-          <div className="px-6 pb-6 flex gap-2">
-            <AlertDialogCancel className="flex-1 h-9 bg-fill border-0 text-fg-tertiary text-xs font-medium hover:bg-fill-strong hover:text-fg dark:bg-fill dark:hover:bg-fill-strong">
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={queryExec.handleUnlimitedQuery}
-              className="flex-1 h-9 bg-warning-solid border-0 text-white text-xs font-medium hover:bg-warning-solid-hover"
-            >
-              Load All
-            </AlertDialogAction>
-          </div>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Delete Connection Confirmation */}
-      <AlertDialog
-        open={!!pendingDeleteConnectionId}
-        onOpenChange={(open) => {
-          if (!open) setPendingDeleteConnectionId(null);
-        }}
-      >
-        <AlertDialogContent
-          className="bg-overlay border-hairline max-w-sm p-0 gap-0 overflow-hidden"
-          {...deleteConnectionReturnFocus}
-        >
-          <div className="px-6 pt-6 pb-4">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-red-500/20 to-red-500/10 flex items-center justify-center shrink-0">
-                <Trash2 strokeWidth={1.5} className="w-5 h-5 text-danger" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <AlertDialogTitle className="text-[0.8125rem] font-medium text-fg mb-1">
-                  Delete connection?
-                </AlertDialogTitle>
-                <AlertDialogDescription className="text-xs text-fg-muted leading-relaxed">
-                  <span className="text-fg-tertiary">
-                    {conn.connections.find((c) => c.id === pendingDeleteConnectionId)?.name || "This connection"}
-                  </span>{" "}
-                  will be removed. This cannot be undone.
-                </AlertDialogDescription>
-              </div>
-            </div>
-          </div>
-          <div className="px-6 pb-6 flex gap-2">
-            <AlertDialogCancel className="flex-1 h-9 bg-fill border-0 text-fg-tertiary text-xs font-medium hover:bg-fill-strong hover:text-fg dark:bg-fill dark:hover:bg-fill-strong">
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={confirmDeleteConnection}
-              className="flex-1 h-9 bg-danger-solid border-0 text-white text-xs font-medium hover:bg-danger-solid-hover"
-            >
-              Delete
-            </AlertDialogAction>
-          </div>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <CommandPalette
+      {/* The standalone-only overlays, in `StudioOverlays`, imported by this shell alone. */}
+      <StudioOverlays
         connections={conn.connections}
         activeConnection={conn.activeConnection}
         schema={conn.schema}
         capabilities={metadata?.capabilities}
+        databaseType={conn.activeConnection?.type}
+        connectionModalOpen={isConnectionModalOpen}
+        editingConnection={editingConnection}
+        onCloseConnectionModal={closeConnectionModal}
+        onConnectConnection={handleConnect}
+        createTableModalOpen={isCreateTableModalOpen}
+        onCloseCreateTable={closeCreateTable}
+        onTableCreated={runModalStatement}
+        pendingDeleteConnectionId={pendingDeleteConnectionId}
+        onDeleteDialogOpenChange={(open) => {
+          if (!open) setPendingDeleteConnectionId(null);
+        }}
+        deleteReturnFocus={deleteConnectionReturnFocus}
+        onConfirmDelete={confirmDeleteConnection}
         onSelectConnection={conn.setActiveConnection}
         onTableClick={onTableClick}
-        onAddConnection={() => setIsConnectionModalOpen(true)}
-        onExecuteQuery={() => {
-          if (!runsTheActiveTab) return;
-          queryExec.executeQuery();
-        }}
-        onLoadSavedQuery={(q) => {
-          if (!runsTheActiveTab) return;
-          tabMgr.updateCurrentTab({ query: q });
-          queryExec.setBottomPanelMode("results");
-        }}
-        onLoadHistoryQuery={(q) => {
-          if (!runsTheActiveTab) return;
-          tabMgr.updateCurrentTab({ query: q });
-          queryExec.setBottomPanelMode("results");
-        }}
-        onNavigateHealth={() => router.push("/monitoring")}
-        onNavigateMonitoring={() => router.push("/monitoring")}
+        onAddConnection={handleAddConnection}
+        onExecuteQuery={handleMobileExecuteQuery}
+        onLoadSavedQuery={handleLoadSavedQuery}
+        onLoadHistoryQuery={handleLoadHistoryQuery}
+        onNavigateMonitoring={handleNavigateMonitoring}
         onShowDiagram={handleShowDiagram}
-        onFormatQuery={() => queryEditorRef.current?.format()}
-        onSaveQuery={() => setIsSaveQueryModalOpen(true)}
+        onFormatQuery={handleFormatQuery}
+        onOpenSaveQuery={openSaveQuery}
         onAskAgent={agentEnabled ? askAgentAboutStatement : undefined}
-        onShowShortcuts={() => shortcutsDialogRef.current?.open()}
+        onShowShortcuts={handleShowShortcuts}
         onLogout={handleLogout}
-      />
-
-      <ShortcutsDialog ref={shortcutsDialogRef} />
-
-      <MobileNav
-        activeTab={activeMobileTab}
-        onTabChange={setActiveMobileTab}
+        shortcutsDialogRef={shortcutsDialogRef}
+        activeMobileTab={activeMobileTab}
+        onMobileTabChange={setActiveMobileTab}
         hasResult={!!tabMgr.currentTab.result}
-        // Absent while the runtime is off, so the nav carries no control that
-        // would open a rail that does not exist.
-        onOpenAgent={agentEnabled ? () => setIsAgentSheetOpen(true) : undefined}
+        onOpenAgent={agentEnabled ? openAgentSheet : undefined}
       />
     </div>
   );

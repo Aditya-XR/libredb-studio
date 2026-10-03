@@ -7,16 +7,10 @@ import { createPortal } from "react-dom";
 import { Sidebar } from "@/components/sidebar";
 import { type TreeRowActionHandlers } from "@/components/object-tree";
 import { ObjectSourceView, type ObjectSourcePatch } from "@/components/object-source";
-import { objectAtPath } from "@/lib/db/detailed-object";
 // MobileNav and mobile tab panels excluded in embedded mode — platform provides its own navigation
 import { QueryEditor, QueryEditorRef } from "@/components/QueryEditor";
-import { DataImportModal } from "@/components/DataImportModal";
-import { QuerySafetyDialog } from "@/components/QuerySafetyDialog";
-import { DataProfiler } from "@/components/DataProfiler";
-import { CodeGenerator } from "@/components/CodeGenerator";
-import { TestDataGenerator } from "@/components/TestDataGenerator";
-import { SaveQueryModal } from "@/components/SaveQueryModal";
 import { StudioTabBar, QueryToolbar, BottomPanel } from "@/components/studio/index";
+import { StudioModals } from "@/components/studio/StudioModals";
 import type { MaskingConfig } from "@/lib/data-masking";
 import type { DatabaseObject } from "@/lib/db/types";
 import { findKind, kindHasSource, relationKindIds } from "@/lib/db/object-kinds";
@@ -24,6 +18,7 @@ import { objectPathLabel } from "@/lib/db/object-path";
 import { useToast } from "@/hooks/use-toast";
 import { useTabManager } from "@/hooks/use-tab-manager";
 import { useTabSummaries } from "@/hooks/use-tab-summaries";
+import { useStableCallback } from "@/hooks/use-stable-callback";
 import { useConnectionAdapter } from "@/workspace/hooks/use-connection-adapter";
 import { useQueryAdapter } from "@/workspace/hooks/use-query-adapter";
 import { type StudioWorkspaceProps, DEFAULT_WORKSPACE_FEATURES } from "@/workspace/types";
@@ -149,17 +144,8 @@ function useStudioTheme() {
     };
   }, []);
 }
-import { TriangleAlert } from "lucide-react";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { AnimatePresence } from "framer-motion";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 
 // No-op masking config for embedded mode (masking disabled)
 const NOOP_MASKING_CONFIG: MaskingConfig = {
@@ -307,28 +293,56 @@ export function StudioWorkspace({
   const [testDataPath, setTestDataPath] = useState<readonly string[] | null>(null);
 
   // === Save query handler ===
-  const handleSaveQuery = useCallback(
-    async (name: string, description: string, tags: string[]) => {
-      if (!conn.activeConnection) return;
+  const handleSaveQuery = useStableCallback(async (name: string, description: string, tags: string[]) => {
+    if (!conn.activeConnection) return;
 
-      if (onSaveQueryProp) {
-        try {
-          await onSaveQueryProp({
-            name,
-            query: tabMgr.currentTab.query,
-            description,
-            connectionType: conn.activeConnection.type,
-            tags,
-          });
-          setSavedKey((prev) => prev + 1);
-          toast({ title: "Query Saved", description: `"${name}" has been added to your saved queries.` });
-        } catch (error) {
-          const msg = error instanceof Error ? error.message : "Failed to save query";
-          toast({ title: "Save Failed", description: msg, variant: "destructive" });
-        }
+    if (onSaveQueryProp) {
+      try {
+        await onSaveQueryProp({
+          name,
+          query: tabMgr.currentTab.query,
+          description,
+          connectionType: conn.activeConnection.type,
+          tags,
+        });
+        setSavedKey((prev) => prev + 1);
+        toast({ title: "Query Saved", description: `"${name}" has been added to your saved queries.` });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "Failed to save query";
+        toast({ title: "Save Failed", description: msg, variant: "destructive" });
       }
-    },
-    [conn.activeConnection, tabMgr.currentTab.query, onSaveQueryProp, toast],
+    }
+  });
+
+  // === Modal handlers (handed to `StudioModals`) ===
+  const closeSaveQuery = useCallback(() => setIsSaveQueryModalOpen(false), []);
+  const closeImport = useCallback(() => setIsImportModalOpen(false), []);
+  const closeSafety = useCallback(() => queryExec.setSafetyCheckQuery(null), [queryExec.setSafetyCheckQuery]);
+  const proceedSafety = useCallback(() => {
+    if (queryExec.safetyCheckQuery) queryExec.forceExecuteQuery(queryExec.safetyCheckQuery);
+  }, [queryExec.safetyCheckQuery, queryExec.forceExecuteQuery]);
+  const closeProfiler = useCallback(() => setProfilerPath(null), []);
+  const closeCodeGen = useCallback(() => setCodeGenPath(null), []);
+  const closeTestData = useCallback(() => setTestDataPath(null), []);
+  const runModalStatement = useCallback((sql: string) => queryExec.executeQuery(sql), [queryExec.executeQuery]);
+  // The embedded shell never talks to the AI safety route; it answers its own analysis.
+  const analyzeSafety = useCallback(
+    async () => ({
+      riskLevel: "high" as const,
+      summary: "Potentially dangerous query detected",
+      warnings: [
+        {
+          type: "destructive",
+          severity: "high",
+          message: "This query may modify or delete data",
+          detail: "Review carefully before proceeding.",
+        },
+      ],
+      affectedRows: "unknown",
+      cascadeEffects: "unknown",
+      recommendation: "Review this query carefully before proceeding.",
+    }),
+    [],
   );
 
   // === Export results (shared writers; this shell applies no masking) ===
@@ -1098,123 +1112,40 @@ export function StudioWorkspace({
         </ResizablePanel>
       </ResizablePanelGroup>
 
-      {/* Modals — only render those that are feature-enabled */}
-
-      {onSaveQueryProp && (
-        <SaveQueryModal
-          isOpen={isSaveQueryModalOpen}
-          onClose={() => setIsSaveQueryModalOpen(false)}
-          onSave={handleSaveQuery}
-          defaultQuery={tabMgr.currentTab.query}
-        />
-      )}
-
-      {features.dataImport && (
-        <DataImportModal
-          isOpen={isImportModalOpen}
-          onClose={() => setIsImportModalOpen(false)}
-          onImport={(sql) => queryExec.executeQuery(sql)}
-          tables={conn.schema}
-          capabilities={conn.metadata?.capabilities}
-          databaseType={conn.activeConnection?.type}
-        />
-      )}
-
-      {/* Safety dialog — stub AI analysis to prevent internal fetch */}
-      <QuerySafetyDialog
-        isOpen={!!queryExec.safetyCheckQuery}
-        query={queryExec.safetyCheckQuery || ""}
+      {/* Modals — only render those that are feature-enabled. */}
+      <StudioModals
+        activeConnection={conn.activeConnection}
+        schema={conn.schema}
         schemaContext={conn.schemaContext}
+        capabilities={conn.metadata?.capabilities}
         databaseType={conn.activeConnection?.type}
         connectionName={conn.activeConnection?.name}
-        onClose={() => queryExec.setSafetyCheckQuery(null)}
-        onProceed={() => {
-          if (queryExec.safetyCheckQuery) queryExec.forceExecuteQuery(queryExec.safetyCheckQuery);
-        }}
-        onAnalyzeSafety={async () => ({
-          riskLevel: "high" as const,
-          summary: "Potentially dangerous query detected",
-          warnings: [
-            {
-              type: "destructive",
-              severity: "high",
-              message: "This query may modify or delete data",
-              detail: "Review carefully before proceeding.",
-            },
-          ],
-          affectedRows: "unknown",
-          cascadeEffects: "unknown",
-          recommendation: "Review this query carefully before proceeding.",
-        })}
+        showSaveQuery={!!onSaveQueryProp}
+        saveQueryModalOpen={isSaveQueryModalOpen}
+        onCloseSaveQuery={closeSaveQuery}
+        onSaveQuery={handleSaveQuery}
+        defaultQuery={tabMgr.currentTab.query}
+        showImport={features.dataImport}
+        importModalOpen={isImportModalOpen}
+        onCloseImport={closeImport}
+        onImport={runModalStatement}
+        safetyCheckQuery={queryExec.safetyCheckQuery}
+        onCloseSafety={closeSafety}
+        onProceedSafety={proceedSafety}
+        onAnalyzeSafety={analyzeSafety}
+        showCodeGenerator={features.codeGenerator}
+        profilerPath={profilerPath}
+        onCloseProfiler={closeProfiler}
+        codeGenPath={codeGenPath}
+        onCloseCodeGen={closeCodeGen}
+        showTestDataGenerator={features.testDataGenerator}
+        testDataPath={testDataPath}
+        onCloseTestData={closeTestData}
+        onExecuteTestData={runModalStatement}
+        unlimitedWarningOpen={queryExec.unlimitedWarningOpen}
+        onUnlimitedWarningChange={queryExec.setUnlimitedWarningOpen}
+        onLoadAll={queryExec.handleUnlimitedQuery}
       />
-
-      {/* Data Profiler */}
-      {features.codeGenerator && (
-        <DataProfiler
-          isOpen={profilerPath !== null}
-          onClose={() => setProfilerPath(null)}
-          tablePath={profilerPath ?? []}
-          tableSchema={objectAtPath(conn.schema, profilerPath)}
-          connection={conn.activeConnection}
-          schemaContext={conn.schemaContext}
-          databaseType={conn.activeConnection?.type}
-        />
-      )}
-
-      {/* Code Generator */}
-      {features.codeGenerator && (
-        <CodeGenerator
-          isOpen={codeGenPath !== null}
-          onClose={() => setCodeGenPath(null)}
-          tablePath={codeGenPath ?? []}
-          tableSchema={objectAtPath(conn.schema, codeGenPath)}
-          databaseType={conn.activeConnection?.type}
-        />
-      )}
-
-      {/* Test Data Generator */}
-      {features.testDataGenerator && (
-        <TestDataGenerator
-          isOpen={testDataPath !== null}
-          onClose={() => setTestDataPath(null)}
-          tablePath={testDataPath ?? []}
-          tableSchema={objectAtPath(conn.schema, testDataPath)}
-          databaseType={conn.activeConnection?.type}
-          capabilities={conn.metadata?.capabilities}
-          onExecuteQuery={(q) => queryExec.executeQuery(q)}
-        />
-      )}
-
-      {/* Unlimited Query Warning */}
-      <AlertDialog open={queryExec.unlimitedWarningOpen} onOpenChange={queryExec.setUnlimitedWarningOpen}>
-        <AlertDialogContent className="bg-overlay border-hairline max-w-sm p-0 gap-0 overflow-hidden">
-          <div className="px-6 pt-6 pb-4">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500/20 to-red-500/10 flex items-center justify-center shrink-0">
-                <TriangleAlert strokeWidth={1.5} className="w-5 h-5 text-warning" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <AlertDialogTitle className="text-xs font-medium text-fg mb-1">Load all results?</AlertDialogTitle>
-                <AlertDialogDescription className="text-xs text-fg-muted leading-relaxed">
-                  This may slow down your browser. Max <span className="text-fg-tertiary">100K</span> rows will be
-                  loaded.
-                </AlertDialogDescription>
-              </div>
-            </div>
-          </div>
-          <div className="px-6 pb-6 flex gap-2">
-            <AlertDialogCancel className="flex-1 h-9 bg-fill border-0 text-fg-tertiary text-xs font-medium hover:bg-fill-strong hover:text-fg dark:bg-fill dark:hover:bg-fill-strong">
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={queryExec.handleUnlimitedQuery}
-              className="flex-1 h-9 bg-warning-solid border-0 text-white text-xs font-medium hover:bg-warning-solid-hover"
-            >
-              Load All
-            </AlertDialogAction>
-          </div>
-        </AlertDialogContent>
-      </AlertDialog>
 
       {/*
         The refusal, said where an adopter can actually read it AND where it can be announced (D82).

@@ -2248,15 +2248,17 @@ writers. `csv.ts` and `result-export.ts` are pure and hold no browser reference 
 can reuse them; `download.ts` is the only browser-bound module there. Worth costing against the
 agent's own export gap (B33, B34), which wants the same route.
 
-### X5. `Studio.tsx` still re-renders its inline dialogs on every keystroke
+### X5. The Studio shell's dialogs and modals still re-render on every keystroke
 
 #1127 memoized the shell's children and took `framer-motion` out of the first load.
 Measured with a commit counter in a real browser, 27 keystrokes in the editor: the sidebar, the agent rail, the toolbar, the connections list and the desktop header no longer re-render, and the shell's component renders fell from 11961 to 6588.
 #1190 hands `BottomPanel`, `StudioTabBar` and `StudioMobileHeader` only what they show, and makes the handlers they take stable.
 Measured with a render counter in each of the three, 27 keystrokes in a real browser: 27 renders each on `main`, 0 each after.
 `BottomPanel` is still handed the tab's statement while its explain view is open, which pairs it with the plan, so in that view alone it re-renders per keystroke.
-Most of the remaining renders are the dialogs `Studio.tsx` still renders inline, about a dozen Radix `Dialog`s per keystroke, plus `CommandPalette` and `MobileNav`, which are not memoized.
-What is left is moving the dialogs into a component of their own.
+The dialogs moved into `StudioModals` and the standalone overlays into `StudioOverlays`.
+Keystroke churn on the shell children was eliminated in #1190.
+What still re-renders on every keystroke, on `main` and on this head alike, is the modal surface: `SaveQueryModal`, `QuerySafetyDialog`, `CreateTableModal`, `DataImportModal`, `DataProfiler`, `CodeGenerator`, `TestDataGenerator`, the two confirmation `AlertDialog`s, `CommandPalette` and `MobileNav`.
+Neither `StudioModals`, `StudioOverlays` nor the modals are memoized.
 
 ### X9. What `columnTypes` still cannot name, measured
 
