@@ -931,7 +931,7 @@ Those three reach code and tests only; the four prose greps of the published blo
 - [ ] `src/lib/query-generators.ts`: a record in `DIALECT_GENERATORS`, what a tree click and Generate Query write, read before the `json` arm, or a tree click auto-executes a MongoDB document.
       `docs/providers/kafka.md` section 3.1 is the worked case.
 - [ ] `src/components/QueryEditor.tsx`: the MongoDB completion provider registers only where the declared capabilities name no JSON dialect.
-- [ ] `tests/unit/lib/dialect-reader-allowlist.test.ts`: every other line under `src/` that compares `queryDialect` or reads `queryLanguage === "json"` is on its closed list with its owner.
+- [ ] `tests/unit/lib/dialect-reader-allowlist.test.ts`: every other line under `src/` that compares `queryDialect`, reads `queryLanguage === "json"` or negates `queryLanguage` is on its closed list with its owner.
       A new reader goes into a registry, or onto the list with the reason it is not one.
 
 **For a new connection field**, beside the three `Record<keyof DatabaseConnection, ...>` maps and `connection-filter.ts` that the note below names:
