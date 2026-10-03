@@ -319,7 +319,7 @@ src/
     │   │   ├── timeseries/  # prometheus/ (transport seam + PromQL over the Prometheus HTTP API)
     │   │   ├── stream/      # kafka/ (read-client seam + JSON read requests over the Kafka protocol via @platformatic/kafka)
     │   │   └── embedded/    # libredb (built-in embedded provider for the sample connection)
-    │   ├── http/            # endpoint.ts: the validated URL builder every HTTP transport uses (no redirects)
+    │   ├── http/            # endpoint.ts: the validated URL builder every HTTP transport uses (no redirects); node-transport.ts: the shared node:http(s) transport a new REST provider takes (one keep-alive Agent per connection, no proxy variables, a streamed byte cap)
     │   ├── factory.ts       # Provider factory
     │   ├── query-dialects.ts # The dialect registry: each queryDialect's tab type and row-menu answers
     │   └── types.ts         # Database types
