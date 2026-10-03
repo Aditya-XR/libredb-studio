@@ -29,6 +29,7 @@ import {
   jsonAnswer,
   type Listener,
   makeCertificates,
+  silentListener,
   streamingAnswer,
 } from "../../../helpers/node-transport-fixtures";
 
@@ -53,7 +54,8 @@ type PortName =
   | "bomb"
   | "holding"
   | "retry"
-  | "guarded";
+  | "guarded"
+  | "silent";
 
 interface Plan {
   readonly ports: Readonly<Record<PortName, number>>;
@@ -237,6 +239,27 @@ async function runCases(deps: Deps, plan: Plan): Promise<Report> {
       transport.close();
     }
   });
+  await record("a request cancelled while queued behind maxSockets", async () => {
+    const origin = deps.httpOrigin("http", "127.0.0.1", ports.silent);
+    const transport = deps.createNodeTransport({ origin, tls: null, maxSockets: 1, headers: { "api-key": SECRET } });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    const send = (path: string, signal: AbortSignal) =>
+      transport.request({ method: "GET", url: deps.endpointUrl(origin, path), signal, maxResponseBytes: MIB });
+    try {
+      const [first, queued] = await Promise.allSettled([
+        send("/first", AbortSignal.timeout(300)),
+        send("/queued", controller.signal),
+      ]);
+      // Both must fail; the queued one's failure is the outcome, and the parent counts the sockets the listener saw.
+      if (first.status === "fulfilled") throw new Error("the first request was answered");
+      if (queued.status === "fulfilled") throw new Error("the queued request was answered");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      throw queued.reason;
+    } finally {
+      transport.close();
+    }
+  });
   // Built before the guard is on, so the refusal below is the transport's own and not httpOrigin's.
   const guardedOrigin = deps.httpOrigin("http", "127.0.0.1", ports.guarded);
   process.env.DB_HTTP_BLOCK_PRIVATE_HOSTS = "true";
@@ -305,6 +328,7 @@ let big: Listener;
 let bomb: Listener;
 let holding: Listener;
 let guarded: Listener;
+let silent: Listener;
 
 beforeAll(async () => {
   const certificates = makeCertificates();
@@ -352,6 +376,7 @@ beforeAll(async () => {
     jsonAnswer(429, '{"status":{"error":"rate limited"}}', headers)(request, response, body);
   });
   guarded = await httpListener(jsonAnswer(200, "{}"));
+  silent = await silentListener();
   const plan: Plan = {
     ports: {
       plain: plain.port,
@@ -366,6 +391,7 @@ beforeAll(async () => {
       holding: holding.port,
       retry: retry.port,
       guarded: guarded.port,
+      silent: silent.port,
     },
     ca: certificates.ca,
     rogueCa: certificates.rogueCa,
@@ -424,6 +450,7 @@ interface Counts {
   readonly target: number;
   readonly slow: number;
   readonly guarded: number;
+  readonly silent: number;
 }
 
 const counts = (): Counts => ({
@@ -431,6 +458,7 @@ const counts = (): Counts => ({
   target: target.accepted(),
   slow: slow.accepted(),
   guarded: guarded.accepted(),
+  silent: silent.accepted(),
 });
 
 interface ChildRun {
@@ -475,6 +503,7 @@ async function runChild(binary: string): Promise<ChildRun> {
       target: after.target - before.target,
       slow: after.slow - before.slow,
       guarded: after.guarded - before.guarded,
+      silent: after.silent - before.silent,
     },
     from,
   };
@@ -540,6 +569,12 @@ const EXPECTED: Readonly<Record<string, Expected>> = {
   "tunnel: a far end by address": OK,
   "tunnel: checked against the local forward instead": TLS_REFUSED,
   "keep-alive: three at once, then five more, at most two sockets": OK,
+  "a request cancelled while queued behind maxSockets": {
+    ok: false,
+    errorName: "TransportError",
+    kind: "aborted",
+    message: "The request was cancelled",
+  },
   "guard: 127.0.0.1 refused before a socket": { ok: false, errorName: "DatabaseConfigError", message: BLOCKED },
   "guard: localhost refused by the lookup on the Agent": {
     ok: false,
@@ -633,6 +668,10 @@ for (const [label, binary] of RUNTIMES) {
 
     test("keep-alive used two sockets for eight requests", () => {
       expect(run?.delta.slow).toBe(2);
+    });
+
+    test("a request cancelled while queued behind maxSockets opened no socket", () => {
+      expect(run?.delta.silent).toBe(1);
     });
 
     test("every request carried accept-encoding identity", () => {

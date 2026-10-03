@@ -274,6 +274,15 @@ export async function gzipOfZeros(bytes: number): Promise<Buffer> {
   return Buffer.concat(parts);
 }
 
+/** A TCP listener that counts what it accepts and never answers or closes it: a server that holds every request. */
+export function silentListener(): Promise<Listener> {
+  return observe(
+    createTcpServer(() => {}),
+    [],
+    "127.0.0.1",
+  );
+}
+
 /** A TCP listener that counts what it accepts and closes it at once: the proxy every proxy variable names. */
 export function countingListener(): Promise<Listener> {
   return observe(

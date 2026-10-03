@@ -26,6 +26,7 @@ import {
   httpListener,
   jsonAnswer,
   type Listener,
+  silentListener,
   streamingAnswer,
 } from "../../../helpers/node-transport-fixtures";
 
@@ -335,6 +336,31 @@ describe("bounded, stoppable and never resent", () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(listener.seen).toHaveLength(1);
     await eventually(() => listener.open() === 0, "every socket to close");
+  });
+
+  test("a request cancelled while queued behind maxSockets opens no socket, then or later", async () => {
+    const listener = await silentListener();
+    const { transport, url } = connect(listener, { maxSockets: 1 });
+    const first = failure(() => transport.request(get(url("/first"), { signal: AbortSignal.timeout(400) })));
+    const controller = new AbortController();
+    const queued = failure(() =>
+      transport.request({ ...get(url("/queued"), { signal: controller.signal }), method: "POST", body: "{}" }),
+    );
+    await eventually(() => listener.accepted() === 1, "the first request's socket");
+    controller.abort();
+    expect(((await queued) as TransportError).kind).toBe("aborted");
+    expect(((await first) as TransportError).kind).toBe("timeout");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(listener.accepted()).toBe(1);
+  });
+
+  test("a request queued behind maxSockets goes out once a socket is free", async () => {
+    const listener = await httpListener(jsonAnswer(200, "{}"));
+    const { transport, url } = connect(listener, { maxSockets: 1 });
+    const answers = await Promise.all([1, 2, 3].map((n) => transport.request(get(url(`/${n}`)))));
+    expect(answers.map(({ status }) => status)).toEqual([200, 200, 200]);
+    expect(listener.seen.map(({ url: path }) => path)).toEqual(["/1", "/2", "/3"]);
+    expect(listener.accepted()).toBe(1);
   });
 
   test("an answer lost on a reused socket is reported once and never resent", async () => {

@@ -367,11 +367,23 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
   const agent = tls === null ? new HttpAgent(shared) : new HttpsAgent({ ...shared, ...tlsAgentOptions(tls) });
   const send = tls === null ? httpRequest : httpsRequest;
   /**
-   * Each request in flight or queued in the Agent, by the function that stops it. close() stops them all before it
+   * Each request in flight or waiting for a socket, by the function that stops it. close() stops them all before it
    * destroys the Agent: destroying the Agent alone hands a queued request a new socket and sends it after the close.
    */
   const active = new Set<(failure: Error) => void>();
   let closed = false;
+  /**
+   * The transport holds the requests beyond maxSockets itself and hands one to the Agent only when a socket is free,
+   * because the Agent keeps a request destroyed in its own queue and later dials a socket for it, so a cancel would
+   * still cost a lookup and a handshake. A request stopped while it waits here never reaches the Agent.
+   */
+  let sending = 0;
+  const waiting: Array<() => void> = [];
+  const release = (): void => {
+    sending -= 1;
+    // After close() nothing more starts: close() stops every waiting request itself.
+    if (!closed) waiting.shift()?.();
+  };
 
   const exchange = (request: NodeRequest, target: URL): Promise<NodeResponse> =>
     new Promise<NodeResponse>((resolve, reject) => {
@@ -379,11 +391,14 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
       let outgoing: ClientRequest | undefined;
       let incoming: IncomingMessage | undefined;
       let settled = false;
+      let started = false;
       const settle = (): boolean => {
         if (settled) return false;
         settled = true;
         active.delete(fail);
         request.signal.removeEventListener("abort", onAbort);
+        if (started) release();
+        else waiting.splice(waiting.indexOf(start), 1);
         return true;
       };
       const fail = (failure: Error): void => {
@@ -395,65 +410,74 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
       };
       const failWith = (error: unknown): void => fail(failureFrom(error, request.signal, tls !== null));
       const onAbort = (): void => fail(abortFailure(request.signal));
-      active.add(fail);
-      try {
-        outgoing = send(
-          {
-            hostname,
-            port,
-            path,
-            method: request.method,
-            agent,
-            headers: requestHeaders(connectionHeaders, request.body),
-          },
-          (answer) => {
-            incoming = answer;
-            answer.on("error", failWith);
-            // Set on every answer a ClientRequest receives; the type is shared with server-side requests.
-            const status = answer.statusCode ?? 0;
-            try {
-              // The shared refusal reads a fetch-shaped status and Location, so the adapter hands it those two.
-              const location = answer.headers.location;
-              rejectRedirect({ status, headers: new Headers(location === undefined ? {} : { location }) }, request.url);
-            } catch (refusal) {
-              // Released unread: fail() destroys the answer, so no redirect is followed and no body is read.
-              fail(new TransportError("redirect", (refusal as Error).message));
-              return;
-            }
-            const encoding = answer.headers["content-encoding"];
-            if (encoding !== undefined && encoding.trim().toLowerCase() !== "identity") {
-              // Refused before a byte of the body is read, so maxResponseBytes always counts the bytes that are parsed.
-              fail(encodingRefusal(encoding));
-              return;
-            }
-            const chunks: Buffer[] = [];
-            let received = 0;
-            answer.on("data", (chunk: Buffer) => {
-              received += chunk.length;
-              if (received > request.maxResponseBytes) {
-                fail(tooLarge(request.maxResponseBytes));
+      const start = (): void => {
+        started = true;
+        sending += 1;
+        try {
+          outgoing = send(
+            {
+              hostname,
+              port,
+              path,
+              method: request.method,
+              agent,
+              headers: requestHeaders(connectionHeaders, request.body),
+            },
+            (answer) => {
+              incoming = answer;
+              answer.on("error", failWith);
+              // Set on every answer a ClientRequest receives; the type is shared with server-side requests.
+              const status = answer.statusCode ?? 0;
+              try {
+                // The shared refusal reads a fetch-shaped status and Location, so the adapter hands it those two.
+                const location = answer.headers.location;
+                rejectRedirect(
+                  { status, headers: new Headers(location === undefined ? {} : { location }) },
+                  request.url,
+                );
+              } catch (refusal) {
+                // Released unread: fail() destroys the answer, so no redirect is followed and no body is read.
+                fail(new TransportError("redirect", (refusal as Error).message));
                 return;
               }
-              chunks.push(chunk);
-            });
-            answer.on("end", () => {
-              if (!settle()) return;
-              resolve({
-                status,
-                contentType: answer.headers["content-type"] ?? null,
-                retryAfter: retryAfterOf(answer.headers["retry-after"]),
-                text: Buffer.concat(chunks).toString("utf8"),
+              const encoding = answer.headers["content-encoding"];
+              if (encoding !== undefined && encoding.trim().toLowerCase() !== "identity") {
+                // Refused before a byte of the body is read, so maxResponseBytes always counts the bytes that are parsed.
+                fail(encodingRefusal(encoding));
+                return;
+              }
+              const chunks: Buffer[] = [];
+              let received = 0;
+              answer.on("data", (chunk: Buffer) => {
+                received += chunk.length;
+                if (received > request.maxResponseBytes) {
+                  fail(tooLarge(request.maxResponseBytes));
+                  return;
+                }
+                chunks.push(chunk);
               });
-            });
-          },
-        );
-        outgoing.on("error", failWith);
-        request.signal.addEventListener("abort", onAbort, { once: true });
-        outgoing.end(request.body);
-      } catch (error) {
-        // node:http refuses some requests by throwing before anything is sent: a header value with a line feed.
-        failWith(error);
-      }
+              answer.on("end", () => {
+                if (!settle()) return;
+                resolve({
+                  status,
+                  contentType: answer.headers["content-type"] ?? null,
+                  retryAfter: retryAfterOf(answer.headers["retry-after"]),
+                  text: Buffer.concat(chunks).toString("utf8"),
+                });
+              });
+            },
+          );
+          outgoing.on("error", failWith);
+          outgoing.end(request.body);
+        } catch (error) {
+          // node:http refuses some requests by throwing before anything is sent: a header value with a line feed.
+          failWith(error);
+        }
+      };
+      active.add(fail);
+      request.signal.addEventListener("abort", onAbort, { once: true });
+      if (sending < maxSockets) start();
+      else waiting.push(start);
     });
 
   return {
