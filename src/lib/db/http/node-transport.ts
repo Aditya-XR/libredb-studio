@@ -27,7 +27,13 @@
  * A measured limit, not worked around: the first request on a new keep-alive TLS socket costs about 40 ms more than on
  * a socket that is closed after one request, with no cause found.
  */
-import { Agent as HttpAgent, type AgentOptions, request as httpRequest } from "node:http";
+import {
+  Agent as HttpAgent,
+  type AgentOptions,
+  type ClientRequest,
+  type IncomingMessage,
+  request as httpRequest,
+} from "node:http";
 import { Agent as HttpsAgent, type AgentOptions as HttpsAgentOptions, request as httpsRequest } from "node:https";
 import { urlToHttpOptions } from "node:url";
 import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
@@ -162,6 +168,43 @@ const SCHEME_MISMATCH = "Invalid TLS settings: an https origin needs TLS materia
 const CLOSED = "The connection was closed, so the request did not complete";
 const NETWORK_FAILURE = "The request failed before a complete response arrived";
 
+/** A runtime error code named in a failure; any other value is left out of the message. */
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+function ownCode(value: unknown): string | undefined {
+  const code = typeof value === "object" && value !== null ? (value as { code?: unknown }).code : undefined;
+  return typeof code === "string" && ERROR_CODE.test(code) ? code : undefined;
+}
+
+/** A code on the error itself, or on its cause. */
+function errorCode(error: unknown): string | undefined {
+  return ownCode(error) ?? (error instanceof Error ? ownCode(error.cause) : undefined);
+}
+
+/** A deadline when an AbortSignal.timeout() fired, a cancellation for any other reason. */
+function abortFailure(signal: AbortSignal): TransportError {
+  const reason: unknown = signal.reason;
+  return reason instanceof DOMException && reason.name === "TimeoutError"
+    ? new TransportError("timeout", "The request did not finish within its time limit")
+    : new TransportError("aborted", "The request was cancelled");
+}
+
+/** Whatever the runtime raised, as a failure whose message holds a code at most. */
+function failureFrom(error: unknown, signal: AbortSignal): Error {
+  // Whatever the runtime threw once the signal fired, the signal says which kind of stop it was.
+  if (signal.aborted) return abortFailure(signal);
+  const code = errorCode(error);
+  if (code === undefined) return new TransportError("network", NETWORK_FAILURE);
+  return new TransportError("network", `${NETWORK_FAILURE} (${code})`);
+}
+
+function tooLarge(limit: number): TransportError {
+  return new TransportError(
+    "too-large",
+    `The response exceeded the ${limit}-byte limit for one response, so it was not read to the end`,
+  );
+}
+
 function isPositiveInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 1;
 }
@@ -219,40 +262,86 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
   const shared: AgentOptions = { keepAlive: true, maxSockets };
   const agent = tls === null ? new HttpAgent(shared) : new HttpsAgent({ ...shared, ...tlsAgentOptions(tls) });
   const send = tls === null ? httpRequest : httpsRequest;
+  /**
+   * Each request in flight or queued in the Agent, by the function that stops it. close() stops them all before it
+   * destroys the Agent: destroying the Agent alone hands a queued request a new socket and sends it after the close.
+   */
+  const active = new Set<(failure: Error) => void>();
   let closed = false;
 
   const exchange = (request: NodeRequest, target: URL): Promise<NodeResponse> =>
     new Promise<NodeResponse>((resolve, reject) => {
       const { hostname, port, path } = urlToHttpOptions(target);
-      const outgoing = send(
-        {
-          hostname,
-          port,
-          path,
-          method: request.method,
-          agent,
-          headers: requestHeaders(connectionHeaders, request.body),
-        },
-        (answer) => {
-          const chunks: Buffer[] = [];
-          answer.on("data", (chunk: Buffer) => chunks.push(chunk));
-          answer.on("end", () =>
-            resolve({
-              status: answer.statusCode ?? 0,
-              contentType: answer.headers["content-type"] ?? null,
-              retryAfter: retryAfterOf(answer.headers["retry-after"]),
-              text: Buffer.concat(chunks).toString("utf8"),
-            }),
-          );
-        },
-      );
-      outgoing.on("error", () => reject(new TransportError("network", NETWORK_FAILURE)));
-      outgoing.end(request.body);
+      let outgoing: ClientRequest | undefined;
+      let incoming: IncomingMessage | undefined;
+      let settled = false;
+      const settle = (): boolean => {
+        if (settled) return false;
+        settled = true;
+        active.delete(fail);
+        request.signal.removeEventListener("abort", onAbort);
+        return true;
+      };
+      const fail = (failure: Error): void => {
+        if (!settle()) return;
+        // Destroying the socket stops a server that keeps writing, and a destroyed socket never returns to the pool.
+        incoming?.destroy();
+        outgoing?.destroy();
+        reject(failure);
+      };
+      const failWith = (error: unknown): void => fail(failureFrom(error, request.signal));
+      const onAbort = (): void => fail(abortFailure(request.signal));
+      active.add(fail);
+      try {
+        outgoing = send(
+          {
+            hostname,
+            port,
+            path,
+            method: request.method,
+            agent,
+            headers: requestHeaders(connectionHeaders, request.body),
+          },
+          (answer) => {
+            incoming = answer;
+            answer.on("error", failWith);
+            // Set on every answer a ClientRequest receives; the type is shared with server-side requests.
+            const status = answer.statusCode ?? 0;
+            const chunks: Buffer[] = [];
+            let received = 0;
+            answer.on("data", (chunk: Buffer) => {
+              received += chunk.length;
+              if (received > request.maxResponseBytes) {
+                fail(tooLarge(request.maxResponseBytes));
+                return;
+              }
+              chunks.push(chunk);
+            });
+            answer.on("end", () => {
+              if (!settle()) return;
+              resolve({
+                status,
+                contentType: answer.headers["content-type"] ?? null,
+                retryAfter: retryAfterOf(answer.headers["retry-after"]),
+                text: Buffer.concat(chunks).toString("utf8"),
+              });
+            });
+          },
+        );
+        outgoing.on("error", failWith);
+        request.signal.addEventListener("abort", onAbort, { once: true });
+        outgoing.end(request.body);
+      } catch (error) {
+        // node:http refuses some requests by throwing before anything is sent: a header value with a line feed.
+        failWith(error);
+      }
     });
 
   return {
     async request(request) {
       if (closed) throw new TransportError("aborted", CLOSED);
+      // An already-aborted signal never fires "abort" again, and node:http would send the request regardless.
+      if (request.signal.aborted) throw abortFailure(request.signal);
       if (!isPositiveInteger(request.maxResponseBytes)) throw new DatabaseConfigError(INVALID_MAX_RESPONSE_BYTES);
       const target = parsedUrl(request.url);
       // A URL carrying userinfo would send it as an Authorization header, so it is refused like another origin.
@@ -263,6 +352,7 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
     },
     close() {
       closed = true;
+      for (const stop of [...active]) stop(new TransportError("aborted", CLOSED));
       agent.destroy();
     },
   };

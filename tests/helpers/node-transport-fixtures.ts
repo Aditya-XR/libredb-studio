@@ -229,3 +229,24 @@ export function makeCertificates(): TransportCertificates {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+/** An answer of `bytes` bytes of the letter a, written in 1 MiB pieces as the socket drains. */
+export function streamingAnswer(bytes: number): Handler {
+  return (_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    const piece = Buffer.alloc(1024 * 1024, 0x61);
+    let left = bytes;
+    const write = (): void => {
+      while (left > 0) {
+        const next = left >= piece.length ? piece : piece.subarray(0, left);
+        left -= next.length;
+        if (!response.write(next)) {
+          response.once("drain", write);
+          return;
+        }
+      }
+      response.end();
+    };
+    write();
+  };
+}

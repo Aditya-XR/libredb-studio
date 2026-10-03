@@ -23,6 +23,7 @@ import {
   httpListener,
   jsonAnswer,
   type Listener,
+  streamingAnswer,
 } from "../../../helpers/node-transport-fixtures";
 
 const SECRET = "node-transport-secret-key";
@@ -244,5 +245,132 @@ describe("refused before any socket", () => {
     expect(error.message).toBe(
       "Invalid TLS settings: an https origin needs TLS material, and an http origin takes none",
     );
+  });
+});
+
+describe("bounded, stoppable and never resent", () => {
+  test("a 16 MiB answer against an 8 MiB cap raises too-large with no partial text, and the socket is closed", async () => {
+    const listener = await httpListener(streamingAnswer(16 * MIB));
+    const { transport, url } = connect(listener);
+    const error = await failure(() => transport.request(get(url("/big"), { maxResponseBytes: 8 * MIB })));
+    expect(error).toBeInstanceOf(TransportError);
+    expect((error as TransportError).kind).toBe("too-large");
+    expect(error.message).toBe(
+      "The response exceeded the 8388608-byte limit for one response, so it was not read to the end",
+    );
+    expect(Object.keys(error)).not.toContain("text");
+    await eventually(() => listener.open() === 0, "the server to see its socket closed");
+  });
+
+  test("an answer of exactly maxResponseBytes is read whole, and one byte more is too-large", async () => {
+    const listener = await httpListener((request, response) => {
+      response.writeHead(200);
+      response.end("x".repeat(request.url === "/over" ? 101 : 100));
+    });
+    const { transport, url } = connect(listener);
+    expect((await transport.request(get(url("/exact"), { maxResponseBytes: 100 }))).text).toHaveLength(100);
+    const error = await failure(() => transport.request(get(url("/over"), { maxResponseBytes: 100 })));
+    expect((error as TransportError).kind).toBe("too-large");
+  });
+
+  test("a deadline destroys the socket and raises timeout", async () => {
+    const listener = await httpListener(() => {});
+    const { transport, url } = connect(listener);
+    const error = await failure(() => transport.request(get(url("/hold"), { signal: AbortSignal.timeout(100) })));
+    expect((error as TransportError).kind).toBe("timeout");
+    expect(error.message).toBe("The request did not finish within its time limit");
+    await eventually(() => listener.open() === 0, "the held socket to close");
+  });
+
+  test("a caller's cancel destroys the socket and raises aborted, also when it rides with a deadline", async () => {
+    const listener = await httpListener(() => {});
+    const { transport, url } = connect(listener);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]);
+    const error = await failure(() => transport.request(get(url("/hold"), { signal })));
+    expect((error as TransportError).kind).toBe("aborted");
+    expect(error.message).toBe("The request was cancelled");
+    await eventually(() => listener.open() === 0, "the held socket to close");
+  });
+
+  test("an already-aborted signal is refused before any socket", async () => {
+    const listener = await httpListener(jsonAnswer(200, "{}"));
+    const { transport, url } = connect(listener);
+    const error = await failure(() => transport.request(get(url("/"), { signal: AbortSignal.abort() })));
+    expect((error as TransportError).kind).toBe("aborted");
+    expect(listener.accepted()).toBe(0);
+  });
+
+  test("close() stops every request in flight or queued: each raises aborted, no request reaches the server after it, and no socket stays open", async () => {
+    const listener = await httpListener(() => {});
+    const { transport, url } = connect(listener, { maxSockets: 1 });
+    const pending = [1, 2, 3].map(() => failure(() => transport.request(get(url("/hold")))));
+    await eventually(() => listener.seen.length === 1, "the first request to arrive");
+    transport.close();
+    const errors = await Promise.all(pending);
+    expect(errors.map((error) => (error as TransportError).kind)).toEqual(["aborted", "aborted", "aborted"]);
+    expect(errors.map((error) => error.message)).toEqual([CLOSED, CLOSED, CLOSED]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(listener.seen).toHaveLength(1);
+    await eventually(() => listener.open() === 0, "every socket to close");
+  });
+
+  test("an answer lost on a reused socket is reported once and never resent", async () => {
+    const listener = await httpListener((request, response, body) => {
+      if (request.method === "POST") {
+        request.socket.destroy();
+        return;
+      }
+      jsonAnswer(200, "{}")(request, response, body);
+    });
+    const { transport, url } = connect(listener);
+    await transport.request(get(url("/collections")));
+    const error = await failure(() =>
+      transport.request({ ...get(url("/collections/c/points")), method: "POST", body: '{"points":[]}' }),
+    );
+    expect(error).toBeInstanceOf(TransportError);
+    expect((error as TransportError).kind).toBe("network");
+    expect(error.message).toMatch(/^The request failed before a complete response arrived( \([A-Z][A-Z0-9_]*\))?$/);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(listener.seen.filter(({ method }) => method === "POST")).toHaveLength(1);
+    expect(listener.accepted()).toBe(1);
+  });
+
+  test("a request after the server closed an idle keep-alive socket goes out on a new socket and succeeds", async () => {
+    const listener = await httpListener((request, response, body) => {
+      jsonAnswer(200, "{}")(request, response, body);
+      response.on("finish", () => setTimeout(() => request.socket.destroy(), 20));
+    });
+    const { transport, url } = connect(listener);
+    await transport.request(get(url("/")));
+    await eventually(() => listener.open() === 0, "the server to close the idle socket");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((await transport.request(get(url("/")))).status).toBe(200);
+    expect(listener.accepted()).toBe(2);
+  });
+
+  test("a refused connection is a network failure naming the runtime's code and no URL", async () => {
+    const listener = await httpListener(jsonAnswer(200, "{}"));
+    const { port } = listener;
+    await listener.close();
+    const origin = httpOrigin("http", "127.0.0.1", port);
+    const transport = createNodeTransport({ origin, tls: null, maxSockets: 1, headers: { "api-key": SECRET } });
+    transports.push(transport);
+    const error = await failure(() =>
+      transport.request(get(endpointUrl(origin, "/collections", new URLSearchParams({ token: SECRET })))),
+    );
+    expect((error as TransportError).kind).toBe("network");
+    expect(error.message).toBe("The request failed before a complete response arrived (ECONNREFUSED)");
+  });
+
+  test("a header value with a line feed is refused before anything is sent, and the message repeats no value", async () => {
+    const listener = await httpListener(jsonAnswer(200, "{}"));
+    const { transport, url } = connect(listener, { headers: { "api-key": `${SECRET}\nx-injected: 1` } });
+    const error = await failure(() => transport.request(get(url("/"))));
+    expect((error as TransportError).kind).toBe("network");
+    expect(error.message).toBe("The request failed before a complete response arrived (ERR_INVALID_CHAR)");
+    expect(error.message).not.toContain(SECRET);
+    expect(listener.accepted()).toBe(0);
   });
 });
