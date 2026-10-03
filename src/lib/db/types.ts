@@ -109,14 +109,18 @@ export type MaintenanceType = "vacuum" | "analyze" | "reindex" | "kill" | "optim
 
 /**
  * Every maintenance operation a provider may declare in `maintenanceOperations` and be asked to run through
- * `runMaintenance`: the six of `MaintenanceType`, and etcd's three.
+ * `runMaintenance`: the six of `MaintenanceType`, etcd's three and Milvus's two.
  *
  * `compact`, `defragment` and `disarm` are etcd's history compaction, member defragmentation and alarm disarm
  * (#1089, section 7.2), operations of their own rather than `vacuum` and `optimize` under other words: a reused
  * `vacuum` is audited as VACUUM and read by the monitoring Tables tab's vacuum column, and `optimize` has no global
  * card, so a defragmentation declared as it would have had no control at all.
+ *
+ * `load` and `release` are Milvus's per-collection Load and Release (#424): a load
+ * reads a collection into the query-node memory every client of the cluster shares, and a release frees it, which no
+ * existing member means; the maintenance route audits them as LOAD and RELEASE.
  */
-export type MaintenanceOperation = MaintenanceType | "compact" | "defragment" | "disarm";
+export type MaintenanceOperation = MaintenanceType | "compact" | "defragment" | "disarm" | "load" | "release";
 
 export interface MaintenanceResult {
   success: boolean;
@@ -719,6 +723,10 @@ export interface ProviderCapabilities {
    * read by the provider's own parser. It landed the way Kafka's did: an explicit arm in every reader
    * of either field, or a test pinning that the branch it falls into is right for etcd.
    *
+   * `"milvus"` is the Milvus provider's (vector-family spec 5.7): its editor text is one `POST /v2/vectordb/<route>`
+   * line and one JSON body, the closed console the provider lowers to typed gRPC calls. It landed through one record
+   * in each registry and no arm anywhere else.
+   *
    * `"qdrant"` is the Qdrant provider's (vector-family spec 6.4): its editor text is one `METHOD /path` request
    * line and one JSON body, the closed console the provider re-serialises from its own parse. It landed through
    * one record in each registry and no arm anywhere else.
@@ -728,7 +736,7 @@ export interface ProviderCapabilities {
    * and `DIALECT_GENERATORS` (`src/lib/query-generators.ts`), and every other reader of this field and of
    * `queryLanguage` is held to a closed list by `tests/unit/lib/dialect-reader-allowlist.test.ts`.
    */
-  queryDialect?: "libredb" | "redis" | "kafka" | "etcd" | "qdrant";
+  queryDialect?: "libredb" | "redis" | "kafka" | "etcd" | "milvus" | "qdrant";
   supportsExplain: boolean;
   /**
    * Present iff supportsExplain is true (enforced by provider tests).

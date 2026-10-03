@@ -267,6 +267,13 @@ export async function createDatabaseProvider(
     }
 
     // Vector databases - dynamically imported
+    case "milvus": {
+      // The explicit /index specifier keeps this dynamic import statically analysable. The execution context
+      // rides along, so an execution profile opens it read-only (vector-family spec E8).
+      const { MilvusProvider } = await import("./providers/vector/milvus/index");
+      return new MilvusProvider(connection, options, execution);
+    }
+
     case "qdrant": {
       // The explicit /index specifier keeps this dynamic import statically analysable. The execution context
       // rides along, so an execution profile opens it read-only, as etcd's does.
@@ -285,7 +292,7 @@ export async function createDatabaseProvider(
         // This list is NOT type-checked against the union - a new case above with no
         // entry here is silent - so it is kept in the same order as the cases and
         // tests/isolated/factory.test.ts pins individual names in it by regex.
-        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, db2, mssql, clickhouse, druid, trino, cassandra, elasticsearch, opensearch, mongodb, couchbase, redis, etcd, prometheus, kafka, neo4j, qdrant, libredb`,
+        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, db2, mssql, clickhouse, druid, trino, cassandra, elasticsearch, opensearch, mongodb, couchbase, redis, etcd, prometheus, kafka, neo4j, milvus, qdrant, libredb`,
         connection.type,
       );
   }
