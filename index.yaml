@@ -4,6 +4,84 @@ entries:
   - annotations:
       artifacthub.io/category: database
       artifacthub.io/changes: |
+        - "The application image gains the Db2 LUW provider (#786); no template, value or default moves, and it acts once an application release moves appVersion."
+      artifacthub.io/containsSecurityUpdates: "false"
+      artifacthub.io/images: |
+        - name: libredb-studio
+          image: ghcr.io/libredb/libredb-studio:0.17.0
+          platforms:
+            - linux/amd64
+            - linux/arm64
+      artifacthub.io/license: MIT
+      artifacthub.io/links: |
+        - name: Documentation
+          url: https://github.com/libredb/libredb-studio#readme
+        - name: Container Image
+          url: https://github.com/libredb/libredb-studio/pkgs/container/libredb-studio
+        - name: Source
+          url: https://github.com/libredb/libredb-studio
+      artifacthub.io/prerelease: "false"
+    apiVersion: v2
+    appVersion: 0.17.0
+    created: "2026-10-03T23:13:58.332427727Z"
+    dependencies:
+    - condition: postgresql.enabled
+      name: postgresql
+      repository: https://charts.bitnami.com/bitnami
+      version: 16.x.x
+    description: Web-based SQL IDE for cloud-native teams supporting twenty-one engines
+      - PostgreSQL, MySQL, SQLite, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Redis,
+      Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Apache Trino,
+      Apache Cassandra, libSQL, Prometheus, Apache Kafka, etcd and Neo4j
+    digest: 9b88f31fe842f9b6817e108de525fa12d85100a2b61df7695a7684f5e7e95e42
+    home: https://github.com/libredb/libredb-studio
+    icon: https://raw.githubusercontent.com/libredb/libredb-studio/main/public/logo.svg
+    keywords:
+    - sql
+    - ide
+    - database
+    - postgresql
+    - mysql
+    - mongodb
+    - redis
+    - sqlite
+    - oracle
+    - mssql
+    - couchbase
+    - clickhouse
+    - druid
+    - elasticsearch
+    - opensearch
+    - trino
+    - cassandra
+    - libsql
+    - turso
+    - duckdb
+    - prometheus
+    - promql
+    - kafka
+    - etcd
+    - db2
+    - ibm-db2
+    - neo4j
+    - cypher
+    - victoriametrics
+    - redpanda
+    - web-ide
+    kubeVersion: '>=1.26.0-0'
+    maintainers:
+    - name: cevheri
+      url: https://github.com/cevheri
+    name: libredb-studio
+    sources:
+    - https://github.com/libredb/libredb-studio
+    type: application
+    urls:
+    - https://github.com/Aditya-XR/libredb-studio/releases/download/libredb-studio-0.1.75/libredb-studio-0.1.75.tgz
+    version: 0.1.75
+  - annotations:
+      artifacthub.io/category: database
+      artifacthub.io/changes: |
         - "A connection id sent by the caller no longer selects a cached database provider. Any signed-in account that named another session's connection id was handed that session's already-open provider, with its credentials, and could disconnect it; the cache key is now derived from the stored connection, the server it resolves to and a digest of its credentials. Reported privately as GHSA-3wh2-8x78-jfw4 and scored 8.8"
         - "A seed connection sent inline that claims a seed id is now resolved through the same role filter as a seed id sent on its own, so a role that may not reach a seed connection can no longer reach it by naming it inline"
         - "Schema diff reads a column default as SQL text and compares it by presence, so a default of 0, an empty string or false is no longer dropped as absent; a MariaDB default is read as its value rather than as the expression text, measured against live servers. ClickHouse MATERIALIZED, ALIAS and EPHEMERAL columns are emitted without a DEFAULT clause, which no engine accepts on them"
@@ -4120,4 +4198,4 @@ entries:
     urls:
     - https://github.com/libredb/libredb-studio/releases/download/libredb-studio-0.1.0/libredb-studio-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-21T01:10:03.140702388Z"
+generated: "2026-10-03T23:13:58.325056825Z"
