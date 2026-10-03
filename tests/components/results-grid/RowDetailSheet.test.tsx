@@ -497,4 +497,82 @@ describe("results-grid/RowDetailSheet", () => {
       expect((label.parentElement!.getAttribute("class") ?? "").split(/\s+/)).toContain("flex");
     });
   });
+
+  test("a declared vector field shows its header line over the whole value, and its copy button copies the value alone", () => {
+    const { container } = render(
+      <RowDetailSheet
+        row={{ id: 1, embedding: [1, 0.5, 0] }}
+        fields={["id", "embedding"]}
+        isOpen
+        onClose={mock(() => {})}
+        rowIndex={0}
+        vectorColumns={{ embedding: { kind: "dense", dtype: "float32", dimension: 3 } }}
+      />,
+    );
+    expect(container.textContent).toContain("dense float32, 3 dims\n[1.0,0.5,0.0]");
+    const copyButtons = Array.from(container.querySelectorAll("button")).filter(
+      (b) => !b.textContent?.includes("Copy JSON") && !b.textContent?.includes("Copied"),
+    );
+    fireEvent.click(copyButtons[1]!);
+    expect(String(writeText.mock.calls[0]?.[0])).toBe("[1.0,0.5,0.0]");
+  });
+
+  test("without the declaration the same field is the JSON block it was", () => {
+    const { container } = render(
+      <RowDetailSheet
+        row={{ id: 1, embedding: [1, 0.5, 0] }}
+        fields={["id", "embedding"]}
+        isOpen
+        onClose={mock(() => {})}
+        rowIndex={0}
+      />,
+    );
+    expect(container.textContent).toContain(JSON.stringify([1, 0.5, 0], null, 2));
+  });
+
+  test("a masked vector field shows and copies its mask", () => {
+    const sensitiveColumns = new Map<string, unknown>([["embedding", { type: "custom" }]]);
+    const { container, queryByText } = render(
+      <RowDetailSheet
+        row={{ id: 1, embedding: [1, 0.5, 0] }}
+        fields={["id", "embedding"]}
+        isOpen
+        onClose={mock(() => {})}
+        rowIndex={0}
+        maskingActive
+        sensitiveColumns={sensitiveColumns as never}
+        vectorColumns={{ embedding: { kind: "dense", dtype: "float32", dimension: 3 } }}
+      />,
+    );
+    expect(queryByText("***MASKED***")).not.toBeNull();
+    const copyButtons = Array.from(container.querySelectorAll("button")).filter(
+      (b) => !b.textContent?.includes("Copy JSON") && !b.textContent?.includes("Copied"),
+    );
+    fireEvent.click(copyButtons[1]!);
+    expect(String(writeText.mock.calls[0]?.[0])).toBe("***MASKED***");
+  });
+
+  test("Copy JSON under masking writes an unmasked vector field as its value, not its header line", () => {
+    const sensitiveColumns = new Map<string, unknown>([["email", { type: "email" }]]);
+    const { queryByText } = render(
+      <RowDetailSheet
+        row={{ id: 1, email: "alice@example.com", embedding: [1, 0.5, 0] }}
+        fields={["id", "email", "embedding"]}
+        isOpen
+        onClose={mock(() => {})}
+        rowIndex={0}
+        maskingActive
+        sensitiveColumns={sensitiveColumns as never}
+        vectorColumns={{ embedding: { kind: "dense", dtype: "float32", dimension: 3 } }}
+      />,
+    );
+
+    fireEvent.click(queryByText("Copy JSON")!);
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(writeText.mock.calls[0]?.[0]))).toEqual({
+      id: "1",
+      email: "***MASKED***",
+      embedding: "[1.0,0.5,0.0]",
+    });
+  });
 });

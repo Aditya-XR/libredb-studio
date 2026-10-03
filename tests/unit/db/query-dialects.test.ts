@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { declaresDialect, dialectSpec, QUERY_DIALECTS, registeredDialect } from "@/lib/db/query-dialects";
+import {
+  declaresDialect,
+  type DialectSpec,
+  dialectSpec,
+  QUERY_DIALECTS,
+  registeredDialect,
+} from "@/lib/db/query-dialects";
 import type { ProviderCapabilities } from "@/lib/db/types";
 
 function makeCaps(overrides: Partial<ProviderCapabilities> = {}): ProviderCapabilities {
@@ -50,6 +56,23 @@ describe("QUERY_DIALECTS", () => {
   test("freezes every record too, so no reader can turn one dialect's gate on at run time", () => {
     for (const [dialect, spec] of Object.entries(QUERY_DIALECTS)) {
       expect(Object.isFrozen(spec), `the ${dialect} record is mutable`).toBe(true);
+    }
+  });
+
+  test("a record may decline the SQL export formats, and none does, so every shipped engine keeps both", () => {
+    // `bun run typecheck` is the assertion for the field: this literal compiles only while `DialectSpec` declares
+    // `offersSqlExport`, and bun strips types, so no runtime expect on it could fail. What a declining record does
+    // to the menus is pinned by the export gate's own tests.
+    const declining: DialectSpec = {
+      tabType: "kafka",
+      offersColumnProfiling: false,
+      offersCodeGeneration: false,
+      offersCountQuery: false,
+      offersSqlExport: false,
+    };
+    void declining;
+    for (const [dialect, spec] of Object.entries(QUERY_DIALECTS)) {
+      expect(Object.hasOwn(spec, "offersSqlExport"), `the ${dialect} record declares offersSqlExport`).toBe(false);
     }
   });
 });

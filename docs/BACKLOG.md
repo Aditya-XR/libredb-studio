@@ -31,7 +31,7 @@ None of it is a GitHub issue.
 - [Drivers and connections](#drivers-and-connections) — D1-D151, U17 · 95
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X22, U2-U72 · 62
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X23, U2-U73 · 64
 - [Dependencies](#dependencies) — P1-P8 · 8
 - [Documentation](#documentation) — DOC3-DOC9 · 6
 - [Release pipeline](#release-pipeline) — REL1-REL7 · 7
@@ -2532,6 +2532,15 @@ Measured 2026-10-03: `src/app/api/db/query/route.ts` holds no reference to `sign
 
 **Done when:** a request aborted mid-run reaches the provider's `cancelQuery` for the run it started, with a route test that aborts the request and asserts exactly one cancel for its `queryId`.
 
+### X23. The multi-statement route drops a result's vector columns
+
+`POST /api/db/multi-query` builds each statement's result and the main result through `carriedChannels` in `src/app/api/db/multi-query/route.ts`, which carries `warnings` and `columnTypes` only, so a `vectorColumns` declaration a provider returns never reaches the grid on that route.
+No shipped engine declares vector columns yet, and the two that will, Milvus and Qdrant, declare a console text bound, which the route refuses with 400 before it runs anything, so neither meets the gap.
+A later engine that declares vector columns and accepts multi-statement text would show its vectors there as plain JSON, and Copy Cell would copy the JSON text rather than the engine's encoding.
+Measured 2026-10-03: `vectorColumns` appears neither in `StatementResult` nor in `carriedChannels`.
+
+**Done when:** the route carries `vectorColumns` on each statement's result and on the main result, with a route test that a declared column reaches both, or a type that declares vector columns is refused on the route by name.
+
 ---
 
 `U24` to `U31` came out of the #789 design that put columns back under an object row. Each was named
@@ -3255,6 +3264,11 @@ Not fixed there: the menu serves every engine and the etcd PR adds no capability
 
 **Done when:** the provider declares whether SQL INSERT and DDL apply to its results, the two entries show only when it does, and a test renders the menu for an engine that declares neither and for one that declares both.
 
+**Partly done:** a query dialect's record now says whether the two SQL formats apply (`offersSqlExport` on `DialectSpec` in `src/lib/db/query-dialects.ts`, absent meaning they do), and `BottomPanel` leaves both out of the Export and the Copy items where it says they do not.
+`tests/components/studio/bottom-panel-export-formats.test.tsx` renders the menu for a record that declines them and for PostgreSQL, MongoDB, Redis, LibreDB, Kafka, etcd and Prometheus, which keep them.
+No shipped dialect declines them yet; each vector dialect's record declines them when its provider lands.
+Still open: an engine with no dialect record, and every record that leaves the field absent, etcd's included, still offers both.
+
 ### U70. Admin Overview's Fleet Status prints "timeout" for any endpoint that errored
 
 `OverviewTab` in `src/components/admin/tabs/OverviewTab.tsx` prints "timeout" for a fleet row whose `item.status === "error"` and the latency otherwise (near line 775), so a refused credential, an unreachable host and a real timeout all read "timeout".
@@ -3285,6 +3299,18 @@ The tag was added so that a renderer can find graph values in any `QueryResult` 
 Found 2026-10-03 while designing the Neo4j provider (decision N7).
 
 **Done when:** a result holding graph values offers a graph tab beside the grid that draws its nodes and relationships, bounded by the result's own rows, and a component test renders a path result in it.
+
+### U73. The object tree hides the parenthesised part of every column type
+
+`TreeRow` in `src/components/object-tree/TreeRow.tsx` draws a column's type as `row.column.type.split("(")[0]` and keeps the whole type only in the row's `title` tooltip and a screen-reader span, so whatever an engine writes in parentheses after a type name never reaches the screen.
+For a SQL column that is a length, a precision or a scale: `NUMERIC(10,2)` shows `NUMERIC`, which `tests/components/object-tree/column-rows.test.tsx` pins as the drawing.
+For a vector field it is the dimension, the one fact a reader of a vector column needs most, so a field whose type text carries its dimension in parentheses shows the type name alone.
+`origin/main` draws every engine's types this way.
+
+Found while designing the vector results grid (#424).
+Not fixed there: the badge is shared by every engine, and changing what it draws changes every engine's tree.
+
+**Done when:** the tree shows a column type's parenthesised part, or a short form that keeps a vector's dimension, and a test renders `NUMERIC(10,2)` and a vector type with a dimension and asserts what each badge shows.
 
 ## Dependencies
 
