@@ -23,7 +23,12 @@ export async function POST(request: Request) {
   }
 
   try {
-    const body = await request.json();
+    // A body that is not JSON, or JSON that is not an object (`null`, an array, a number), is the caller's mistake and
+    // answers 400 in a fixed sentence, rather than reaching the destructuring below as a raw runtime error.
+    const body = await request.json().catch(() => null);
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    }
     const { type, target, container } = body;
 
     const connection = await resolveConnection(body, guard.session);
@@ -119,6 +124,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error }, { status: 400 });
     }
 
+    // The engine principal this connection acts as, for a provider that can name one (spec 3.11): a user name, never
+    // any part of a secret, so it is recorded beside the Studio user on every row below.
+    const engineUser = provider.engineUser?.();
+
     // The fields every row of this run shares, built once so the completed row and the thrown row
     // cannot disagree about which operation was run against what.
     const auditFields = {
@@ -133,6 +142,8 @@ export async function POST(request: Request) {
       container: requestedContainer,
       connectionName: connection.name || connection.database || "unknown",
       user: guard.session.username || "admin",
+      // Omitted, not undefined, for a provider that names no engine principal, so its rows keep their shape.
+      ...(engineUser === undefined ? {} : { engineUser }),
     } as const;
 
     const startTime = Date.now();

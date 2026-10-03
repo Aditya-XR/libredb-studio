@@ -66,6 +66,7 @@ import type { DetailedObject } from "@/lib/db/detailed-object";
 import { KafkaProvider } from "@/lib/db/providers/stream/kafka/index";
 import { EtcdProvider } from "@/lib/db/providers/keyvalue/etcd/index";
 import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
+import { SYNTHETIC_ENTITY_CAPABILITIES } from "../../fixtures/maintenance-entity-operations";
 
 // Capability fixtures are partial on purpose: TableItem reads a handful of fields, and
 // spelling out every ProviderCapabilities key in each case would bury them (#427).
@@ -1207,5 +1208,142 @@ describe("TableItem", () => {
       // The control: the same row once the declaration has arrived.
       expect(offered(menuOf(largeTable, sqlCaps))).toEqual(["Profile Table", "Generate Code", "Generate Test Data"]);
     });
+  });
+});
+
+describe("declared per-row operations in the mobile row menu (spec 3.11)", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  const declaredCaps = caps({ queryLanguage: "sql", objectKinds: [tableKind], ...SYNTHETIC_ENTITY_CAPABILITIES });
+  const MAINTENANCE_ITEMS = ["Analyze Table", "Release Object", "Load Object"];
+  const maintenanceTexts = (dropdown: HTMLElement) =>
+    Array.from(dropdown.querySelectorAll('[role="menuitem"]'))
+      .map((item) => item.textContent ?? "")
+      .filter((text) => MAINTENANCE_ITEMS.includes(text));
+
+  test("offers each declared operation after the provider's own, in declaration order", () => {
+    const { getByTestId } = render(
+      <TableItem
+        table={qualifiedTable}
+        isExpanded={false}
+        onToggle={mock(() => {})}
+        isAdmin
+        capabilities={declaredCaps}
+        labels={labelsFor({})}
+        onOpenMaintenance={mock(() => {})}
+      />,
+    );
+
+    expect(maintenanceTexts(getByTestId("dropdown"))).toEqual(MAINTENANCE_ITEMS);
+  });
+
+  test('a declared item opens maintenance on "tables" with the row\'s ADDRESS', () => {
+    const onOpenMaintenance = mock((tab?: "global" | "tables" | "sessions", path?: readonly string[]) => {
+      void tab;
+      void path;
+    });
+    const { getByTestId } = render(
+      <TableItem
+        table={qualifiedTable}
+        isExpanded={false}
+        onToggle={mock(() => {})}
+        isAdmin
+        capabilities={declaredCaps}
+        onOpenMaintenance={onOpenMaintenance}
+      />,
+    );
+
+    fireEvent.click(within(getByTestId("dropdown")).getByText("Load Object"));
+    expect(onOpenMaintenance).toHaveBeenCalledTimes(1);
+    expect(onOpenMaintenance.mock.calls[0][0]).toBe("tables");
+    expect(onOpenMaintenance.mock.calls[0][1]).toEqual(["app", "users"]);
+  });
+
+  test("a declared operation that names its kinds is offered on those kinds only, as the desktop tree does", () => {
+    const kindedCaps = caps({
+      queryLanguage: "sql",
+      objectKinds: [tableKind, viewKind],
+      ...SYNTHETIC_ENTITY_CAPABILITIES,
+      maintenanceOperationSpecs: {
+        ...SYNTHETIC_ENTITY_CAPABILITIES.maintenanceOperationSpecs,
+        compact: { ...SYNTHETIC_ENTITY_CAPABILITIES.maintenanceOperationSpecs.compact, kinds: ["table"] },
+      },
+    });
+    const table = render(
+      <TableItem
+        table={qualifiedTable}
+        isExpanded={false}
+        onToggle={mock(() => {})}
+        isAdmin
+        capabilities={kindedCaps}
+        labels={labelsFor({})}
+        onOpenMaintenance={mock(() => {})}
+      />,
+    );
+    expect(maintenanceTexts(table.getByTestId("dropdown"))).toEqual(MAINTENANCE_ITEMS);
+    cleanup();
+
+    const view = render(
+      <TableItem
+        table={viewObject}
+        isExpanded={false}
+        onToggle={mock(() => {})}
+        isAdmin
+        capabilities={kindedCaps}
+        labels={labelsFor({})}
+        onOpenMaintenance={mock(() => {})}
+      />,
+    );
+    expect(maintenanceTexts(view.getByTestId("dropdown"))).toEqual(["Analyze Table", "Release Object"]);
+  });
+
+  test("a declared operation alone still draws the maintenance group", () => {
+    const { getByTestId } = render(
+      <TableItem
+        table={qualifiedTable}
+        isExpanded={false}
+        onToggle={mock(() => {})}
+        isAdmin
+        capabilities={caps({
+          queryLanguage: "sql",
+          objectKinds: [tableKind],
+          supportsMaintenance: true,
+          maintenanceOperations: ["disarm"],
+          maintenanceOperationSpecs: { disarm: SYNTHETIC_ENTITY_CAPABILITIES.maintenanceOperationSpecs.disarm },
+        })}
+        onOpenMaintenance={mock(() => {})}
+      />,
+    );
+
+    expect(maintenanceTexts(getByTestId("dropdown"))).toEqual(["Release Object"]);
+  });
+
+  test("a non-admin, and a derived grouping, are offered none of them", () => {
+    const { getByTestId, unmount } = render(
+      <TableItem
+        table={qualifiedTable}
+        isExpanded={false}
+        onToggle={mock(() => {})}
+        isAdmin={false}
+        capabilities={declaredCaps}
+        onOpenMaintenance={mock(() => {})}
+      />,
+    );
+    expect(maintenanceTexts(getByTestId("dropdown"))).toEqual([]);
+    unmount();
+
+    const grouped = render(
+      <TableItem
+        table={qualifiedTable}
+        isExpanded={false}
+        onToggle={mock(() => {})}
+        isAdmin
+        capabilities={caps({ ...declaredCaps, tablesAreDerivedGroupings: true })}
+        onOpenMaintenance={mock(() => {})}
+      />,
+    );
+    expect(maintenanceTexts(grouped.getByTestId("dropdown"))).toEqual([]);
   });
 });

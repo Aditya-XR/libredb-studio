@@ -218,6 +218,25 @@ describe("POST /api/db/maintenance", () => {
     }));
   });
 
+  test.each<[string, string]>([
+    ["null", "null"],
+    ["an array", "[]"],
+    ["a number", "7"],
+    ["text that is not JSON", "{"],
+  ])("a body that is %s answers 400 with a fixed sentence and opens no provider", async (_label, raw) => {
+    const res = await POST(
+      new Request("http://localhost:3000/api/db/maintenance", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: raw,
+      }) as never,
+    );
+
+    expect(res.status).toBe(400);
+    expect(await parseResponseJSON<{ error: string }>(res)).toEqual({ error: "Invalid request body" });
+    expect(mockGetOrCreateProvider).not.toHaveBeenCalled();
+  });
+
   test("admin with valid params returns maintenance result", async () => {
     const req = createMockRequest("/api/db/maintenance", {
       method: "POST",
@@ -869,4 +888,85 @@ describe("POST /api/db/maintenance", () => {
       expect(writer.client.calls.slice(writer.connectCalls).map((call) => call.method)).toContain(rpc);
     },
   );
+
+  // Spec 3.11: every row this route writes names the engine principal, for a provider that reports one. The shared
+  // mock provider implements no `engineUser`, so each test adds it and takes it away again.
+  const reportingEngineUser = (name: string | undefined): (() => void) => {
+    const provider = mockProvider as { engineUser?: () => string | undefined };
+    provider.engineUser = mock(() => name);
+    return () => {
+      delete provider.engineUser;
+    };
+  };
+
+  test.each<[string, () => void, "success" | "failure"]>([
+    ["a completed run", () => {}, "success"],
+    [
+      "a run the engine refused",
+      () => {
+        (mockProvider.runMaintenance as ReturnType<typeof mock>).mockImplementation(async () => ({
+          success: false,
+          executionTime: 1,
+          message: "refused",
+        }));
+      },
+      "failure",
+    ],
+    [
+      "a run that throws",
+      () => {
+        (mockProvider.runMaintenance as ReturnType<typeof mock>).mockImplementation(async () => {
+          throw new DatabaseError("Internal maintenance failure", "postgres", "DATABASE_ERROR");
+        });
+      },
+      "failure",
+    ],
+  ])("%s writes the engine principal on its row", async (_label, arrange, result) => {
+    const restore = reportingEngineUser("app_maintainer");
+    try {
+      arrange();
+      await POST(
+        createMockRequest("/api/db/maintenance", {
+          method: "POST",
+          body: { type: "vacuum", target: "orders", container: "app", connection: validConnection },
+        }) as never,
+      );
+
+      expect(mockAuditPush).toHaveBeenCalledTimes(1);
+      const event = mockAuditPush.mock.calls[0]![0] as Record<string, unknown>;
+      expect(event.engineUser).toBe("app_maintainer");
+      expect(event.result).toBe(result);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a provider that does not implement engineUser writes a row with no such key", async () => {
+    await POST(
+      createMockRequest("/api/db/maintenance", {
+        method: "POST",
+        body: { type: "vacuum", target: "orders", connection: validConnection },
+      }) as never,
+    );
+
+    expect(mockAuditPush).toHaveBeenCalledTimes(1);
+    expect(Object.hasOwn(mockAuditPush.mock.calls[0]![0] as object, "engineUser")).toBe(false);
+  });
+
+  test("a provider whose engineUser names no one writes a row with no such key", async () => {
+    const restore = reportingEngineUser(undefined);
+    try {
+      await POST(
+        createMockRequest("/api/db/maintenance", {
+          method: "POST",
+          body: { type: "vacuum", target: "orders", connection: validConnection },
+        }) as never,
+      );
+
+      expect(mockAuditPush).toHaveBeenCalledTimes(1);
+      expect(Object.hasOwn(mockAuditPush.mock.calls[0]![0] as object, "engineUser")).toBe(false);
+    } finally {
+      restore();
+    }
+  });
 });
