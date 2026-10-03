@@ -27,7 +27,11 @@
  * A measured limit, not worked around: the first request on a new keep-alive TLS socket costs about 40 ms more than on
  * a socket that is closed after one request, with no cause found.
  */
+import { Agent as HttpAgent, type AgentOptions, request as httpRequest } from "node:http";
+import { Agent as HttpsAgent, type AgentOptions as HttpsAgentOptions, request as httpsRequest } from "node:https";
+import { urlToHttpOptions } from "node:url";
 import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
+import { endpointUrl, type HttpOrigin } from "@/lib/db/http/endpoint";
 import type { SSLConfig, SSLMode } from "@/lib/types";
 
 /** The SSL / TLS panel as node:https takes it. */
@@ -40,6 +44,36 @@ export interface NodeTlsMaterial {
   readonly identity: string;
 }
 
+export interface NodeTransportOptions {
+  /** From httpOrigin(): host and port already validated. */
+  readonly origin: HttpOrigin;
+  /** null for plaintext. */
+  readonly tls: NodeTlsMaterial | null;
+  /** The provider's in-flight bound. */
+  readonly maxSockets: number;
+  /** Set once per connection, the credential header among them. */
+  readonly headers: Readonly<Record<string, string>>;
+}
+
+export interface NodeRequest {
+  readonly method: "GET" | "POST";
+  /** From endpointUrl(); a URL whose origin is not the connection's is refused. */
+  readonly url: string;
+  /** UTF-8 JSON text, already serialised. */
+  readonly body?: string;
+  /** Carries the caller's cancel and the deadline. */
+  readonly signal: AbortSignal;
+  readonly maxResponseBytes: number;
+}
+
+export interface NodeResponse {
+  readonly status: number;
+  readonly contentType: string | null;
+  /** The Retry-After header as received, cut to 64 characters; null when absent. */
+  readonly retryAfter: string | null;
+  readonly text: string;
+}
+
 /** A request that did not complete. Its message never carries a header, the key, a URL query string or a body. */
 export class TransportError extends ConnectionError {
   constructor(
@@ -50,6 +84,11 @@ export class TransportError extends ConnectionError {
     this.name = "TransportError";
     Object.setPrototypeOf(this, TransportError.prototype);
   }
+}
+
+export interface NodeTransport {
+  request(request: NodeRequest): Promise<NodeResponse>;
+  close(): void;
 }
 
 /**
@@ -110,5 +149,121 @@ export function nodeTlsMaterial(ssl: SSLConfig | null | undefined, identity: str
     ...(cert === undefined ? {} : { cert }),
     ...(key === undefined ? {} : { key }),
     identity: unbracketed(identity),
+  };
+}
+
+/** The longest Retry-After value kept: an HTTP date is 29 characters, and a longer value is no wait a client can read. */
+const MAX_RETRY_AFTER_LENGTH = 64;
+
+const FOREIGN_URL = "Invalid host: the request URL would not address the configured host, so it was not sent";
+const INVALID_MAX_SOCKETS = "Invalid maxSockets: expected a positive integer";
+const INVALID_MAX_RESPONSE_BYTES = "Invalid maxResponseBytes: expected a positive integer";
+const SCHEME_MISMATCH = "Invalid TLS settings: an https origin needs TLS material, and an http origin takes none";
+const CLOSED = "The connection was closed, so the request did not complete";
+const NETWORK_FAILURE = "The request failed before a complete response arrived";
+
+function isPositiveInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 1;
+}
+
+function retryAfterOf(value: string | undefined): string | null {
+  return value === undefined ? null : value.slice(0, MAX_RETRY_AFTER_LENGTH);
+}
+
+/** Header names in lower case, so the transport's own headers below replace a caller's whatever its spelling. */
+function lowerCased(headers: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
+}
+
+function requestHeaders(
+  connection: Readonly<Record<string, string>>,
+  body: string | undefined,
+): Record<string, string> {
+  return {
+    ...connection,
+    "accept-encoding": "identity",
+    ...(body === undefined
+      ? {}
+      : { "content-type": "application/json", "content-length": String(Buffer.byteLength(body, "utf8")) }),
+  };
+}
+
+function parsedUrl(text: string): URL | null {
+  try {
+    return new URL(text);
+  } catch {
+    return null;
+  }
+}
+
+/** The TLS options of node:https under its own names, set once on the connection's Agent. */
+function tlsAgentOptions(tls: NodeTlsMaterial): HttpsAgentOptions {
+  return {
+    rejectUnauthorized: tls.rejectUnauthorized,
+    ...(tls.ca === undefined ? {} : { ca: tls.ca }),
+    ...(tls.cert === undefined ? {} : { cert: tls.cert }),
+    ...(tls.key === undefined ? {} : { key: tls.key }),
+  };
+}
+
+/**
+ * One connection's transport: its own keep-alive Agent, never the global one. The constructor opens nothing; the first
+ * request opens the first socket.
+ */
+export function createNodeTransport(options: NodeTransportOptions): NodeTransport {
+  const { origin, tls, maxSockets } = options;
+  if (!isPositiveInteger(maxSockets)) throw new DatabaseConfigError(INVALID_MAX_SOCKETS);
+  if ((origin.scheme === "https") !== (tls !== null)) throw new DatabaseConfigError(SCHEME_MISMATCH);
+  const connectionOrigin = new URL(endpointUrl(origin, "/")).origin;
+  const connectionHeaders = lowerCased(options.headers);
+  const shared: AgentOptions = { keepAlive: true, maxSockets };
+  const agent = tls === null ? new HttpAgent(shared) : new HttpsAgent({ ...shared, ...tlsAgentOptions(tls) });
+  const send = tls === null ? httpRequest : httpsRequest;
+  let closed = false;
+
+  const exchange = (request: NodeRequest, target: URL): Promise<NodeResponse> =>
+    new Promise<NodeResponse>((resolve, reject) => {
+      const { hostname, port, path } = urlToHttpOptions(target);
+      const outgoing = send(
+        {
+          hostname,
+          port,
+          path,
+          method: request.method,
+          agent,
+          headers: requestHeaders(connectionHeaders, request.body),
+        },
+        (answer) => {
+          const chunks: Buffer[] = [];
+          answer.on("data", (chunk: Buffer) => chunks.push(chunk));
+          answer.on("end", () =>
+            resolve({
+              status: answer.statusCode ?? 0,
+              contentType: answer.headers["content-type"] ?? null,
+              retryAfter: retryAfterOf(answer.headers["retry-after"]),
+              text: Buffer.concat(chunks).toString("utf8"),
+            }),
+          );
+        },
+      );
+      outgoing.on("error", () => reject(new TransportError("network", NETWORK_FAILURE)));
+      outgoing.end(request.body);
+    });
+
+  return {
+    async request(request) {
+      if (closed) throw new TransportError("aborted", CLOSED);
+      if (!isPositiveInteger(request.maxResponseBytes)) throw new DatabaseConfigError(INVALID_MAX_RESPONSE_BYTES);
+      const target = parsedUrl(request.url);
+      // A URL carrying userinfo would send it as an Authorization header, so it is refused like another origin.
+      if (target === null || target.origin !== connectionOrigin || target.username !== "" || target.password !== "") {
+        throw new DatabaseConfigError(FOREIGN_URL);
+      }
+      return exchange(request, target);
+    },
+    close() {
+      closed = true;
+      agent.destroy();
+    },
   };
 }
