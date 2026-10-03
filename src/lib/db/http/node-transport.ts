@@ -39,6 +39,7 @@ import { isIP } from "node:net";
 import { checkServerIdentity, type PeerCertificate } from "node:tls";
 import { urlToHttpOptions } from "node:url";
 import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
+import { guardedNodeOptions } from "@/lib/db/http/egress-policy";
 import { endpointUrl, type HttpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
 import type { SSLConfig, SSLMode } from "@/lib/types";
 
@@ -238,6 +239,8 @@ function abortFailure(signal: AbortSignal): TransportError {
 
 /** Whatever the runtime raised, as a failure whose message holds a code at most. */
 function failureFrom(error: unknown, signal: AbortSignal): Error {
+  // The egress guard's refusal from the Agent's lookup: already worded, and naming no address.
+  if (error instanceof DatabaseConfigError) return error;
   // Whatever the runtime threw once the signal fired, the signal says which kind of stop it was.
   if (signal.aborted) return abortFailure(signal);
   const code = errorCode(error);
@@ -326,9 +329,13 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
   const { origin, tls, maxSockets } = options;
   if (!isPositiveInteger(maxSockets)) throw new DatabaseConfigError(INVALID_MAX_SOCKETS);
   if ((origin.scheme === "https") !== (tls !== null)) throw new DatabaseConfigError(SCHEME_MISMATCH);
+  // With DB_HTTP_BLOCK_PRIVATE_HOSTS on, this refuses a blocked IP literal now, before any socket, because a literal
+  // never reaches a lookup, and hands back the guard's lookup for this connection's own Agent. Its `agent: false` is not
+  // taken: the Agent below belongs to this connection alone and never carries an unguarded request (R44 QM1).
+  const { lookup } = guardedNodeOptions(origin.host);
   const connectionOrigin = new URL(endpointUrl(origin, "/")).origin;
   const connectionHeaders = lowerCased(options.headers);
-  const shared: AgentOptions = { keepAlive: true, maxSockets };
+  const shared: AgentOptions = { keepAlive: true, maxSockets, ...(lookup === undefined ? {} : { lookup }) };
   const agent = tls === null ? new HttpAgent(shared) : new HttpsAgent({ ...shared, ...tlsAgentOptions(tls) });
   const send = tls === null ? httpRequest : httpsRequest;
   /**
