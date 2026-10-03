@@ -1,6 +1,9 @@
 import type { ProviderCapabilities } from "@/lib/db/types";
 import type { QueryTab } from "@/lib/types";
 
+/** The Monaco language ids a query tab renders in, `QueryEditor`'s `language` prop. */
+export type EditorLanguage = "sql" | "json" | "libredb" | "redis" | "promql" | "etcd";
+
 /**
  * The tab type a connection's tabs take.
  *
@@ -37,9 +40,7 @@ export function resolveTabType(capabilities?: ProviderCapabilities | null): Quer
 }
 
 /** The Monaco language id a tab type renders in (#427, #1085, #1088, #1089). */
-export function editorLanguageForTabType(
-  type: QueryTab["type"],
-): "sql" | "json" | "libredb" | "redis" | "promql" | "etcd" {
+export function editorLanguageForTabType(type: QueryTab["type"]): EditorLanguage {
   if (type === "libredb") return "libredb";
   if (type === "redis") return "redis";
   if (type === "kafka") return "json";
