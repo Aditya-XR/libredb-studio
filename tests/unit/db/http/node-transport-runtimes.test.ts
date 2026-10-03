@@ -1,7 +1,9 @@
 /**
  * The transport's proxy, redirect, cap, encoding, Retry-After, TLS, tunnel, pooling and guard checks on the runtimes
- * production runs (vector-family spec 3.7 and 8.2): in a Bun child and in a Node child, the `node` on PATH, so CI's
- * Node 24 runs them and a local Node 26 runs them with PATH=$HOME/.nvm/versions/node/v26.7.0/bin:$PATH.
+ * production runs (vector-family spec 3.7 and 8.2): in a Bun child and in one Node child per binary that
+ * NODE_TRANSPORT_NODES lists, split on the path delimiter, or else in the `node` on PATH, so CI's Node 24 runs them and
+ * NODE_TRANSPORT_NODES=$HOME/.nvm/versions/node/v24.14.0/bin/node:$HOME/.nvm/versions/node/v26.7.0/bin/node runs both
+ * Node lines in one pass. Each child must report the version its binary prints, so a listed Node never passes as another.
  *
  * Both children run one bundle that Bun.build({ target: "node" }) makes of node-transport.ts and endpoint.ts around the
  * text of `runCases`, as tests/unit/db/etcd/tls-handshake.test.ts runs its adapter, against listeners this file starts.
@@ -15,7 +17,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type * as http from "node:http";
 import type * as https from "node:https";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { endpointUrl, httpOrigin } from "@/lib/db/http/endpoint";
 import type { createNodeTransport, nodeTlsMaterial } from "@/lib/db/http/node-transport";
 import {
@@ -571,24 +573,47 @@ function expectCase(report: Report | undefined, name: string): void {
   expect(outcome?.message).not.toContain("secret");
 }
 
-const RUNTIMES = [
-  ["a Bun child", () => process.execPath],
-  ["a Node child, the node on PATH", () => Bun.which("node")],
-] as const;
+/** The runtime string a child of `binary` must report: Bun's own version, or what the Node binary prints. */
+function expectedRuntime(binary: string): string {
+  if (binary === process.execPath) return `bun ${Bun.version}`;
+  const printed = Bun.spawnSync([binary, "--version"], { stdout: "pipe", stderr: "pipe" });
+  if (printed.exitCode !== 0) throw new Error(`${binary} --version exited ${printed.exitCode}`);
+  return `node ${printed.stdout.toString().trim()}`;
+}
+
+/** The Node binaries NODE_TRANSPORT_NODES lists, or the node on PATH; an empty list or no node fails by name. */
+function nodeBinaries(): string[] {
+  const listed = process.env.NODE_TRANSPORT_NODES;
+  if (listed !== undefined) {
+    const binaries = listed.split(delimiter).filter((entry) => entry !== "");
+    if (binaries.length === 0) throw new Error("NODE_TRANSPORT_NODES is set and lists no Node binary");
+    return binaries;
+  }
+  const onPath = Bun.which("node");
+  if (onPath === null) {
+    throw new Error(
+      "No node on PATH: this file runs the cases under Node, the production runtime; install Node 24 or later",
+    );
+  }
+  return [onPath];
+}
+
+const RUNTIMES: ReadonlyArray<readonly [string, string]> = [
+  ["a Bun child", process.execPath],
+  ...nodeBinaries().map((binary) => [`a Node child, ${binary}`, binary] as const),
+];
 
 for (const [label, binary] of RUNTIMES) {
   describe(`in ${label}`, () => {
     let run: ChildRun | undefined;
     beforeAll(async () => {
-      const resolved = binary();
-      if (resolved === null) {
-        throw new Error(
-          "No node on PATH: this block runs the cases under Node, the production runtime; install Node 24 or later",
-        );
-      }
-      run = await runChild(resolved);
+      run = await runChild(binary);
       console.log(`node-transport runtimes: ${label} ran as ${run.report.runtime}`);
     }, 120_000);
+
+    test("the child ran on the runtime it was asked for", () => {
+      expect(run?.report.runtime).toBe(expectedRuntime(binary));
+    });
 
     test.each(Object.keys(EXPECTED))("%s", (name) => expectCase(run?.report, name));
 
