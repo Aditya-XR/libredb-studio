@@ -35,6 +35,8 @@ import {
   request as httpRequest,
 } from "node:http";
 import { Agent as HttpsAgent, type AgentOptions as HttpsAgentOptions, request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
+import { checkServerIdentity, type PeerCertificate } from "node:tls";
 import { urlToHttpOptions } from "node:url";
 import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
 import { endpointUrl, type HttpOrigin, rejectRedirect } from "@/lib/db/http/endpoint";
@@ -171,6 +173,51 @@ const NETWORK_FAILURE = "The request failed before a complete response arrived";
 /** A runtime error code named in a failure; any other value is left out of the message. */
 const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
+/**
+ * The names both runtimes give OpenSSL's certificate verification results, X509_V_ERR_* without the prefix, the list
+ * the Prometheus transport measured on Node and on Bun 1.4.2. Written again here because a shared module imports no
+ * provider; D37 names this file as the copy later providers take.
+ */
+const CERTIFICATE_VERIFICATION_CODES: ReadonlySet<string> = new Set([
+  "CERT_CHAIN_TOO_LONG",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "CERT_REJECTED",
+  "CERT_REVOKED",
+  "CERT_SIGNATURE_FAILURE",
+  "CERT_UNTRUSTED",
+  "CRL_HAS_EXPIRED",
+  "CRL_NOT_YET_VALID",
+  "CRL_SIGNATURE_FAILURE",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "ERROR_IN_CERT_NOT_AFTER_FIELD",
+  "ERROR_IN_CERT_NOT_BEFORE_FIELD",
+  "ERROR_IN_CRL_LAST_UPDATE_FIELD",
+  "ERROR_IN_CRL_NEXT_UPDATE_FIELD",
+  "HOSTNAME_MISMATCH",
+  "INVALID_CA",
+  "INVALID_PURPOSE",
+  "PATH_LENGTH_EXCEEDED",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY",
+  "UNABLE_TO_DECRYPT_CERT_SIGNATURE",
+  "UNABLE_TO_DECRYPT_CRL_SIGNATURE",
+  "UNABLE_TO_GET_CRL",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+]);
+
+/**
+ * Handshake, identity and key-material failures: OpenSSL's reasons (ERR_SSL_), Node's TLS layer (ERR_TLS_), OpenSSL 3's
+ * decoders (ERR_OSSL_), and BoringSSL on Bun (ERR_BORINGSSL).
+ */
+const TLS_CODE_PREFIXES: readonly string[] = ["ERR_SSL_", "ERR_TLS_", "ERR_OSSL_", "ERR_BORINGSSL"];
+
+function isTlsCode(code: string): boolean {
+  return CERTIFICATE_VERIFICATION_CODES.has(code) || TLS_CODE_PREFIXES.some((prefix) => code.startsWith(prefix));
+}
+
 function ownCode(value: unknown): string | undefined {
   const code = typeof value === "object" && value !== null ? (value as { code?: unknown }).code : undefined;
   return typeof code === "string" && ERROR_CODE.test(code) ? code : undefined;
@@ -195,6 +242,8 @@ function failureFrom(error: unknown, signal: AbortSignal): Error {
   if (signal.aborted) return abortFailure(signal);
   const code = errorCode(error);
   if (code === undefined) return new TransportError("network", NETWORK_FAILURE);
+  // A TLS failure stays a failure: nothing is retried over plain HTTP or with weaker verification.
+  if (isTlsCode(code)) return new TransportError("tls", `The TLS connection failed (${code})`);
   return new TransportError("network", `${NETWORK_FAILURE} (${code})`);
 }
 
@@ -251,13 +300,21 @@ function parsedUrl(text: string): URL | null {
   }
 }
 
-/** The TLS options of node:https under its own names, set once on the connection's Agent. */
+/**
+ * The TLS options of node:https under its own names, set once on the connection's Agent. The server name is the
+ * identity when it is a DNS name; for an IP literal none is sent. Every certificate is checked against the identity,
+ * which through an SSH tunnel is the far end, never the local forward the socket dials; for an IP identity Node's own
+ * check reads the certificate's IP SAN.
+ */
 function tlsAgentOptions(tls: NodeTlsMaterial): HttpsAgentOptions {
+  const { identity } = tls;
   return {
     rejectUnauthorized: tls.rejectUnauthorized,
     ...(tls.ca === undefined ? {} : { ca: tls.ca }),
     ...(tls.cert === undefined ? {} : { cert: tls.cert }),
     ...(tls.key === undefined ? {} : { key: tls.key }),
+    ...(isIP(identity) === 0 ? { servername: identity } : {}),
+    checkServerIdentity: (_dialled: string, certificate: PeerCertificate) => checkServerIdentity(identity, certificate),
   };
 }
 
