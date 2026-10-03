@@ -15,6 +15,7 @@ import { endpointUrl, httpOrigin } from "@/lib/db/http/endpoint";
 import {
   createNodeTransport,
   type NodeRequest,
+  type NodeResponse,
   type NodeTransport,
   type NodeTransportOptions,
   TransportError,
@@ -85,7 +86,19 @@ describe("a request and its answer", () => {
   test("a GET returns status, content type, Retry-After and text, with the connection's headers and accept-encoding identity", async () => {
     const listener = await httpListener(jsonAnswer(200, '{"result":{"collections":[]}}'));
     const { transport, url } = connect(listener);
-    const answer = await transport.request(get(url("/collections", new URLSearchParams({ limit: "1" }))));
+    const answer: NodeResponse = await transport.request(get(url("/collections", new URLSearchParams({ limit: "1" }))));
+    // The answer's contract, which a provider's own answer type mirrors: a renamed or added field fails typecheck here.
+    const exactKeys: [keyof NodeResponse] extends ["status" | "contentType" | "retryAfter" | "text"]
+      ? ["status" | "contentType" | "retryAfter" | "text"] extends [keyof NodeResponse]
+        ? true
+        : false
+      : false = true;
+    const noneOptional: {
+      [field in keyof NodeResponse]-?: object extends Pick<NodeResponse, field> ? field : never;
+    }[keyof NodeResponse] extends never
+      ? true
+      : false = true;
+    expect([exactKeys, noneOptional]).toEqual([true, true]);
     expect(answer).toEqual({
       status: 200,
       contentType: "application/json",
