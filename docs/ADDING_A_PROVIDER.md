@@ -688,7 +688,7 @@ Every field and what it controls:
 | Field | Type | Controls |
 |-------|------|----------|
 | `queryLanguage` | `'sql' \| 'json' \| 'promql'` | Monaco editor language mode, AI prompt style, query template format. A closed union: a new member needs an arm, or a test pinning its branch, in every reader (#1085) |
-| `queryDialect` | `'libredb' \| 'redis' \| 'kafka' \| 'etcd' \| undefined` | Optional. Names the dialect's records in three registries, which every reader consults **before** `queryLanguage`: `QUERY_DIALECTS` (`src/lib/db/query-dialects.ts`, the tab type and the row-menu gates), `DIALECT_EDITORS` (`src/lib/editor/dialect-editors.ts`, the Monaco language and the formatter) and `DIALECT_GENERATORS` (`query-generators.ts`, what a tree click and Generate Query write). A new dialect adds its three records, not a check in each reader: `queryLanguage: 'json'` alone means MongoDB, which is how Redis silently got MongoDB documents until #427. Left undefined by SQL and MongoDB |
+| `queryDialect` | `'libredb' \| 'redis' \| 'kafka' \| 'etcd' \| undefined` | Optional. Names the dialect's records in three registries, which the tab type, the Monaco language, the formatter, the generated statements and the Generate Code and Generate Count Query gates consult **before** `queryLanguage` (only Profile answers an SQL language first, `offersColumnProfiling` in `src/lib/db/types.ts`): `QUERY_DIALECTS` (`src/lib/db/query-dialects.ts`, the tab type and the row-menu gates), `DIALECT_EDITORS` (`src/lib/editor/dialect-editors.ts`, the Monaco language and the formatter) and `DIALECT_GENERATORS` (`query-generators.ts`, what a tree click and Generate Query write). A new dialect adds its three records, not a check in each reader: `queryLanguage: 'json'` alone means MongoDB, which is how Redis silently got MongoDB documents until #427. Left undefined by SQL and MongoDB |
 | `supportsExplain` | `boolean` | EXPLAIN button visibility in QueryEditor toolbar |
 | `explainFormat` | `ExplainFormat \| undefined` | **Required whenever `supportsExplain` is true.** Selects the strategy in `src/lib/explain/index.ts`. Setting the flag without the format leaves the control visible and dead — the UI resets out of explain mode when metadata lacks it |
 | `supportsExternalQueryLimiting` | `boolean` | Whether route applies LIMIT to queries (SQL) or provider handles it (MongoDB) |
@@ -938,7 +938,7 @@ Those three reach code and tests only; the four prose greps of the published blo
 - [ ] `src/lib/query-generators.ts`: a record in `DIALECT_GENERATORS`, what a tree click and Generate Query write, read before the `json` arm, or a tree click auto-executes a MongoDB document.
       `docs/providers/kafka.md` section 3.1 is the worked case.
 - [ ] `src/components/QueryEditor.tsx`: the MongoDB completion provider registers only where the declared capabilities name no JSON dialect.
-- [ ] `tests/unit/lib/dialect-reader-allowlist.test.ts`: every other line under `src/` that compares `queryDialect` or reads `queryLanguage === "json"` is on its closed list with its owner.
+- [ ] `tests/unit/lib/dialect-reader-allowlist.test.ts`: every other line under `src/` that compares `queryDialect`, reads `queryLanguage === "json"` or negates `queryLanguage` is on its closed list with its owner.
       A new reader goes into a registry, or onto the list with the reason it is not one.
 
 **For a new connection field**, beside the three `Record<keyof DatabaseConnection, ...>` maps and `connection-filter.ts` that the note below names:
