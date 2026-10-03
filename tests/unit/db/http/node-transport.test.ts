@@ -384,6 +384,24 @@ describe("bounded, stoppable and never resent", () => {
     expect(listener.accepted()).toBe(1);
   });
 
+  test.each([
+    ["a content-length answer", { "content-length": "100" }],
+    ["a chunked answer", {}],
+  ])("%s cut off after 10 bytes of its body is reported as lost at once, never as text", async (_label, headers) => {
+    const listener = await httpListener((request, response) => {
+      response.writeHead(200, { "content-type": "application/json", ...headers });
+      response.write("x".repeat(10), () => setTimeout(() => request.socket.destroy(), 20));
+    });
+    const { transport, url } = connect(listener);
+    const started = Date.now();
+    const error = await failure(() => transport.request(get(url("/collections"))));
+    expect(error).toBeInstanceOf(TransportError);
+    expect((error as TransportError).kind).toBe("network");
+    expect(error.message).toMatch(/^The request failed before a complete response arrived \([A-Z][A-Z0-9_]*\)$/);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(listener.seen).toHaveLength(1);
+  });
+
   test("a request after the server closed an idle keep-alive socket goes out on a new socket and succeeds", async () => {
     const listener = await httpListener((request, response, body) => {
       jsonAnswer(200, "{}")(request, response, body);
