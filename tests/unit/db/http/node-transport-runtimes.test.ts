@@ -188,6 +188,9 @@ async function runCases(deps: Deps, plan: Plan): Promise<Report> {
   await record("TLS: a rogue CA", () =>
     once("https", "localhost", ports.secure, material(plan.rogueCa, "localhost"), "/rogue"),
   );
+  await record("TLS: a plaintext listener", () =>
+    once("https", "127.0.0.1", ports.plain, material(plan.ca, "127.0.0.1"), "/plaintext"),
+  );
   await record("TLS: a wrong name", () =>
     once("https", "localhost", ports.farName, material(plan.ca, "localhost"), "/wrong-name"),
   );
@@ -526,6 +529,7 @@ const EXPECTED: Readonly<Record<string, Expected>> = {
   "TLS: 127.0.0.1 with the CA": OK,
   "TLS: a server-name override": OK,
   "TLS: a rogue CA": TLS_REFUSED,
+  "TLS: a plaintext listener": TLS_REFUSED,
   "TLS: a wrong name": TLS_REFUSED,
   "TLS: two CAs, the second against its own server": OK,
   "TLS: two CAs, the second against the first CA's server": TLS_REFUSED,

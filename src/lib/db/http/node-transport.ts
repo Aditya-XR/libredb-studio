@@ -215,8 +215,17 @@ const CERTIFICATE_VERIFICATION_CODES: ReadonlySet<string> = new Set([
  */
 const TLS_CODE_PREFIXES: readonly string[] = ["ERR_SSL_", "ERR_TLS_", "ERR_OSSL_", "ERR_BORINGSSL"];
 
-function isTlsCode(code: string): boolean {
-  return CERTIFICATE_VERIFICATION_CODES.has(code) || TLS_CODE_PREFIXES.some((prefix) => code.startsWith(prefix));
+/**
+ * Node names an OpenSSL record-layer failure, such as a TLS request answered by a plaintext server ("wrong version
+ * number"), with the errno EPROTO and no TLS code, where Bun says ERR_SSL_WRONG_VERSION_NUMBER. Only a TLS socket
+ * raises it, so it is a TLS failure on a TLS connection and a network failure on any other.
+ */
+function isTlsCode(code: string, overTls: boolean): boolean {
+  return (
+    (overTls && code === "EPROTO") ||
+    CERTIFICATE_VERIFICATION_CODES.has(code) ||
+    TLS_CODE_PREFIXES.some((prefix) => code.startsWith(prefix))
+  );
 }
 
 function ownCode(value: unknown): string | undefined {
@@ -238,7 +247,7 @@ function abortFailure(signal: AbortSignal): TransportError {
 }
 
 /** Whatever the runtime raised, as a failure whose message holds a code at most. */
-function failureFrom(error: unknown, signal: AbortSignal): Error {
+function failureFrom(error: unknown, signal: AbortSignal, overTls: boolean): Error {
   // The egress guard's refusal from the Agent's lookup: already worded, and naming no address.
   if (error instanceof DatabaseConfigError) return error;
   // Whatever the runtime threw once the signal fired, the signal says which kind of stop it was.
@@ -246,7 +255,7 @@ function failureFrom(error: unknown, signal: AbortSignal): Error {
   const code = errorCode(error);
   if (code === undefined) return new TransportError("network", NETWORK_FAILURE);
   // A TLS failure stays a failure: nothing is retried over plain HTTP or with weaker verification.
-  if (isTlsCode(code)) return new TransportError("tls", `The TLS connection failed (${code})`);
+  if (isTlsCode(code, overTls)) return new TransportError("tls", `The TLS connection failed (${code})`);
   return new TransportError("network", `${NETWORK_FAILURE} (${code})`);
 }
 
@@ -365,7 +374,7 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
         outgoing?.destroy();
         reject(failure);
       };
-      const failWith = (error: unknown): void => fail(failureFrom(error, request.signal));
+      const failWith = (error: unknown): void => fail(failureFrom(error, request.signal, tls !== null));
       const onAbort = (): void => fail(abortFailure(request.signal));
       active.add(fail);
       try {

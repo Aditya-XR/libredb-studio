@@ -12,6 +12,7 @@ import { createNodeTransport, type NodeTransport, nodeTlsMaterial, TransportErro
 import type { SSLConfig } from "@/lib/types";
 import {
   closeAll,
+  httpListener,
   httpsListener,
   jsonAnswer,
   type Listener,
@@ -138,6 +139,12 @@ describe("the identity the certificate is checked against (R32 9, etcd E5)", () 
   test("a rogue CA is refused as a TLS failure, and nothing reaches the handler", async () => {
     const listener = await httpsListener(certificates.local, ok);
     await refused(() => call("localhost", listener, verifyFull(certificates.rogueCa)));
+    expect(listener.seen).toHaveLength(0);
+  });
+
+  test("a TLS request answered by a plaintext listener is a TLS failure, and nothing reaches the handler", async () => {
+    const listener = await httpListener(ok);
+    await refused(() => call("127.0.0.1", listener, verifyFull(certificates.ca)));
     expect(listener.seen).toHaveLength(0);
   });
 
