@@ -28,10 +28,10 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1-D150, U17 · 94
+- [Drivers and connections](#drivers-and-connections) — D1-D151, U17 · 95
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X19, U2-U72 · 59
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X22, U2-U72 · 62
 - [Dependencies](#dependencies) — P1-P8 · 8
 - [Documentation](#documentation) — DOC3-DOC9 · 6
 - [Release pipeline](#release-pipeline) — REL1-REL7 · 7
@@ -2100,6 +2100,18 @@ Found 2026-10-03 while building the Db2 provider (#786); the schema-diff engine 
 
 **Done when:** either the diff keys objects by schema and name, keeps a view or MQT a view, and quotes each part of a qualified name on its own, each pinned by a test over a two-schema Db2 fixture, or a declared capability turns schema diff and migration DDL off for an engine that cannot be served correctly, with the Db2 provider declaring it and the UI saying why.
 
+### D151. MongoDB and Couchbase read their fields from a sample and do not mark them sampled
+
+`describeObject` in `src/lib/db/providers/document/mongodb.ts` infers a collection's fields from up to `OBJECT_SAMPLE_SIZE` (100) documents and sets no `provenance` on the columns it builds.
+`src/lib/db/providers/document/couchbase/index.ts` does the same with the engine's `INFER` sampler, because Couchbase stores no schema to read, and sets no `provenance` either.
+So every field name either reports, which comes from the stored documents rather than from a declaration, reaches MCP `inspect_schema`, agent grounding and the four AI panels.
+`ColumnSchema.provenance: "sampled"` exists for that case, and `machineColumns` in `src/lib/db/detailed-object.ts` keeps a marked column from every one of those surfaces.
+Adopting it is one assignment in the column builder and its test, but the consequence is not small: every MongoDB and Couchbase field is sampled, so marking them removes each engine's whole field list from MCP, agent grounding and the AI panels, where a model drafts queries from those names today.
+That trade needs the owner's decision before anyone makes it, once for both engines.
+Measured 2026-10-03: no `provenance:` assignment exists in either provider, and MongoDB's `OBJECT_SAMPLE_SIZE` is 100.
+
+**Done when:** the owner has decided whether MongoDB's and Couchbase's sampled fields stay visible to models, and for each engine either its column builder sets `provenance: "sampled"` with a test that `inspect_schema` and the agent inventory hold none of them, or its provider doc (`docs/providers/mongodb.md`, `docs/providers/couchbase.md`) states that its sampled fields reach those surfaces; then this entry is deleted.
+
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound
@@ -2489,6 +2501,36 @@ stated in `readDefaultBody`'s own docblock.
 
 **Done when:** a body above the framework's clone limit gets one answer that names the size, on every
 route, rather than an empty-body claim on five and a parser error on one.
+
+### X20. The query routes read the whole JSON body before any bound a connection type declares
+
+`POST /api/db/query` and `POST /api/db/multi-query` call `req.json()` before they know which connection type the request is for, because the type is inside the body.
+A console text bound a connection type declares (`maxTextBytes` on its row in `src/lib/db/destructive-commands.ts`) is therefore checked after the body is parsed: the 413 of `POST /api/db/query` and the 400 of `POST /api/db/multi-query` keep the text from the provider, never from the parse.
+For every engine the only bound on the body is the framework's clone limit of X19, and statements up to it run today: `tests/api/db/query.test.ts` runs a 9 MiB statement on a type that declares no bound.
+A streamed bound read before the parse, as `readBoundedJson` in `src/lib/api/bounded-json.ts` gives the passkey routes and `readObjectRouteBody`, would close this for every engine, but it changes every SQL tab, and a JSON-escaped text can be several times its own size, so the figure is a decision about every engine rather than a fix.
+X19 measured how `POST /api/db/query` answers a body above the framework's 10 MiB buffer; how `POST /api/db/multi-query` answers one is unverified.
+
+**Done when:** the owner has chosen a body bound for the query routes, and both routes answer a body above it with a 413 that names the size, read from the stream before any parse, with a test per route.
+
+### X21. One user can fill a shared connection's in-flight slots
+
+`src/lib/db/utils/bounded-limiter.ts` bounds the calls Studio has in flight per provider and per engine key, with one FIFO queue per engine key, and `ProviderLimiter.acquire(signal)` takes no user.
+A connection every user shares, a seed connection above all, is one provider, so one user's console runs and panel reads can hold every slot and fill the queue.
+Another user's request then waits behind them, or is refused with the full-queue sentence, although that user sent one request.
+No shipped provider uses the limiter yet; the Milvus and Qdrant providers are its first consumers.
+Measured 2026-10-03: `acquire` takes the one parameter `signal`, and `engineLimiter` has no caller outside its own module.
+
+**Done when:** the routes that reach a provider bound the calls each user has in flight on one connection, with a test that a second user's request is admitted while the first user's requests fill their own share.
+
+### X22. A request the browser drops does not cancel the query it started
+
+`POST /api/db/query` hands the run's `queryId` to a provider that implements `cancelQuery`, and the one way to stop that run is `POST /api/db/cancel` with the same id, which the editor's Stop sends.
+When the browser drops the request instead, because the tab is closed, the network fails or the page reloads, the route never reads the request's abort signal.
+The provider then keeps the query running until it ends or its deadline passes, holding its connection and, for a provider on the limiter of X21, its slot.
+No engine has that bridge today.
+Measured 2026-10-03: `src/app/api/db/query/route.ts` holds no reference to `signal`.
+
+**Done when:** a request aborted mid-run reaches the provider's `cancelQuery` for the run it started, with a route test that aborts the request and asserts exactly one cancel for its `queryId`.
 
 ---
 
