@@ -114,6 +114,7 @@ const VERIFY_BY_MODE: Readonly<Record<SSLMode, boolean | null>> = Object.freeze(
   "verify-full": true,
 });
 
+const INVALID_SSL = "Invalid ssl: expected an object";
 const INVALID_SSL_MODE = "Invalid ssl.mode: expected disable, require, verify-system, verify-ca or verify-full";
 const INVALID_REJECT_UNAUTHORIZED = "Invalid ssl.rejectUnauthorized: expected true or false";
 const CLIENT_PAIR = "Invalid ssl.clientCert and ssl.clientKey: give both or neither";
@@ -141,6 +142,8 @@ function unbracketed(host: string): string {
  */
 export function nodeTlsMaterial(ssl: SSLConfig | null | undefined, identity: string): NodeTlsMaterial | null {
   if (ssl === null || ssl === undefined) return null;
+  // `false` or "disable" for the whole panel is not a panel: refused, never read as one with no mode, which verifies.
+  if (typeof ssl !== "object" || Array.isArray(ssl)) throw new DatabaseConfigError(INVALID_SSL);
   const panel = ssl as { readonly [field in keyof SSLConfig]?: unknown };
   const mode = panel.mode ?? "verify-full";
   if (typeof mode !== "string" || !Object.hasOwn(VERIFY_BY_MODE, mode)) throw new DatabaseConfigError(INVALID_SSL_MODE);

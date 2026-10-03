@@ -150,6 +150,18 @@ describe("nodeTlsMaterial: refusals name the field and never repeat the value", 
   });
 });
 
+describe("nodeTlsMaterial: a panel that is not an object", () => {
+  test.each([false, true, "disable", "verify-full-secret", 0, ["verify-full"]])(
+    "%p is refused by name, never read as a panel that verifies",
+    (panel) => {
+      const error = refusal(() => nodeTlsMaterial(panel as unknown as SSLConfig, "h.example"));
+      expect(error).toBeInstanceOf(DatabaseConfigError);
+      expect(error.message).toBe("Invalid ssl: expected an object");
+      expect(error.message).not.toContain("secret");
+    },
+  );
+});
+
 describe("TransportError", () => {
   test("is a ConnectionError that carries its kind", () => {
     const error = new TransportError(
