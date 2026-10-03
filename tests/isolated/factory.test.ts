@@ -617,6 +617,31 @@ describe("createDatabaseProvider", () => {
     expect(provider.type).toBe("neo4j");
   });
 
+  test('creates provider for type "qdrant"', async () => {
+    // No user and no database: Qdrant has neither. The constructor validates nothing and opens nothing, as
+    // etcd's, so the provider is built, and declares its language, its dialect and its read-only enforcement,
+    // with no Qdrant running.
+    const conn = makeConnection("qdrant", { port: 6333, user: undefined, database: undefined });
+    const provider = await createDatabaseProvider(conn);
+    expect(provider.type).toBe("qdrant");
+    expect(provider.getCapabilities().queryLanguage).toBe("json");
+    expect(provider.getCapabilities().queryDialect).toBe("qdrant");
+    expect(provider.getCapabilities().enforcesReadOnly).toBe(true);
+    expect(provider.getCapabilities().supportsMaintenance).toBe(false);
+    expect(provider.isConnected()).toBe(false);
+  });
+
+  test("a qdrant connection with readOnly: true is built, since its provider keeps the mode (vector-family spec 4.4)", async () => {
+    const conn = { ...makeConnection("qdrant", { port: 6333, user: undefined, database: undefined }), readOnly: true };
+    expect(() => assertReadOnlyHonoured(conn)).not.toThrow();
+    expect((await createDatabaseProvider(conn)).type).toBe("qdrant");
+  });
+
+  test("the factory error lists qdrant among the supported types, before the embedded store", async () => {
+    const conn = makeConnection("not-an-engine");
+    await expect(createDatabaseProvider(conn)).rejects.toThrow(/Supported types: .*\bqdrant\b.*, libredb$/);
+  });
+
   test('creates provider for type "libredb"', async () => {
     // A path the platform owns rather than a hardcoded "/tmp/...", which is not a directory
     // on Windows at all. Nothing opens this file: `createDatabaseProvider` constructs and
