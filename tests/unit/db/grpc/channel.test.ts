@@ -10,6 +10,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import net, { type AddressInfo } from "node:net";
 import {
+  Client,
   type Metadata,
   Server,
   ServerCredentials,
@@ -20,6 +21,7 @@ import {
 } from "@grpc/grpc-js";
 import { fromJSON, type MethodDefinition } from "@grpc/proto-loader";
 import { type GrpcCall, grpcChannelOptions, openGrpcChannel } from "@/lib/db/grpc/channel";
+import { ClosingCredentials } from "@/lib/db/grpc/credentials";
 
 /** The error a call rejects with; a call that answers fails the test. */
 async function failure(call: Promise<unknown>): Promise<unknown> {
@@ -332,6 +334,43 @@ describe("over grpc-js: one channel, its calls and its close", () => {
     await eventually(() => seen.cancelled === 1);
     server.forceShutdown();
     expect(seen.cancelled).toBe(1);
+  }, 10_000);
+
+  test("close() runs its three steps in order: the open streams, then the client, then the sockets", async () => {
+    const { server, target, seen } = await serve();
+    const channel = openGrpcChannel({ target, receiveCapBytes: 1024, retries: "none", unsent: unsentNever });
+    const stream = channel.bidiStream(CHAT, callOf());
+    stream.write({ text: "hold" });
+    await eventually(() => seen.chats === 1);
+    const order: string[] = [];
+    // close() ends each stream through the very object it handed out, so recording that object's method sees it.
+    const cancelStream = stream.cancel.bind(stream);
+    (stream as { cancel: () => void }).cancel = () => {
+      order.push("stream");
+      cancelStream();
+    };
+    const closeClient = Client.prototype.close;
+    const clientClosed = spyOn(Client.prototype, "close").mockImplementation(function (this: Client) {
+      order.push("client");
+      closeClient.call(this);
+    });
+    const endSockets = ClosingCredentials.prototype.endEverySocket;
+    const socketsEnded = spyOn(ClosingCredentials.prototype, "endEverySocket").mockImplementation(function (
+      this: ClosingCredentials,
+    ) {
+      order.push("sockets");
+      endSockets.call(this);
+    });
+    try {
+      const reading = failure(stream.read());
+      channel.close();
+      await reading;
+    } finally {
+      clientClosed.mockRestore();
+      socketsEnded.mockRestore();
+      server.forceShutdown();
+    }
+    expect(order).toEqual(["stream", "client", "sockets"]);
   }, 10_000);
 
   test("a stream cancelled before close() is no longer the channel's", async () => {

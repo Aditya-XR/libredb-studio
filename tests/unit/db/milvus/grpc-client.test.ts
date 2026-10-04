@@ -32,7 +32,7 @@ import {
   type WireShowCollectionsRequest,
 } from "@/lib/db/providers/vector/milvus/client";
 import type { MilvusConnectionOptions } from "@/lib/db/providers/vector/milvus/connection-options";
-import { toMilvusError, toProviderError } from "@/lib/db/providers/vector/milvus/errors";
+import { MilvusUnsentStatus, toMilvusError, toProviderError } from "@/lib/db/providers/vector/milvus/errors";
 import {
   allowlistedService,
   allowlistFindings,
@@ -243,6 +243,19 @@ describe("E7: the channel options, exactly", () => {
 });
 
 describe("over grpc-js: the channel dials only the configured endpoint (E1, E2, E7)", () => {
+  test("a call its own signal ended before grpc-js gave it a transport is MilvusUnsentStatus: nothing was sent", async () => {
+    const listener = await counting();
+    const controller = new AbortController();
+    controller.abort();
+    const channel = grpcWireTransport(at(listener.port));
+    const error = await failure(channel.unary("GetVersion", {}, wireCall(2000, controller.signal)));
+    channel.close();
+    listener.listener.close();
+    // The provider's own class, which toMilvusError reads as a call that never left, so a Load or Release it ends is
+    // never worded "may have been applied".
+    expect(error).toBeInstanceOf(MilvusUnsentStatus);
+  }, 10_000);
+
   test("opening the channel dials nothing: only a call does", async () => {
     const listener = await counting();
     const channel = grpcWireTransport(at(listener.port));

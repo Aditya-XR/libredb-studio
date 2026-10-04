@@ -3536,6 +3536,48 @@ describe("over grpc-js: sockets and names that answer nothing (spec 5.6)", () =>
 });
 
 describe("over grpc-js: the channel's own rules (spec E1, E4, E16, 6.1)", () => {
+  /**
+   * The options grpc-js hands the connector of the channel `grpcWireTransport` opens, which are the channel's own:
+   * the credentials grpc-js's `credentials` builds for it are recorded, and one call makes grpc-js dial.
+   */
+  async function channelOptionsOf(tls?: GrpcTlsOptions): Promise<unknown> {
+    const listener = net.createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+    const port = (listener.address() as AddressInfo).port;
+    const inner = tls === undefined ? credentials.createInsecure() : credentials.createSsl();
+    const connectors = spyOn(inner, "_createSecureConnector");
+    const created = spyOn(credentials, tls === undefined ? "createInsecure" : "createSsl").mockReturnValue(inner);
+    try {
+      const channel = grpcWireTransport(at(port, tls === undefined ? {} : { tls }));
+      const call = { metadata: {}, deadline: new Date(Date.now() + 1000), signal: new AbortController().signal };
+      await failure(channel.unary("Maintenance/Status", {}, call));
+      channel.close();
+    } finally {
+      created.mockRestore();
+      listener.close();
+    }
+    expect(connectors).toHaveBeenCalled();
+    return connectors.mock.calls[0][1];
+  }
+
+  // The five options etcd has always opened with, and no grpc.enable_retries: grpc-js keeps its transparent retries, so
+  // a call a member refused or never started fails over to the next member (the decision that closed D156).
+  const ETCD_OPTIONS = {
+    "grpc.service_config_disable_resolution": 1,
+    "grpc.max_receive_message_length": PLAINTEXT.receiveCapBytes,
+    "grpc.enable_http_proxy": 0,
+    "grpc.keepalive_time_ms": 10_000,
+    "grpc.keepalive_timeout_ms": 6_000,
+  };
+
+  test("the channel options, exactly, with grpc-js's transparent retries kept (D156, decided against)", async () => {
+    expect(await channelOptionsOf()).toEqual(ETCD_OPTIONS);
+  }, 10_000);
+
+  test("TLS adds the server-name override, and nothing else", async () => {
+    expect(await channelOptionsOf(TLS)).toEqual({ ...ETCD_OPTIONS, "grpc.ssl_target_name_override": "etcd.test" });
+  }, 10_000);
+
   test("opening the channel dials nothing: only a call does (spec E16)", async () => {
     let accepted = 0;
     const listener = net.createServer((socket) => {

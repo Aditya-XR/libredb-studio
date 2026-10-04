@@ -391,9 +391,12 @@ const GRPC_JS_NAME = /['"]@grpc\/grpc-js['"]/;
 const g8NoGrpcJsName: Rule = (root, env) =>
   textFindings("no third copy, check 1", root, outsideTransport(root, env), GRPC_JS_NAME);
 
-/** G9, check 2: no file of src/ outside the transport holds the channel's own code. */
+/**
+ * G9, check 2: no file of src/ outside the transport holds the channel's own code, any channel option key included,
+ * quoted or a computed template key. A backticked option name in a comment is prose, not a key, and passes.
+ */
 const CHANNEL_CODE =
-  /class ClosingCredentials|function (closingConnector|pickNotice|cancelOnAbort|channelCredentials|verifyOptions|unaryCall|openStream)\b|"grpc\.(service_config_disable_resolution|keepalive_time_ms|keepalive_timeout_ms|ssl_target_name_override|enable_http_proxy|enable_retries|max_receive_message_length)"|make(Unary|ServerStream|BidiStream)Request|createFromMetadataGenerator|createSsl\(|createInsecure\(/;
+  /class ClosingCredentials|function (closingConnector|pickNotice|cancelOnAbort|channelCredentials|verifyOptions|unaryCall|openStream)\b|['"]grpc(-node)?\.[a-z_]+['"]|\[`grpc(-node)?\.[a-z_]+`\]|make(Unary|ServerStream|BidiStream)Request|createFromMetadataGenerator|createSsl\(|createInsecure\(/;
 const g9NoChannelCode: Rule = (root, env) =>
   textFindings("no third copy, check 2", root, outsideTransport(root, env), CHANNEL_CODE);
 
@@ -732,6 +735,20 @@ describe("planted violations: each rule fails by name", () => {
     ]);
     expect(planted({ [COPY]: 'export const options = { "grpc.enable_retries": 0 };\n' }, g9NoChannelCode)).toEqual([
       `no third copy, check 2: ${COPY}:1 holds "grpc.enable_retries"`,
+    ]);
+    const keys = [
+      "export const options = {",
+      "  'grpc.keepalive_permit_without_calls': 1,",
+      '  [`grpc.default_authority`]: "x",',
+      '  "grpc-node.max_session_memory": 10,',
+      "};",
+      "/** Set as `grpc.ssl_target_name_override` in prose. */",
+      "",
+    ].join("\n");
+    expect(planted({ [COPY]: keys }, g9NoChannelCode)).toEqual([
+      `no third copy, check 2: ${COPY}:2 holds 'grpc.keepalive_permit_without_calls'`,
+      `no third copy, check 2: ${COPY}:3 holds [\`grpc.default_authority\`]`,
+      `no third copy, check 2: ${COPY}:4 holds "grpc-node.max_session_memory"`,
     ]);
     expect(planted({ [COPY]: "export const call = client.makeUnaryRequest;\n" }, g9NoChannelCode)).toEqual([
       `no third copy, check 2: ${COPY}:1 holds makeUnaryRequest`,

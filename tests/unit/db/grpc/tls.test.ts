@@ -1,8 +1,9 @@
 /**
  * The SSL / TLS panel mapping of the shared gRPC transport (src/lib/db/grpc/tls.ts): the panel read once for every
  * gRPC provider, the TLS identity of one dialled host, the dial target and the endpoint host rule.
- * Every check-order case is pinned through the providers by their own connection-options.test.ts files; this file
- * holds what the module adds: the sentences and errors are the caller's, and the client-certificate hook is optional.
+ * The check order is pinned step by step through etcd's connection-options.test.ts; this file pins where the steps
+ * meet the PEM (a pair half before the CA, the CA before the pair) and holds what the module adds: the sentences and
+ * errors are the caller's, and the client-certificate hook is optional.
  */
 import { describe, expect, test } from "bun:test";
 import { X509Certificate } from "node:crypto";
@@ -122,7 +123,7 @@ describe("readGrpcTlsPanel", () => {
     ]);
   });
 
-  test("the panel is checked whole before its mode is read, and a pair half before the CA", () => {
+  test("the panel is checked whole before its mode is read, a pair half before the CA, and the CA before the pair", () => {
     const { words } = recordingWords();
     // A disabled panel with a field of the wrong type is still refused.
     expect((thrown(() => readGrpcTlsPanel({ mode: "disable", clientCert: 1 }, words)) as Error).message).toBe(
@@ -137,6 +138,13 @@ describe("readGrpcTlsPanel", () => {
         ) as Error
       ).message,
     ).toBe(CLIENT_PAIR);
+    // A CA that does not parse and a client pair that does not match: the CA, drawn first on the panel, answers.
+    const badCaAndPair = {
+      caCert: "not a certificate",
+      clientCert: certificates.client.cert,
+      clientKey: certificates.server.key,
+    };
+    expect((thrown(() => readGrpcTlsPanel(badCaAndPair, words)) as Error).message).toBe(CA_NOT_PEM);
   });
 
   test("the client-certificate hook runs after the certificate parses and before the key match, and only when given", () => {

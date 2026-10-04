@@ -94,7 +94,7 @@ function caNotPem(engine: string): string {
 }
 
 /**
- * The SSL / TLS panel, checked whole before any of it is read, in this order, which both provider suites pin:
+ * The SSL / TLS panel, checked whole before any of it is read, in this order:
  * the panel object; the mode (absent reads as `verify-full`); `caCert`, `clientCert`, `clientKey` as text;
  * `rejectUnauthorized` as a boolean; `disable` is undefined; the client pair together; the CA; the client pair.
  */
