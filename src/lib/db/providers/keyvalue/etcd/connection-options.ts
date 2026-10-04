@@ -65,7 +65,7 @@ export const ETCD_DEFAULT_PORT = 2379;
 
 /**
  * The fixed override for an IP identity: a name that is not an IP (spec E5). `.invalid` is reserved
- * (RFC 6761), so the name belongs to no host; R07 measured it, with a `checkServerIdentity` that
+ * (RFC 6761), so the name belongs to no host; R07 measured it, with a server identity check that
  * verifies the IP, connecting under Node 24.14.0, 26.7.0 and 26.10.0 and Bun 1.4.2
  * (`07-MEASUREMENTS-grpc.md`, the iponly log).
  */
