@@ -142,16 +142,16 @@ const BUCKETS: Record<RateLimitBucket, BucketSpec> = {
   // files while the grep it cites already answered twenty-one, because admin/accounts,
   // admin/accounts/[email], auth/passkey and auth/totp had joined without it.
   //
-  // THIRTY-TWO route files today, and there are three ways in, which is why one grep under-counts.
-  // Directly, twenty-two route files that pass bucket: "query" to guardRoute themselves
-  // (grep -rl 'bucket: "query"' src/app/api/ answers twenty-two files; grep -c on the same list
+  // THIRTY-THREE route files today, and there are three ways in, which is why one grep under-counts.
+  // Directly, twenty-three route files that pass bucket: "query" to guardRoute themselves
+  // (grep -rl 'bucket: "query"' src/app/api/ answers twenty-three files; grep -c on the same list
   // finds one call site in each but auth/passkey and auth/totp, which have one per method, two
-  // each, so twenty-four call sites): admin/accounts, admin/accounts/[email], admin/fleet-health,
-  // auth/passkey, auth/totp, db/cancel, db/disconnect, db/health, db/maintenance,
-  // db/maintenance/preview, db/monitoring, db/multi-query, db/pool-stats, db/profile,
-  // db/provider-meta, db/query, db/test-connection, db/transaction, mcp/token, and the three storage
-  // routes (storage, storage/[collection], storage/migrate). Note db/health: only its POST is
-  // metered, because the GET is the container health probe and takes no connection. mcp/token
+  // each, so twenty-five call sites): admin/accounts, admin/accounts/[email], admin/discovery,
+  // admin/fleet-health, auth/passkey, auth/totp, db/cancel, db/disconnect, db/health,
+  // db/maintenance, db/maintenance/preview, db/monitoring, db/multi-query, db/pool-stats,
+  // db/profile, db/provider-meta, db/query, db/test-connection, db/transaction, mcp/token, and the
+  // three storage routes (storage, storage/[collection], storage/migrate). Note db/health: only its
+  // POST is metered, because the GET is the container health probe and takes no connection. mcp/token
   // runs no query: its POST is metered here because the credential it mints reaches this workload,
   // and its GET reads the channel status with getSession and is charged nothing, as
   // GET /api/agent/config is in the ai bucket.
@@ -177,6 +177,10 @@ const BUCKETS: Record<RateLimitBucket, BucketSpec> = {
   // a new call site.
   // Account administration (`/api/admin/accounts`) and TOTP enrolment (`/api/auth/totp`) share
   // this bucket: both read and write the storage database.
+  //
+  // The discovery status (`/api/admin/discovery`) reaches no database or LLM provider: it is an
+  // admin-only status read that may open TCP reachability probes, so it shares the bucket the other
+  // metered admin routes use.
   //
   // The storage family joined when AU1 moved it onto the shared 401 (2026-08-22), and that gave it
   // a limiter it never had. It belongs here rather than in a bucket of its own: under

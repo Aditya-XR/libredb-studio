@@ -1,7 +1,7 @@
 "use client";
 
 import { appFetch } from "@/lib/config/base-path";
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { DatabaseConnection } from "@/lib/types";
 import { detailedObjects, schemaContextOf, type DetailedObject } from "@/lib/db/detailed-object";
 import { relationKindIds } from "@/lib/db/object-kinds";
@@ -23,9 +23,31 @@ import {
  * inlined at build time, so packaged artifacts always use the default. */
 const MANAGED_POLL_MAX_ATTEMPTS = 30;
 
+/**
+ * Managed-list refresh after the first load (CapRover auto-connect spec, section 11): the interval
+ * never runs more often than the floor and never less often than the cap, while focus and visibility
+ * refresh at once, bounded only by the refresh's in-flight guard. NEXT_PUBLIC_MANAGED_REFRESH_FLOOR_MS
+ * moves the floor in source builds and tests only, because NEXT_PUBLIC_ values are inlined at
+ * build time, exactly like the poll tick above.
+ */
+export const MANAGED_REFRESH_DEFAULT_FLOOR_MS = 5000;
+export const MANAGED_REFRESH_MAX_MS = 60000;
+
+/** Milliseconds between two refreshes: max(cacheHint, floor), capped at MANAGED_REFRESH_MAX_MS. */
+export function managedRefreshIntervalMs(cacheHint: number | null): number {
+  const floor = Number(process.env.NEXT_PUBLIC_MANAGED_REFRESH_FLOOR_MS) || MANAGED_REFRESH_DEFAULT_FLOOR_MS;
+  return Math.min(Math.max(cacheHint ?? 0, floor), MANAGED_REFRESH_MAX_MS);
+}
+
 export function useConnectionManager(storageReady = false) {
   const [connections, setConnections] = useState<DatabaseConnection[]>([]);
   const [activeConnection, setActiveConnection] = useState<DatabaseConnection | null>(null);
+  /**
+   * The active connection as last committed, for the managed refresh: the refresh runs inside
+   * the storage effect, whose closure never sees a later render, and it has to know which
+   * connection is open to keep it open or to say that it is gone.
+   */
+  const activeConnectionRef = useRef<DatabaseConnection | null>(null);
   /**
    * The server's own seed descriptors, kept alongside the merged list rather than
    * folded into it. The merge deliberately prefers an existing editable copy over the
@@ -315,10 +337,15 @@ export function useConnectionManager(storageReady = false) {
       return merged;
     };
 
-    const fetchManaged = async (): Promise<{
+    const fetchManaged = async ({
+      quiet = false,
+    }: {
+      quiet?: boolean;
+    } = {}): Promise<{
       merged: DatabaseConnection[] | null;
       pendingSeeds: string[];
       failed: boolean;
+      cacheHint: number | null;
     }> => {
       const managedRes = await appFetch("/api/connections/managed");
       // A non-OK response is a transient failure, NOT "nothing pending" — the
@@ -331,19 +358,31 @@ export function useConnectionManager(storageReady = false) {
         // seeds" are different sentences, and only this response can tell them apart.
         // Any other failure — a 404 where the route does not exist at all, as in the
         // platform embed — is not evidence about that configuration and says nothing.
+        // A quiet read (the refresh below) records nothing on failure: only the initial load and the
+        // pending-seed poll may mark the served seeds unread, so a refresh that fails changes nothing at all.
         const body = (await managedRes.json().catch(() => ({}))) as { reason?: string };
-        if (!cancelled && body.reason === SEED_CONFIG_UNREADABLE_REASON) setServedSeeds({ loaded: false });
-        return { merged: null, pendingSeeds: [], failed: true };
+        if (!quiet && !cancelled && body.reason === SEED_CONFIG_UNREADABLE_REASON) {
+          setServedSeeds({ loaded: false });
+        }
+        return { merged: null, pendingSeeds: [], failed: true, cacheHint: null };
       }
-      const { connections: managedConns, pendingSeeds } = (await managedRes.json()) as {
+      const {
+        connections: managedConns,
+        pendingSeeds,
+        cacheHint,
+      } = (await managedRes.json()) as {
         connections?: ManagedConnectionPayload[];
         pendingSeeds?: string[];
+        cacheHint?: unknown;
       };
       if (!cancelled) setServedSeeds({ loaded: true, seeds: managedConns ?? [] });
       return {
         merged: managedConns && managedConns.length > 0 ? mergeManagedConnections(managedConns) : null,
         pendingSeeds: pendingSeeds ?? [],
         failed: false,
+        // The server's seed cache lifetime in ms (SEED_CACHE_TTL_MS); the refresh interval follows it,
+        // between the floor and the one-minute cap (managedRefreshIntervalMs).
+        cacheHint: typeof cacheHint === "number" && Number.isFinite(cacheHint) ? cacheHint : null,
       };
     };
 
@@ -384,14 +423,94 @@ export function useConnectionManager(storageReady = false) {
       }, pollMs);
     };
 
+    /*
+      The managed list after the first load (CapRover auto-connect spec, section 11).
+
+      A discovered database is added or removed on the server while a tab is open, so the
+      list is read again: every max(cacheHint, floor) ms capped at a minute, only while the
+      tab is visible, and at once when the window regains focus or the document becomes
+      visible. One read at a time, like the seed poll: a trigger that arrives while a read is
+      in flight is absorbed by it.
+
+      It reads quietly: a refresh that fails changes nothing, servedSeeds included.
+    */
+    let refreshTimer: ReturnType<typeof setInterval> | null = null;
+    let refreshInFlight = false;
+
+    /*
+      The active connection keeps its object identity while its id is still listed, and the
+      refreshed list carries that same object in place of its fresh copy: every way of picking a
+      connection (sidebar, mobile list and header, command palette) hands the list's object to
+      setActiveConnection, and a new object for the same connection resets the transaction,
+      discards edits and re-reads the schema (Studio's connection-change effect). When its id is
+      gone, the first remaining connection becomes active and the user is told, once, because
+      the next refresh finds the new active connection listed.
+    */
+    const applyManagedRefresh = (next: DatabaseConnection[]) => {
+      const active = activeConnectionRef.current;
+      setConnections(
+        active !== null && next.some((c) => c.id === active.id)
+          ? next.map((c) => (c.id === active.id ? active : c))
+          : next,
+      );
+      if (active === null) {
+        setActiveConnection((prev) => prev ?? next[0] ?? null);
+        return;
+      }
+      if (next.some((c) => c.id === active.id)) return;
+      setActiveConnection(next[0] ?? null);
+      toast({ title: "Connection removed", description: `${active.name} is no longer available.` });
+    };
+
+    const refreshManaged = () => {
+      if (refreshInFlight || document.visibilityState !== "visible") return;
+      refreshInFlight = true;
+      fetchManaged({ quiet: true })
+        .then(({ merged, failed }) => {
+          if (cancelled || failed) return;
+          // An empty list is an answer too: the server withdrew every managed entry, and
+          // fetchManaged maps it to `merged: null`, so what remains is the user's own list.
+          applyManagedRefresh(merged ?? storage.getConnections());
+        })
+        .catch((err) => {
+          logger.debug("Managed connection refresh failed", {
+            route: "use-connection-manager",
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          refreshInFlight = false;
+        });
+    };
+
+    const startManagedRefresh = (cacheHint: number | null) => {
+      refreshTimer = setInterval(refreshManaged, managedRefreshIntervalMs(cacheHint));
+      window.addEventListener("focus", refreshManaged);
+      document.addEventListener("visibilitychange", refreshManaged);
+    };
+
+    const stopManagedRefresh = () => {
+      if (refreshTimer !== null) clearInterval(refreshTimer);
+      refreshTimer = null;
+      window.removeEventListener("focus", refreshManaged);
+      document.removeEventListener("visibilitychange", refreshManaged);
+    };
+
     const initializeConnections = async () => {
       const loadedConnections = storage.getConnections();
 
       // Fetch managed (seed) connections
       let managedMerged = false;
+      // Only an initial fetch that ANSWERED starts the refresh, for the reason the catch below
+      // gives for the seed poll: where this route does not exist, every refresh would be one
+      // more useless request.
+      let managedAnswered = false;
+      let managedCacheHint: number | null = null;
       try {
-        const { merged, pendingSeeds } = await fetchManaged();
+        const { merged, pendingSeeds, failed, cacheHint } = await fetchManaged();
         if (cancelled) return;
+        managedAnswered = !failed;
+        managedCacheHint = cacheHint;
         if (merged) {
           setConnections(merged);
           managedMerged = true;
@@ -423,6 +542,8 @@ export function useConnectionManager(storageReady = false) {
           setActiveConnection(saved ?? loadedConnections[0]);
         }
       }
+
+      if (managedAnswered) startManagedRefresh(managedCacheHint);
     };
 
     initializeConnections().catch((err) => {
@@ -435,11 +556,13 @@ export function useConnectionManager(storageReady = false) {
     return () => {
       cancelled = true;
       stopPoll();
+      stopManagedRefresh();
     };
-  }, [storageReady]);
+  }, [storageReady, toast]);
 
   // Persist active connection ID
   useEffect(() => {
+    activeConnectionRef.current = activeConnection;
     if (activeConnection) {
       storage.setActiveConnectionId(activeConnection.id);
     }

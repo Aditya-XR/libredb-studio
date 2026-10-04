@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S7 · 5
-- [Drivers and connections](#drivers-and-connections) — D1-D227, U17 · 138
+- [Drivers and connections](#drivers-and-connections) — D1-D231, U17 · 142
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X26, U2-U89 · 81
@@ -1159,9 +1159,9 @@ test pins the behaviour that was chosen.
 
 ---
 
-### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses two exports
+### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses four exports
 
-`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 42 hits, re-measured 2026-10-03. Ten of
+`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 44 hits, re-measured 2026-10-04. Twelve of
 them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`,
 the agent routes' pattern). Thirty write out the same five-key object - `getSession`, `signJWT`,
 `verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token
@@ -1169,15 +1169,20 @@ nothing reads, and one of those thirty is `tests/helpers/object-edit-route-harne
 harness that could have been the factory and copied the stub instead. The remaining two write a
 shorter stub of their own, one with two keys and one with a single `getSession`.
 
-`src/lib/auth.ts` exports seven names. The two no hand-written stub carries are
-`shouldMarkCookieSecure` and `resetCookieSecurityWarning`:
-`grep -rn 'shouldMarkCookieSecure' tests/` returns exactly one hit, and it is a sentence in a comment
-rather than a stub key, while `resetCookieSecurityWarning` appears only in
-`tests/unit/lib/auth.test.ts`, which imports the real module.
+`src/lib/auth.ts` exports nine names. The four no hand-written stub carries are
+`shouldMarkCookieSecure`, `resetCookieSecurityWarning`, `readCookieSecureOverride` and
+`isLoopbackHost`: `grep -rn 'shouldMarkCookieSecure' tests/` returns exactly one hit, and it is a
+sentence in a comment rather than a stub key. `resetCookieSecurityWarning` appears only in
+`tests/unit/lib/auth.test.ts`, which imports the real module, and in
+`tests/api/admin/discovery.test.ts`, which calls it on the real module it spreads.
+`readCookieSecureOverride` and `isLoopbackHost` appear in `tests/unit/lib/auth.test.ts` and
+otherwise only in a comment of `tests/api/admin/discovery.test.ts`.
 `src/app/api/auth/oidc/login/route.ts` imports `shouldMarkCookieSecure` and awaits it to decide the
-auth cookie's `secure` flag, so every one of those stubs is already an export short of the module it
-replaces. Nothing has hit that yet only because `tests/api/auth/oidc-login.test.ts` is one of the
-route tests that does NOT mock `@/lib/auth`.
+auth cookie's `secure` flag, and `src/app/api/admin/discovery/route.ts` imports
+`readCookieSecureOverride` to report whether `AUTH_COOKIE_SECURE` is off, so every one of those
+stubs is already short of exports a route imports from the module it replaces. Nothing has hit that
+yet only because `tests/api/auth/oidc-login.test.ts` is one of the route tests that does NOT mock
+`@/lib/auth`, and `tests/api/admin/discovery.test.ts` spreads the real module.
 
 Nothing can catch it either. `mock.module` is declared `module(id: string, factory: () => any)` in
 `node_modules/bun-types/test.d.ts`, so a stub that has drifted from the module it stands in for is
@@ -1191,7 +1196,7 @@ process boundary cannot do is make the stub the right SHAPE.
 **Done when:** one factory in `tests/helpers/`, typed `(): typeof import("@/lib/auth")`, replaces the
 hand-written stubs, so adding an export to `src/lib/auth.ts` fails `typecheck` in every file that
 mocks it instead of at run time in one of them. The same shape then covers the other layer-wide
-mocks, `@/lib/db` in fifteen files and `@/lib/audit` in four.
+mocks, `@/lib/db` in twenty-one files and `@/lib/audit` in six.
 
 ### D86. `bun test --isolate` has not been re-probed, and the runner pays a process per test file
 
@@ -2513,6 +2518,44 @@ A1 is the same property on the agent and MCP path.
 Found 2026-10-04 while fixing #1364.
 
 **Done when:** SQLite statements run in a worker thread that the provider terminates on cancel and on the query timeout, the SQLite provider implements `cancelQuery`, and a test shows `/api/health` answering while a long statement runs.
+
+### D228. Platform discovery recognises only four engine families
+
+`detectEngine` in `src/lib/seed/discovery-fingerprint.ts` matches the PostgreSQL family, the MySQL family (MySQL, MariaDB, Percona), MongoDB and the Redis family (Redis, Valkey, KeyDB, Dragonfly), and `ENV_ALLOW_LIST` in `docker/discover.mjs` exports only the ten environment keys those need.
+A SQL Server, ClickHouse or Neo4j app installed from the CapRover catalog is therefore never listed, and the admin adds it by hand; the admin status does not claim it either.
+Each engine widens what the exporter copies to the shared volume, so each one is its own reviewed change.
+
+Deferred by the CapRover auto-connect work.
+
+**Done when:** each added engine has its keys in `ENV_ALLOW_LIST`, a detection row and a mapping row in `src/lib/seed/discovery-fingerprint.ts`, tests in `tests/unit/docker-discover.test.ts` and `tests/unit/seed/discovery-fingerprint.test.ts`, and rows in the detection and mapping tables of `docs/SEED_CONNECTIONS.md`.
+
+### D229. Platform discovery reads CapRover's Swarm services only
+
+The exporter, `docker/discover.mjs`, lists the Swarm services of one overlay network (`scanOnce`), and `DiscoveryExportSchema` in `src/lib/seed/discovery-export.ts` accepts `platform: "caprover"` only.
+Kubernetes, plain Docker Compose and other Docker Swarm platforms have no discovery source, so a database they run is a seed-file entry or a hand-made connection.
+
+Deferred by the CapRover auto-connect work.
+
+**Done when:** a second platform writes the same export contract under its own `platform` value, with its own exporter tests, or the decision not to support one is stated in `docs/SEED_CONNECTIONS.md` and this entry is deleted.
+
+### D230. `useAllConnections` loads the managed list once
+
+`useAllConnections` (`src/hooks/use-all-connections.ts`) fetches `/api/connections/managed` in its mount effect and never again, while `useConnectionManager` refreshes the same list on an interval and on focus.
+Its callers, the admin Overview and Operations tabs, Schema Diff and the Monitoring dashboard, keep showing a discovered database that was withdrawn, and miss one that appeared, until the page is reloaded.
+
+Deferred by the CapRover auto-connect work.
+
+**Done when:** `useAllConnections` refreshes on the schedule `useConnectionManager` uses (`MANAGED_REFRESH_DEFAULT_FLOOR_MS`, `MANAGED_REFRESH_MAX_MS`, visible tabs only), and a hook test shows a withdrawn connection disappearing without a reload.
+
+### D231. The auto-connect template cannot place its two apps on one manager node
+
+`deploy/caprover/libredb-studio-autoconnect.yml` deploys Studio and its `-discovery` companion as two Swarm services that share a named volume, and a one-click template cannot express placement.
+A named volume is local to a node, and only a swarm manager answers the exporter's service listing, so on a multi-node CapRover the companion can land on a worker (status `swarm_unavailable`) or on another node than Studio (Studio never sees the export and keeps waiting).
+Today the template's closing text tells the operator to pin both apps to the manager under App Configs.
+
+Deferred by the CapRover auto-connect work.
+
+**Done when:** both apps land on the same manager node without a manual pin, or the export reaches Studio across nodes, measured on a two-node CapRover cluster.
 
 ## Value interpolation
 

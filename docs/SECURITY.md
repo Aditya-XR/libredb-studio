@@ -200,8 +200,8 @@ audited. A forged, tampered or truncated `auth-token` reaches the trailing `catc
 other two refusals both emit: `origin_mismatch` and `insufficient_role`. See
 [`docs/BACKLOG.md`](./BACKLOG.md) H12.
 
-Everything the row once described short of that is audited. Role failures are recorded at all eight
-sites that refuse on role, seven in handlers and one in the proxy, and the seven handler sites are the
+Everything the row once described short of that is audited. Role failures are recorded at all nine
+sites that refuse on role, eight in handlers and one in the proxy, and the eight handler sites are the
 ones the Admin Audit tab can read:
 
 | site | call |
@@ -213,11 +213,12 @@ ones the Admin Audit tab can read:
 | `src/app/api/db/maintenance/route.ts` | `auditRoleDenial` |
 | `src/app/api/db/maintenance/preview/route.ts` | `auditRoleDenial` |
 | `src/app/api/admin/fleet-health/route.ts` | `auditRoleDenial` |
+| `src/app/api/admin/discovery/route.ts` | `auditRoleDenial` |
 | `src/proxy.ts` | `emitAuditEvent`, `insufficient_role` |
 
 `auditRoleDenial`
 ([`src/lib/api/require-session.ts`](../src/lib/api/require-session.ts)) emits `permission_denied`
-with `reason: "insufficient_role"`, so those seven reach the tab. An earlier version of this note
+with `reason: "insufficient_role"`, so those eight reach the tab. An earlier version of this note
 claimed the opposite and pointed at an `H12` that did not exist.
 
 Two qualifiers the grade rests on, both deliberate and documented at each call site:
@@ -608,6 +609,15 @@ These are real, current, and not oversights. Each is a decision with a reason.
   on a proxy and lumps everyone behind it into one bucket. The same derived address is the `ip`
   field in the audit log, so a wrong value also makes that field unreliable. Both are documented in
   [`.env.example`](../.env.example) under Forwarded Headers.
+- **The CapRover auto-connect variant runs a companion with the Docker socket, which is root on the host.**
+  It is an operator decision, made by choosing the separate `libredb-studio-autoconnect` template; the plain CapRover template, the chart and every other channel never mount the socket.
+  The exporter, `docker/discover.mjs`, sends GET requests to two Docker Engine API paths only, but that is a property of its code and not of the socket: whoever controls the companion's image tag or process controls the host.
+  It has no listening port, and the Studio web process never touches the socket; it reads one file the exporter writes, and treats that file as untrusted input.
+  The file holds the name, host alias, image and task counts of every non-system app on the CapRover network that is not listed in "Apps to skip", only the names of the apps that are, and the values of ten allow-listed database environment keys, in plaintext, mode 0600 and owned by uid 1001, on a named volume; the same passwords are already plaintext in each service spec and in CapRover's own configuration.
+  Every discovered connection is managed, admin-only and never offered to MCP clients, its values are used as literal text so no `${NAME}` or `${vault:...}` in another app's environment is resolved, and a standard user who names a discovered id gets the same 404 as for an unknown id.
+  The export file itself is not admin-only: a DuckDB connection reads any file the Studio process can ([`docs/providers/duckdb.md`](./providers/duckdb.md) section 14.3), so any signed-in user, the standard user included, can read every discovered database's superuser credentials from it, and on this variant the standard login should go only to someone trusted with them.
+  The connections carry the superuser credentials CapRover's database templates create, so a stolen admin session reaches every discovered database; the template ships `AUTH_COOKIE_SECURE` set to `false` until HTTPS is on, and the admin Overview page warns while the session cookie can travel over plain HTTP.
+  [`docs/SEED_CONNECTIONS.md`](./SEED_CONNECTIONS.md#platform-discovery-caprover) describes the variant, and [`deploy/caprover/README.md`](../deploy/caprover/README.md#auto-connect-variant) how to install it.
 - **Configuring an AI model means database content leaves the machine.** Nothing here is telemetry
   and nothing fires on its own, but an agent run sends the objective you typed, the schema
   inventory, the relations graph and the rows of every read it performs to the model provider you

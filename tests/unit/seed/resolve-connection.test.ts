@@ -1,6 +1,10 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "path";
 import type { DatabaseConnection } from "@/lib/types";
+import type { ManagedConnection } from "@/lib/seed/types";
+import { postgresService, writeDiscoveryExport, type DiscoveryExportFixture } from "../../helpers/discovery-fixture";
 
 const FIXTURES = path.resolve(__dirname, "../../fixtures/seed-connections");
 process.env.SEED_CONFIG_PATH = path.join(FIXTURES, "multi-role-config.yaml");
@@ -9,8 +13,11 @@ process.env.USER_MYSQL_PASS = "user-secret";
 process.env.SHARED_PG_PASS = "shared-secret";
 process.env.BOTH_PG_PASS = "both-secret";
 
+import { getManagedConnections } from "@/lib/seed";
 import { resolveConnection, SeedConnectionError } from "@/lib/seed/resolve-connection";
 import { resetCache } from "@/lib/seed/config-loader";
+import { resetDiscoveryCache } from "@/lib/seed/discovery-loader";
+import * as vaultClient from "@/lib/seed/vault-client";
 
 describe("resolve-connection", () => {
   beforeEach(() => {
@@ -130,5 +137,125 @@ describe("resolve-connection", () => {
       expect(err).toBeInstanceOf(SeedConnectionError);
       expect((err as SeedConnectionError).statusCode).toBe(400);
     }
+  });
+});
+
+/*
+  The literal marker on the query path (CapRover auto-connect spec 9.5). A discovered value is the text another
+  app on the platform network set, so a `${vault:...}` in it must reach the provider as that text: resolving it
+  would send one of Studio's own Vault secrets to that app as a password. readVaultSecret is replaced by a spy
+  so a call to it is counted, not made.
+*/
+describe("resolve-connection with discovered connections", () => {
+  const VAULT_REFERENCE = "${vault:secret/data/x#y}";
+  const ADMIN = { role: "admin", username: "test" };
+  const originalSeedPath = process.env.SEED_CONFIG_PATH;
+  let discovery: DiscoveryExportFixture;
+  let scratch: string;
+  let readVaultSecret: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    scratch = mkdtempSync(path.join(tmpdir(), "libredb-resolve-literal-"));
+    const seedFile = path.join(scratch, "seed-connections.json");
+    writeFileSync(
+      seedFile,
+      JSON.stringify({
+        version: "1",
+        connections: [
+          {
+            id: "caprover-x",
+            name: "File seed with a discovery-like id",
+            type: "postgres",
+            host: "file-pg.internal",
+            password: VAULT_REFERENCE,
+            roles: ["admin"],
+          },
+        ],
+      }),
+    );
+    process.env.SEED_CONFIG_PATH = seedFile;
+    discovery = writeDiscoveryExport([postgresService("pg", VAULT_REFERENCE)]);
+    process.env.SEED_DISCOVERY_PATH = discovery.path;
+    resetCache();
+    resetDiscoveryCache();
+    readVaultSecret = spyOn(vaultClient, "readVaultSecret").mockResolvedValue("vault-resolved-secret");
+  });
+
+  afterEach(() => {
+    readVaultSecret.mockRestore();
+    process.env.SEED_CONFIG_PATH = originalSeedPath;
+    delete process.env.SEED_DISCOVERY_PATH;
+    resetCache();
+    resetDiscoveryCache();
+    discovery.remove();
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it("hands an admin a discovered ${vault:...} password as that literal text, without reading Vault", async () => {
+    const result = await resolveConnection({ connectionId: "seed:caprover-pg" }, ADMIN);
+    expect(result.password).toBe(VAULT_REFERENCE);
+    // The marker is on what resolveConnection received from the list, after the role filter.
+    expect((result as ManagedConnection).literal).toBe(true);
+    expect(readVaultSecret).not.toHaveBeenCalled();
+  });
+
+  it("still resolves a seed-file connection whose id starts with caprover- through Vault", async () => {
+    const result = await resolveConnection({ connectionId: "seed:caprover-x" }, ADMIN);
+    expect(result.password).toBe("vault-resolved-secret");
+    expect((result as ManagedConnection).literal).toBeUndefined();
+    expect(readVaultSecret).toHaveBeenCalledTimes(1);
+    expect(readVaultSecret).toHaveBeenCalledWith("secret/data/x", "y", undefined);
+  });
+
+  // The marker is set in code only. A seed file that writes `literal: true` on its own connection is not the
+  // discovery source, so that connection is listed without the field and its ${vault:...} is still resolved.
+  it("ignores a literal key written in the seed file: no marker is listed and Vault is still read", async () => {
+    const seedFile = path.join(scratch, "seed-with-literal-key.json");
+    writeFileSync(
+      seedFile,
+      JSON.stringify({
+        version: "1",
+        connections: [
+          {
+            id: "file-literal",
+            name: "File seed that asks to be literal",
+            type: "postgres",
+            host: "file-pg.internal",
+            password: VAULT_REFERENCE,
+            roles: ["admin"],
+            literal: true,
+          },
+        ],
+      }),
+    );
+    process.env.SEED_CONFIG_PATH = seedFile;
+    resetCache();
+
+    const listed = (await getManagedConnections(["admin"])).find((c) => c.seedId === "file-literal");
+    expect(listed?.host).toBe("file-pg.internal");
+    expect(listed).not.toHaveProperty("literal");
+
+    const result = await resolveConnection({ connectionId: "seed:file-literal" }, ADMIN);
+    expect(result.password).toBe("vault-resolved-secret");
+    expect(readVaultSecret).toHaveBeenCalledTimes(1);
+    expect(readVaultSecret).toHaveBeenCalledWith("secret/data/x", "y", undefined);
+  });
+
+  it("answers a standard user who names a discovered id with the 404 of an unknown id", async () => {
+    const session = { role: "user", username: "test" };
+    const discovered = await resolveConnection({ connectionId: "seed:caprover-pg" }, session).catch(
+      (thrown: unknown) => thrown,
+    );
+    const unknown = await resolveConnection({ connectionId: "seed:caprover-none" }, session).catch(
+      (thrown: unknown) => thrown,
+    );
+
+    expect(discovered).toBeInstanceOf(SeedConnectionError);
+    expect(unknown).toBeInstanceOf(SeedConnectionError);
+    expect((discovered as SeedConnectionError).statusCode).toBe(404);
+    expect((unknown as SeedConnectionError).statusCode).toBe(404);
+    expect((discovered as SeedConnectionError).message).toBe('Seed connection "caprover-pg" not found');
+    expect((unknown as SeedConnectionError).message).toBe('Seed connection "caprover-none" not found');
+    expect(readVaultSecret).not.toHaveBeenCalled();
   });
 });

@@ -237,6 +237,8 @@ const ROUTES_WITHOUT_A_PROVIDER: Record<string, string> = {
   "admin/accounts/[email]":
     "same account registry as admin/accounts, one account at a time (PATCH and DELETE, no POST export)",
   "admin/audit": "reads/writes the in-process audit ring buffer only; no database or LLM provider",
+  "admin/discovery":
+    "reads the CapRover discovery status for the admin Overview card: an export file on disk, plus a bare TCP reachability probe for built-image candidates, and never a database or LLM provider (GET, no POST export). It still calls guardRoute with the query bucket and answers 403 to a non-admin (tests/api/admin/discovery.test.ts)",
   "agent/config":
     "answers whether the agent runtime is enabled, from process.env alone; no database or LLM provider (GET, no POST export). It still requires a session — a bare getSession() like connections/managed, because metering a visibility probe out of the ai bucket would spend a run's budget on rendering a panel — and tests/api/agent/config.test.ts proves an unauthenticated caller learns nothing about the flag",
   "agent/drive":
@@ -257,7 +259,8 @@ const ROUTES_WITHOUT_A_PROVIDER: Record<string, string> = {
   "auth/me": "reads the caller's own session claims only (GET, no POST export)",
   "auth/oidc/callback": "completes the OIDC exchange that CREATES the session (GET, no POST export)",
   "auth/oidc/login": "starts the OIDC redirect before a session exists (GET, no POST export)",
-  "connections/managed": "reads seed config metadata only; never opens a database connection (GET, no POST export)",
+  "connections/managed":
+    "reads seed config metadata and the CapRover discovery export; never opens a database connection, and its only network use is a bare node:net reachability probe for built-image candidates when SEED_DISCOVERY_PATH is set (GET, no POST export)",
   health:
     "liveness only: returns a fixed body and touches nothing, so there is no provider to require a session for (GET, no POST export). The connection-scoped check is POST /api/db/health, which is not on this list",
   mcp: "reaches a provider, but is called by an MCP client of the user's own and verifies a scoped bearer token instead of a session (src/lib/mcp/bearer.ts): its 401 body differs from guardRoute's on purpose, and tests/security/mcp-auth.test.ts proves that no refused identity constructs a provider",
@@ -439,6 +442,8 @@ describe("routes that reach a provider require a session", () => {
     "@/lib/api/login-budget":
       "the login failure budgets shared by every route that checks a password, a code or a passkey",
     "@/lib/api/rate-limit": "the in-process token buckets",
+    "@/lib/api/request-scheme":
+      "reads the request's scheme and host for a display-only plain-HTTP warning; opens nothing",
     "@/lib/api/session-ended":
       "the session-required 401 body and the return-path check for sign-in; data and string checks only",
     "@/lib/api/require-session": "guardRoute itself",
@@ -459,7 +464,10 @@ describe("routes that reach a provider require a session", () => {
     "@/lib/logger": "structured logging",
     "@/lib/non-finite": "writes NaN and the infinities in held rows as words; pure, imports nothing",
     "@/lib/oidc": "the OIDC discovery and PKCE exchange",
-    "@/lib/seed": "reads seed connection metadata from config; never connects",
+    "@/lib/seed":
+      "reads seed connection metadata from config and the CapRover discovery export; its only network use is a bare node:net reachability probe for built-image candidates, through ./discovery-loader, never a database or LLM provider",
+    "@/lib/seed/discovery-loader":
+      "reads the CapRover discovery export file and builds its status; its only network use is a bare node:net reachability probe for built-image candidates, never a database or LLM provider",
     "@/lib/storage/connection-secrets":
       "the credential field classification; withoutSecretFields copies a connection record without its secrets and opens nothing",
     "@/lib/storage/factory": "the app's own storage backend (STORAGE_PROVIDER), not a user database",

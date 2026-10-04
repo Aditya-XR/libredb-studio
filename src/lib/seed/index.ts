@@ -2,6 +2,7 @@ import * as fs from "fs";
 import { loadConfig } from "./config-loader";
 import { resolveAllCredentials } from "./credential-resolver";
 import { filterByRoles, mergeDefaults } from "./connection-filter";
+import { getDiscoveredConnections } from "./discovery-loader";
 import { isSampleEnabled, resolveSamplePath, buildSampleConnection } from "./libredb-sample";
 import {
   isSqliteSampleEnabled,
@@ -32,7 +33,27 @@ export async function getManagedConnections(roles: string[]): Promise<ManagedCon
       )
     : [];
 
-  const out = [...fromConfig];
+  /*
+    Discovered connections (CapRover auto-connect spec 9.5 and 9.7) come after the operator's own file and
+    before the built-in samples. They never pass through resolveAllCredentials: their values are the literal
+    text another app on the platform network carries, so a `${NAME}` in them is not Studio's to resolve, and
+    a plaintext password in them is not the operator's to be warned about. The literal marker is set here,
+    after filterByRoles, because filterByRoles copies a fixed field list and SeedConnectionSchema strips an
+    undeclared key, so a marker set any earlier would not survive. loadAndResolve above does not include
+    them, so the unfiltered lookup never confirms to a caller that a discovered id exists. filterByRoles builds
+    a new object per entry, so the marker is set on that object in place and the loader's cache is not touched.
+
+    A discovered connection whose id the seed file read above also uses is dropped, whichever role the file's
+    connection is for. The loader applies the same rule when it recomputes, but its cache and the seed file's
+    expire independently, so for up to one SEED_CACHE_TTL_MS it can still list an id the file has just gained,
+    and the list would carry that id twice.
+  */
+  const fileIds = new Set(config?.connections.map((conn) => conn.id));
+  const discovered = filterByRoles(await getDiscoveredConnections(), roles)
+    .filter((conn) => !fileIds.has(conn.seedId))
+    .map((conn) => Object.assign(conn, { literal: true as const }));
+
+  const out = [...fromConfig, ...discovered];
 
   /*
     The SQLite sample leads the built-ins, and the order is the point: a client with
