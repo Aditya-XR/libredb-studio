@@ -21,6 +21,7 @@ import { newLocalId } from "@/lib/ids";
 import { getExplainStrategy, type ExplainStrategy } from "@/lib/explain";
 import type { ExplainFormat } from "@/lib/db/types";
 import { maybeInviteToStar } from "@/lib/community/star-prompt-toast";
+import { sandboxRefusal } from "@/lib/editor/sandbox-refusal";
 import { buildConnectionPayload } from "./use-connection-payload";
 
 export interface QueryExecutionOptions {
@@ -55,8 +56,32 @@ interface UseQueryExecutionParams {
    * the same `schemaRefreshPattern`, and until this existed only the first one was refreshed.
    */
   onObjectsChanged?: () => void;
+  /**
+   * The server ended the open transaction while running a statement in it: a typed COMMIT or
+   * ROLLBACK, or a statement the engine commits implicitly. The route answers `inTransaction: false`
+   * and the BEGIN/COMMIT/ROLLBACK controls must stop offering a transaction that is gone.
+   */
+  onTransactionEnded?: () => void;
   queryEditorRef: RefObject<QueryEditorRef | null>;
 }
+
+/**
+ * Whether a SANDBOX rollback answer confirms that the rollback happened. Only a 2xx
+ * does; a fetch that threw never reached the route and is not an answer either.
+ */
+async function rollbackConfirmed(request: Promise<Response>): Promise<boolean> {
+  try {
+    return (await request).ok;
+  } catch {
+    return false;
+  }
+}
+
+/** What the user is told when a SANDBOX run's changes were NOT rolled back. */
+const SANDBOX_NOT_ROLLED_BACK = {
+  title: "Not Rolled Back",
+  variant: "destructive" as const,
+};
 
 /**
  * Why an explain run cannot proceed, phrased for the user. Absent metadata means
@@ -146,6 +171,7 @@ export function useQueryExecution({
   playgroundMode,
   fetchSchema,
   onObjectsChanged,
+  onTransactionEnded,
   queryEditorRef,
 }: UseQueryExecutionParams) {
   /**
@@ -281,7 +307,20 @@ export function useQueryExecution({
       // run, a page (`offset`) or playground mode skips, so none of those paths can carry it to a route. It counts as
       // the tab's newest run: a run still in flight there is superseded, as a new run supersedes it, so its late
       // answer cannot land over the refusal.
-      const refusal = statementRefusal(queryToExecute, activeConnection.type);
+      //
+      // SANDBOX adds its own refusal on the same terms: a statement that would commit the
+      // transaction SANDBOX is about to roll back (see `sandboxRefusal`). Asked only of a
+      // run that will open that transaction, the same condition `isPlaygroundRun` reads below.
+      const refusal =
+        statementRefusal(queryToExecute, activeConnection.type) ??
+        (playgroundMode && !transactionActive && !isExplain && !executionOptions?.offset
+          ? sandboxRefusal(
+              queryToExecute,
+              resolveSqlGrammar(activeConnection.type),
+              metadata?.capabilities.implicitCommitStatements,
+              metadata?.capabilities.implicitCommitExceptions,
+            )
+          : undefined);
       if (refusal !== undefined) {
         runsRef.current.get(targetTabId)?.controller.abort();
         runsRef.current.delete(targetTabId);
@@ -444,8 +483,23 @@ export function useQueryExecution({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ...runPayload, action: "begin" }),
           });
+          // No transaction, no SANDBOX run. This used to log and carry on, so the statement
+          // ran unprotected and the toast still said it had been rolled back: measured on
+          // RisingWave 3.1.0, whose BEGIN opens nothing, an INSERT and a DELETE stayed applied
+          // (the DELETE without the confirmation dialog, which SANDBOX skips because it
+          // promises a rollback).
           if (!beginRes.ok) {
-            logger.warn("Playground transaction BEGIN failed", { route: "use-query-execution" });
+            const answer = await beginRes.json().catch(() => ({}));
+            const description =
+              typeof answer?.error === "string" ? answer.error : "The transaction SANDBOX needs could not be opened.";
+            commitToTab((t) => ({ ...t, isExecuting: false, isLoadingMore: false }));
+            toast({
+              title: "Sandbox Unavailable",
+              // The server's sentence may or may not end in a period ("Transaction already active").
+              description: `${/[.!?]$/.test(description) ? description : `${description}.`} Nothing was run.`,
+              variant: "destructive",
+            });
+            return false;
           }
         }
 
@@ -756,26 +810,55 @@ export function useQueryExecution({
           };
         });
 
-        // Playground mode: auto-rollback after getting results
-        if (isPlaygroundRun) {
-          try {
-            await appFetch("/api/db/transaction", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ...runPayload, action: "rollback" }),
-            });
-          } catch {
-            logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });
-          }
+        // The server ended the transaction inside this run, so there is nothing left to roll back.
+        // The OUTCOME is not known here and is not claimed: a COMMIT or an implicitly committing
+        // statement kept the work, a ROLLBACK (or a COMMIT of a failed PostgreSQL transaction)
+        // discarded it, and the server reports the same idle state after either.
+        const transactionEnded = useTransaction && resultData.inTransaction === false;
+        if (transactionEnded && !isPlaygroundRun) {
+          onTransactionEnded?.();
           toast({
-            title: "Playground",
-            description: "Changes auto-rolled back. No data was modified.",
+            title: "Transaction Ended",
+            description:
+              "The database ended the transaction while running this statement (a COMMIT, a ROLLBACK, or a statement it commits implicitly). Check what was kept.",
+            variant: "destructive",
           });
         }
 
+        // Playground mode: auto-rollback after getting results, and say it only when it happened.
+        if (isPlaygroundRun) {
+          if (transactionEnded) {
+            toast({
+              ...SANDBOX_NOT_ROLLED_BACK,
+              description:
+                "The database ended the transaction while running this statement (a COMMIT, a ROLLBACK, or a statement it commits implicitly), so SANDBOX could not roll it back. Check what was kept.",
+            });
+          } else if (
+            await rollbackConfirmed(
+              appFetch("/api/db/transaction", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...runPayload, action: "rollback" }),
+              }),
+            )
+          ) {
+            toast({
+              title: "Playground",
+              description: "Changes auto-rolled back. No data was modified.",
+            });
+          } else {
+            logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });
+            toast({
+              ...SANDBOX_NOT_ROLLED_BACK,
+              description: "The rollback was not confirmed by the server, so the changes may have been kept.",
+            });
+          }
+        }
+
         // Refresh schema after DDL/write operations (pattern from provider capabilities)
-        // Skip schema refresh in playground mode since changes are rolled back
-        if (!isExplain && !isPlaygroundRun && metadata) {
+        // Skip schema refresh in playground mode since changes are rolled back, unless the server
+        // committed them anyway: then the catalog did change and the tree has to say so.
+        if (!isExplain && (!isPlaygroundRun || transactionEnded) && metadata) {
           if (shouldRefreshSchema(queryToExecute, metadata.capabilities.schemaRefreshPattern)) {
             fetchSchema(activeConnection);
             // The tree's cache is its own and nothing else can reach it, so the same statement
@@ -803,16 +886,23 @@ export function useQueryExecution({
         // would otherwise count one the user never sees.
         return !resultData.hasError && !isSuperseded();
       } catch (error) {
-        // Playground mode: rollback on error too
+        // Playground mode: rollback on error too. A statement that failed may still have
+        // changed something first (a multi-statement text), so an unconfirmed rollback is
+        // reported here as well rather than only logged.
         if (isPlaygroundRun) {
-          try {
-            await appFetch("/api/db/transaction", {
+          const rolledBack = await rollbackConfirmed(
+            appFetch("/api/db/transaction", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ ...runPayload, action: "rollback" }),
-            });
-          } catch {
+            }),
+          );
+          if (!rolledBack) {
             logger.warn("Playground transaction rollback failed", { route: "use-query-execution" });
+            toast({
+              ...SANDBOX_NOT_ROLLED_BACK,
+              description: "The rollback was not confirmed by the server, so any changes may have been kept.",
+            });
           }
         }
         // A superseded run must not clear the flags the newer run just set: the
@@ -875,6 +965,7 @@ export function useQueryExecution({
       toast,
       fetchSchema,
       onObjectsChanged,
+      onTransactionEnded,
       metadata,
       transactionActive,
       playgroundMode,
