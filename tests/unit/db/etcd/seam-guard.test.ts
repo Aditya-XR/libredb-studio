@@ -51,6 +51,7 @@ import { ETCD_REFUSED_COMMANDS, parseEtcdCommand } from "@/lib/db/providers/keyv
 import { assessCommand, type CommandAssessment } from "@/lib/db/providers/keyvalue/etcd/guard";
 import { ETCD_MAINTENANCE_SPECS } from "@/lib/db/providers/keyvalue/etcd/maintenance";
 import { refuseBeforeSend, refuseReadOnly } from "@/lib/db/providers/keyvalue/etcd/write-policy";
+import { heldByAnotherGuard } from "../../../helpers/grpc-seam-holdings";
 
 const ROOT = join(import.meta.dir, "..", "..", "..", "..");
 const ETCD_PATH = "src/lib/db/providers/keyvalue/etcd";
@@ -67,21 +68,6 @@ const SOURCE_FILE = /\.(c|m)?(t|j)sx?$/;
 
 const GRPC_JS = "@grpc/grpc-js";
 const PROTO_LOADER = "@grpc/proto-loader";
-
-/**
- * The files another provider's seam guard holds. The Milvus provider copies etcd's gRPC transport under the
- * isolation rule (vector-family spec 5.1, decision Q1a), and tests/unit/db/milvus/seam-guard.test.ts holds who among
- * these imports @grpc/grpc-js, @grpc/proto-loader, the Milvus descriptor and its generator. This guard's lists stay
- * etcd's own, and a stray anywhere else still fails here.
- */
-const HELD_BY_THE_MILVUS_GUARD: readonly RegExp[] = [
-  /^src\/lib\/db\/providers\/vector\/milvus\//,
-  /^scripts\/generate-milvus-descriptor\.mjs$/,
-  /^tests\/unit\/db\/milvus\//,
-  /^tests\/helpers\/milvus-/,
-  /^tests\/live\/milvus-/,
-];
-const heldByTheMilvusGuard = (path: string) => HELD_BY_THE_MILVUS_GUARD.some((pattern) => pattern.test(path));
 
 // -- reading files ------------------------------------------------------------------------------------------------
 
@@ -349,7 +335,7 @@ const IMPORT_RULES: readonly ImportRule[] = [
 function importRuleFindings(rule: ImportRule, root: string, env?: NodeJS.ProcessEnv): string[] {
   const files = filesOf(root, env);
   const found = new Set(
-    files.filter((file) => !heldByTheMilvusGuard(file.path) && rule.holds(file, root)).map((file) => file.path),
+    files.filter((file) => !heldByAnotherGuard(file.path) && rule.holds(file, root)).map((file) => file.path),
   );
   const listed = new Set(files.map((file) => file.path));
   return [
@@ -930,7 +916,7 @@ describe("spec E11: who may import the client packages, the descriptor and its g
   test("the detector reads real code: each named file holds its rule, and the lists overlap as E11 says", () => {
     const files = filesOf(ROOT);
     const holding = (rule: ImportRule) =>
-      files.filter((file) => !heldByTheMilvusGuard(file.path) && rule.holds(file, ROOT)).map((file) => file.path);
+      files.filter((file) => !heldByAnotherGuard(file.path) && rule.holds(file, ROOT)).map((file) => file.path);
     expect(holding(IMPORT_RULES[0])).toEqual([...IMPORT_RULES[0].named].sort());
     expect(files.length).toBeGreaterThan(1000);
     // The evidence harness builds its definition from the generator, never from an import of the descriptor.
@@ -1257,6 +1243,24 @@ describe("planted violations: spec E11's import lists fail by name", () => {
     expect(findings("@grpc/grpc-js importers", { [stray]: `import * as grpc from "${GRPC_JS}";\n` })).toEqual([
       `@grpc/grpc-js importers: ${stray} imports @grpc/grpc-js, and spec E11 does not name it`,
     ]);
+  });
+
+  test("the shared transport's files are the transport guard's", () => {
+    const findings = (name: string, planted: Readonly<Record<string, string>>) =>
+      inPlantedRepository({ ...HOLDING[name], ...planted }, (root, env) =>
+        importRuleFindings(ruleNamed(name), root, env),
+      );
+    expect(
+      findings("@grpc/grpc-js importers", {
+        "src/lib/db/grpc/channel.ts": `import * as grpc from "${GRPC_JS}";\n`,
+        "tests/unit/db/grpc/channel.test.ts": `import * as grpc from "${GRPC_JS}";\n`,
+      }),
+    ).toEqual([]);
+    expect(
+      findings("@grpc/proto-loader importers", {
+        "src/lib/db/grpc/channel.ts": `import type { PackageDefinition } from "${PROTO_LOADER}";\n`,
+      }),
+    ).toEqual([]);
   });
 });
 
