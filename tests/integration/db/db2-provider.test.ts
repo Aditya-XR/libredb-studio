@@ -1,7 +1,7 @@
 /**
  * The Db2 LUW provider (#786), driven through its driver seam.
  *
- * The fake client below answers each catalog statement the way db2-node 1.0.22 answers it against
+ * The fake client below answers each catalog statement the way db2-node 1.0.22 and 1.0.24 answer it against
  * the dev container's fixture (`docker/db2-init/01-object-fixture.sql`): names as the HEX of their
  * UTF-8 bytes, the code page 1208, a definition as two padded hex chunks and its byte length, and
  * the NULL text of an EXTERNAL routine. Every statement is matched by identity against the
@@ -581,6 +581,20 @@ describe("Db2Provider: declaration", () => {
     );
   });
 
+  // db2-node 1.0.24 reads non-ASCII text back as written (K1) and refuses a DECIMAL that does not
+  // fit (K22), measured on 12.1.0.0 and 11.5.9.0 with an edit and an import read back as HEX, so a
+  // table takes row writes again. Create Table stays off: it needs a Db2 row of column types.
+  test("only the table kind takes row writes, inline edit is on, and Create Table is off", () => {
+    const capabilities = makeProvider().getCapabilities();
+
+    expect(capabilities.supportsInlineRowEdit).toBe(true);
+    expect(capabilities.supportsCreateTable).toBe(false);
+    expect(capabilities.objectKinds?.filter((kind) => kind.acceptsRowWrites === true).map((kind) => kind.id)).toEqual([
+      "table",
+    ]);
+    expect(capabilities.objectKinds?.some((kind) => kind.acceptsSourceEdits === true)).toBe(false);
+  });
+
   test("declares none of the methods this version leaves out", () => {
     const provider = makeProvider() as unknown as Record<string, unknown>;
     for (const method of [
@@ -638,14 +652,32 @@ describe("Db2Provider: connect and disconnect", () => {
     expect(provider.isConnected()).toBe(false);
   });
 
-  test("a password db2-node 1.0.22 cannot send is refused before the driver is reached (K23)", async () => {
-    const provider = makeProvider({ password: "Password123!" });
+  // 1.0.24 sends these characters wrongly over TLS and without it, under either mechanism, so the
+  // refusal holds for a TLS connection and for one behind the insecure opt-in alike.
+  test.each([
+    ["over TLS", {}],
+    ["without TLS behind the insecure opt-in", { ssl: undefined, allowInsecureAuth: true }],
+  ] as const)(
+    "a password db2-node 1.0.24 cannot send is refused before the driver is reached, %s (K23)",
+    async (_, overrides) => {
+      const provider = makeProvider({ ...overrides, password: "Password123!" });
+      const error = await provider.connect().catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(DatabaseConfigError);
+      expect((error as Error).message).toContain("contains !");
+      expect((error as Error).message).toContain("db2-node 1.0.24");
+      expect(built).toEqual([]);
+      expect(provider.isConnected()).toBe(false);
+    },
+  );
+
+  test("no TLS without the opt-in is refused for the transport first, whatever the password holds", async () => {
+    const provider = makeProvider({ ssl: undefined, password: "Password123!" });
     const error = await provider.connect().catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(DatabaseConfigError);
-    expect((error as Error).message).toContain("contains !");
+    expect((error as Error).message).toContain("has no TLS");
     expect(built).toEqual([]);
-    expect(provider.isConnected()).toBe(false);
   });
 
   test("a connection with no TLS and the consent connects without TLS", async () => {
@@ -729,19 +761,22 @@ describe("Db2Provider: query", () => {
     expect(sent.at(-1)).toEqual({ sql: "SELECT ID, NAME FROM APP.CUSTOMERS", params: undefined });
   });
 
-  test("strips a leading comment the driver refuses, and converts a safe bigint", async () => {
-    userQuery = async () => ({ rows: [], rowCount: 0, columns: [column("A", "Integer")], diagnostics: [] });
+  // db2-node 1.0.24 classifies a statement past its leading comments (K18) and binds a bigint
+  // losslessly (K10, K6), so both reach it exactly as the caller wrote them.
+  test("sends a leading comment and a bigint as written", async () => {
+    userQuery = async () => ({ rows: [], rowCount: 0, columns: [column("A", "BigInt")], diagnostics: [] });
     const provider = await connected();
-    await provider.query("-- note\n/* more */ SELECT A FROM T WHERE A = ?", [BigInt(5)]);
+    const huge = BigInt(2) ** BigInt(63) - BigInt(1);
+    await provider.query("-- note\n/* more */ SELECT A FROM T WHERE A = ?", [huge]);
 
-    expect(sent.at(-1)).toEqual({ sql: "SELECT A FROM T WHERE A = ?", params: [5] });
+    expect(sent.at(-1)).toEqual({ sql: "-- note\n/* more */ SELECT A FROM T WHERE A = ?", params: [huge] });
   });
 
-  test("refuses an unsafe bigint before anything is sent (M3)", async () => {
+  test("refuses an array parameter before anything is sent (M3)", async () => {
     const provider = await connected();
     const before = sent.length;
 
-    await expect(provider.query("SELECT ?", [BigInt(2) ** BigInt(60)])).rejects.toBeInstanceOf(QueryError);
+    await expect(provider.query("SELECT ?", [[1, 2]])).rejects.toBeInstanceOf(QueryError);
     expect(sent.length).toBe(before);
   });
 
@@ -807,10 +842,10 @@ describe("Db2Provider: prepareQuery", () => {
     ]);
 
     expect(preview).toBe(
-      '-- Not read by this preview: "C_CLOB" CLOB(1048576), "C_XML" XML. db2-node 1.0.22 cannot fetch these types; select one through a cast, as docs/providers/db2.md shows.\n' +
-        'SELECT "ID", VARCHAR("C_BIG") AS "C_BIG", VARGRAPHIC("C_VCHAR") AS "C_VCHAR", VARCHAR("C_BOOL") AS "C_BOOL", VARCHAR("C_TS0") AS "C_TS0" FROM "APP"."ALLTYPES";',
+      '-- Not read by this preview: "C_CLOB" CLOB(1048576), "C_XML" XML. db2-node can return a wrong value, or none, for a LOB or XML column read beside other columns; select each one on its own, as docs/providers/db2.md shows.\n' +
+        'SELECT "ID", "C_BIG", "C_VCHAR", "C_BOOL", "C_TS0" FROM "APP"."ALLTYPES";',
     );
-    // The comment is removed before the driver sees it, and the bound lands after the statement.
+    // The bound lands after the statement, and the leading comment goes to the driver as written.
     expect(provider.prepareQuery(preview, { limit: 50 }).query).toEndWith(
       'FROM "APP"."ALLTYPES" FETCH FIRST 50 ROWS ONLY;',
     );
@@ -1233,8 +1268,8 @@ describe("Db2Provider: maintenance", () => {
     const optimize = await provider.runMaintenance("optimize", "ORDER_TOTALS", "APP");
     expect(optimize.message).toBe("REORG completed on APP.ORDER_TOTALS");
     expect(executed).toEqual([
-      `BEGIN CALL SYSPROC.ADMIN_CMD('RUNSTATS ON TABLE "APP"."Mixed Case" WITH DISTRIBUTION AND DETAILED INDEXES ALL'); END`,
-      `BEGIN CALL SYSPROC.ADMIN_CMD('REORG TABLE "APP"."ORDER_TOTALS"'); END`,
+      `CALL SYSPROC.ADMIN_CMD('RUNSTATS ON TABLE "APP"."Mixed Case" WITH DISTRIBUTION AND DETAILED INDEXES ALL')`,
+      `CALL SYSPROC.ADMIN_CMD('REORG TABLE "APP"."ORDER_TOTALS"')`,
     ]);
   });
 

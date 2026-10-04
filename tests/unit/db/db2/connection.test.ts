@@ -112,7 +112,7 @@ describe("resolveTarget", () => {
       { mode: "verify-full" as SSLMode, clientKey: PEM },
     ]) {
       expect(() => resolveTarget(connection({ ssl }))).toThrow(
-        "db2-node 1.0.22 has no client-certificate authentication; remove the client certificate and key from this Db2 connection.",
+        "db2-node 1.0.24 has no client-certificate authentication; remove the client certificate and key from this Db2 connection.",
       );
     }
   });
@@ -202,14 +202,15 @@ describe("resolveTarget", () => {
 });
 
 describe("assertPasswordSendable (K23)", () => {
-  // Measured on Db2 12.1.0.0 with db2-node 1.0.22, with and without TLS: the server rejects each of
-  // these five as a wrong password, while the IBM CLP signs in with the same password.
+  // Measured on Db2 12.1.0.0 with db2-node 1.0.22 and again with 1.0.24, with and without TLS and
+  // under both security mechanisms: the server rejects each of these five as a wrong password, while
+  // the IBM CLP signs in with the same password.
   test.each(["!", "[", "]", "^", "|"])("a password holding %s is refused, naming the character", (character) => {
     const config = connection({ password: `Pass${character}word1` });
     const error = refusal(() => assertPasswordSendable(resolveTarget(config)));
     expect(error).toBeInstanceOf(DatabaseConfigError);
     expect(error.message).toContain(`contains ${character}`);
-    expect(error.message).toContain("db2-node 1.0.22");
+    expect(error.message).toContain("db2-node 1.0.24");
     expect(error.message).toContain("Change the password");
   });
 
@@ -245,7 +246,7 @@ describe("assertTransport (fail closed)", () => {
       const config = connection({ ssl });
       const error = refusal(() => assertTransport(config, resolveTarget(config)));
       expect(error).toBeInstanceOf(DatabaseConfigError);
-      expect(error.message).toContain("sends the password to the server in cleartext");
+      expect(error.message).toContain("the password is sent to the server in cleartext");
       expect(error.message).toContain("Send the password without TLS");
     }
   });
@@ -280,7 +281,7 @@ describe("assertTransport (fail closed)", () => {
         [TUNNEL_FAR_END]: { host: "db2.remote.example", port: 50001 },
       });
       expect(() => assertTransport(config, resolveTarget(config))).toThrow(
-        `TLS mode "${mode}" checks the server's name, and through an SSH tunnel db2-node 1.0.22 can only check the tunnel's local address rather than db2.remote.example.`,
+        `TLS mode "${mode}" checks the server's name, and through an SSH tunnel db2-node 1.0.24 can only check the tunnel's local address rather than db2.remote.example.`,
       );
     }
   });
@@ -303,8 +304,8 @@ describe("clientOptions (M4, M6)", () => {
   const base = { host: "db2.example.com", port: 50001, database: "TESTDB", user: "db2inst1", password: "secret" };
 
   test.each([
-    [undefined, { ssl: false }],
-    ["disable", { ssl: false }],
+    [undefined, { ssl: false, securityMechanism: "userPassword" }],
+    ["disable", { ssl: false, securityMechanism: "userPassword" }],
     ["require", { ssl: true, rejectUnauthorized: false }],
     ["verify-system", { ssl: true, rejectUnauthorized: true }],
     ["verify-ca", { ssl: true, rejectUnauthorized: true, sslClientHostnameValidation: "OFF", caCert: "/tmp/x/ca.pem" }],
@@ -320,7 +321,7 @@ describe("clientOptions (M4, M6)", () => {
     expect(clientOptions(target("verify-full"))).not.toHaveProperty("caCert");
   });
 
-  test("never queryTimeout, currentSchema or securityMechanism, whatever the connection carries", () => {
+  test("never queryTimeout or currentSchema, whatever the connection carries", () => {
     for (const mode of [undefined, "disable", "require", "verify-system", "verify-ca", "verify-full"] as const) {
       const options = clientOptions(
         resolveTarget(
@@ -330,6 +331,14 @@ describe("clientOptions (M4, M6)", () => {
       );
       expect(Object.keys(options)).not.toContain("queryTimeout");
       expect(Object.keys(options)).not.toContain("currentSchema");
+    }
+  });
+
+  // db2-node 1.0.24 refuses the plaintext mechanism unless it is asked for by name, so the
+  // insecure opt-in has to say it; over TLS the driver's default encrypted mechanism is kept.
+  test("the plaintext mechanism is named only without TLS, and never over TLS", () => {
+    for (const mode of ["require", "verify-system", "verify-ca", "verify-full"] as const) {
+      const options = clientOptions(resolveTarget(connection({ ssl: { mode, caCert: PEM } })), "/tmp/ca.pem");
       expect(Object.keys(options)).not.toContain("securityMechanism");
     }
   });
@@ -436,6 +445,13 @@ describe("openClient", () => {
     expect(opened.caDir).toBe(join(tmpdir(), "libredb-db2-abc"));
     expect(built[0].caCert).toBe(join(tmpdir(), "libredb-db2-abc", "ca.pem"));
     expect(calls).toHaveLength(2);
+  });
+
+  test("the insecure opt-in reaches the driver as the plaintext mechanism, named", async () => {
+    const { driver, built } = fakeDriver();
+    await openClient(connection({ ssl: undefined, allowInsecureAuth: true }), async () => driver, memoryFs().fs);
+
+    expect(built[0]).toMatchObject({ ssl: false, securityMechanism: "userPassword" });
   });
 
   test("with no CA there is no file and no directory", async () => {
