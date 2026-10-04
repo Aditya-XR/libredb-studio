@@ -2042,6 +2042,8 @@ interface ColumnSchema {
   nullable: boolean;       // Allows NULL
   isPrimary: boolean;      // Primary key
   defaultValue?: string;   // Default value
+  defaultExpression?: string; // The SQL that produces it, where the provider has it. MySQL
+                           // only with includeDefaultSql, since its catalog spells a value (#1031)
   provenance?: "sampled";  // Inferred from sampled rows rather than declared; never sent to MCP or a model
 }
 
@@ -2361,6 +2363,11 @@ curl -X POST http://localhost:3000/api/db/objects/inventory \
     "includeColumns": true
   }'
 ```
+
+Add `"includeDefaultSql": true` (with `includeColumns`) to have each column carry `defaultExpression`,
+the SQL a migration writes after `DEFAULT`. On MySQL that costs one `SHOW CREATE TABLE` per table with a
+default, because its catalog reports the value rather than the SQL; SchemaDiff asks for it, nothing
+else does (#1031). Without `includeColumns` it is a 400.
 
 #### AI Explanation of a Plan
 ```bash
