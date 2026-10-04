@@ -28,7 +28,7 @@ It is bound to Studio's RBAC through a seed-declared read-only mode, admin-only 
 ### 2.1 Where it sits
 
 `EtcdProvider` extends `BaseDatabaseProvider` in the `keyvalue` family beside Redis, and every module talks to etcd only through the `EtcdClient` interface of `client.ts`, each through the slice it uses.
-`grpc-client.ts` is the one file that imports `@grpc/grpc-js`, and it names only the allowlist of RPCs `tests/unit/db/etcd/seam-guard.test.ts` holds.
+`grpc-client.ts` is the provider's one gRPC file: it reaches `@grpc/grpc-js` only through the shared transport in `src/lib/db/grpc/`, and it names only the allowlist of RPCs `tests/unit/db/etcd/seam-guard.test.ts` holds.
 `lexer.ts`, `commands.ts`, `keys.ts` and `guard.ts` are pure and shipped to the browser, because the confirmation gate, the generators and the editor's tokens provider read them; `write-policy.ts`, which decides the read-only mode and the Kubernetes refusals, runs on the server only.
 
 ### 2.2 Modules
@@ -36,7 +36,7 @@ It is bound to Studio's RBAC through a seed-declared read-only mode, admin-only 
 | File | What it owns |
 |---|---|
 | `client.ts` | The seam: `EtcdClient`, its request and answer types, and `EtcdError` |
-| `grpc-client.ts` | The one gRPC channel, its credentials, the token and its renewal, the `hasleader` table, deadlines and aborts |
+| `grpc-client.ts` | The RPC table over the shared gRPC channel of `src/lib/db/grpc/`, the token and its renewal, the `hasleader` table, deadlines and aborts |
 | `proto/` | The vendored etcd v3.7.2 protos and the descriptor generated from them by `scripts/generate-etcd-descriptor.mjs` |
 | `connection-options.ts` | The connection to options, with the endpoint, credential and TLS checks |
 | `lexer.ts`, `commands.ts` | Every quoting rule, the `schemaRefreshPattern` that reloads the tree after a write, built from those rules, and the etcdctl subset as a declared table |

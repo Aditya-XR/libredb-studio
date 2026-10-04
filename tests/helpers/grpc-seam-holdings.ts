@@ -25,7 +25,10 @@ export const GRPC_SEAM_HOLDINGS: Readonly<Record<string, GrpcSeamHolding>> = {
   },
   etcd: {
     held: [],
-    transportImporters: [],
+    transportImporters: [
+      "src/lib/db/providers/keyvalue/etcd/grpc-client.ts",
+      "src/lib/db/providers/keyvalue/etcd/connection-options.ts",
+    ],
     providerDirectory: "src/lib/db/providers/keyvalue/etcd",
   },
   milvus: {

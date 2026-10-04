@@ -35,6 +35,7 @@ import { createPrivateKey, type KeyObject, X509Certificate } from "node:crypto";
 import { isIP, isIPv6 } from "node:net";
 import { validateHost, validatePort } from "@/lib/db/http/endpoint";
 import { DatabaseConfigError } from "@/lib/db/errors";
+import type { GrpcTlsOptions } from "@/lib/db/grpc/tls";
 import {
   type DatabaseConnection,
   type DatabaseType,
@@ -54,21 +55,6 @@ export type EtcdAuthMode =
   | { readonly kind: "password"; readonly user: string; readonly password: string }
   /** A client certificate and no password: etcd reads its Common Name as the user under RBAC. */
   | { readonly kind: "certificate" };
-
-export interface EtcdTlsOptions {
-  /** `disable`, an absent and a `null` panel are no TLS (spec E2, E5). */
-  readonly mode: "require" | "verify-system" | "verify-ca" | "verify-full";
-  /** PEM as configured; absent means the runtime's roots. */
-  readonly ca?: string;
-  readonly clientCertificate?: { readonly cert: string; readonly key: string };
-  /** False only for `require`, or an explicit `rejectUnauthorized: false` (spec 3.5's rule). */
-  readonly verify: boolean;
-  /** The TLS identity: the tunnel's far end when one carries the connection, else the host (spec E5). */
-  readonly identity: string;
-  readonly identityIsIp: boolean;
-  /** Always set as `grpc.ssl_target_name_override`: the identity, or ETCD_IP_SERVER_NAME for an IP identity. */
-  readonly serverNameOverride: string;
-}
 
 /** The client port etcd listens on (spec 6.1), for a connection that names no port. */
 export const ETCD_DEFAULT_PORT = 2379;
@@ -100,7 +86,7 @@ export interface EtcdConnectionOptions {
    * `EtcdErrorConnection.host` is; a reader that joins it with the port brackets an IPv6 host.
    */
   readonly endpoint: { readonly host: string; readonly port: number };
-  readonly tls?: EtcdTlsOptions;
+  readonly tls?: GrpcTlsOptions;
   readonly auth: EtcdAuthMode;
   /** Who etcd sees: the `user`, or the client certificate's subject Common Name read with X509Certificate (spec 4.7). */
   readonly principal?: { readonly name: string; readonly via: "password" | "certificate" };
@@ -119,7 +105,7 @@ const PROVIDER: DatabaseType = "etcd";
  * whether it verifies the chain and the name when `rejectUnauthorized` does not decide. The chain is
  * checked against the pasted CA when one is configured, and against the runtime's roots otherwise.
  */
-const TLS_MODES: Readonly<Record<SSLMode, { readonly mode: EtcdTlsOptions["mode"]; readonly verify: boolean } | null>> =
+const TLS_MODES: Readonly<Record<SSLMode, { readonly mode: GrpcTlsOptions["mode"]; readonly verify: boolean } | null>> =
   Object.freeze({
     disable: null,
     require: { mode: "require", verify: false },
@@ -264,7 +250,7 @@ function shared<T>(validate: () => T): T {
   }
 }
 
-function tlsOptions(config: DatabaseConnection, identity: string): EtcdTlsOptions | undefined {
+function tlsOptions(config: DatabaseConnection, identity: string): GrpcTlsOptions | undefined {
   // The whole panel is checked, whatever its mode, before any of it is read (spec 6.1, Kafka 6.1).
   const panel = optionalObject<keyof SSLConfig>(config.ssl, "ssl");
   if (panel === undefined) return undefined;
@@ -361,7 +347,7 @@ function privateKey(pem: string): KeyObject {
  */
 function credentials(
   config: DatabaseConnection,
-  tls: EtcdTlsOptions | undefined,
+  tls: GrpcTlsOptions | undefined,
 ): { readonly auth: EtcdAuthMode; readonly principal?: EtcdConnectionOptions["principal"] } {
   const user = credential(config.user, "user");
   const password = credential(config.password, "password");

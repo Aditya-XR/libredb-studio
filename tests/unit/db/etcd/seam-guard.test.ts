@@ -4,7 +4,7 @@
  * The provider reaches etcd through one narrow seam, and this file keeps the seam where it is. It parses source
  * files from disk and fails the build when an ordinary edit crosses a line spec E11 draws:
  *
- * - who imports @grpc/grpc-js (the adapter, the gate-4 evidence harness and the adapter's two transport tests),
+ * - who imports @grpc/grpc-js (the gate-4 evidence harness and the adapter's two transport tests),
  *   who imports the generated descriptor, who names its file to read it, who imports @grpc/proto-loader, and who
  *   imports the descriptor's generator, each list held exactly, so a named file that stops importing fails too;
  * - what each module of spec 3.1's pure set imports (other members, the shared types, the repository's error
@@ -297,7 +297,7 @@ const IMPORT_RULES: readonly ImportRule[] = [
     name: "@grpc/grpc-js importers",
     what: GRPC_JS,
     verb: "imports",
-    named: [ADAPTER, HARNESS, ADAPTER_TEST, TLS_TEST],
+    named: [HARNESS, ADAPTER_TEST, TLS_TEST],
     holds: importsPackage(GRPC_JS),
   },
   {
@@ -1076,7 +1076,7 @@ function inPlantedRepository<T>(
 /** Each import rule's named files, each holding the rule, as a planted repository starts. */
 const HOLDING: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   "@grpc/grpc-js importers": Object.fromEntries(
-    [ADAPTER, HARNESS, ADAPTER_TEST, TLS_TEST].map((path) => [path, `import * as grpc from "${GRPC_JS}";\n`]),
+    [HARNESS, ADAPTER_TEST, TLS_TEST].map((path) => [path, `import * as grpc from "${GRPC_JS}";\n`]),
   ),
   "descriptor importers": {
     [DESCRIPTOR]: "export const ETCD_DESCRIPTOR = {};\n",
@@ -1363,14 +1363,15 @@ describe("planted violations: the text rules fail by name", () => {
       `RPC names: grpc-client.ts:${lines - 2} names the Lock or Election service, which spec E11 forbids`,
       `RPC names: grpc-client.ts:${lines - 1} writes a method path by hand, where the adapter takes each from the descriptor`,
     ]);
-    const streamed = plantedIn(adapter, "client.makeBidiStreamRequest(", "client.makeServerStreamRequest(");
+    const streamed = plantedIn(adapter, "channel.bidiStream(", "channel.makeServerStreamRequest(");
     expect(rpcNameFindings(streamed)).toEqual([
-      `RPC names: grpc-client.ts:${lineOf(streamed, "client.makeServerStreamRequest(")} names makeServerStreamRequest, which spec E11 forbids`,
+      `RPC names: grpc-client.ts:${lineOf(streamed, "channel.makeServerStreamRequest(")} names makeServerStreamRequest, which spec E11 forbids`,
     ]);
     // A service client answers every RPC under a lower-camel-case name too, so no client may be built from the definition.
-    const constructed = plantedIn(adapter, "  credentials,\n", "  credentials,\n  loadPackageDefinition,\n");
+    const loader = 'import { fromJSON, type MethodDefinition, type ServiceDefinition } from "@grpc/proto-loader";\n';
+    const constructed = plantedIn(adapter, loader, `${loader}import { loadPackageDefinition } from "@grpc/grpc-js";\n`);
     expect(rpcNameFindings(constructed)).toEqual([
-      `RPC names: grpc-client.ts:${lineOf(constructed, "  loadPackageDefinition,")} names loadPackageDefinition, which spec E11 forbids`,
+      `RPC names: grpc-client.ts:${lineOf(constructed, "import { loadPackageDefinition }")} names loadPackageDefinition, which spec E11 forbids`,
     ]);
   });
 
