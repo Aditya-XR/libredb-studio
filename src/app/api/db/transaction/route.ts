@@ -1,3 +1,4 @@
+import { firstResultSet } from "@/lib/api/first-result-set";
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateProvider } from "@/lib/db";
 import type { QueryResult } from "@/lib/db/types";
@@ -152,7 +153,7 @@ export async function POST(req: NextRequest) {
         const hasMore = prepared.wasLimited && result.rows.length === prepared.limit;
 
         return NextResponse.json({
-          ...result,
+          ...firstResultSet(result),
           inTransaction: stillInTransaction,
           pagination: {
             limit: prepared.limit,

@@ -450,6 +450,149 @@ describe("POST /api/db/multi-query", () => {
     });
   });
 
+  // #1312: what one request carries is the dialect's unit, not the `;`-statement.
+  describe("execution units", () => {
+    const executed = () => (mockProvider.query as ReturnType<typeof mock>).mock.calls.map((call) => call[0]);
+
+    test("a T-SQL batch is ONE provider call, sent whole and unbounded", async () => {
+      const sql = "DECLARE @x INT = 5; SELECT @x * 2 AS doubled;\nGO\nSELECT 3 AS c";
+      const req = createMockRequest("/api/db/multi-query", {
+        method: "POST",
+        body: { connection: { ...validConnection, type: "mssql", port: 1433 }, sql },
+      });
+
+      const res = await POST(req as never);
+      const data = await parseResponseJSON<{ statementCount: number; statements: { sql: string }[] }>(res);
+
+      expect(data.statementCount).toBe(2);
+      // Only the script's last unit is bounded, as only its last statement was before.
+      expect(executed()).toEqual(["DECLARE @x INT = 5; SELECT @x * 2 AS doubled", "SELECT 3 AS c LIMIT 50"]);
+      expect(data.statements.map((statement) => statement.sql)).toEqual([
+        "DECLARE @x INT = 5; SELECT @x * 2 AS doubled",
+        "SELECT 3 AS c",
+      ]);
+    });
+
+    const mssql = { ...validConnection, type: "mssql", port: 1433 };
+
+    test("the last batch's last read is bounded in place, the statements before it as written", async () => {
+      const req = createMockRequest("/api/db/multi-query", {
+        method: "POST",
+        body: { connection: mssql, sql: "SELECT 1; SELECT * FROM big;" },
+      });
+
+      await POST(req as never);
+
+      expect(executed()).toEqual(["SELECT 1; SELECT * FROM big LIMIT 50"]);
+    });
+
+    test.each([
+      "CREATE PROCEDURE p AS SET NOCOUNT ON; SELECT * FROM big",
+      "CREATE OR ALTER VIEW v AS SELECT 1 AS a; SELECT * FROM big",
+      "ALTER FUNCTION f() RETURNS TABLE AS RETURN SELECT 1 AS a; SELECT * FROM big",
+    ])("a batch that is a module body is never bounded, its tail being the stored body: %s", async (sql) => {
+      const req = createMockRequest("/api/db/multi-query", { method: "POST", body: { connection: mssql, sql } });
+
+      await POST(req as never);
+
+      expect(executed()).toEqual([sql]);
+    });
+
+    test("a last batch that ends with a write is sent as written", async () => {
+      const req = createMockRequest("/api/db/multi-query", {
+        method: "POST",
+        body: { connection: mssql, sql: "SELECT 1; DELETE FROM t" },
+      });
+
+      await POST(req as never);
+
+      expect(executed()).toEqual(["SELECT 1; DELETE FROM t"]);
+    });
+
+    test("a batch with several result sets shows the last one with rows", async () => {
+      (mockProvider.query as ReturnType<typeof mock>).mockImplementation(async () => ({
+        rows: [{ a: 1 }],
+        fields: ["a"],
+        rowCount: 1,
+        executionTime: 1,
+        resultSets: [
+          { rows: [{ a: 1 }], fields: ["a"] },
+          { rows: [{ b: 2 }, { b: 3 }], fields: ["b"], columnTypes: { b: "int" } },
+          { rows: [], fields: ["c"] },
+        ],
+      }));
+      const req = createMockRequest("/api/db/multi-query", {
+        method: "POST",
+        body: { connection: mssql, sql: "SELECT 1 AS a; SELECT b FROM t; SELECT c FROM empty" },
+      });
+
+      const data = await parseResponseJSON<{
+        rows: unknown[];
+        fields: string[];
+        rowCount: number;
+        statements: { columnTypes?: Record<string, string> }[];
+      }>(await POST(req as never));
+
+      expect(data.rows).toEqual([{ b: 2 }, { b: 3 }]);
+      expect(data.fields).toEqual(["b"]);
+      expect(data.rowCount).toBe(2);
+      expect(data.statements[0].columnTypes).toEqual({ b: "int" });
+    });
+
+    test.each<[string, Record<string, unknown>, number]>([
+      // One result set after a write: the engine's count is the INSERT's, not the shown rows'.
+      [
+        "INSERT INTO t VALUES (1),(2); SELECT * FROM t",
+        { rows: [{ a: 1 }, { a: 2 }, { a: 3 }, { a: 4 }, { a: 5 }], fields: ["a"], rowCount: 2 },
+        5,
+      ],
+      // No result set at all: the engine's count is the only one there is.
+      ["UPDATE t SET a = 1; UPDATE u SET b = 2", { rows: [], fields: [], rowCount: 7 }, 7],
+    ])("a batch's count is its shown rows when it has a result set: %s", async (sql, answer, rowCount) => {
+      (mockProvider.query as ReturnType<typeof mock>).mockImplementation(async () => ({ executionTime: 1, ...answer }));
+      const req = createMockRequest("/api/db/multi-query", { method: "POST", body: { connection: mssql, sql } });
+
+      const data = await parseResponseJSON<{ statements: { rowCount: number }[] }>(await POST(req as never));
+
+      expect(data.statements[0].rowCount).toBe(rowCount);
+    });
+
+    test("a single-statement unit keeps the engine's own result even when it carries several sets", async () => {
+      (mockProvider.query as ReturnType<typeof mock>).mockImplementation(async () => ({
+        rows: [{ a: 1 }],
+        fields: ["a"],
+        rowCount: 1,
+        executionTime: 1,
+        resultSets: [
+          { rows: [{ a: 1 }], fields: ["a"] },
+          { rows: [{ b: 2 }], fields: ["b"] },
+        ],
+      }));
+      const req = createMockRequest("/api/db/multi-query", {
+        method: "POST",
+        body: { connection: mssql, sql: "EXEC sp_help\nGO" },
+      });
+
+      const data = await parseResponseJSON<{ rows: unknown[] }>(await POST(req as never));
+
+      expect(data.rows).toEqual([{ a: 1 }]);
+    });
+
+    test("an Oracle PL/SQL unit is one call that keeps its END;, and the `/` line is never sent", async () => {
+      const req = createMockRequest("/api/db/multi-query", {
+        method: "POST",
+        body: {
+          connection: { ...validConnection, type: "oracle", port: 1521 },
+          sql: "CREATE PROCEDURE p AS BEGIN UPDATE emp SET a = 1; END;\n/\nBEGIN p; END;",
+        },
+      });
+
+      await POST(req as never);
+
+      expect(executed()).toEqual(["CREATE PROCEDURE p AS BEGIN UPDATE emp SET a = 1; END;", "BEGIN p; END;"]);
+    });
+  });
+
   describe("final-statement classification", () => {
     test("comment-led final SELECT is prepared and the bounded SQL reaches the engine", async () => {
       const finalStatement = "-- final read\nSELECT * FROM users";

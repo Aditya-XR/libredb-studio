@@ -2525,6 +2525,77 @@ describe("QueryEditor", () => {
     window.removeEventListener("execute-query", handler);
   });
 
+  test.each([
+    // A batch that is a run of statements: the caret's own statement, never the DELETE after it.
+    ["SELECT 1 AS a; DELETE FROM t\nGO\nSELECT 2", 3, "SELECT 1 AS a"],
+    // A batch that is a procedure body: the whole definition, the only statement it holds.
+    [
+      "CREATE PROCEDURE p AS BEGIN SET NOCOUNT ON; SELECT 1; END\nGO\nSELECT 2",
+      50,
+      "CREATE PROCEDURE p AS BEGIN SET NOCOUNT ON; SELECT 1; END",
+    ],
+  ])("getEffectiveQuery on SQL Server: %j at %d runs %j (#1312)", (value, offset, expected) => {
+    mockUseMonacoReturn = {
+      Range: class {
+        constructor(
+          public startLineNumber: number,
+          public startColumn: number,
+          public endLineNumber: number,
+          public endColumn: number,
+        ) {}
+      },
+    };
+    mockCursorOffset = offset;
+
+    let eventDetail: { query: string } | null = null;
+    const handler = ((e: CustomEvent) => {
+      eventDetail = e.detail;
+    }) as EventListener;
+    window.addEventListener("execute-query", handler);
+
+    render(React.createElement(QueryEditor, createDefaultProps({ value, databaseType: "mssql" as const })));
+    act(() => {
+      capturedCommands[0].handler();
+    });
+
+    expect(eventDetail!.query).toBe(expected);
+    window.removeEventListener("execute-query", handler);
+  });
+
+  test("getEffectiveQuery: on SQL Server a caret runs its own statement, not the DECLARE before it (#1312)", () => {
+    mockUseMonacoReturn = {
+      Range: class {
+        constructor(
+          public startLineNumber: number,
+          public startColumn: number,
+          public endLineNumber: number,
+          public endColumn: number,
+        ) {}
+      },
+    };
+    mockCursorOffset = 22; // Inside `SELECT @x`, after the DECLARE that gives it a value
+
+    let eventDetail: { query: string } | null = null;
+    const handler = ((e: CustomEvent) => {
+      eventDetail = e.detail;
+    }) as EventListener;
+    window.addEventListener("execute-query", handler);
+
+    render(
+      React.createElement(
+        QueryEditor,
+        createDefaultProps({ value: "DECLARE @x INT = 5; SELECT @x\nGO\nSELECT 2", databaseType: "mssql" as const }),
+      ),
+    );
+    act(() => {
+      capturedCommands[0].handler();
+    });
+
+    // The two statements share @x only when sent together, which a selection does.
+    expect(eventDetail!.query).toBe("SELECT @x");
+    window.removeEventListener("execute-query", handler);
+  });
+
   test("getEffectiveQuery: cursor after last semicolon extracts trailing statement", () => {
     mockUseMonacoReturn = {
       Range: class {

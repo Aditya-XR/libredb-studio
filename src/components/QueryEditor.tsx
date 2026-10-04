@@ -29,7 +29,7 @@ import { logger } from "@/lib/logger";
 import { setLineNumbersPreference, useLineNumbersPreference } from "@/hooks/use-line-numbers-preference";
 import { writeToClipboard } from "@/components/copy-button";
 import { toast } from "sonner";
-import { splitStatements } from "@/lib/sql/statement-splitter";
+import { splitCursorTargets } from "@/lib/sql/statement-splitter";
 import { resolveSqlGrammar } from "@/lib/sql/grammar";
 import type { DatabaseType } from "@/lib/types";
 
@@ -394,12 +394,18 @@ export const QueryEditor = forwardRef<QueryEditorRef, QueryEditorProps>(
       // cut at a `;` inside a nested comment, so what reached the engine was a line
       // comment plus the SELECT, and the grid read 0 rows where psql answers 2. A `;`
       // inside a literal (`SELECT 'a;b'`) cut the same way.
+      //
+      // A procedural body is one target (#1312): a caret inside a PL/SQL unit, a SQLite
+      // trigger or a T-SQL `CREATE PROCEDURE` batch runs the whole definition, and a `GO` or
+      // `/` line is never sent. A T-SQL batch that is a run of statements still offers them
+      // one by one, so a caret on a SELECT never sends the DELETE after it; a script whose
+      // statements share a `DECLARE @x` is run by selecting it.
       if (language === "sql") {
         const position = editorRef.current.getPosition();
         if (position) {
           const fullText = model.getValue();
           const cursorOffset = model.getOffsetAt(position);
-          const statements = splitStatements(fullText, resolveSqlGrammar(databaseType));
+          const statements = splitCursorTargets(fullText, resolveSqlGrammar(databaseType));
           // The statement the cursor is inside or immediately after, which is what "run
           // this one" means with the caret resting at a statement's end. Whitespace
           // between two statements belongs to neither, so the last one that starts at or
