@@ -509,6 +509,13 @@ These are real, current, and not oversights. Each is a decision with a reason.
   and the SSH tunnel host are outside this guard. HTTP connections routed through an SSH tunnel are
   refused while the flag is enabled because their request target is a local tunnel endpoint.
   Oxia is reached over gRPC, as Milvus is, and is outside this guard: grpc-js resolves names itself, so an address check would be believed and not hold; a pinned gRPC guard is a backlog entry (D212).
+- **A PostgreSQL-wire cancel opens one more connection to the server.** Where `pg_cancel_backend`
+  is refused (CockroachDB, Materialize, RisingWave), Cancel sends the protocol's CancelRequest,
+  carrying the session's process id and secret key, on a fresh connection to the session's
+  address. It is TLS-encrypted whenever the session is, with the session's own TLS options and
+  server name, and is not sent at all if such a server refuses TLS or presents a certificate the
+  session would not trust; without TLS it is plaintext, as the session is
+  ([`docs/providers/postgres.md`](./providers/postgres.md) section 5.3, #1364).
 - **Browser `localStorage` holds your credentials in plaintext.** It is the rendering source, and
   encrypting it would require a master password and a recovery flow, changing what the product is.
   This is why 0.1 and 1.1 matter as much as they do.
@@ -527,7 +534,7 @@ These are real, current, and not oversights. Each is a decision with a reason.
   The Kafka client's SCRAM exchange runs PBKDF2 over the password as many times as the broker's first SCRAM answer asks, checking only the lower bound, while Apache Kafka 4.3.1 stores no credential above 16,384 iterations, so a hostile broker, or one in the middle of a connection in TLS mode `require`, can hold threads of the process's pool for minutes per connect, which stalls every file read, DNS lookup and crypto call waiting for a thread ([`docs/providers/kafka.md`](./providers/kafka.md) section 4.2).
   A broker that answers a SASL authentication with a session lifetime (KIP-368) has the Kafka client authenticate again at 80% of it, for as long as the connection is open and with no floor, so a hostile or misconfigured broker that answers 1 ms keeps about 60% of a core busy per SCRAM connection of a cached provider, up to 35 minutes after its last use, when the factory's idle sweep evicts it ([`docs/providers/kafka.md`](./providers/kafka.md) section 4.2).
   An etcd connection's read-only mode (row 3.8) does not narrow this: it binds a `user` only on a managed seed and only where etcd authenticates the client with a secret only the seeds hold, a password or a client certificate, so on an etcd that authenticates nobody a `user` who knows the address writes through a connection of their own ([`docs/providers/etcd.md`](./providers/etcd.md) section 3.4).
-  Cancelling an etcd write in the editor shows it as cancelled even when etcd applied it, because the editor aborts its own request, posts the cancel and discards the answer that says the write was already sent.
+  An etcd write cannot be cancelled once it has been sent: the provider's cancel answers false, and the editor says the cancel was not confirmed rather than that it happened (#1364), so a user reads the key again before running the command again.
   The etcd provider's Kubernetes write protection is by prefix, and by content only where a single-key write meets a stored Kubernetes envelope: under a custom `--etcd-prefix`, a range write, a value written between a `txn`'s read of its single-key targets and its send, a `lease revoke`, a new key, and a key holding Kubernetes JSON or CBOR are not recognised.
   A Neo4j connection's read policy (row 3.10) does not narrow this either: it decides which statements run on that connection, and a `user` can still post a connection of their own to any host and port.
 - **A statement the editor refuses is never sent and never written to history.**
