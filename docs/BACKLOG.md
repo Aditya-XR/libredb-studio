@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S6 · 4
-- [Drivers and connections](#drivers-and-connections) — D1-D167, U17 · 109
+- [Drivers and connections](#drivers-and-connections) — D1-D180, U17 · 110
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U78 · 72
@@ -2268,6 +2268,16 @@ The value is right since #789; only the label loses the container.
 Found 2026-10-04 by the browser check of #1303 on a Db2 connection with tables in `APP` and `REPORTING`; every engine with more than one container has it.
 
 **Done when:** each option's label names its container path wherever the engine has containers, the way the object tree qualifies a name, and a component test with two same-named tables in two schemas finds two distinct labels.
+### D180. The etcd live check still points at a worktree that no longer exists
+
+`tests/live/etcd-live-check.ts` holds `LANE_E`, the absolute path of the lane worktree the etcd provider was built in, as the working directory of its `--idempotence` run, the compose file its `--service measure --seed` run reads and the mount its `--drive-cluster-container` run takes; its header and `docs/providers/etcd.md` section 11.4 also name the compose project `etcd-lane-e`.
+That worktree was removed after the provider merged, so `--idempotence` fails before any check, with `posix_spawn 'docker'` in a working directory that does not exist (measured 2026-10-04); the four `--service` runs of section 11.4 do not need it and pass.
+Under Node the `etcd-auth` run also stops at its own snapshot: the harness reads the gateway with the global `fetch`, which cannot present the client certificate that fixture requires, while Bun's `fetch` takes one.
+So the Node runs that work are `etcd`, `etcd-cluster` and, with `NODE_EXTRA_CA_CERTS` naming the fixture CA, `etcd-auth-password`.
+
+Found 2026-10-04 while running the live check over the shared gRPC transport.
+
+**Done when:** the script takes the repository root from its own location and the compose project from a flag, `--idempotence` passes from any worktree, and the `etcd-auth` snapshot under Node goes through `node:https` with the client pair.
 
 ## Value interpolation
 
