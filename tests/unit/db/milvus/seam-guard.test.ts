@@ -38,7 +38,7 @@ const SOURCE_FILE = /\.(c|m)?(t|j)sx?$/;
 /** The files this guard holds; the etcd guard skips exactly these. */
 const MILVUS_HELD: readonly RegExp[] = GRPC_SEAM_HOLDINGS.milvus.held;
 
-const GRPC_IMPORTERS = [ADAPTER, HARNESS, ADAPTER_TEST, TLS_TEST, HANDSHAKE_CASES];
+const GRPC_IMPORTERS = [HARNESS, ADAPTER_TEST, TLS_TEST, HANDSHAKE_CASES];
 const PROTO_LOADER_IMPORTERS = [
   ADAPTER,
   HARNESS,

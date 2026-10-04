@@ -24,6 +24,7 @@
  */
 import { readOnlySeedRefusal } from "@/lib/db/credential-warnings";
 import { DatabaseConfigError } from "@/lib/db/errors";
+import type { GrpcTlsOptions } from "@/lib/db/grpc/tls";
 import { plaintextSecretRefusal, validateHost, validatePort } from "@/lib/db/http/endpoint";
 import { secretForms } from "@/lib/db/utils/server-text";
 import {
@@ -49,23 +50,12 @@ export type MilvusAuth =
 /** Where a read-only mode was set; part C's write-policy.ts words its refusal by it. */
 export type MilvusReadOnlySource = "connection" | "seed" | "execution-profile";
 
-export interface MilvusTlsOptions {
-  readonly mode: "require" | "verify-system" | "verify-ca" | "verify-full";
-  readonly ca?: string;
-  readonly clientCertificate?: { readonly cert: string; readonly key: string };
-  /** False only for `require`, or an explicit `rejectUnauthorized: false`. */
-  readonly verify: boolean;
-  readonly identity: string;
-  readonly identityIsIp: boolean;
-  readonly serverNameOverride: string;
-}
-
 export interface MilvusConnectionOptions {
   /** `dns:<host>:<port>` from the validated parts; the local forward under a tunnel. */
   readonly target: string;
   /** The endpoint as configured (the far end under a tunnel), bare host; what sentences name. */
   readonly endpoint: { readonly host: string; readonly port: number };
-  readonly tls?: MilvusTlsOptions;
+  readonly tls?: GrpcTlsOptions;
   readonly auth: MilvusAuth;
   /** Sent on every call as `db_name` (5.2, E16). */
   readonly database: string;
@@ -89,15 +79,14 @@ export const MILVUS_RECEIVE_CAP_BYTES = 16 * 1024 * 1024;
 
 const PROVIDER: DatabaseType = "milvus";
 
-const TLS_MODES: Readonly<
-  Record<SSLMode, { readonly mode: MilvusTlsOptions["mode"]; readonly verify: boolean } | null>
-> = Object.freeze({
-  disable: null,
-  require: { mode: "require", verify: false },
-  "verify-system": { mode: "verify-system", verify: true },
-  "verify-ca": { mode: "verify-ca", verify: true },
-  "verify-full": { mode: "verify-full", verify: true },
-});
+const TLS_MODES: Readonly<Record<SSLMode, { readonly mode: GrpcTlsOptions["mode"]; readonly verify: boolean } | null>> =
+  Object.freeze({
+    disable: null,
+    require: { mode: "require", verify: false },
+    "verify-system": { mode: "verify-system", verify: true },
+    "verify-ca": { mode: "verify-ca", verify: true },
+    "verify-full": { mode: "verify-full", verify: true },
+  });
 
 const FORBIDDEN_IN_CREDENTIAL = /[\r\n\0]/;
 /** Milvus's user name rule: at most 32 characters, a letter first (R04 F23, `internal/proxy/util.go` near 1256-1296). */
@@ -224,7 +213,7 @@ function shared<T>(validate: () => T): T {
   }
 }
 
-function tlsOptions(config: DatabaseConnection, identity: string): MilvusTlsOptions | undefined {
+function tlsOptions(config: DatabaseConnection, identity: string): GrpcTlsOptions | undefined {
   const panel = optionalObject<keyof SSLConfig>(config.ssl, "ssl");
   if (panel === undefined) return undefined;
   const mode = panel.mode ?? "verify-full";

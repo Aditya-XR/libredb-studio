@@ -39,7 +39,10 @@ export const GRPC_SEAM_HOLDINGS: Readonly<Record<string, GrpcSeamHolding>> = {
       /^tests\/helpers\/milvus-/,
       /^tests\/live\/milvus-/,
     ],
-    transportImporters: [],
+    transportImporters: [
+      "src/lib/db/providers/vector/milvus/grpc-client.ts",
+      "src/lib/db/providers/vector/milvus/connection-options.ts",
+    ],
     providerDirectory: "src/lib/db/providers/vector/milvus",
   },
 };
