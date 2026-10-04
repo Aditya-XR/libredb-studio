@@ -527,6 +527,13 @@ export default function Studio() {
   const [pendingDeleteConnectionId, setPendingDeleteConnectionId] = useState<string | null>(null);
   const deleteConnectionReturnFocus = useReturnFocus();
   const [isCreateTableModalOpen, setIsCreateTableModalOpen] = useState(false);
+  // The container a Create Table was asked for in, `[]` when it was asked for nowhere in
+  // particular (the flat explorer's button), which leaves the statement unqualified (#1391).
+  const [createTableContainer, setCreateTableContainer] = useState<readonly string[]>([]);
+  const openCreateTable = useCallback((container: readonly string[]) => {
+    setCreateTableContainer(container);
+    setIsCreateTableModalOpen(true);
+  }, []);
   const [showDiagram, setShowDiagram] = useState(false);
   const handleShowDiagram = useCallback(() => setShowDiagram(true), []);
   const handleHideDiagram = useCallback(() => setShowDiagram(false), []);
@@ -1049,10 +1056,10 @@ export default function Studio() {
       onGenerateCode: (object) => setCodeGenPath(object.path),
       onGenerateTestData: (object) => setTestDataPath(object.path),
       onOpenMaintenance: isAdmin ? (object) => openMaintenance("tables", object.path) : undefined,
-      onCreateObject: () => setIsCreateTableModalOpen(true),
+      onCreateObject: openCreateTable,
       onViewSource: openSourceTab,
     }),
-    [handleGenerateSelect, handleGenerateCount, openSourceTab, isAdmin, openMaintenance],
+    [handleGenerateSelect, handleGenerateCount, openSourceTab, isAdmin, openMaintenance, openCreateTable],
   );
 
   const requestDeleteConnection = useCallback((id: string) => {
@@ -1326,7 +1333,7 @@ export default function Studio() {
                             tabMgr.handleGenerateCount(path);
                             setActiveMobileTab("editor");
                           }}
-                          onCreateTableClick={() => setIsCreateTableModalOpen(true)}
+                          onCreateTableClick={() => openCreateTable([])}
                           isAdmin={isAdmin}
                           onOpenMaintenance={openMaintenance}
                           databaseType={conn.activeConnection?.type}
@@ -1400,6 +1407,7 @@ export default function Studio() {
                                 language={editorLanguageForTabType(tabMgr.currentTab.type)}
                                 databaseType={conn.activeConnection?.type}
                                 schemaContext={conn.schemaContext}
+                                defaultContainer={conn.defaultContainer}
                                 capabilities={metadata?.capabilities}
                               />
                             </div>
@@ -1593,6 +1601,7 @@ export default function Studio() {
         onCloseConnectionModal={closeConnectionModal}
         onConnectConnection={handleConnect}
         createTableModalOpen={isCreateTableModalOpen}
+        createTableContainer={createTableContainer}
         onCloseCreateTable={closeCreateTable}
         onTableCreated={runModalStatement}
         pendingDeleteConnectionId={pendingDeleteConnectionId}
