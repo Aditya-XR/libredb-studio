@@ -1,4 +1,5 @@
 import { connectionFingerprint } from "./connection-fingerprint";
+import { READS_FILE_ACCESS_POSTURE } from "./compatibility";
 import type { DatabaseConnection, WithTunnelFarEnd } from "@/lib/types";
 
 /**
@@ -40,6 +41,18 @@ import type { DatabaseConnection, WithTunnelFarEnd } from "@/lib/types";
  *   refused, and a read-only caller handed a read-write entry would have them sent. It is not in
  *   `credentialDigest` or the fingerprint, whose rules are as whom a connection authenticates and
  *   which server it reaches, and the mode changes neither.
+ * - The file-access posture (the non-admin DuckDB file-access change), for an engine that opens its
+ *   editor handle under one: `READS_FILE_ACCESS_POSTURE` in `./compatibility.ts` answers which, so
+ *   this is not a `connection.type` branch (CLAUDE.md), and today only DuckDB answers true. A denied
+ *   editor handle opens with `enable_external_access: 'false'` and a full-reach one without it, so the
+ *   two must never share a cached handle: a caller of one posture would otherwise be handed the
+ *   other's handle. (A seed a non-admin role can use gets one posture for every role in
+ *   `editorExecutionContext`, so that record still keeps one key.) The deny posture appends a segment;
+ *   the allow/admin posture and an absent posture append NOTHING, so every other engine's key and the
+ *   profiled key (which passes no posture) stay byte-identical to before this change. The posture
+ *   lives on `ProviderExecutionContext`, server-derived from the session role and the resolved
+ *   connection's audience, never on the
+ *   connection, so a request body cannot move a handle between the two pools.
  *
  * WHY THE ID IS SAFE IN THE KEY. Reaching a cached entry now costs the victim's id AND their
  * server AND their credentials. The first is guessable and the second is often public; the third
@@ -63,12 +76,25 @@ import type { DatabaseConnection, WithTunnelFarEnd } from "@/lib/types";
  * WHAT IT DOES NOT CATCH, stated as a limit rather than left to be found: the same limit
  * `connectionFingerprint` states, a different server answering on the same host and port.
  */
-export async function providerCacheKey(connection: DatabaseConnection & WithTunnelFarEnd): Promise<string> {
+export async function providerCacheKey(
+  connection: DatabaseConnection & WithTunnelFarEnd,
+  allowExternalFileAccess?: boolean,
+): Promise<string> {
   const [server, credentials] = await Promise.all([connectionFingerprint(connection), credentialDigest(connection)]);
   const mode = connection.readOnly === true ? "read-only" : "read-write";
+  const parts = [connection.id, server, credentials, mode];
+  // Only an engine that opens its editor handle under a file-access posture, and only its deny
+  // posture, adds bytes: the admin/allow and absent postures leave the key byte-identical to before
+  // this field existed, which keeps every other engine's key and the profiled key (passed no posture)
+  // unchanged. A denied editor handle must not be shared with a full-reach one on the same
+  // connection, so its key carries this extra segment (the non-admin DuckDB file-access change). The
+  // engine is read from `READS_FILE_ACCESS_POSTURE`, not a `connection.type` branch (CLAUDE.md).
+  if (READS_FILE_ACCESS_POSTURE[connection.type] && allowExternalFileAccess === false) {
+    parts.push("duckdb-deny-file-access");
+  }
   // Length-framed like the two digests it joins: an id ending in a digit must not be able to
   // answer the same key as a shorter id followed by a longer fingerprint.
-  return [connection.id, server, credentials, mode].map((value) => `${value.length}:${value}`).join("");
+  return parts.map((value) => `${value.length}:${value}`).join("");
 }
 
 /**

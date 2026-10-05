@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S7 · 5
-- [Drivers and connections](#drivers-and-connections) — D1-D233, U17 · 143
+- [Drivers and connections](#drivers-and-connections) — D1-D240, U17 · 144
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X26, U2-U92 · 84
@@ -892,8 +892,7 @@ sentences or its docblock says why a 400 raised before the provider is a differe
 
 `docs/providers/duckdb.md` section 3.11 says a multi-statement string runs the first statement only, that the rest is
 silently discarded, and that there is no error and no second result.
-`src/lib/db/providers/sql/duckdb/index.ts:699-703` says `client.run()` executes only the FIRST statement and that the
-method guarantees the tail is never executed.
+`src/lib/db/providers/sql/duckdb/index.ts:873-876` says `client.run()` executes only the FIRST statement and that the method guarantees the tail is never executed.
 
 Measured 2026-09-13 on DuckDB v1.5.5 through `@duckdb/node-api` 1.5.5-r.4, while grounding #778 Phase 3.
 `CREATE TABLE probe_c(i INTEGER); CREATE TABLE probe_c(i INTEGER)` answers
@@ -1161,13 +1160,10 @@ test pins the behaviour that was chosen.
 
 ### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses four exports
 
-`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 46 hits, re-measured 2026-10-05. Fourteen of
-them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`,
-the agent routes' pattern). Thirty write out the same five-key object - `getSession`, `signJWT`,
-`verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token
-nothing reads, and one of those thirty is `tests/helpers/object-edit-route-harness.ts`, a shared
-harness that could have been the factory and copied the stub instead. The remaining two write a
-shorter stub of their own, one with two keys and one with a single `getSession`.
+`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 48 hits, re-measured 2026-10-05.
+Sixteen of them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`, the agent routes' pattern).
+Thirty write out the same five-key object - `getSession`, `signJWT`, `verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token nothing reads, and one of those thirty is `tests/helpers/object-edit-route-harness.ts`, a shared harness that could have been the factory and copied the stub instead.
+The remaining two write a shorter stub of their own, one with two keys and one with a single `getSession`.
 
 `src/lib/auth.ts` exports nine names. The four no hand-written stub carries are
 `shouldMarkCookieSecure`, `resetCookieSecurityWarning`, `readCookieSecureOverride` and
@@ -1196,7 +1192,7 @@ process boundary cannot do is make the stub the right SHAPE.
 **Done when:** one factory in `tests/helpers/`, typed `(): typeof import("@/lib/auth")`, replaces the
 hand-written stubs, so adding an export to `src/lib/auth.ts` fails `typecheck` in every file that
 mocks it instead of at run time in one of them. The same shape then covers the other layer-wide
-mocks, `@/lib/db` in twenty-one files and `@/lib/audit` in six.
+mocks, `@/lib/db` in twenty-two files and `@/lib/audit` in six.
 
 ### D86. `bun test --isolate` has not been re-probed, and the runner pays a process per test file
 
@@ -1827,7 +1823,7 @@ Not fixed there: the change is to the adapter's log-dir read, whose error table 
 
 ### D126. Concurrent first acquisitions of one connection and profile each open a provider
 
-`acquireExecutionProfileProvider` (`src/lib/db/factory.ts:823-923`) checks the profiled cache, and on a miss constructs and connects a provider, then stores it (`:919`).
+`acquireExecutionProfileProvider` (`src/lib/db/factory.ts:969-1075`) checks the profiled cache, and on a miss constructs and connects a provider, then stores it (`:1071`).
 Two callers that miss at the same time each construct one, and the later store overwrites the earlier entry, so the earlier provider stays connected with nothing left to close it.
 The editor and agent paths reach this function the same way.
 `/api/mcp` avoids it on its own side, with an in-flight map keyed on the exported `profiledCacheKey` (`src/lib/mcp/context.ts`).
@@ -2574,6 +2570,17 @@ Found 2026-10-04 while planning the platform integration, whose local gates kept
 Not fixed there: none of the six files is part of that work.
 
 **Done when:** each of the six files removes the directories it makes, for example with `rmSync(path, { recursive: true, force: true })` in an `afterEach` or `afterAll`, and a run of `bun run test` with `TMPDIR` pointed at an empty directory leaves it empty.
+
+### D240. Two connection records naming one DuckDB file get two read-write handles in one process
+
+`getOrCreateProvider` in `src/lib/db/factory.ts` keys its cache per connection record and never borrows, so two different records that name the same DuckDB file each open a read-write `DuckDBInstance` on it: two users' own connections, say, or an admin-only seed and a user's connection naming its file.
+On Linux and macOS each handle keeps its own catalog, and whichever closes last checkpoints over the other's committed rows; on Windows the second open is refused (`docs/providers/duckdb.md` section 3.8).
+It predates the non-admin DuckDB file-access change: `main` before that change behaves the same for two records, and the change removed only the one-record case, a seed every role can use, by giving that record one posture.
+Test Connection and the agent's operations reads borrow the open handle instead, so the gap is the editor's own cache.
+
+Found while fixing the review findings on the non-admin DuckDB file-access change.
+
+**Done when:** a second record naming a file the cache already holds is served without a second read-write handle, or is refused with a sentence that names the open one, measured on Linux and on Windows.
 
 ## Value interpolation
 
@@ -4293,9 +4300,9 @@ Not fixed there: the change was English-only, and seven translations of a provid
 
 ### DOC11. Two PostgreSQL-relative caveats no longer hold on the current images: CockroachDB sessions and OrioleDB index sizes
 
-`src/lib/db/compatibility.ts:380` (CockroachDB, probed on v26.2.6) says "Performance metrics, slow queries and active sessions do work: the pg_stat_* views CockroachDB provides are enough for them."
+`src/lib/db/compatibility.ts:429` (CockroachDB, probed on v26.2.6) says "Performance metrics, slow queries and active sessions do work: the pg_stat_* views CockroachDB provides are enough for them."
 On v26.3.2 (`cockroachdb/cockroach:latest`, single node, insecure) Monitoring > Sessions reads "No active sessions found", Overview reads "Connections 0" and Queries reads "pg_stat_statements required", while Studio held connections: `pg_stat_activity` returned 0 rows and `crdb_internal.cluster_sessions` returned 3.
-`src/lib/db/compatibility.ts:419` (OrioleDB, probed on beta 16) and the OrioleDB row of `docs/providers/README.md` say "every index reads 0 bytes".
+`src/lib/db/compatibility.ts:470` (OrioleDB, probed on beta 16) and the OrioleDB row of `docs/providers/README.md` say "every index reads 0 bytes".
 On beta 19 (`orioledb/orioledb:latest-pg18`, PostgreSQL 18.6) `pg_indexes_size()` is non-zero and Monitoring > Tables reads 48 kB for `orders` and 8192 bytes for `customers`.
 
 Found by the end-to-end test pass of 2026-10-03 and 2026-10-04.
@@ -4305,7 +4312,7 @@ Reading CockroachDB sessions from `crdb_internal.cluster_sessions` instead of an
 
 ### DOC12. The FerretDB compatibility entry omits Check Collection, views and Compact, and a maintenance request has no deadline
 
-`src/lib/db/compatibility.ts:696-705` lists FerretDB as `tier: "full"` with three caveats, all about sign-in, version and deployment.
+`src/lib/db/compatibility.ts:752-762` lists FerretDB as `tier: "full"` with three caveats, all about sign-in, version and deployment.
 Measured on FerretDB 2.7.0 (`ghcr.io/ferretdb/ferretdb:latest` over `postgres-documentdb`): Operations > Check Collection answers HTTP 500 `no such command: 'dbCheck'`; a view created in mongosh is listed and counted as an empty collection (count 0); and Run Compact never returns, a self-deadlock in FerretDB itself, so the button stays disabled because `/api/db/maintenance` (`src/app/api/db/maintenance/route.ts`, called from `src/hooks/use-monitoring-data.ts:222` and `:259`) sets no deadline on the operation.
 
 Found by the end-to-end test pass of 2026-10-03 and 2026-10-04.

@@ -11,12 +11,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "b
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { acquireExecutionProfileProvider } from "@/lib/db/factory";
+import { acquireExecutionProfileProvider, getOrCreateProvider } from "@/lib/db/factory";
 import { SQLiteProvider } from "@/lib/db/providers/sql/sqlite";
 import { logger } from "@/lib/logger";
 import { MCP_CONNECTIONS_UNREADABLE, McpConnectionContext } from "@/lib/mcp/context";
 import {
   countMethod,
+  createDuckdbFile,
   createSqliteFile,
   failNextCall,
   gateMethod,
@@ -31,6 +32,7 @@ pinMcpTestEnvironment();
 const ROOT = resolve(import.meta.dir, "../../..");
 const dir = mkdtempSync(join(tmpdir(), "libredb-mcp-context-"));
 const alice = { username: "alice", role: "admin" } as const;
+const bob = { username: "bob", role: "user" } as const;
 
 beforeAll(() => {
   createSqliteFile(join(dir, "shop.db"), ["CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"]);
@@ -205,6 +207,56 @@ describe("acquire", () => {
       expect(failing.calls).toBe(2);
     } finally {
       failing.restore();
+    }
+  });
+
+  test("an admin's operations acquisition on an admin-only DuckDB seed borrows the editor's open handle", async () => {
+    // The non-admin DuckDB file-access change with B49: the editor holds the file under the admin
+    // posture, which is the posture this caller gets in the editor on a seed only admins can use, so
+    // the borrow lends it that handle rather than opening a second one beside it.
+    const file = join(dir, "admin-only.duckdb");
+    await createDuckdbFile(file, ["CREATE TABLE t (id INTEGER)"]);
+    writeSeedFile(dir, [{ id: "warehouse", type: "duckdb", database: file, roles: ["admin"] }]);
+    const context = new McpConnectionContext(alice);
+    const connection = await context.resolve("seed:warehouse");
+    if (connection === null || connection === MCP_CONNECTIONS_UNREADABLE)
+      throw new Error("seed:warehouse did not resolve");
+    const editor = await getOrCreateProvider(connection, {}, { allowExternalFileAccess: true });
+
+    expect(await context.acquire(connection, "agent-operations")).toBe(editor);
+  });
+
+  test("a user's operations acquisition is never lent an admin's full-reach handle on the same file", async () => {
+    // The MCP context must pass the CALLER'S own editor posture to the acquisition, not a constant.
+    // A user on a roles ["*"] mcp seed gets the denied posture, so even with an admin's full-reach
+    // handle open on the same file (an admin-only record naming it), the user's agent-operations
+    // borrow must not reach it. If the context passed a constant allow posture instead, the user
+    // would borrow the admin's handle: a wider handle than its own.
+    const file = join(dir, "shared-by-roles.duckdb");
+    await createDuckdbFile(file, ["CREATE TABLE t (id INTEGER)"]);
+    writeSeedFile(dir, [
+      { id: "warehouse", type: "duckdb", database: file, roles: ["*"], mcp: true },
+      { id: "warehouse-admin", type: "duckdb", database: file, roles: ["admin"], mcp: true },
+    ]);
+    // An admin's full-reach handle holds the file, opened under the admin-only record.
+    const adminContext = new McpConnectionContext(alice);
+    const adminConnection = await adminContext.resolve("seed:warehouse-admin");
+    if (adminConnection === null || adminConnection === MCP_CONNECTIONS_UNREADABLE)
+      throw new Error("seed:warehouse-admin did not resolve");
+    const adminEditor = await getOrCreateProvider(adminConnection, {}, { allowExternalFileAccess: true });
+
+    const context = new McpConnectionContext(bob);
+    const connection = await context.resolve("seed:warehouse");
+    if (connection === null || connection === MCP_CONNECTIONS_UNREADABLE)
+      throw new Error("seed:warehouse did not resolve");
+
+    if (process.platform === "win32") {
+      // Windows refuses any second handle on a file this process holds, and the user must not borrow
+      // the admin's, so the acquisition is refused rather than served the wider handle.
+      await expect(context.acquire(connection, "agent-operations")).rejects.toThrow();
+    } else {
+      const acquired = await context.acquire(connection, "agent-operations");
+      expect(acquired).not.toBe(adminEditor);
     }
   });
 });

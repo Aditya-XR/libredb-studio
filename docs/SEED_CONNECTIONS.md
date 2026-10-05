@@ -604,6 +604,10 @@ The config file is **cached in memory** with a TTL (default 60 seconds). When th
 3. Updated credentials take effect immediately (for `managed: true`)
 4. **No restart required**
 
+On a DuckDB seed, a `roles` change that moves the seed between admins only and a non-admin role changes the file-access posture its one handle opens under (section 3.16 of [`docs/providers/duckdb.md`](./providers/duckdb.md)).
+The first request after the re-read then closes the open handle and opens a new one: a statement still running on the old handle does not complete, and its session state (temporary tables, `SET` values) is lost.
+It happens once per such edit.
+
 ### Tuning the Cache TTL
 
 ```bash
@@ -876,7 +880,8 @@ The marker that does this is set by the discovery source, not derived from the i
 - An app named in the export's `excluded` list (the "Apps to skip" field, `DISCOVERY_EXCLUDE`) is never listed and, while Studio serves fresh data, is reported as skipped, with the reason "listed in Apps to skip".
 - Each discovered connection is validated on its own with the seed schema; an invalid one is skipped with its reason and the others are listed.
 - Discovered connections go through the same role filter as file seeds, so a standard user receives none of them, and naming a discovered id answers the same 404 as an unknown id.
-  The filter does not cover the export file itself: a DuckDB connection reads any file the Studio process can ([`docs/providers/duckdb.md`](./providers/duckdb.md) section 14.3), so any signed-in user, the standard one included, can read every discovered database's password from it.
+  A standard user cannot read the export file through DuckDB either: a non-admin DuckDB handle opens with statement-level file access closed (section 3.16 of [`docs/providers/duckdb.md`](./providers/duckdb.md), control 3.17 in [`docs/SECURITY.md`](./SECURITY.md)), and the export is JSON, which DuckDB refuses to open as a database.
+  An admin's own DuckDB connection can still read it (section 14.3 of [`docs/providers/duckdb.md`](./providers/duckdb.md)), so the admin login holds every discovered database's password.
 - No discovery failure reaches the managed list: every error is caught inside the source, so file seeds and samples are listed as before.
 
 ### Freshness and state

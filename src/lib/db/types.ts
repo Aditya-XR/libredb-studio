@@ -1100,6 +1100,28 @@ export interface ProviderCapabilities {
    * is refused here", the answer for every engine whose provider does not refuse writes itself.
    */
   readonly enforcesReadOnly?: true;
+  /**
+   * True when this engine's provider reads `ProviderExecutionContext.allowExternalFileAccess` and
+   * opens its editor handle under that file-access posture: `false` closes every statement-level file
+   * and network route outside the handle's private temp directory and its database's own file names
+   * while the database stays writable, `true` keeps the full reach (DuckDB, the
+   * non-admin DuckDB file-access change). Only DuckDB does this today.
+   *
+   * It is what tells `src/lib/db` that an editor handle of this engine must be split by posture: the
+   * writable cache key carries the deny posture as a segment, and the single-writer borrow lends a
+   * handle only to a caller of its own posture. Both read `READS_FILE_ACCESS_POSTURE` in
+   * `src/lib/db/compatibility.ts` rather than this field, because each decides before a provider
+   * exists (the cache key is computed to find or open one), and
+   * `tests/unit/db/reads-file-access-posture-capability.test.ts` holds that map equal to this
+   * declaration for every shipped type-id, so the two cannot drift and no `connection.type` branch is
+   * needed in `src/lib/db` (forbidden by `CLAUDE.md`).
+   *
+   * Optional for the same published-interface reason as `enforcesReadOnly`: a required field added
+   * after the fact stops every external implementer compiling. Only the literal `true` is declared, so
+   * an absent flag reads as "this engine has no file-access posture", the answer for every engine but
+   * DuckDB.
+   */
+  readonly readsFileAccessPosture?: true;
   supportsMaintenance: boolean;
   maintenanceOperations: MaintenanceOperation[];
   /**
@@ -1972,11 +1994,22 @@ export interface ProviderOptions {
 }
 
 /**
- * Server-injected construction context for an execution-profile provider
- * (#328). Deliberately NOT a member of `ProviderOptions`: that object is
- * caller-supplied and flows all the way into `getOrCreateProvider`, so a
- * profile flag living there could be set — or cleared — by whoever builds the
- * options for a request. Only `acquireExecutionProfileProvider` passes this.
+ * Server-injected construction context for a provider (#328, non-admin DuckDB file access).
+ * Deliberately NOT a member of `ProviderOptions`: that object is caller-supplied
+ * and flows all the way into `getOrCreateProvider`, so a flag living there could
+ * be set, or cleared, by whoever builds the options for a request.
+ *
+ * Two producers pass it. `acquireExecutionProfileProvider` passes an execution
+ * profile's context (`readOnly`). The db routes pass the editor file-access posture
+ * (`allowExternalFileAccess`) through `getOrCreateProvider` or `createDatabaseProvider`,
+ * derived by `editorExecutionContext` (`src/lib/api/execution-context.ts`) from the
+ * verified session and the resolved connection. `getOrCreateProvider` takes only that
+ * posture (`EditorExecutionContext`) and refuses a `readOnly`, because its cache holds
+ * writable providers.
+ *
+ * For an embedder of `@libredb/studio/providers` the posture is a behaviour change: a
+ * factory called without a context opens a DuckDB handle with file access denied, see
+ * `allowExternalFileAccess`.
  */
 export interface ProviderExecutionContext {
   /**
@@ -1988,10 +2021,40 @@ export interface ProviderExecutionContext {
    * use the flag to (a) verify at connect that the session's own role or principal is
    * least-privilege and (b) refuse `queryReadOnly` outright on a provider that was not
    * opened this way, so agent semantics are never served without the layer that makes
-   * them true.
+   * them true. Test Connection also passes it for a DuckDB test handle opened beside a
+   * writer of the other file-access posture, where only a read-only handle is safe.
    */
   readOnly?: boolean;
+  /**
+   * Whether an ordinary (editor) DuckDB handle may reach files and the network (non-admin DuckDB file access).
+   *
+   * Server-derived and never taken from the request body: the db routes set it with
+   * `editorExecutionContext(guard.session, connection)`, which answers `true` only for an
+   * admin, and never on a seed a non-admin role can use, because that record is one handle
+   * for every role. ONLY DuckDB reads it, and only on its writable (editor) open: `false`
+   * opens the handle with `enable_external_access: 'false'`, so no statement reaches the
+   * network, or a file other than the database's own and the handle's private temp directory,
+   * while that database stays read-write; `true` keeps the full editor reach. It closes
+   * statement-level reach only: the database path itself is the connection's. Every other
+   * engine ignores it.
+   *
+   * ABSENT MEANS DENY (fail closed): a caller that forgets to pass it gets the denied handle,
+   * never the open one, so a forged or missing context cannot widen file access. That
+   * includes an embedder calling `createDatabaseProvider` or `getOrCreateProvider` without a
+   * context, which had the full reach before this field existed and now passes `true` to keep
+   * it. `readOnly: true` already implies external access off and keeps precedence, so the
+   * agent read-only profile does not set this field.
+   */
+  allowExternalFileAccess?: boolean;
 }
+
+/**
+ * The DuckDB editor file-access posture on its own (non-admin DuckDB file access): what `editorExecutionContext`
+ * derives from the verified session and the resolved connection, what `getOrCreateProvider`
+ * takes, and what an execution-profile acquisition is told about the requester it serves, so it
+ * borrows only a handle opened under that requester's own posture. Absent means deny.
+ */
+export type EditorExecutionContext = Pick<ProviderExecutionContext, "allowExternalFileAccess">;
 
 // ============================================================================
 // Internal Types
