@@ -57,6 +57,11 @@ It needs LibreDB Studio 0.18.0 or later, the first release that ships the export
 With an older tag the `-discovery` app cannot start, because its command names a file that image does not have.
 CapRover upgrades each app on its own, so when you upgrade, deploy the same version to both apps, the Studio app first: a Studio older than the exporter can refuse its export file, and then it withdraws every discovered connection.
 
+Pick an app name of at most 39 characters that starts with a letter: the second app is named `<app>-discovery`, CapRover refuses an app name of 50 characters or more, and the project the install groups both apps in takes the app name and must start with a letter.
+CapRover checks each name only when it creates that app or project, one at a time, and removes nothing when a later step fails.
+A name of 40 to 49 characters therefore stops the install at `<app>-discovery` with "App Name is not allowed" and leaves the project and a Studio app without discovery; delete both before you install again under a shorter name.
+For the same reason the template has CapRover create the Studio app first, so an install that stops early never leaves the app that holds the Docker socket running on its own.
+
 What it adds to the plain template:
 
 - **The `-discovery` companion.**
@@ -76,7 +81,7 @@ What it adds to the plain template:
   Discovered connections are listed for the admin login only.
   The standard login cannot read the export file through a DuckDB connection: a non-admin DuckDB handle opens with statement-level file access closed (section 3.16 of [`docs/providers/duckdb.md`](../../docs/providers/duckdb.md), control 3.17 in [`docs/SECURITY.md`](../../docs/SECURITY.md)), and the export is JSON, which DuckDB refuses to open as a database.
   The admin login can read it, so treat that login as holding every discovered database's password.
-  Still give the standard login only to someone you trust: it reaches each connection's own database as the connection's DB user, and a connection that names a database file on the server is not limited to a directory (section 14 of [`docs/providers/sqlite.md`](../../docs/providers/sqlite.md#14-known-limitations--future-work), issue [#125](https://github.com/libredb/libredb-studio/issues/125)).
+  Still give the standard login only to someone you trust: it reaches each connection's own database as the connection's DB user, and a connection that names a database file on the server is not limited to a directory (section 14.3 of [`docs/providers/duckdb.md`](../../docs/providers/duckdb.md#143-the-file-path-is-a-trust-boundary-for-every-role-and-statement-reach-is-the-admins), issue [#125](https://github.com/libredb/libredb-studio/issues/125)).
 - **Apps to skip.**
   The optional "Apps to skip" field becomes `DISCOVERY_EXCLUDE` of the companion: comma-separated CapRover app names whose databases Studio must not connect to.
   The exporter writes only the names of those apps to the export, and Studio's discovery status lists each one as skipped with the reason "listed in Apps to skip".
@@ -100,6 +105,7 @@ Below, `studio` stands for its app name.
    To list only the CapRover databases, as the template does, also add `LIBREDB_EMBEDDED_SAMPLE=false` and `SQLITE_EMBEDDED_SAMPLE=false`; without them the two built-in sample connections stay listed.
    Click **Save & Restart**.
 2. Create an app named `studio-discovery` with **Has Persistent Data** checked.
+   If `studio-discovery` would have 50 characters or more, any shorter name works: nothing reads this app's name.
 3. In `studio-discovery`, under **HTTP Settings**, check **Do not expose as web-app externally** and click **Save & Restart**.
 4. In `studio-discovery`, under **App Configs**:
    - add a persistent directory with **Path in App** `/app/discovery` and **Label** `studio-discovered`, the same label as in step 1;
