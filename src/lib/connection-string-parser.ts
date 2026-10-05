@@ -552,7 +552,7 @@ function parseMongoDBString(uri: string): ParsedConnection {
  * Percent-decode a component, keeping it verbatim when it is not a valid escape
  * sequence. Couchbase bucket names may legally contain a literal "%".
  */
-function safeDecodeURIComponent(value: string): string {
+export function safeDecodeURIComponent(value: string): string {
   try {
     return decodeURIComponent(value);
   } catch {

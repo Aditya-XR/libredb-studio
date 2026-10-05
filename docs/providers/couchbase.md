@@ -423,7 +423,7 @@ cardinality can appear on CE plans.
 | `host` | Yes (or `connectionString`) | Cluster node hostname. `validate()` throws `DatabaseConfigError` when both are missing |
 | `port` | No | **Management** port only. Defaults to `8091` (`18091` when SSL is on). Query ports are discovered ([§3.3](#33-ports-are-discovered-not-configured)) |
 | `user` / `password` | No | Sent as HTTP Basic on every request |
-| `database` | **Yes** | Carries the **bucket** name. One bucket per connection; the ConnectionModal labels this field "Bucket" |
+| `database` | Yes, unless supplied in the URI path | Carries the **bucket** name and overrides the URI path. One bucket per connection; the ConnectionModal labels this field "Bucket" |
 | `connectionString` | No | `couchbase://` / `couchbases://`; see [§4.2](#42-connection-strings) |
 | `ssl` | No | See [§4.3](#43-tls) |
 
@@ -433,7 +433,7 @@ cardinality can appear on CE plans.
 connection without one ([`index.ts`](../../src/lib/db/providers/document/couchbase/index.ts)):
 
 ```text
-Couchbase requires a bucket (use the "database" field)
+Couchbase requires a bucket (use the URL path or the "database" field)
 ```
 
 Multi-bucket browsing from a single connection is out of scope; create one connection per bucket.
@@ -470,8 +470,13 @@ The scheme also arrives as an SSL mode - `require` for `couchbases://`, `disable
 pasted string ([§4.3](#43-tls)); without it a `couchbases://` paste posted plain HTTP to 18091.
 `require` and not a verifying mode for the reason §4.3 gives: a self-hosted cluster's certificate is
 self-signed, so only the SSL panel turns verification on.
-A connection that carries *only* a connection string has its hostname lifted out for the transport
-and nothing else — the URL's port is deliberately not used, because a `couchbase://` URL from an
+A connection in **Connection String** mode has its hostname lifted out for the transport.
+When the separate Bucket (`database`) field is empty, the provider also reads and URL-decodes the
+first path segment as the bucket: `couchbase://localhost/travel%2Dsample` selects `travel-sample`.
+A `%` that does not start a valid escape is kept verbatim, as Paste URL keeps it, because a bucket name may contain one: `couchbase://localhost/100%` selects `100%`.
+An explicit Bucket field wins. The resolved bucket is used for management requests and the SQL++
+query context alike; a URL without a bucket path still requires the field to be filled in.
+The URL's port is deliberately not used, because a `couchbase://` URL from an
 application config carries the KV port, not the management port, and discovery handles the rest
 (`hostFromConnectionString()`,
 [`index.ts`](../../src/lib/db/providers/document/couchbase/index.ts)).

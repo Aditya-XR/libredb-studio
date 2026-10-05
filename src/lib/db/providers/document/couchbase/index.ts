@@ -21,6 +21,7 @@
  *   otherwise working connection.
  */
 
+import { safeDecodeURIComponent } from "@/lib/connection-string-parser";
 import { BaseDatabaseProvider } from "@/lib/db/base-provider";
 import {
   applySourceBound,
@@ -430,8 +431,11 @@ export class CouchbaseProvider extends BaseDatabaseProvider {
     if (!this.config.host && !this.config.connectionString) {
       throw new DatabaseConfigError("Couchbase requires a host or a connection string", this.type);
     }
-    if (!this.config.database) {
-      throw new DatabaseConfigError('Couchbase requires a bucket (use the "database" field)', this.type);
+    if (!this.bucket) {
+      throw new DatabaseConfigError(
+        'Couchbase requires a bucket (use the URL path or the "database" field)',
+        this.type,
+      );
     }
   }
 
@@ -469,9 +473,8 @@ export class CouchbaseProvider extends BaseDatabaseProvider {
    * provider talks to, and port discovery handles the rest (decision 3).
    */
   private transportConfig(): DatabaseConnection {
-    if (this.config.host) return this.config;
-    const host = this.hostFromConnectionString();
-    return host ? { ...this.config, host } : this.config;
+    const host = this.config.host || this.hostFromConnectionString();
+    return { ...this.config, ...(host ? { host } : {}), database: this.bucket };
   }
 
   private hostFromConnectionString(): string | null {
@@ -501,7 +504,14 @@ export class CouchbaseProvider extends BaseDatabaseProvider {
   }
 
   private get bucket(): string {
-    return this.config.database ?? "";
+    if (this.config.database) return this.config.database;
+    try {
+      const url = new URL(this.config.connectionString ?? "");
+      if (url.protocol !== "couchbase:" && url.protocol !== "couchbases:") return "";
+      return safeDecodeURIComponent(url.pathname.split("/")[1] ?? "");
+    } catch {
+      return "";
+    }
   }
 
   // ==========================================================================
