@@ -2555,6 +2555,63 @@ describe("object surface", () => {
     ]);
   });
 
+  // #1456: nullable was set only when a sampled value was `null`, so a field most documents
+  // lack read "Nullable: No" in Docs and `NN` in the ERD. Absent counts as empty too.
+  test("infers nullable from absent fields as well as nulls (#1456)", async () => {
+    mockDocumentsByNs["app.customers"] = [
+      {
+        _id: new MockObjectId("c1"),
+        name: "Ada",
+        city: "Istanbul",
+        nick: null,
+        address: { city: "Izmir", zip: "35000" },
+      },
+      { _id: new MockObjectId("c2"), name: "Grace", city: "Ankara", address: { city: "Ankara" } },
+      { _id: new MockObjectId("c3"), name: "Lin" },
+    ];
+    const detail = await objectProvider.describeObject(["app", "customers"], "collection");
+    expect(detail.columns.map((c) => [c.name, c.nullable])).toEqual([
+      ["_id", false],
+      // Absent from one document.
+      ["address", true],
+      ["address.city", true],
+      ["address.zip", true],
+      ["city", true],
+      // Present in every document, never null.
+      ["name", false],
+      // Present only once, and as null there.
+      ["nick", true],
+    ]);
+  });
+
+  test("a field present in every sampled document is nullable only when one of them holds null (#1456)", async () => {
+    mockDocumentsByNs["app.customers"] = [
+      { _id: new MockObjectId("c1"), name: "Ada", city: null },
+      { _id: new MockObjectId("c2"), name: "Grace", city: "Ankara" },
+    ];
+    const detail = await objectProvider.describeObject(["app", "customers"], "collection");
+    expect(detail.columns.map((c) => [c.name, c.nullable])).toEqual([
+      ["_id", false],
+      ["city", true],
+      ["name", false],
+    ]);
+  });
+
+  // #1456 review: `_id` follows the same rule as every other field. Measured on mongo:7, a
+  // collection holding `{_id: null}` and `{_id: 2}` (or a `$group` view with `_id: null`) has a
+  // null `_id`, and a fixed "never nullable" for `_id` contradicted the sample.
+  test("an _id that is null in a sampled document is nullable (#1456)", async () => {
+    mockDocumentsByNs["app.customers"] = [
+      { _id: null, name: "Ada" },
+      { _id: 2, name: "Grace" },
+    ];
+    const detail = await objectProvider.describeObject(["app", "customers"], "collection");
+    expect(detail.columns.map((c) => [c.name, c.type, c.nullable])).toEqual([
+      ["_id", "mixed(null|number)", true],
+      ["name", "string", false],
+    ]);
+  });
+
   test("describes a view with its fields and claims no indexes for it", async () => {
     const detail = await objectProvider.describeObject(["app", "active_customers"], "view");
     expect(detail.path).toEqual(["app", "active_customers"]);

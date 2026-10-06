@@ -1323,9 +1323,16 @@ export class MongoDBProvider extends BaseDatabaseProvider {
 
   private inferSchemaFromDocuments(docs: Document[]): ColumnSchema[] {
     const fieldTypes = new Map<string, Set<string>>();
+    // In how many sampled documents each path is present. MongoDB declares no
+    // nullability, so a field is empty in two ways: absent, or present as `null`.
+    // Counting only the second marked a field most documents lack as NOT NULL (#1456).
+    // `_id` follows the same rule: present and non-null in every document of an ordinary
+    // collection, so not nullable there, but a `{_id: null}` document or a `$group` view
+    // answers null, and a fixed "never nullable" would contradict the sample.
+    const fieldPresence = new Map<string, number>();
 
     for (const doc of docs) {
-      this.extractFieldTypes(doc, "", fieldTypes);
+      this.extractFieldTypes(doc, "", fieldTypes, fieldPresence);
     }
 
     const columns: ColumnSchema[] = [];
@@ -1337,7 +1344,7 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       columns.push({
         name: fieldName,
         type,
-        nullable: types.has("null") || types.has("undefined"),
+        nullable: (fieldPresence.get(fieldName) ?? 0) < docs.length || types.has("null") || types.has("undefined"),
         isPrimary: fieldName === "_id",
         defaultValue: undefined,
       });
@@ -1359,13 +1366,21 @@ export class MongoDBProvider extends BaseDatabaseProvider {
     return columns.slice(0, MAX_INFERRED_FIELDS);
   }
 
-  private extractFieldTypes(doc: Document, prefix: string, fieldTypes: Map<string, Set<string>>, depth = 1): void {
+  private extractFieldTypes(
+    doc: Document,
+    prefix: string,
+    fieldTypes: Map<string, Set<string>>,
+    fieldPresence: Map<string, number>,
+    depth = 1,
+  ): void {
     for (const [key, value] of Object.entries(doc)) {
       const fieldName = prefix ? `${prefix}.${key}` : key;
 
       if (!fieldTypes.has(fieldName)) {
         fieldTypes.set(fieldName, new Set());
       }
+      // Once per document: keys are unique within a (sub)document and arrays are not descended.
+      fieldPresence.set(fieldName, (fieldPresence.get(fieldName) ?? 0) + 1);
 
       const type = this.getMongoType(value);
       fieldTypes.get(fieldName)!.add(type);
@@ -1384,7 +1399,7 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       // on an array what the same syntax means on a subdocument, and listing it
       // beside the others would invite exactly that confusion.
       if (type === "object" && depth < MAX_NESTED_FIELD_DEPTH) {
-        this.extractFieldTypes(value as Document, fieldName, fieldTypes, depth + 1);
+        this.extractFieldTypes(value as Document, fieldName, fieldTypes, fieldPresence, depth + 1);
       }
     }
   }
