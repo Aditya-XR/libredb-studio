@@ -2209,6 +2209,30 @@ describe("MySQLProvider", () => {
       expect(overview.version).toBe("MySQL 8.0.35");
     });
 
+    // #1444. Measured against percona/percona-server:latest 8.4.11-11: VERSION() is a bare
+    // MySQL-style number and only @@version_comment names Percona.
+    for (const [label, version, comment, expected] of [
+      ["Percona Server", "8.4.11-11", "Percona Server (GPL), Release 11", "Percona Server 8.4.11-11"],
+      ["stock MySQL", "8.0.35", "MySQL Community Server - GPL", "MySQL 8.0.35"],
+      ["MariaDB", "12.3.2-MariaDB-ubu2404", "mariadb.org binary distribution", "12.3.2-MariaDB-ubu2404"],
+    ] as const) {
+      test(`labels ${label} from VERSION() and @@version_comment as ${expected}`, async () => {
+        mockExecuteFn = (sql: string) =>
+          sql.trim().toLowerCase().includes("version()")
+            ? Promise.resolve([
+                [{ version, version_comment: comment }],
+                [{ name: "version" }, { name: "version_comment" }],
+              ])
+            : defaultMockExecute(sql);
+
+        provider = new MySQLProvider(makeMySQLConfig());
+        await provider.connect();
+        const overview = await provider.getOverview();
+
+        expect(overview.version).toBe(expected);
+      });
+    }
+
     test("formats uptime correctly", async () => {
       provider = new MySQLProvider(makeMySQLConfig());
       await provider.connect();
