@@ -140,6 +140,18 @@ file path — the same pattern used by the SQLite provider. A missing `database`
 closes. This offers no durable value for a GUI tool, so the provider explicitly requires a file
 path and throws rather than silently opening an in-memory database.
 
+SQLite's in-memory name is refused too (#1450). `:memory:` used to go through `path.resolve()` like
+any path, so Test Connection answered "Connected successfully" and left a 0-byte file literally
+named `:memory:` in the server's working directory; `validate()` now throws a `DatabaseConfigError`
+saying LibreDB has no in-memory mode.
+
+A relative path is resolved against the server's working directory, which is where the built-in
+sample connection lives (`./data/sample.libredb` under the default data directory). A path whose
+parent directory does not exist is refused before the file is opened, with "The directory <dir>
+does not exist": the kernel opens its `.lock` sidecar first, so that case used to read as an ENOENT
+about a `<file>.libredb.lock` the user never named. The directory is not created, unlike the SQLite
+provider, because a connection setting should not make directories on the server.
+
 ### 3.3 Catalog-aware schema, with key-prefix grouping as the raw-kv fallback
 
 Since `@libredb/libredb` 0.0.2 a `.libredb` file carries a persisted **catalog**: the lenses
@@ -250,7 +262,7 @@ fields are ignored.
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `database` | Yes | Absolute path to the `.libredb` file on the Studio server's filesystem. Throws `DatabaseConfigError` if absent. |
+| `database` | Yes | Path to the `.libredb` file on the Studio server's filesystem, absolute or relative to the server's working directory; its directory must exist ([§3.2](#32-no-in-memory-connections)). Throws `DatabaseConfigError` if absent or `:memory:`. |
 
 No `host`, `port`, `user`, `password`, or `connectionString` fields are used. The `supportsConnectionString`
 capability is `false`.
