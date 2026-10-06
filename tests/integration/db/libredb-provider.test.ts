@@ -127,6 +127,7 @@ describe("LibreDBProvider — lifecycle & metadata", () => {
     // The query language is a small JSON command grammar, not SQL, so the inline
     // row editor's `UPDATE ... SET` cannot be expressed here (#269).
     expect(caps.supportsInlineRowEdit).toBe(false);
+    expect(caps.supportsTestDataGeneration).toBe(false);
     // No `prepareQuery` override here, so the base one echoes the requested offset back
     // while applying nothing - the silent page-one answer #816 exists to prevent.
     expect(caps.supportsResultPagination).toBe(false);

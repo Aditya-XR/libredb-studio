@@ -644,7 +644,7 @@ generators used to write here (#1410), and the provider now declares both away.
 `supportsConstantPredicate: false` makes **Generate Query** (on a table or a materialized view) write
 `SELECT <columns> FROM <keyspace>.<table> LIMIT 100;` with no `WHERE 1=1`, and
 `supportsMultiRowInsert: false` makes the **CSV/JSON import** into an existing table, and the
-**Test Data Generator**, write one `INSERT` per row, which the editor sends through `/api/db/multi-query` one statement at a time.
+**Test Data Generator** (not offered by the row menus, `supportsTestDataGeneration: false`, BACKLOG U93), write one `INSERT` per row, which the editor sends through `/api/db/multi-query` one statement at a time.
 Measured on 5.0.9 on 2026-10-04 through the provider and the multi-query splitter: the generated
 select on a table runs, and a two-row import inserts both rows. ScyllaDB shares the provider and
 the declaration, and was not re-measured. An import into a **new** table stays withheld by `supportsCreateTable: false`.
@@ -1196,6 +1196,7 @@ because there are no table statistics to list at all.)
   supportsExternalQueryLimiting: true,
   supportsCreateTable: false,        // the modal cannot emit valid CQL, and a diff cannot derive the partition key (§5.5)
   supportsInlineRowEdit: false,      // one guessed key column is not a CQL primary key (§5.5)
+  supportsTestDataGeneration: false, // the row menus never offered the generator here; not measured (#1468)
   supportsResultPagination: false,   // CQL has no OFFSET; prepareQuery throws rather than answer page two with page one (#816)
   supportsTransactions: false,       // CQL has no transaction; BATCH is not one (#464)
   declaresForeignKeys: false,        // the clause does not exist (§6.2)

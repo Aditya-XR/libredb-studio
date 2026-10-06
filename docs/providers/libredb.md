@@ -457,7 +457,7 @@ a plausible, runnable `delete billing:2024` one **Run Selected** away (only `get
 
 Three menu actions are **not offered** on this provider.
 `Profile Table` and `Generate Test Data` address an object and insert rows into it; a `users:*` row is a prefix grouping this server derived from one bounded scan (`tablesAreDerivedGroupings`, see 9), not an object any command can be given, so both are hidden rather than left to answer HTTP 400 (#427).
-Since #1085 each is withheld by its own declaration: Profile by that flag and by the language gate `offersColumnProfiling`, because the profile route refuses JSON in a dialect of its own, and Generate Test Data by the row-write rule both row menus ask (decision D-M), because no kind here declares `acceptsRowWrites` and the engine declares `supportsInlineRowEdit: false`.
+Since #1085 each is withheld by its own declaration: Profile by that flag and by the language gate `offersColumnProfiling`, because the profile route refuses JSON in a dialect of its own, and Generate Test Data by the row-write rule both row menus ask (decision D-M), because no kind here declares `acceptsRowWrites` and the engine declares `supportsTestDataGeneration: false` (#1468).
 `Generate Count Query` is the third, withheld by `offersCountQuery` (#702): the five-verb grammar has no count, and a derived grouping has nothing to count.
 The per-row `Analyze` and `Vacuum`
 items are hidden as well: they call `onOpenMaintenance("tables", <row>)` and there is no
@@ -1032,6 +1032,7 @@ for a second reason: the rows are derived groupings, see 5.3.
 | `supportsExternalQueryLimiting` | `false` |
 | `supportsCreateTable` | `false` |
 | `supportsInlineRowEdit` | `false` — the command grammar (`get`/`put`/`delete`/`prefix`/`range`) has no `UPDATE ... SET` for the results grid's inline editor to emit |
+| `supportsTestDataGeneration` | `false` - no kind here declares a row write, and the command grammar has no multi-row insert for the Generate Test Data dialog to emit |
 | `supportsResultPagination` | `false` — this provider adds no `prepareQuery` override, so it inherits the base one, which echoes the requested offset back while applying nothing. A `true` here would render a control whose every click re-reads page one (#816) |
 | `supportsTransactions` | `false` — the command grammar has no transaction verb at all, so the trio and SANDBOX are not offered (#464) |
 | `declaresForeignKeys` | `false` — the catalog declares namespaces and columns and nothing that references another namespace, so there is no foreign key to read |

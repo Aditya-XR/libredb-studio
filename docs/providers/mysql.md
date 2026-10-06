@@ -2218,6 +2218,7 @@ gated on the literal `vacuum`, so MySQL's own wording was written and never show
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `supportsCreateTable` | `true` (from base) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core MySQL DML |
+| `supportsTestDataGeneration` | `true` - the row menus offer Generate Test Data on tables, which writes one multi-row `INSERT INTO ... VALUES` |
 | `supportsResultPagination` | `true` — `LIMIT n OFFSET m` from the shared limiter (#816) |
 | `supportsTransactions` | `true`: the transaction runs on one held connection opened with `BEGIN` ([§6.0.1](#601-servers-that-report-no-transaction-state)), so the trio and the SANDBOX toggle are offered (#464) |
 | `implicitCommitStatements` | `ALTER`, `ANALYZE`, `BEGIN`, `CACHE`, `CHANGE`, `CHECK`, `CREATE`, `DROP`, `FLUSH`, `GRANT`, `INSTALL`, `LOCK`, `OPTIMIZE`, `RENAME`, `REPAIR`, `RESET`, `REVOKE`, `START`, `STOP`, `TRUNCATE`, `UNINSTALL`, `UNLOCK`: the statements MySQL commits implicitly, which SANDBOX refuses before sending ([§6.0](#60-what-the-server-says-about-the-transaction)) |

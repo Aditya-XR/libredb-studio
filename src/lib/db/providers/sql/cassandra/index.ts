@@ -255,6 +255,7 @@ export class CassandraProvider extends SQLBaseProvider {
       // real table - is "Some partition key parts are missing: id". Editing a key
       // column is refused outright ("PRIMARY KEY part id found in SET part").
       supportsInlineRowEdit: false,
+      supportsTestDataGeneration: false,
       // CQL has no `OFFSET` clause. `prepareQuery` below THROWS on any positive offset
       // rather than answering a page request with page one, and this flag is what keeps
       // the editor from provoking that refusal in the first place (#816).

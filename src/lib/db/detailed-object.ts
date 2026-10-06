@@ -120,9 +120,10 @@ export function relationCountLabel(
  * engine-wide `supportsInlineRowEdit` is a SEPARATE fact about the results grid's inline
  * editor, and MongoDB, Couchbase and Cassandra declare it false while declaring a kind
  * that genuinely takes row writes. Conjoining the two here would refuse an import all
- * three engines support today. The conjunction belongs at the callers that need both
- * facts, the two row menus (`src/components/object-tree/row-actions.ts` and, since
- * #1085 (decision D-M), `src/components/schema-explorer/TableItem.tsx`), spelled out there.
+ * three engines support today. The two row menus ask a different conjunction for
+ * Generate Test Data, `offersTestDataGeneration` in `src/lib/db/object-kinds.ts`, which
+ * combines `acceptsRowWrites` with `supportsTestDataGeneration`, not with
+ * `supportsInlineRowEdit` (#1468).
  *
  * A view is the case this exists for: it has columns, it is a relation, and on most
  * engines an insert into it is meaningless, so only the provider's own

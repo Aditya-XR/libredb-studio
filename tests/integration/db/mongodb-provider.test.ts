@@ -917,6 +917,8 @@ describe("MongoDBProvider", () => {
       // No SQL at all here: the query language is JSON commands, so the inline row
       // editor's `UPDATE ... SET` has nothing to run against (#269).
       expect(caps.supportsInlineRowEdit).toBe(false);
+      // The generator writes `insertMany`, not the grid's `UPDATE ... SET`, so it is offered (#1468).
+      expect(caps.supportsTestDataGeneration).toBe(true);
       // `prepareQuery` pins `offset` to 0 and returns the command untouched, so page two
       // would be page one. The control is hidden rather than offered (#816).
       expect(caps.supportsResultPagination).toBe(false);

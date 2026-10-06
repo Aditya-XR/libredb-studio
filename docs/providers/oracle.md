@@ -2159,6 +2159,7 @@ is what lets the Operations tab render those words and send an operation Oracle 
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `supportsCreateTable` | `true` (from base) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core Oracle DML |
+| `supportsTestDataGeneration` | `true` - the row menus offer Generate Test Data on tables, which writes one multi-row `INSERT INTO ... VALUES` |
 | `supportsResultPagination` | `true` — `OFFSET m ROWS FETCH NEXT n ROWS ONLY` from this provider's own `prepareQuery` override; page one is `FETCH FIRST n ROWS ONLY` (#816) |
 | `supportsTransactions` | `true` — Oracle is always in a transaction and the held connection commits or rolls back, so the trio and the SANDBOX toggle are offered (#464) |
 | `implicitCommitStatements` | `ALTER`, `ANALYZE`, `ASSOCIATE`, `AUDIT`, `COMMENT`, `CREATE`, `DISASSOCIATE`, `DROP`, `FLASHBACK`, `GRANT`, `NOAUDIT`, `PURGE`, `RENAME`, `REVOKE`, `TRUNCATE`: Oracle's DDL, which "implicitly commits the current transaction before and after every DDL statement" (SQL Language Reference, "Types of SQL Statements"). Plus `BEGIN`, `DECLARE` and `CALL`: a PL/SQL block or a procedure can commit through `EXECUTE IMMEDIATE` or its own `COMMIT`. SANDBOX refuses all of these before sending, because a `ROLLBACK` after one answers success and can undo nothing, and this provider reads no transaction state back from the server to notice afterwards, so the declaration is the only guard here. `COMMIT`, `ROLLBACK` and `ABORT` are refused on every engine |
