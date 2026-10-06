@@ -536,9 +536,13 @@ SELECT * FROM probe.orders WHERE amount > 5 LIMIT 3 ALLOW FILTERING   -> 3 rows
 SELECT * FROM probe.orders WHERE amount > 5 ALLOW FILTERING LIMIT 3   -> line 1:60 mismatched input 'LIMIT'
 ```
 
-The limiter appends, so the two clauses are **transposed** — with the writer's own spacing preserved.
-This is strictly better than declining to bound the statement, which is the shape a user writes
-precisely when a scan is about to happen.
+The clause is declared in the dialect grammar as one that must FOLLOW the row bound, so the shared
+limiter places the bound before it and re-attaches it with the writer's own spacing — and reads
+`… LIMIT 3 ALLOW FILTERING` as the existing bound it is, which the old after-the-fact transposition
+did not, emitting `LIMIT 3 LIMIT 500 ALLOW FILTERING` instead. ScyllaDB's `BYPASS CACHE` and
+`USING TIMEOUT 5s`, which share this type-id, come from the same declaration. This is strictly
+better than declining to bound the statement, which is the shape a user writes precisely when a
+scan is about to happen.
 
 **3. A line comment must be closed by a newline — and CQL has a third comment form.**
 
