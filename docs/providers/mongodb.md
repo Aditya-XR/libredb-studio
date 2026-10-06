@@ -1000,11 +1000,19 @@ uses `getDatabaseName()`, the name `connect()` opened - a connection-string conn
 
 | Type | MongoDB action |
 |------|----------------|
-| `analyze` | `validate` (one collection, or every collection) |
-| `vacuum` / `optimize` | `compact` (one collection, or best-effort all) |
+| `analyze` | `validate` (one collection, or every collection; views skipped) |
+| `vacuum` / `optimize` | `compact` (one collection, or every collection; views skipped) |
 | `check` | `dbCheck` (**requires** a collection target) |
 | `kill` | `killOp` (**requires** an opid) |
 | `reindex` | **unsupported** — returns a message (the `reIndex` command was removed in MongoDB 6.0+) |
+
+Without a target, `validate` and `compact` run on every entry `listCollections()` answers except
+views, which the server refuses for both (#1408). A time series collection is attempted, not
+dropped: the test is view versus everything else, as in the object tree. A refusal from one
+collection is collected rather than ending the run, and the result names it:
+`Validated 3 collections; skipped 1 view; failed on 1: users (<server message>)`, with `success`
+false whenever anything failed. Before #1408 the first view aborted the validate loop with a 500,
+and the compact loop swallowed every error into a bare "Compacted collections".
 
 `getCapabilities().maintenanceOperations = ['vacuum', 'analyze', 'check']` — so the UI surfaces those
 three, though `runMaintenance` also accepts `optimize`/`kill`/`reindex` when invoked directly.

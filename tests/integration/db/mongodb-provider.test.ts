@@ -271,6 +271,9 @@ const createMockCollection = (name = "users", dbName = "testdb") => ({
 
 const mockCommandResults: Record<string, unknown> = {};
 
+/** A per-collection `validate` / `compact` refusal, by collection name (#1408). */
+let mockMaintenanceRefusal: Record<string, Error> = {};
+
 /**
  * What `serverStatus` answers, as a function rather than a literal: the metric
  * paths have to be driven on a server that publishes NO `wiredTiger` section
@@ -318,8 +321,17 @@ const createMockDb = (dbName = "testdb") => ({
         throw commandNotSupportedOnView("collStats", String(cmd.collStats));
       return { size: 1024, totalIndexSize: 512, count: 42 };
     }
-    if (cmd.validate) return { ok: 1, valid: true };
-    if (cmd.compact) return { ok: 1 };
+    if (cmd.validate || cmd.compact) {
+      const name = String(cmd.validate ?? cmd.compact);
+      // The server refuses both on a view, code 166 with these sentences (measured on
+      // 7.0.43, 8.0.32 and 8.2.12, #1408).
+      if (isMockView(name, dbName)) {
+        throw mongoServerError(166, cmd.validate ? "Cannot validate a view" : "can't compact a view");
+      }
+      const refusal = mockMaintenanceRefusal[name];
+      if (refusal !== undefined) throw refusal;
+      return cmd.validate ? { ok: 1, valid: true } : { ok: 1 };
+    }
     return mockCommandResults;
   },
   listCollections: () => ({
@@ -613,6 +625,7 @@ function resetObjectSurfaceMocks(): void {
   mockDatabaseList = [];
   mockCollectionsByDb = {};
   mockListCollectionsError = {};
+  mockMaintenanceRefusal = {};
   mockDocumentsByNs = {};
   mongoOpenedDatabases = [];
   mongoAggregatePipelines = [];
@@ -1543,6 +1556,56 @@ describe("MongoDBProvider", () => {
 
     test("unsupported maintenance type throws", async () => {
       await expect(provider.runMaintenance("flush" as never)).rejects.toThrow();
+    });
+
+    // #1408: the whole-database loops ran `validate` on every `listCollections()` entry,
+    // views included, and the server refuses it on a view - so the first view aborted
+    // the run with a 500. Compact swallowed every error and answered a bare success.
+    describe("over the whole database (#1408)", () => {
+      beforeEach(() => {
+        mockCollections = [
+          { name: "users", type: "collection" },
+          { name: "active_users", type: "view" },
+          { name: "readings", type: "timeseries" },
+          { name: "orders", type: "collection" },
+        ];
+      });
+
+      test("validate skips the view, attempts the time series collection, and says so", async () => {
+        const result = await provider.runMaintenance("analyze");
+        expect(result).toMatchObject({
+          success: true,
+          message: "Validated 3 collections; skipped 1 view",
+        });
+      });
+
+      test("a collection whose validate fails is named while the rest still run", async () => {
+        mockMaintenanceRefusal.users = mongoServerError(13, "not authorized on testdb to execute command");
+        const result = await provider.runMaintenance("analyze");
+        expect(result).toMatchObject({
+          success: false,
+          message:
+            "Validated 2 collections; skipped 1 view; failed on 1: users (not authorized on testdb to execute command)",
+        });
+      });
+
+      test("compact skips the view and reports a failure instead of a bare success", async () => {
+        mockMaintenanceRefusal.orders = mongoServerError(20, "compact is not allowed here");
+        const result = await provider.runMaintenance("vacuum");
+        expect(result).toMatchObject({
+          success: false,
+          message: "Compacted 2 collections; skipped 1 view; failed on 1: orders (compact is not allowed here)",
+        });
+      });
+
+      test("a single collection and a single view read in the singular", async () => {
+        mockCollections = [
+          { name: "users", type: "collection" },
+          { name: "active_users", type: "view" },
+        ];
+        const result = await provider.runMaintenance("vacuum");
+        expect(result).toMatchObject({ success: true, message: "Compacted 1 collection; skipped 1 view" });
+      });
     });
   });
 

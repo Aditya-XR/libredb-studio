@@ -1533,6 +1533,44 @@ export class MongoDBProvider extends BaseDatabaseProvider {
     }
   }
 
+  /**
+   * Runs `validate` or `compact` on every entry `listCollections()` answers, for the
+   * whole-database actions that name no target (#1408).
+   *
+   * Views are skipped: the server refuses both commands on a view, and the first view
+   * used to abort the validate loop with a 500, so neither the collections before it
+   * nor the ones after it were reported. The test is view versus everything else, as in
+   * `mongoObjectKind`, so a time series collection is attempted rather than
+   * dropped. A refusal from any one collection is collected and named in the result
+   * instead of ending the run, and the compact loop no longer swallows it into a bare
+   * success.
+   */
+  private async maintainEachCollection(
+    command: "validate" | "compact",
+    verb: string,
+  ): Promise<Omit<MaintenanceResult, "executionTime">> {
+    const collections = await this.db!.listCollections().toArray();
+    let done = 0;
+    let views = 0;
+    const failed: string[] = [];
+    for (const coll of collections) {
+      if (readText(coll.type) === MONGODB_VIEW_TYPE) {
+        views++;
+        continue;
+      }
+      try {
+        await this.db!.command({ [command]: coll.name });
+        done++;
+      } catch (error) {
+        failed.push(`${coll.name} (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    const parts = [`${verb} ${done} ${done === 1 ? "collection" : "collections"}`];
+    if (views > 0) parts.push(`skipped ${views} ${views === 1 ? "view" : "views"}`);
+    if (failed.length > 0) parts.push(`failed on ${failed.length}: ${failed.join(", ")}`);
+    return { success: failed.length === 0, message: parts.join("; ") };
+  }
+
   public async runMaintenance(type: MaintenanceType, target?: string, container?: string): Promise<MaintenanceResult> {
     this.assertContainerIsBound(container);
     this.ensureConnected();
@@ -1551,11 +1589,7 @@ export class MongoDBProvider extends BaseDatabaseProvider {
               await this.db!.command({ validate: target });
               return { success: true, message: `Validated collection: ${target}` };
             } else {
-              const collections = await this.db!.listCollections().toArray();
-              for (const coll of collections) {
-                await this.db!.command({ validate: coll.name });
-              }
-              return { success: true, message: `Validated ${collections.length} collections` };
+              return await this.maintainEachCollection("validate", "Validated");
             }
 
           case "reindex":
@@ -1572,15 +1606,7 @@ export class MongoDBProvider extends BaseDatabaseProvider {
               await this.db!.command({ compact: target });
               return { success: true, message: `Compacted collection: ${target}` };
             } else {
-              const collections = await this.db!.listCollections().toArray();
-              for (const coll of collections) {
-                try {
-                  await this.db!.command({ compact: coll.name });
-                } catch {
-                  // Some collections might not be compactable
-                }
-              }
-              return { success: true, message: `Compacted collections` };
+              return await this.maintainEachCollection("compact", "Compacted");
             }
 
           case "check": {
