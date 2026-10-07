@@ -31,7 +31,7 @@ None of it is a GitHub issue.
 - [Drivers and connections](#drivers-and-connections) — D1-D244, U17 · 148
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X26, U2-U95 · 86
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X26, U2-U96 · 87
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC18 · 15
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
@@ -4062,6 +4062,17 @@ The driver's `NAME_1` cannot be told apart from a column the statement itself na
 Found 2026-10-07 by the external review of the result column names fix; pre-existing.
 
 **Done when:** masking treats an Oracle repeat like any other numbered repeat (for example by reading `NAME_N` as a repeat of `NAME` when `NAME` is also in the result), the inline-edit refusal makes the same call or the provider doc says why it cannot, and tests pin both.
+
+### U96. A statement that returns several result sets shows only its first, and nothing says others came back
+
+`QueryResult.resultSets` (`src/lib/types.ts`) carries every set a text produced, and `shownSet` in `src/app/api/db/multi-query/route.ts` shows the last set with rows, but only for a unit the script splitter made of several statements.
+One statement that returns several sets is shown by its first: on SQL Server an `EXEC` of a procedure that selects twice, and `POST /api/db/query` drops the rest through `firstResultSet` (`src/lib/api/first-result-set.ts`).
+A batch run while a transaction is open goes through `queryInTransaction` in `src/lib/db/providers/sql/mssql.ts`, which reads only `result.recordset`, so `SELECT 1; SELECT 2` shows the first set there while the same text outside a transaction shows the last.
+The other sets ran, and the grid gives no sign that they exist; a MySQL `CALL` that selects twice answers the same way once its sets are read (#1575).
+
+Found 2026-10-07 by the external review of the result column names fix; pre-existing.
+
+**Done when:** a statement or a transaction batch that returns several sets is shown by the same rule as a script batch (or lets the user choose the set), the result says how many sets came back, and route tests pin `EXEC`, `CALL` and the transaction path.
 
 ## Dependencies
 
