@@ -207,6 +207,31 @@ describe("useProviderMetadata", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  test("reads the declaration again when an edit changes where the same connection reaches", async () => {
+    const connection = makeConnection();
+    const fetchMock = mockGlobalFetch({
+      "/api/db/provider-meta": { ok: true, status: 200, json: mockMetadata },
+    });
+
+    const { result, rerender } = renderHook(({ conn }) => useProviderMetadata(conn), {
+      initialProps: { conn: connection },
+    });
+    await waitFor(() => {
+      expect(result.current.metadata).not.toBeNull();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The same id, edited to reach another host: a declaration may depend on any field that decides where a read
+    // goes, so the old one is not kept for the new settings, not even for the render the edit lands on.
+    rerender({ conn: makeConnection({ host: "replica.internal" }) });
+    expect(result.current.metadata).toBeNull();
+
+    await waitFor(() => {
+      expect(result.current.metadata).not.toBeNull();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   test("resets metadata when connection becomes null", async () => {
     const connection = makeConnection();
     mockGlobalFetch({

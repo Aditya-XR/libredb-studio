@@ -183,12 +183,16 @@ const mockLabels = {
 // assert the lookup follows the selection rather than firing on null.
 const providerMetadataCalls: Array<{ id?: string } | null> = [];
 
+// The capabilities the metadata mock answers with; a test swaps in its own declaration and
+// beforeEach puts the shared one back.
+let currentCapabilities: Record<string, unknown> = mockCapabilities;
+
 mock.module("@/hooks/use-provider-metadata", () => ({
   useProviderMetadata: mock((connection: { id?: string } | null) => {
     providerMetadataCalls.push(connection);
     return {
       metadata: {
-        capabilities: mockCapabilities,
+        capabilities: currentCapabilities,
         labels: mockLabels,
       },
       isLoading: false,
@@ -240,6 +244,7 @@ describe("MonitoringDashboard", () => {
     mockSetRefreshInterval.mockClear();
     mockUseMonitoringData.mockImplementation(monitoringDataDefaults);
     selectCallbacks.clear();
+    currentCapabilities = mockCapabilities;
   });
 
   test("renders monitoring title", async () => {
@@ -321,6 +326,32 @@ describe("MonitoringDashboard", () => {
     // Auto-refresh toggle button has title containing "auto-refresh"
     const autoRefreshButton = container.querySelector('[title="Pause auto-refresh"]');
     expect(autoRefreshButton).not.toBeNull();
+  });
+
+  test("shows the billing sentence beside auto-refresh when the capability is declared, and none otherwise", async () => {
+    // A provider whose compute resumes on any statement and is billed until it suspends (a Databend
+    // Cloud warehouse) declares `resumesBilledCompute`: every auto-refresh tick keeps it awake.
+    const sentence = "Each refresh runs statements on this connection, which keeps its billed compute running.";
+
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<MonitoringDashboard />);
+    });
+    expect(renderResult!.queryByText(sentence)).toBeNull();
+    expect(
+      renderResult!.container.querySelector('[title="Pause auto-refresh"]')?.hasAttribute("aria-describedby"),
+    ).toBe(false);
+    cleanup();
+
+    currentCapabilities = { ...mockCapabilities, resumesBilledCompute: true };
+    await act(async () => {
+      renderResult = render(<MonitoringDashboard />);
+    });
+    const note = renderResult!.queryByText(sentence);
+    expect(note).not.toBeNull();
+    // The toggle names the sentence as its description, so a screen reader hears the cost on it.
+    const toggle = renderResult!.container.querySelector('[title="Pause auto-refresh"]');
+    expect(toggle?.getAttribute("aria-describedby")).toBe(note!.id);
   });
 
   test("no connection shows empty state", async () => {

@@ -186,7 +186,6 @@ const connectionManagerAnswer = {
   schema: [],
   schemaContext: "[]",
   isLoadingSchema: false,
-  connectionPulse: "none",
   setConnections: () => {},
   setActiveConnection: () => {},
   setSchema: () => {},

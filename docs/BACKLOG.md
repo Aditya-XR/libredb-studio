@@ -3533,7 +3533,7 @@ Not fixed in #1085: the wide matrix was chosen so that the chart needed no chang
 ### U45. The connection status badges read a refused connection as slow, timed out or online
 
 Three surfaces report whether a connection works, and none of them says it was refused.
-- `checkHealth` in `src/hooks/use-connection-manager.ts` sets the pulse to `"degraded"` for any answer of `POST /api/db/health` that is not OK, and `src/components/studio/StudioDesktopHeader.tsx` renders `"degraded"` as "Slow", so a server that refused the credentials reads "Slow" in the desktop header.
+- `checkHealth` in `src/hooks/use-connection-pulse.ts` sets the pulse to `"degraded"` for any answer of `POST /api/db/health` that is not OK, and `src/components/studio/StudioDesktopHeader.tsx` renders `"degraded"` as "Slow", so a server that refused the credentials reads "Slow" in the desktop header.
 - The fleet list of `src/components/admin/tabs/OverviewTab.tsx` renders every item whose `status` is `"error"` as "timeout", beside the message that says what the error was.
 - `src/components/studio/StudioMobileHeader.tsx` renders the label "Online" for every active connection without reading the health check, and the pulse dot beside it draws `"degraded"` in the warning tint under the title "Connection: degraded".
 Seen 2026-09-23 in the #1085 browser pass on a Prometheus connection with a wrong password: `/api/v1/status/buildinfo` answered HTTP 401, and the desktop header read "Slow", the admin fleet "timeout" and the mobile header "Online", while the object panel showed the refusal itself.

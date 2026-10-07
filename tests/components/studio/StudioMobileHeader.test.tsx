@@ -156,6 +156,29 @@ describe("StudioMobileHeader", () => {
     expect(container.textContent).toContain("Online");
   });
 
+  test("keeps the healthy, degraded and error pulse dots as they were", () => {
+    const dot = (connectionPulse: "healthy" | "degraded" | "error") =>
+      render(<StudioMobileHeader {...defaults} connectionPulse={connectionPulse} />).container.querySelector(
+        `[title="Connection: ${connectionPulse}"] .rounded-full`,
+      )?.className;
+    expect(dot("healthy")).toContain("bg-success-tint animate-pulse");
+    expect(dot("degraded")).toContain("bg-warning-tint");
+    expect(dot("error")).toContain("bg-danger-tint");
+  });
+
+  test('renders not-checked as "Not checked" with a neutral, unanimated dot', () => {
+    const { container } = render(<StudioMobileHeader {...defaults} connectionPulse="not-checked" />);
+    const indicator = container.querySelector('[title^="Connection: Not checked."]');
+    expect(indicator?.getAttribute("title")).toBe(
+      "Connection: Not checked. Studio sends this connection no background health checks.",
+    );
+    const dot = indicator?.querySelector(".rounded-full");
+    expect(dot?.className).toContain("bg-fg-subtle");
+    expect(dot?.className).not.toContain("animate-pulse");
+    expect(container.textContent).toContain("Not checked");
+    expect(container.textContent).not.toContain("Online");
+  });
+
   test("shows RUN button when on editor tab", () => {
     const { queryByText } = render(<StudioMobileHeader {...defaults} />);
     expect(queryByText("RUN")).not.toBeNull();
