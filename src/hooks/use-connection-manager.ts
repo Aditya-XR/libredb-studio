@@ -18,7 +18,6 @@ import {
   type ConnectionPolicy,
 } from "@/lib/connection-policy";
 import {
-  buildConnectionPayload,
   NO_SERVED_SEEDS,
   SEED_CONFIG_UNREADABLE_REASON,
   type ManagedConnectionPayload,
@@ -148,7 +147,6 @@ export function useConnectionManager(storageReady = false) {
    */
   const [schemaError, setSchemaError] = useState<string | null>(null);
   const [isLoadingSchema, setIsLoadingSchema] = useState(false);
-  const [pulseState, setConnectionPulse] = useState<"healthy" | "degraded" | "error" | null>(null);
   /**
    * The connection whose deferred catalog read the reader has explicitly asked for, by
    * id. Null means nobody has asked for any, which is where a session starts.
@@ -739,26 +737,6 @@ export function useConnectionManager(storageReady = false) {
     }
   }, [visibleActive]);
 
-  // Connection pulse — quick health check every 60s
-  useEffect(() => {
-    if (!visibleActive) return;
-    const checkHealth = async () => {
-      try {
-        const res = await appFetch("/api/db/health", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildConnectionPayload(visibleActive)),
-        });
-        setConnectionPulse(res.ok ? "healthy" : "degraded");
-      } catch {
-        setConnectionPulse("error");
-      }
-    };
-    checkHealth().catch(() => {});
-    const interval = setInterval(checkHealth, 60000);
-    return () => clearInterval(interval);
-  }, [visibleActive]);
-
   return {
     connections: visibleConnections,
     setConnections,
@@ -769,9 +747,6 @@ export function useConnectionManager(storageReady = false) {
     setSchema,
     schemaError,
     isLoadingSchema,
-    // Derived rather than reset in the pulse effect: with no active connection
-    // there is nothing to report on, and the render already knows that.
-    connectionPulse: visibleActive === null ? null : pulseState,
     fetchSchema,
     /**
      * Whether the active connection is holding its catalog reads back. False with no

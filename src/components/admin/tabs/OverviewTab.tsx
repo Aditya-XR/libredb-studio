@@ -295,10 +295,15 @@ export function OverviewTab({ user }: OverviewTabProps) {
     return { total, successful, failed, successRate, avgTime, byDay };
   }, [history, now]);
 
+  // A `not-checked` row was sent nothing (its provider resumes billed compute), so it is neither
+  // healthy nor unhealthy and stays out of the score's denominator. A fleet of only such rows has
+  // no score: null, read as N/A, since 0% would rate it critical.
   const healthScore = useMemo(() => {
     if (fleetHealth.length === 0) return 0;
-    const healthy = fleetHealth.filter((h) => h.status === "healthy").length;
-    return Math.round((healthy / fleetHealth.length) * 100);
+    const checked = fleetHealth.filter((h) => h.status !== "not-checked");
+    if (checked.length === 0) return null;
+    const healthy = checked.filter((h) => h.status === "healthy").length;
+    return Math.round((healthy / checked.length) * 100);
   }, [fleetHealth]);
 
   const todayQueries = useMemo(() => {
@@ -316,7 +321,7 @@ export function OverviewTab({ user }: OverviewTabProps) {
   }, [history, now]);
 
   const avgLatency = useMemo(() => {
-    const healthy = fleetHealth.filter((h) => h.status !== "error");
+    const healthy = fleetHealth.filter((h) => h.status !== "error" && h.status !== "not-checked");
     // null, not 0: no reachable connection means nothing was timed, and 0 ms would rate as excellent.
     if (healthy.length === 0) return null;
     return Math.round(healthy.reduce((sum, h) => sum + h.latencyMs, 0) / healthy.length);
@@ -428,7 +433,7 @@ function HeroStatusBanner({
   fleetLoading,
   onRefresh,
 }: {
-  healthScore: number;
+  healthScore: number | null;
   fleetHealth: FleetHealthItem[];
   connections: DatabaseConnection[];
   queryStats: { total: number; successRate: number | null; avgTime: number };
@@ -440,7 +445,7 @@ function HeroStatusBanner({
   fleetLoading: boolean;
   onRefresh: () => void;
 }) {
-  const animatedScore = useAnimatedCounter(healthScore);
+  const animatedScore = useAnimatedCounter(healthScore ?? 0);
   const animatedConns = useAnimatedCounter(connections.length);
   const animatedQueries = useAnimatedCounter(queryStats.total);
   const animatedToday = useAnimatedCounter(todayQueries);
@@ -453,20 +458,37 @@ function HeroStatusBanner({
   // it orients without competing, which is exactly what a gauge track is for.
   const gaugeTrack = chartTheme(useEffectiveTheme()).grid;
 
-  const gaugeColor = getGaugeColor(healthScore);
-  const gaugeData = [{ value: healthScore, fill: gaugeColor }];
+  const gaugeColor = healthScore === null ? NEUTRAL_GAUGE_COLOR : getGaugeColor(healthScore);
+  const gaugeData = [{ value: healthScore ?? 0, fill: gaugeColor }];
 
   const healthyCount = fleetHealth.filter((h) => h.status === "healthy").length;
   const degradedCount = fleetHealth.filter((h) => h.status === "degraded").length;
   const errorCount = fleetHealth.filter((h) => h.status === "error").length;
+  const notCheckedCount = fleetHealth.filter((h) => h.status === "not-checked").length;
 
-  const statusText =
-    errorCount > 0 ? "Attention Required" : degradedCount > 0 ? "Degraded Performance" : "All Systems Operational";
+  // No score means every row was `not-checked`: nothing was asked, so the line claims nothing
+  // either way and carries no success styling.
+  const unchecked = healthScore === null;
 
-  const statusColor = errorCount > 0 ? "text-danger" : degradedCount > 0 ? "text-warning" : "text-success";
+  const statusText = unchecked
+    ? "Not checked"
+    : errorCount > 0
+      ? "Attention Required"
+      : degradedCount > 0
+        ? "Degraded Performance"
+        : "All Systems Operational";
 
-  const statusGlow =
-    errorCount > 0
+  const statusColor = unchecked
+    ? "text-fg-muted"
+    : errorCount > 0
+      ? "text-danger"
+      : degradedCount > 0
+        ? "text-warning"
+        : "text-success";
+
+  const statusGlow = unchecked
+    ? ""
+    : errorCount > 0
       ? "shadow-[0_0_20px_rgba(239,68,68,0.15)]"
       : degradedCount > 0
         ? "shadow-[0_0_20px_rgba(245,158,11,0.15)]"
@@ -512,7 +534,7 @@ function HeroStatusBanner({
                 so the badge's strip does not pull the reading off centre. */}
             <div className="absolute inset-x-0 top-0 h-[160px] flex flex-col items-center justify-center">
               <span className="text-3xl font-bold tabular-nums" style={{ color: gaugeColor }}>
-                {animatedScore}%
+                {healthScore === null ? "N/A" : `${animatedScore}%`}
               </span>
               <span className="text-xs text-fg-muted uppercase tracking-wider">Health</span>
             </div>
@@ -547,6 +569,11 @@ function HeroStatusBanner({
                   {errorCount > 0 && (
                     <Badge variant="outline" className="border-danger-tint/30 text-danger h-5 text-[0.625rem]">
                       {errorCount} error{errorCount === 1 ? "" : "s"}
+                    </Badge>
+                  )}
+                  {notCheckedCount > 0 && (
+                    <Badge variant="outline" className="border-hairline-strong text-fg-muted h-5 text-[0.625rem]">
+                      {notCheckedCount} not checked
                     </Badge>
                   )}
                 </div>
@@ -680,6 +707,14 @@ function FleetHealthSection({
           gradient: "from-amber-500/60 via-amber-400/40",
           latencyColor: "#f59e0b",
         };
+      case "not-checked":
+        return {
+          dot: "bg-fg-subtle",
+          border: "border-hairline hover:border-hairline-strong",
+          glow: "",
+          gradient: "from-transparent via-transparent",
+          latencyColor: "transparent",
+        };
       default:
         return {
           dot: "bg-danger-tint",
@@ -778,7 +813,11 @@ function FleetHealthSection({
 
                 <div className="flex items-center gap-3 text-xs text-fg-muted">
                   <span className="font-mono text-fg-tertiary">
-                    {item.status === "error" ? "timeout" : `${item.latencyMs}ms`}
+                    {item.status === "error"
+                      ? "timeout"
+                      : item.status === "not-checked"
+                        ? "not checked"
+                        : `${item.latencyMs}ms`}
                   </span>
                   {item.databaseSize && (
                     <>
@@ -795,6 +834,11 @@ function FleetHealthSection({
                 </div>
 
                 {item.error && <div className="text-danger text-xs truncate mt-1.5">{item.error}</div>}
+                {item.status === "not-checked" && (
+                  <div className="text-fg-muted text-xs mt-1.5">
+                    Not checked: this connection resumes billed compute, so Studio does not poll it.
+                  </div>
+                )}
               </motion.a>
             );
           })}
@@ -814,7 +858,7 @@ function KeyMetricsSection({
   yesterdayQueries,
 }: {
   queryStats: { total: number; successRate: number | null; avgTime: number };
-  healthScore: number;
+  healthScore: number | null;
   avgLatency: number | null;
   todayQueries: number;
   yesterdayQueries: number;
@@ -833,7 +877,13 @@ function KeyMetricsSection({
           unit={queryStats.successRate === null ? "" : "%"}
           color={queryStats.successRate === null ? NEUTRAL_GAUGE_COLOR : getGaugeColor(queryStats.successRate)}
         />
-        <MetricGauge label="Fleet Health" value={healthScore} unit="%" color={getGaugeColor(healthScore)} />
+        <MetricGauge
+          label="Fleet Health"
+          value={healthScore ?? 0}
+          displayValue={healthScore === null ? "N/A" : undefined}
+          unit={healthScore === null ? "" : "%"}
+          color={healthScore === null ? NEUTRAL_GAUGE_COLOR : getGaugeColor(healthScore)}
+        />
         <MetricGauge
           label="Avg Response"
           value={Math.min(avgLatency ?? 0, 500)}

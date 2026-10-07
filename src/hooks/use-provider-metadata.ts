@@ -5,7 +5,7 @@ import { useCallback, useState, useEffect, useRef } from "react";
 import type { DatabaseConnection } from "@/lib/types";
 import type { ProviderCapabilities, ProviderLabels } from "@/lib/db/types";
 import { logger } from "@/lib/logger";
-import { buildConnectionPayload } from "./use-connection-payload";
+import { buildConnectionPayload, connectionResolutionKey } from "./use-connection-payload";
 
 export interface ProviderMetadata {
   capabilities: ProviderCapabilities;
@@ -58,8 +58,15 @@ export function useProviderMetadata(connection: DatabaseConnection | null): Prov
 
   const retry = useCallback(() => setAttempt((previous) => previous + 1), []);
 
-  /** Which read is wanted: one connection, one attempt. Null means there is nothing to read. */
-  const readKey = connection === null ? null : `${attempt}:${connection.id}`;
+  /**
+   * Which read is wanted: one connection as it reaches its database now, one attempt. Null means there is nothing
+   * to read.
+   *
+   * The resolution key is part of it because a declaration may depend on any field that decides where a read goes
+   * (a provider answers `resumesBilledCompute` from the connection's own settings), so an edit of the same
+   * connection is read again, while a rename, which changes no such field, is not.
+   */
+  const readKey = connection === null ? null : `${attempt}:${connection.id}:${connectionResolutionKey(connection)}`;
 
   /**
    * Clear the previous answer for the render readKey changes ON, not the one after.

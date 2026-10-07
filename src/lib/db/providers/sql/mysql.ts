@@ -1122,7 +1122,7 @@ function toSlowQueryStats(r: RowDataPacket): SlowQueryStats {
  * an appearance nobody can check. No component reads `HealthInfo.slowQueries` (the
  * monitoring Queries and Overview tabs read `MonitoringData.slowQueries`, a different
  * reading with its own `SlowQueryStats` shape), and the one caller of
- * `POST /api/db/health` - the 60s connection pulse in `src/hooks/use-connection-manager.ts` -
+ * `POST /api/db/health` - the 60s connection pulse in `src/hooks/use-connection-pulse.ts` -
  * reads `res.ok` and discards the body. The agent's curated health reading
  * (`src/lib/agent/tools.ts`) was the last live consumer and read only the list's LENGTH -
  * never `query`, never `avgTime` - and it no longer reads the list at all (#513). So this
@@ -3953,7 +3953,7 @@ export class MySQLProvider extends SQLBaseProvider {
       // `HealthInfo.slowQueries` (the monitoring Queries and Overview tabs read
       // `MonitoringData.slowQueries`, a different reading), and the one caller of
       // `POST /api/db/health` - the 60s connection pulse in
-      // `src/hooks/use-connection-manager.ts` - looks at `res.ok` and discards the body.
+      // `src/hooks/use-connection-pulse.ts` - looks at `res.ok` and discards the body.
       //
       // The operator is not left without the reason, because the SAME refusal reaches
       // them on the path that does have a channel: `getSlowQueries()` below lets it

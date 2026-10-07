@@ -47,6 +47,7 @@ import { useAgentArtifact } from "@/components/agent/use-agent-artifact";
 import { useAgentPrefill } from "@/components/agent/use-agent-prefill";
 import { useToast } from "@/hooks/use-toast";
 import { useProviderMetadata } from "@/hooks/use-provider-metadata";
+import { useConnectionPulse } from "@/hooks/use-connection-pulse";
 import { useConnectionOrder } from "@/hooks/use-connection-order";
 import { useConnectionGroups } from "@/hooks/use-connection-groups";
 import { useAuth } from "@/hooks/use-auth";
@@ -111,6 +112,8 @@ export default function Studio() {
   // 2. Connection Manager + Provider Metadata
   const conn = useConnectionManager(storageReady);
   const { metadata, error: metadataError, retry: retryMetadata } = useProviderMetadata(conn.activeConnection);
+  // After the metadata, because the declaration decides whether a health check may be sent at all.
+  const connectionPulse = useConnectionPulse(conn.activeConnection, metadata);
   const { favoriteIds, toggleFavorite } = useFavoriteConnections(storageReady);
   const { order: connectionOrder, setOrder: setConnectionOrder } = useConnectionOrder(storageReady);
   const { groups: connectionGroups, ...groupActions } = useConnectionGroups(storageReady);
@@ -1256,7 +1259,7 @@ export default function Studio() {
             <StudioMobileHeader
               connections={conn.connections}
               activeConnection={conn.activeConnection}
-              connectionPulse={conn.connectionPulse}
+              connectionPulse={connectionPulse}
               user={user}
               isAdmin={isAdmin}
               activeMobileTab={activeMobileTab}
@@ -1284,7 +1287,7 @@ export default function Studio() {
 
             <StudioDesktopHeader
               activeConnection={conn.activeConnection}
-              connectionPulse={conn.connectionPulse}
+              connectionPulse={connectionPulse}
               user={user}
               isAdmin={isAdmin}
               onLogout={handleLogout}

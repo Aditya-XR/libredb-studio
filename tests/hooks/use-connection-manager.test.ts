@@ -173,7 +173,6 @@ describe("useConnectionManager", () => {
     expect(result.current.activeConnection).toBeNull();
     expect(result.current.schema).toEqual([]);
     expect(result.current.isLoadingSchema).toBe(false);
-    expect(result.current.connectionPulse).toBeNull();
   });
 
   // ── Load from localStorage ────────────────────────────────────────────────
@@ -615,62 +614,30 @@ describe("useConnectionManager", () => {
     expect(result.current.connections[1].name).toBe("Beta");
   });
 
-  // ── connectionPulse healthy ───────────────────────────────────────────────
+  // ── No connection pulse ───────────────────────────────────────────────
 
-  test("connectionPulse is healthy when health check succeeds", async () => {
+  // The pulse is `useConnectionPulse`'s, which waits for the provider's declaration before it may
+  // send anything; a post from here would reach a connection whose compute it wakes and bills.
+  test("posts no /api/db/health and reports no pulse of its own", async () => {
     const conn = makeConnection();
     storage.saveConnection(conn);
 
-    mockGlobalFetch({
+    const fetchMock = mockGlobalFetch({
+      "/api/db/provider-meta": providerMeta(),
+      "/api/db/objects": { json: { objects: OBJECTS } },
       "/api/db/health": { ok: true, json: { status: "healthy" } },
     });
 
     const { result } = renderHook(() => useConnectionManager(true));
 
     await waitFor(() => {
-      expect(result.current.connectionPulse).toBe("healthy");
+      expect(result.current.activeConnection?.id).toBe("conn-1");
     });
-  });
-
-  // ── Connection pulse degraded ──────────────────────────────────────────
-
-  test("connectionPulse is degraded when health check returns non-ok", async () => {
-    const conn = makeConnection();
-    storage.saveConnection(conn);
-
-    mockGlobalFetch({
-      "/api/db/health": { ok: false, status: 503, json: { error: "Service Unavailable" } },
-    });
-
-    const { result } = renderHook(() => useConnectionManager(true));
-
     await waitFor(() => {
-      expect(result.current.connectionPulse).toBe("degraded");
+      expect(result.current.isLoadingSchema).toBe(false);
     });
-  });
-
-  // ── Connection pulse error on fetch failure ────────────────────────────
-
-  test("connectionPulse is error when health check throws", async () => {
-    const conn = makeConnection();
-    storage.saveConnection(conn);
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("/api/db/health")) {
-        throw new Error("Network error");
-      }
-      return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
-    }) as typeof fetch;
-
-    const { result } = renderHook(() => useConnectionManager(true));
-
-    await waitFor(() => {
-      expect(result.current.connectionPulse).toBe("error");
-    });
-
-    globalThis.fetch = originalFetch;
+    expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/api/db/health"))).toHaveLength(0);
+    expect("connectionPulse" in result.current).toBe(false);
   });
 
   // ── fetchSchema error with non-JSON response ──────────────────────────
@@ -2559,9 +2526,9 @@ describe("the custom connections policy", () => {
     expect(result.current.connections.map((c) => c.id)).toEqual(["seed:sandbox"]);
   });
 
-  test("a refused connection made active later is reported as none and is never health-checked", async () => {
+  test("a refused connection made active later is reported as none", async () => {
     storage.saveConnection(own);
-    const fetchMock = mockGlobalFetch(routes({ json: { customConnections: false } }));
+    mockGlobalFetch(routes({ json: { customConnections: false } }));
 
     const { result } = renderHook(() => useConnectionManager(true));
     await waitFor(() => {
@@ -2573,13 +2540,7 @@ describe("the custom connections policy", () => {
     });
 
     expect(result.current.activeConnection).toBeNull();
-    expect(result.current.connectionPulse).toBeNull();
     expect(result.current.objectScanDeferred).toBe(false);
-    const healthBodies = fetchMock.mock.calls
-      .filter((call) => String(call[0]).includes("/api/db/health"))
-      .map((call) => String((call[1] as RequestInit | undefined)?.body));
-    expect(healthBodies.length).toBeGreaterThan(0);
-    expect(healthBodies.some((body) => body.includes("own-1"))).toBe(false);
   });
 
   test("a server that allows them lists every connection, as before", async () => {
@@ -2618,14 +2579,8 @@ describe("the custom connections policy", () => {
         { id: "group-1", name: "Mine", collapsed: false, connectionIds: ["own-2"] },
       ]);
     };
-    const healthCheckedFor = (fetchMock: ReturnType<typeof mockGlobalFetch>, id: string) =>
-      fetchMock.mock.calls.some(
-        (call) =>
-          String(call[0]).includes("/api/db/health") &&
-          String((call[1] as RequestInit | undefined)?.body).includes(`"id":"${id}"`),
-      );
 
-    const whileOff = mockGlobalFetch(routes({ json: { customConnections: false } }));
+    mockGlobalFetch(routes({ json: { customConnections: false } }));
     const switchedOff = renderHook(() => useConnectionManager(true));
     await waitFor(() => {
       expect(switchedOff.result.current.activeConnection?.id).toBe("seed:orders");
@@ -2635,12 +2590,11 @@ describe("the custom connections policy", () => {
       switchedOff.result.current.setActiveConnection(second);
     });
     expect(switchedOff.result.current.activeConnection).toBeNull();
-    expect(healthCheckedFor(whileOff, "own-2")).toBe(false);
     expectOwnStateKept();
     switchedOff.unmount();
     restoreGlobalFetch();
 
-    const whileOn = mockGlobalFetch(routes({ json: { customConnections: true } }));
+    mockGlobalFetch(routes({ json: { customConnections: true } }));
     const switchedOn = renderHook(() => useConnectionManager(true));
     await waitFor(() => {
       expect(switchedOn.result.current.connections.map((c) => c.id)).toEqual([
@@ -2654,7 +2608,6 @@ describe("the custom connections policy", () => {
       switchedOn.result.current.setActiveConnection(second);
     });
     expect(switchedOn.result.current.activeConnection?.id).toBe("own-2");
-    expect(healthCheckedFor(whileOn, "own-2")).toBe(true);
     expect(switchedOn.result.current.customConnections).toBe(true);
     expectOwnStateKept();
   });

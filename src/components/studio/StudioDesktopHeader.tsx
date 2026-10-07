@@ -2,6 +2,7 @@
 
 import React from "react";
 import type { DatabaseConnection } from "@/lib/types";
+import { connectionPulseTitle, type ConnectionPulse } from "@/hooks/use-connection-pulse";
 import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { Database, Gauge, KeyRound, LogOut, Settings, ShieldCheck, User } from "lucide-react";
@@ -16,9 +17,17 @@ import { GitHubRepoLink } from "@/components/github-repo-link";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ReadOnlyMarker } from "@/components/read-only-marker";
 
+/** What the pulse indicator reads for each state. Only Online animates: the others are not live. */
+const PULSE_TEXT: Record<ConnectionPulse, string> = {
+  healthy: "Online",
+  degraded: "Slow",
+  error: "Error",
+  "not-checked": "Not checked",
+};
+
 interface StudioDesktopHeaderProps {
   activeConnection: DatabaseConnection | null;
-  connectionPulse: "healthy" | "degraded" | "error" | null;
+  connectionPulse: ConnectionPulse | null;
   user: { role?: string } | null;
   isAdmin: boolean;
   onLogout: () => void;
@@ -69,7 +78,7 @@ export const StudioDesktopHeader = React.memo(function StudioDesktopHeader({
         {connectionPulse && (
           <div
             className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-fill mr-2"
-            title={`Connection: ${connectionPulse}`}
+            title={connectionPulseTitle(connectionPulse)}
           >
             <div
               className={cn(
@@ -77,11 +86,10 @@ export const StudioDesktopHeader = React.memo(function StudioDesktopHeader({
                 connectionPulse === "healthy" && "bg-success-tint animate-pulse",
                 connectionPulse === "degraded" && "bg-warning-tint",
                 connectionPulse === "error" && "bg-danger-tint",
+                connectionPulse === "not-checked" && "bg-fg-subtle",
               )}
             />
-            <span className="text-xs font-medium text-fg-muted">
-              {connectionPulse === "healthy" ? "Online" : connectionPulse === "degraded" ? "Slow" : "Error"}
-            </span>
+            <span className="text-xs font-medium text-fg-muted">{PULSE_TEXT[connectionPulse]}</span>
           </div>
         )}
 

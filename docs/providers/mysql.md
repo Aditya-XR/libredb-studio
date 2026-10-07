@@ -1971,7 +1971,7 @@ reading does not have. `HealthInfo.slowQueries` is a `SlowQuery[]`: no error fie
 refusal cannot be represented in this reading at all. Nothing renders it either — no component reads
 `HealthInfo.slowQueries` (the monitoring Queries and Overview tabs read `MonitoringData.slowQueries`,
 a different reading), and the one caller of `POST /api/db/health`, the 60s connection pulse in
-[`use-connection-manager.ts`](../../src/hooks/use-connection-manager.ts), reads `res.ok` and
+[`use-connection-pulse.ts`](../../src/hooks/use-connection-pulse.ts), reads `res.ok` and
 discards the body. `ProviderLabels.slowQueriesEmptyState` is **not** a carrier for it: `QueriesTab`
 renders that one fixed sentence for every empty list whatever produced it, which is why the sentence
 had to stop naming a cause (it used to end *"enable the Performance Schema to see them"* — the one

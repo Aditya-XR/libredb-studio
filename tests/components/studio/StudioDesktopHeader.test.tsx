@@ -40,6 +40,7 @@ mock.module("@/components/ui/button", () => ({
 
 import { StudioDesktopHeader } from "@/components/studio/StudioDesktopHeader";
 import type { DatabaseConnection } from "@/lib/types";
+import type { ConnectionPulse } from "@/hooks/use-connection-pulse";
 
 // --- Fixtures ---
 const baseConnection: DatabaseConnection = {
@@ -82,7 +83,7 @@ const connectionWithEnvNoColor: DatabaseConnection = {
 
 const defaultProps = {
   activeConnection: baseConnection,
-  connectionPulse: null as "healthy" | "degraded" | "error" | null,
+  connectionPulse: null as ConnectionPulse | null,
   user: { role: "admin" } as { role?: string } | null,
   isAdmin: true,
   onLogout: mock(() => {}),
@@ -206,6 +207,22 @@ describe("StudioDesktopHeader", () => {
       expect(dot?.className).not.toContain("animate-pulse");
 
       expect(pulseContainer!.textContent).toContain("Error");
+    });
+
+    test('renders not-checked as "Not checked" with a neutral, unanimated dot', () => {
+      const { container } = render(<StudioDesktopHeader {...defaultProps} connectionPulse="not-checked" />);
+      const pulseContainer = container.querySelector('[title^="Connection: Not checked."]');
+      expect(pulseContainer).toBeTruthy();
+      expect(pulseContainer!.getAttribute("title")).toBe(
+        "Connection: Not checked. Studio sends this connection no background health checks.",
+      );
+
+      const dot = pulseContainer!.querySelector(".rounded-full");
+      expect(dot?.className).toContain("bg-fg-subtle");
+      expect(dot?.className).not.toContain("animate-pulse");
+      expect(dot?.className).not.toContain("bg-success-tint");
+
+      expect(pulseContainer!.textContent).toBe("Not checked");
     });
   });
 

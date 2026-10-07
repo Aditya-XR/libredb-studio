@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useId, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity,
@@ -92,6 +92,11 @@ export function MonitoringDashboard({ isEmbedded = false }: MonitoringDashboardP
   // perform (issue #272). Same hook Studio uses — no new API surface.
   const { metadata } = useProviderMetadata(selectedConnection);
 
+  // A provider whose compute resumes on any statement and is billed until it suspends: every
+  // auto-refresh tick keeps it awake, so the toggle says so and names the sentence as its description.
+  const billedComputeNoteId = useId();
+  const resumesBilledCompute = metadata?.capabilities.resumesBilledCompute === true;
+
   const handleConnectionChange = (connectionId: string) => {
     setChosenId(connectionId);
   };
@@ -150,12 +155,19 @@ export function MonitoringDashboard({ isEmbedded = false }: MonitoringDashboardP
               </SelectContent>
             </Select>
 
+            {resumesBilledCompute && (
+              <span id={billedComputeNoteId} className="max-w-[16rem] text-xs text-muted-foreground">
+                Each refresh runs statements on this connection, which keeps its billed compute running.
+              </span>
+            )}
+
             <Button
               variant="ghost"
               size="icon"
               className="h-8 w-8"
               onClick={() => setAutoRefresh(!autoRefresh)}
               title={autoRefresh ? "Pause auto-refresh" : "Start auto-refresh"}
+              aria-describedby={resumesBilledCompute ? billedComputeNoteId : undefined}
             >
               {autoRefresh ? <Pause className="h-4 w-4" /> : <Play strokeWidth={1.5} className="h-4 w-4" />}
             </Button>

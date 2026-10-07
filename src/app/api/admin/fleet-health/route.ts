@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getOrCreateProvider } from "@/lib/db";
+import { createDatabaseProvider, getOrCreateProvider } from "@/lib/db";
 import type { DatabaseConnection } from "@/lib/types";
 import { createErrorResponse } from "@/lib/api/errors";
 import { resolveConnection } from "@/lib/seed/resolve-connection";
@@ -22,7 +22,11 @@ export interface FleetHealthItem {
   connectionName: string;
   type: string;
   environment?: string;
-  status: "healthy" | "degraded" | "error";
+  /**
+   * `not-checked` is a connection whose provider declares `resumesBilledCompute`: a check would
+   * resume compute the engine bills for, so the route sends it nothing and `latencyMs` is 0.
+   */
+  status: "healthy" | "degraded" | "error" | "not-checked";
   latencyMs: number;
   activeConnections?: number;
   databaseSize?: string;
@@ -80,7 +84,28 @@ export async function POST(request: Request) {
            * refused item is reported as that item's error, beside the health of the rest.
            */
           const resolved = await resolveConnection(buildConnectionPayload(conn), guard.session);
-          const provider = await getOrCreateProvider(resolved, {}, editorExecutionContext(guard.session, resolved));
+          const execution = editorExecutionContext(guard.session, resolved);
+          /*
+           * The capability is read off an unconnected provider, the provider-meta pattern: a
+           * connection that resumes billed compute (a suspended Databend Cloud warehouse wakes on
+           * any statement) is answered without a cached provider or a statement, since a check on
+           * every dashboard refresh would keep it awake and billed. The factory logs its
+           * "[DB] Creating <type> provider" line for this build, once per row on every refresh,
+           * as provider-meta does; the declaration is read each time because an edit of the
+           * connection can change it.
+           */
+          const unconnected = await createDatabaseProvider(resolved, {}, execution);
+          if (unconnected.getCapabilities().resumesBilledCompute) {
+            return {
+              connectionId: conn.id,
+              connectionName: conn.name,
+              type: conn.type,
+              environment: conn.environment,
+              status: "not-checked",
+              latencyMs: 0,
+            };
+          }
+          const provider = await getOrCreateProvider(resolved, {}, execution);
           const health = await provider.getHealth();
           const latencyMs = Date.now() - start;
 

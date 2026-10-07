@@ -25,6 +25,7 @@ let capturedSaveQueryModalProps: Record<string, unknown> = {};
 let capturedCommandPaletteProps: Record<string, unknown> = {};
 let capturedSafetyDialogProps: Record<string, unknown> = {};
 let capturedMobileHeaderProps: Record<string, unknown> = {};
+let capturedDesktopHeaderProps: Record<string, unknown> = {};
 let capturedTabBarProps: Record<string, unknown> = {};
 let capturedSchemaExplorerProps: Record<string, unknown> = {};
 let capturedConnectionsListProps: Record<string, unknown> = {};
@@ -138,7 +139,6 @@ mock.module("@/hooks/use-connection-manager", () => ({
     schema: EMPTY_SCHEMA,
     schemaContext: "[]",
     isLoadingSchema: false,
-    connectionPulse: "none",
     setConnections: mockSetConnections,
     setActiveConnection: mockSetActiveConnection,
     setSchema: mockSetSchema,
@@ -174,6 +174,11 @@ mock.module("@/hooks/use-provider-metadata", () => ({
     ...metadataOverride,
   })),
 }));
+
+// The pulse's own behaviour is pinned in tests/hooks/use-connection-pulse.test.ts; here only what
+// Studio hands it and what Studio does with its answer.
+const mockUseConnectionPulse = mock((_connection: unknown, _metadata: unknown) => "not-checked");
+mock.module("@/hooks/use-connection-pulse", () => ({ useConnectionPulse: mockUseConnectionPulse }));
 
 mock.module("@/hooks/use-tab-manager", () => ({
   useTabManager: mock(() => ({
@@ -358,7 +363,10 @@ mock.module("@/components/studio/index", () => {
       capturedMobileHeaderProps = props;
       return React.createElement("div", { "data-testid": "mobile-header" }, "MobileHeader");
     },
-    StudioDesktopHeader: () => React.createElement("div", { "data-testid": "desktop-header" }, "DesktopHeader"),
+    StudioDesktopHeader: (props: Record<string, unknown>) => {
+      capturedDesktopHeaderProps = props;
+      return React.createElement("div", { "data-testid": "desktop-header" }, "DesktopHeader");
+    },
     StudioTabBar: (props: Record<string, unknown>) => {
       capturedTabBarProps = props;
       return React.createElement("div", { "data-testid": "tab-bar" }, "TabBar");
@@ -572,6 +580,7 @@ describe("Studio", () => {
     capturedCommandPaletteProps = {};
     capturedSafetyDialogProps = {};
     capturedMobileHeaderProps = {};
+    capturedDesktopHeaderProps = {};
     capturedTabBarProps = {};
     capturedSchemaExplorerProps = {};
     capturedConnectionsListProps = {};
@@ -595,6 +604,7 @@ describe("Studio", () => {
     // Clear trackable mocks
     mockHandleLogout.mockClear();
     mockSetConnections.mockClear();
+    mockUseConnectionPulse.mockClear();
     mockSetActiveConnection.mockClear();
     mockSetSchema.mockClear();
     mockFetchSchema.mockClear();
@@ -2033,6 +2043,17 @@ describe("Studio", () => {
   });
 
   // --- Inline-edit capability gate (#269) ---
+  test("asks the connection pulse about the active connection once its metadata answers, and shows its answer in both headers", () => {
+    connMgrOverride = { activeConnection: pgConn };
+    render(<Studio />);
+
+    const [connection, metadata] = mockUseConnectionPulse.mock.calls.at(-1)!;
+    expect(connection).toBe(pgConn);
+    expect((metadata as { capabilities: { queryLanguage: string } }).capabilities.queryLanguage).toBe("sql");
+    expect(capturedMobileHeaderProps.connectionPulse).toBe("not-checked");
+    expect(capturedDesktopHeaderProps.connectionPulse).toBe("not-checked");
+  });
+
   test("withholds every editing affordance when supportsInlineRowEdit is false", () => {
     capabilitiesOverride = { supportsInlineRowEdit: false };
     // Even with editing already switched on in the hook, no editable cell wiring

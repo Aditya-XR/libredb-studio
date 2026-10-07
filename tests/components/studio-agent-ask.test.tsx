@@ -107,7 +107,6 @@ mock.module("@/hooks/use-connection-manager", () => ({
     schema: [],
     schemaContext: "[]",
     isLoadingSchema: false,
-    connectionPulse: "none",
     setConnections: mock(() => {}),
     setActiveConnection: mock(() => {}),
     setSchema: mock(() => {}),

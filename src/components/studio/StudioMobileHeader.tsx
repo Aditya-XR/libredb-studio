@@ -2,6 +2,7 @@
 
 import React, { type RefObject } from "react";
 import type { DatabaseConnection } from "@/lib/types";
+import { connectionPulseTitle, type ConnectionPulse } from "@/hooks/use-connection-pulse";
 import type { QueryEditorRef } from "@/components/QueryEditor";
 import { CancelQueryButton, type CancelControlMode } from "./QueryToolbar";
 import { useRouter } from "next/navigation";
@@ -46,7 +47,7 @@ import { toast } from "sonner";
 interface StudioMobileHeaderProps {
   connections: DatabaseConnection[];
   activeConnection: DatabaseConnection | null;
-  connectionPulse: "healthy" | "degraded" | "error" | null;
+  connectionPulse: ConnectionPulse | null;
   user: { role?: string } | null;
   isAdmin: boolean;
   activeMobileTab: "database" | "schema" | "editor";
@@ -193,9 +194,12 @@ export const StudioMobileHeader = React.memo(function StudioMobileHeader({
           </DropdownMenu>
 
           {activeConnection?.readOnly === true && <ReadOnlyMarker />}
-          {activeConnection && (
-            <span className="text-xs text-success font-medium px-1.5 py-0.5 rounded bg-success-tint/10">Online</span>
-          )}
+          {activeConnection &&
+            (connectionPulse === "not-checked" ? (
+              <span className="text-xs text-fg-muted font-medium px-1.5 py-0.5 rounded bg-fill">Not checked</span>
+            ) : (
+              <span className="text-xs text-success font-medium px-1.5 py-0.5 rounded bg-success-tint/10">Online</span>
+            ))}
         </div>
 
         <div className="flex items-center gap-1">
@@ -212,7 +216,7 @@ export const StudioMobileHeader = React.memo(function StudioMobileHeader({
           {connectionPulse && (
             <div
               className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-fill"
-              title={`Connection: ${connectionPulse}`}
+              title={connectionPulseTitle(connectionPulse)}
             >
               <div
                 className={cn(
@@ -220,6 +224,7 @@ export const StudioMobileHeader = React.memo(function StudioMobileHeader({
                   connectionPulse === "healthy" && "bg-success-tint animate-pulse",
                   connectionPulse === "degraded" && "bg-warning-tint",
                   connectionPulse === "error" && "bg-danger-tint",
+                  connectionPulse === "not-checked" && "bg-fg-subtle",
                 )}
               />
             </div>

@@ -1146,6 +1146,24 @@ export interface ProviderCapabilities {
    * DuckDB.
    */
   readonly readsFileAccessPosture?: true;
+  /**
+   * True when a request to this connection can resume compute the engine bills for: a suspended
+   * Databend Cloud warehouse wakes on any statement and is charged until it suspends again.
+   *
+   * Studio then sends the connection no background request of its own, since each one would keep
+   * the compute awake: no connection pulse (the header shows "not checked") and no admin fleet
+   * health check (the row answers `not-checked`). The monitoring auto-refresh toggle carries a
+   * sentence saying each refresh keeps the billed compute running; auto-refresh stays off until the
+   * user starts it, as it does for every provider, and then polls on its timer. A request the user
+   * makes still runs and still resumes the compute.
+   * Read from an unconnected provider, so the declaration answers before any connect.
+   *
+   * Optional for the same published-interface reason as `enforcesReadOnly`: a required field added
+   * after the fact stops every external implementer compiling. Only the literal `true` is declared,
+   * so an absent flag reads as "a request costs nothing to send", the answer for every engine whose
+   * compute is not suspended and billed per resume.
+   */
+  readonly resumesBilledCompute?: true;
   supportsMaintenance: boolean;
   maintenanceOperations: MaintenanceOperation[];
   /**

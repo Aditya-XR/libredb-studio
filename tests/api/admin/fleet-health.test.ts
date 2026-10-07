@@ -22,6 +22,10 @@ import {
 // ─── Mock provider ──────────────────────────────────────────────────────────
 const mockProvider = createMockProvider();
 const mockGetOrCreateProvider = mock(async () => mockProvider);
+// The unconnected provider the route reads capabilities from, the provider-meta pattern.
+const mockCreateDatabaseProvider = mock<(conn: { id: string }) => Promise<typeof mockProvider>>(
+  async () => mockProvider,
+);
 const mockGetSession = mock(
   async (): Promise<{ role: string; username: string } | null> => ({ role: "admin", username: "admin" }),
 );
@@ -38,7 +42,7 @@ mock.module("@/lib/auth", () => ({
 // ─── Mock @/lib/db BEFORE importing the route ───────────────────────────────
 mock.module("@/lib/db", () => ({
   getOrCreateProvider: mockGetOrCreateProvider,
-  createDatabaseProvider: mock(),
+  createDatabaseProvider: mockCreateDatabaseProvider,
   removeProvider: mock(),
   clearProviderCache: mock(),
   getProviderCacheStats: mock(),
@@ -94,6 +98,8 @@ describe("POST /api/admin/fleet-health", () => {
       async (): Promise<{ role: string; username: string } | null> => ({ role: "admin", username: "admin" }),
     );
     mockGetOrCreateProvider.mockImplementation(async () => mockProvider);
+    mockCreateDatabaseProvider.mockClear();
+    mockCreateDatabaseProvider.mockImplementation(async () => mockProvider);
     (mockProvider.getHealth as ReturnType<typeof mock>).mockClear();
   });
 
@@ -311,6 +317,90 @@ describe("POST /api/admin/fleet-health", () => {
     expect(res.status).toBe(200);
     expect(data.results).toBeArray();
     expect(data.results.length).toBe(0);
+  });
+});
+
+// ─── Billed compute ─────────────────────────────────────────────────────────
+// A connection whose provider declares `resumesBilledCompute` (a Databend Cloud warehouse) wakes
+// on any statement and is charged until it suspends again, so a fleet check every 60 s would keep
+// it awake for as long as the dashboard is open. The route reads the declaration off an unconnected
+// provider and answers that row `not-checked`, building no cached provider and sending nothing.
+describe("POST /api/admin/fleet-health billed compute", () => {
+  const billed = {
+    id: "conn-billed",
+    name: "Cloud Warehouse",
+    type: "postgres",
+    host: "warehouse.example.com",
+    port: 443,
+    database: "default",
+    environment: "production",
+    createdAt: new Date(),
+  };
+
+  beforeEach(() => {
+    clearRateLimitState();
+    mockGetOrCreateProvider.mockClear();
+    mockCreateDatabaseProvider.mockClear();
+    mockGetSession.mockImplementation(
+      async (): Promise<{ role: string; username: string } | null> => ({ role: "admin", username: "admin" }),
+    );
+    mockGetOrCreateProvider.mockImplementation(async () => mockProvider);
+  });
+
+  test("a resumesBilledCompute connection is answered not-checked, with no cached provider and no statement", async () => {
+    const billedProvider = createMockProvider({ capabilities: { resumesBilledCompute: true } });
+    const controlProvider = createMockProvider();
+    mockCreateDatabaseProvider.mockImplementation(async (conn) =>
+      conn.id === billed.id ? billedProvider : createMockProvider(),
+    );
+    mockGetOrCreateProvider.mockImplementation(async () => controlProvider);
+
+    const req = createMockRequest("/api/admin/fleet-health", {
+      method: "POST",
+      body: { connections: [billed, connections[0]] },
+    });
+
+    const res = await POST(req);
+    const data = await parseResponseJSON<{
+      results: Record<string, unknown>[];
+    }>(res);
+
+    expect(res.status).toBe(200);
+    expect(data.results[0]).toEqual({
+      connectionId: "conn-billed",
+      connectionName: "Cloud Warehouse",
+      type: "postgres",
+      environment: "production",
+      status: "not-checked",
+      latencyMs: 0,
+    });
+    // Nothing was opened, cached or sent for the billed connection.
+    expect(billedProvider.connect).not.toHaveBeenCalled();
+    expect(billedProvider.query).not.toHaveBeenCalled();
+    expect(billedProvider.getHealth).not.toHaveBeenCalled();
+    expect(billedProvider.getOverview).not.toHaveBeenCalled();
+    expect(mockGetOrCreateProvider).toHaveBeenCalledTimes(1);
+    expect((mockGetOrCreateProvider.mock.calls[0] as unknown as [{ id: string }])[0].id).toBe("conn-1");
+
+    // The control connection beside it is checked as before.
+    expect(data.results[1].connectionId).toBe("conn-1");
+    expect(data.results[1].status).toBe("healthy");
+    expect(controlProvider.getHealth).toHaveBeenCalledTimes(1);
+  });
+
+  test("other connections are checked as before", async () => {
+    const req = createMockRequest("/api/admin/fleet-health", {
+      method: "POST",
+      body: { connections },
+    });
+
+    const res = await POST(req);
+    const data = await parseResponseJSON<{ results: { status: string }[] }>(res);
+
+    expect(res.status).toBe(200);
+    expect(data.results.map((r) => r.status)).toEqual(["healthy", "healthy"]);
+    expect(mockCreateDatabaseProvider).toHaveBeenCalledTimes(2);
+    expect(mockGetOrCreateProvider).toHaveBeenCalledTimes(2);
   });
 });
 

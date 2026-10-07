@@ -180,6 +180,8 @@ describe("OverviewTab", () => {
       // Hero section should contain status text
       expect(queryByText("All Systems Operational")).not.toBeNull();
     });
+    // An all-healthy fleet has nothing unchecked to count, so no such badge.
+    expect(queryByText(/not checked/i)).toBeNull();
   });
 
   test("shows empty state when no connections", async () => {
@@ -733,6 +735,113 @@ describe("OverviewTab", () => {
       expect(queryByText("2 errors")).not.toBeNull();
       expect(queryByText("2 error")).toBeNull();
     });
+  });
+
+  // A connection that resumes billed compute (a Databend Cloud warehouse) is answered
+  // `not-checked` by the route, which sent it nothing: the card says why in one sentence, and
+  // the row counts as neither healthy nor unhealthy, nor as a 0 ms answer in the average.
+  test("a not-checked connection shows the billing sentence and stays out of the health counts", async () => {
+    fetchMock = mockGlobalFetch({
+      "/api/admin/audit": { json: { events: [] } },
+      "/api/admin/fleet-health": {
+        json: {
+          results: [
+            {
+              connectionId: "c1",
+              connectionName: "PG Dev",
+              type: "postgres",
+              status: "healthy",
+              latencyMs: 15,
+            },
+            {
+              connectionId: "c2",
+              connectionName: "Cloud Warehouse",
+              type: "postgres",
+              status: "not-checked",
+              latencyMs: 0,
+            },
+          ],
+        },
+      },
+    });
+
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OverviewTab user={{ username: "admin", role: "admin" }} />);
+    });
+    const { queryByText } = renderResult!;
+
+    await waitFor(
+      () => {
+        expect(queryByText("Cloud Warehouse")).not.toBeNull();
+        expect(
+          queryByText("Not checked: this connection resumes billed compute, so Studio does not poll it."),
+        ).not.toBeNull();
+        expect(queryByText("not checked")).not.toBeNull();
+        expect(queryByText("0ms")).toBeNull();
+        expect(queryByText("1 healthy")).not.toBeNull();
+        expect(queryByText("1 not checked")).not.toBeNull();
+        expect(queryByText("All Systems Operational")).not.toBeNull();
+        expect(gaugeOf("Fleet Health").textContent).toContain("100");
+        expect(gaugeOf("Avg Response").textContent).toContain("15");
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  // A fleet whose every row is `not-checked` has no score: N/A in the neutral color, as Query
+  // Success reads before any query, never a critical-red 0%. Nothing was checked, so the status
+  // line is a neutral "Not checked", not a green "All Systems Operational".
+  test("a fleet with only not-checked connections reads N/A in the neutral color", async () => {
+    fetchMock = mockGlobalFetch({
+      "/api/admin/audit": { json: { events: [] } },
+      "/api/admin/fleet-health": {
+        json: {
+          results: [
+            {
+              connectionId: "c2",
+              connectionName: "Cloud Warehouse",
+              type: "postgres",
+              status: "not-checked",
+              latencyMs: 0,
+            },
+            {
+              connectionId: "c3",
+              connectionName: "Second Warehouse",
+              type: "postgres",
+              status: "not-checked",
+              latencyMs: 0,
+            },
+          ],
+        },
+      },
+    });
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OverviewTab user={{ username: "admin", role: "admin" }} />);
+    });
+    const { queryByText } = renderResult!;
+
+    await waitFor(
+      () => {
+        expect(document.body.textContent).toContain("Cloud Warehouse");
+        const gauge = gaugeOf("Fleet Health");
+        expect(gauge.textContent).toContain("N/A");
+        expect(gauge.textContent).not.toContain("0%");
+        expect(gauge.innerHTML).not.toContain("#ef4444");
+        const hero = gaugeOf("Health");
+        expect(hero.textContent).toContain("N/A");
+        expect(hero.textContent).not.toContain("0%");
+        expect(hero.innerHTML).not.toContain("#ef4444");
+        expect(queryByText("All Systems Operational")).toBeNull();
+        const status = queryByText("Not checked") as HTMLElement;
+        expect(status).not.toBeNull();
+        expect(status.className).toContain("text-fg-muted");
+        expect(status.className).not.toContain("text-success");
+        expect(queryByText("2 not checked")).not.toBeNull();
+      },
+      { timeout: 3000 },
+    );
   });
 
   // ── Fleet-health request race ──────────────────────────────────────────────
