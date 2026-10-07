@@ -65,6 +65,11 @@ export interface NodeTransportOptions {
   readonly headers: Readonly<Record<string, string>>;
   /** How long a pooled socket may sit idle before the transport closes it; IDLE_SOCKET_MS when absent. */
   readonly idleSocketMs?: number;
+  /**
+   * The lower-case names a request may carry in `NodeRequest.headers`, a closed list; none when absent. A name the
+   * transport or the connection sets is refused when the transport is built.
+   */
+  readonly requestHeaderNames?: readonly string[];
 }
 
 export interface NodeRequest {
@@ -79,6 +84,11 @@ export interface NodeRequest {
    * refused before any socket, never sent with one of them dropped.
    */
   readonly form?: Readonly<Record<string, string>>;
+  /**
+   * Headers of this request alone, each named in the transport's `requestHeaderNames` in the same spelling, each value
+   * visible ASCII or space and at most 1024 bytes; anything else is refused before any socket. Never kept for the next.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
   /** Carries the caller's cancel and the deadline. */
   readonly signal: AbortSignal;
   readonly maxResponseBytes: number;
@@ -199,6 +209,9 @@ const CLOSED = "The connection was closed, so the request did not complete";
 const NETWORK_FAILURE = "The request failed before a complete response arrived";
 const TRUNCATED = "The server ended the response before it was complete";
 const BODY_AND_FORM = "Invalid request: give a body or form fields, not both";
+const INVALID_HEADER_NAMES = "Invalid requestHeaderNames: expected lower-case header names";
+const UNLISTED_HEADER = "Invalid request headers: a header this transport does not list was given";
+const NOT_A_RECORD = "Invalid request headers: expected a plain record of header names and values";
 
 /** A runtime error code named in a failure; any other value is left out of the message. */
 const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
@@ -343,6 +356,86 @@ function lowerCased(headers: Readonly<Record<string, string>>): Record<string, s
   return Object.fromEntries(lowered);
 }
 
+/**
+ * Names a per-request header may never take: those node:http or this transport set for each request, those that frame
+ * or govern the connection rather than one request, and the Authorization credential, which belongs to the connection's
+ * own headers. Every `content-` and `proxy-` name is refused by its prefix.
+ */
+const OWNED_HEADERS: ReadonlySet<string> = new Set([
+  "host",
+  "transfer-encoding",
+  "accept-encoding",
+  "connection",
+  "keep-alive",
+  "te",
+  "trailer",
+  "upgrade",
+  "expect",
+  "authorization",
+]);
+const OWNED_HEADER_PREFIXES: readonly string[] = ["content-", "proxy-"];
+
+/** An HTTP field name (RFC 9110 token) in lower case. */
+const HEADER_NAME = /^[a-z0-9!#$%&'*+.^_`|~-]+$/;
+/** Visible ASCII and space: no CR or LF to split a header, no control and nothing node:http would re-encode. */
+const HEADER_VALUE = /^[\x20-\x7e]*$/;
+const MAX_HEADER_VALUE_BYTES = 1024;
+
+/**
+ * The closed list of per-request header names, checked once when the transport is built: a name that is not a
+ * lower-case token is refused without being repeated, and one the transport or the connection owns is refused by name,
+ * so a request can never replace a credential, a framing header or a header every request of the connection carries.
+ */
+function requestHeaderNamesOf(
+  names: readonly string[] | undefined,
+  connection: Readonly<Record<string, string>>,
+): ReadonlySet<string> {
+  // A string would list its characters and a hole or a number would reach the name check as something else.
+  if (names !== undefined && (!Array.isArray(names) || !Array.from(names).every((name) => typeof name === "string"))) {
+    throw new DatabaseConfigError(INVALID_HEADER_NAMES);
+  }
+  const listed = new Set(names);
+  for (const name of listed) {
+    if (!HEADER_NAME.test(name)) throw new DatabaseConfigError(INVALID_HEADER_NAMES);
+    if (
+      OWNED_HEADERS.has(name) ||
+      OWNED_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
+      Object.hasOwn(connection, name)
+    ) {
+      throw new DatabaseConfigError(`Invalid requestHeaderNames: ${name} is set by the transport or the connection`);
+    }
+  }
+  return listed;
+}
+
+/**
+ * A request's own headers, checked before any socket: an unlisted name is refused without being repeated, and a value
+ * of the wrong kind is refused by its listed name, never its value.
+ */
+function perRequestHeaders(
+  headers: Readonly<Record<string, string>> | undefined,
+  listed: ReadonlySet<string>,
+): Readonly<Record<string, string>> {
+  // One read, checked and then sent, so a record whose keys or values change between reads cannot pass one set.
+  const record = headers ?? {};
+  const entries = Object.entries(record);
+  // What that read cannot see, a Map's entries, a Symbol or a non-enumerable key, is refused rather than dropped; the
+  // second key read only ever refuses, it never adds to what is sent.
+  const prototype: unknown = Object.getPrototypeOf(record);
+  if ((prototype !== Object.prototype && prototype !== null) || Reflect.ownKeys(record).length !== entries.length) {
+    throw new DatabaseConfigError(NOT_A_RECORD);
+  }
+  for (const [name, value] of entries) {
+    if (!listed.has(name)) throw new DatabaseConfigError(UNLISTED_HEADER);
+    if (typeof value !== "string" || value.length > MAX_HEADER_VALUE_BYTES || !HEADER_VALUE.test(value)) {
+      throw new DatabaseConfigError(
+        `Invalid request headers: the value of ${name} must be visible ASCII or space, at most ${MAX_HEADER_VALUE_BYTES} bytes`,
+      );
+    }
+  }
+  return Object.fromEntries(entries);
+}
+
 /** What a request sends: its text and the content type the transport sets for it. */
 interface Payload {
   readonly text: string;
@@ -357,12 +450,15 @@ function payloadOf(request: NodeRequest): Payload | undefined {
   return request.body === undefined ? undefined : { text: request.body, contentType: "application/json" };
 }
 
+/** The connection's headers, then the request's own, then the transport's, which no earlier one can replace. */
 function requestHeaders(
   connection: Readonly<Record<string, string>>,
+  perRequest: Readonly<Record<string, string>>,
   payload: Payload | undefined,
 ): Record<string, string> {
   return {
     ...connection,
+    ...perRequest,
     "accept-encoding": "identity",
     ...(payload === undefined
       ? {}
@@ -413,6 +509,7 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
   const { lookup } = guardedNodeOptions(origin.host);
   const connectionOrigin = new URL(endpointUrl(origin, "/")).origin;
   const connectionHeaders = lowerCased(options.headers);
+  const requestHeaderNames = requestHeaderNamesOf(options.requestHeaderNames, connectionHeaders);
   const shared: AgentOptions = {
     keepAlive: true,
     timeout: options.idleSocketMs ?? IDLE_SOCKET_MS,
@@ -440,7 +537,11 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
     if (!closed) waiting.shift()?.();
   };
 
-  const exchange = (request: NodeRequest, target: URL): Promise<NodeResponse> =>
+  const exchange = (
+    request: NodeRequest,
+    target: URL,
+    perRequest: Readonly<Record<string, string>>,
+  ): Promise<NodeResponse> =>
     new Promise<NodeResponse>((resolve, reject) => {
       const { hostname, port, path } = urlToHttpOptions(target);
       let outgoing: ClientRequest | undefined;
@@ -479,7 +580,7 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
               path,
               method: request.method,
               agent,
-              headers: requestHeaders(connectionHeaders, payload),
+              headers: requestHeaders(connectionHeaders, perRequest, payload),
             },
             (answer) => {
               incoming = answer;
@@ -548,12 +649,13 @@ export function createNodeTransport(options: NodeTransportOptions): NodeTranspor
       if (!isPositiveInteger(request.maxResponseBytes)) throw new DatabaseConfigError(INVALID_MAX_RESPONSE_BYTES);
       // Neither is dropped silently: a request naming both is refused before any socket.
       if (request.body !== undefined && request.form !== undefined) throw new DatabaseConfigError(BODY_AND_FORM);
+      const perRequest = perRequestHeaders(request.headers, requestHeaderNames);
       const target = parsedUrl(request.url);
       // A URL carrying userinfo would send it as an Authorization header, so it is refused like another origin.
       if (target === null || target.origin !== connectionOrigin || target.username !== "" || target.password !== "") {
         throw new DatabaseConfigError(FOREIGN_URL);
       }
-      return exchange(request, target);
+      return exchange(request, target, perRequest);
     },
     close() {
       closed = true;

@@ -282,6 +282,35 @@ async function runCases(deps: Deps, plan: Plan): Promise<Report> {
       transport.close();
     }
   });
+  // A listed per-request header goes out; an unlisted one is refused before a socket, so the guarded listener sees none.
+  const sendHeaders = async (port: number, path: string, headers: Record<string, string>) => {
+    const origin = deps.httpOrigin("http", "127.0.0.1", port);
+    const transport = deps.createNodeTransport({
+      origin,
+      tls: null,
+      maxSockets: 1,
+      headers: { "api-key": SECRET },
+      requestHeaderNames: ["x-databend-session"],
+    });
+    try {
+      return await transport.request({
+        method: "POST",
+        url: deps.endpointUrl(origin, path),
+        body: "{}",
+        headers,
+        signal: AbortSignal.timeout(10_000),
+        maxResponseBytes: MIB,
+      });
+    } finally {
+      transport.close();
+    }
+  };
+  await record("request headers: a listed header is sent", () =>
+    sendHeaders(ports.plain, "/request-header", { "x-databend-session": "runtime-session" }),
+  );
+  await record("request headers: an unlisted header is refused before a socket", () =>
+    sendHeaders(ports.guarded, "/unlisted", { "x-other": "1" }),
+  );
   // Built before the guard is on, so the refusal below is the transport's own and not httpOrigin's.
   const guardedOrigin = deps.httpOrigin("http", "127.0.0.1", ports.guarded);
   process.env.DB_HTTP_BLOCK_PRIVATE_HOSTS = "true";
@@ -688,6 +717,12 @@ const EXPECTED: Readonly<Record<string, Expected>> = {
     kind: "aborted",
     message: "The request was cancelled",
   },
+  "request headers: a listed header is sent": OK,
+  "request headers: an unlisted header is refused before a socket": {
+    ok: false,
+    errorName: "DatabaseConfigError",
+    message: "Invalid request headers: a header this transport does not list was given",
+  },
   "guard: 127.0.0.1 refused before a socket": { ok: false, errorName: "DatabaseConfigError", message: BLOCKED },
   "guard: localhost refused by the lookup on the Agent": {
     ok: false,
@@ -794,6 +829,11 @@ for (const [label, binary] of RUNTIMES) {
     test("the redirect's target and the guarded listener saw nothing", () => {
       expect(run?.delta.target).toBe(0);
       expect(run?.delta.guarded).toBe(0);
+    });
+
+    test("a listed per-request header reached the listener under its listed name", () => {
+      const sent = plain.seen.slice(run?.from.plain).find(({ url }) => url === "/request-header");
+      expect(sent?.headers["x-databend-session"]).toBe("runtime-session");
     });
 
     test("keep-alive used two sockets for eight requests", () => {
