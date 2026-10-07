@@ -439,6 +439,24 @@ const NAMED_CITATIONS = [
       "requireTarget",
     ],
   },
+  // Db2: the JDBC-backed relational provider (#1259).
+  {
+    doc: "docs/providers/db2.md",
+    source: "src/lib/db/providers/sql/db2/index.ts",
+    methods: ["connect", "disconnect", "query", "countObjects", "describeObjects"],
+  },
+  // etcd: the key-value provider over gRPC (#1259).
+  {
+    doc: "docs/providers/etcd.md",
+    source: "src/lib/db/providers/keyvalue/etcd/index.ts",
+    methods: ["connect", "disconnect"],
+  },
+  // Neo4j: the graph provider over Bolt (#1259).
+  {
+    doc: "docs/providers/neo4j.md",
+    source: "src/lib/db/providers/graph/neo4j/index.ts",
+    methods: ["getLabels", "connect"],
+  },
 ] as const;
 
 const SEARCH_DOCS = ["docs/providers/elasticsearch.md", "docs/providers/opensearch.md"] as const;
