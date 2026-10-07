@@ -31,7 +31,7 @@ None of it is a GitHub issue.
 - [Drivers and connections](#drivers-and-connections) — D1-D244, U17 · 148
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X26, U2-U94 · 85
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X26, U2-U95 · 86
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC18 · 15
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
@@ -4052,6 +4052,16 @@ Read on `main` 9b370ee6d: none of the three views receives `maskingConfig`.
 Found 2026-10-07 by the security review of the result column names fix; pre-existing.
 
 **Done when:** the three views either show the masked text for a masked column or leave a masked column out while masking is in force, `docs/FEATURES.md` states which, and a component test per view pins it.
+
+### U95. On Oracle, data masking and the inline-edit refusal do not read a repeated column as a repeat
+
+node-oracledb numbers a repeated result column itself, `NAME_1`, `NAME_2` (`_setup` in `oracledb/lib/impl/resultset.js`; measured 2026-10-07 on Oracle XE), and the Oracle provider keeps those names (`docs/providers/oracle.md`, section 5.1).
+Data masking (`namesToMatch` in `src/lib/data-masking.ts`) and the inline-edit refusal (`generatedFieldNames` in `src/components/results-grid/utils.ts`) read only the `name (N)` form that `uniqueFieldNames` writes, so on Oracle a join that projects `EMAIL` from both tables masks `EMAIL` and shows `EMAIL_1` in clear while masking is in force.
+The driver's `NAME_1` cannot be told apart from a column the statement itself names `NAME_1`, and rebuilding the declared names costs a statement-cache miss on every editor statement (the same section).
+
+Found 2026-10-07 by the external review of the result column names fix; pre-existing.
+
+**Done when:** masking treats an Oracle repeat like any other numbered repeat (for example by reading `NAME_N` as a repeat of `NAME` when `NAME` is also in the result), the inline-edit refusal makes the same call or the provider doc says why it cannot, and tests pin both.
 
 ## Dependencies
 
