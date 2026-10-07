@@ -52,18 +52,18 @@ None of it is a GitHub issue.
 The readers in `src/lib/sql/` decide where a statement starts, where it ends, and what it operates
 on. `src/lib/sql/grammar.ts` gave them a dialect (#292). These are the gaps that channel leaves.
 
-### S2. Backslash escaping is not a grammar fact
+### S2. No shipped dialect declares backslash escaping
 
-Whether `\` escapes inside a string literal differs by dialect, and in MySQL by session mode. Making
-it a row in `SqlGrammar` would narrow the false confirmation prompts #297 introduced, and would
-remove S4's MSSQL decline entirely.
+Whether `\` escapes inside a string literal differs by dialect, and in MySQL by session mode.
+The fact now exists: `SqlGrammar.backslashAlwaysEscapes`, and where it is true `spans.ts` reads a backslash and the character after it as one escaped pair inside `'…'` and `"…"`, except a backslash before a line feed, which leaves the literal unterminated (Databend's `\\.` does not match a line feed).
+Every shipped row declares it `false`, so every dialect keeps the undeterminable reading of a quote behind an odd backslash run.
+MySQL is not set `true` because `NO_BACKSLASH_ESCAPES` in `sql_mode` turns the escape off per session, so the row cannot state it for every connection.
+Setting it where a dialect always escapes would narrow the false confirmation prompts #297 introduced there.
+The fact says only that a backslash always escapes, so it cannot say that one never does (SQL Server, PostgreSQL's standard strings), and S4's MSSQL decline needs that second value before it can go.
 
-Left out of maintainer-sweep-5 on purpose: it retypes every literal in every dialect. It also
-destroys the premise of two fixtures that sweep required (the "end cannot be cut" case and the
-"genuinely unresolvable text still has to ask" case). Those fixtures need replacing with shapes that
-stay unresolvable once `\` is understood.
-
-The single largest follow-up from that sweep.
+Declaring it `true` on a row retypes that dialect's literals only, and no other dialect changes.
+It also destroys, for that dialect, the premise of two fixtures maintainer-sweep-5 required (the "end cannot be cut" case and the "genuinely unresolvable text still has to ask" case).
+Those fixtures need shapes that stay unresolvable once `\` is understood before any shipped row turns the fact on.
 
 ### S3. Comment and escape forms no reader models
 

@@ -586,9 +586,9 @@ The accepted cost, pinned by tests rather than left to be discovered, in two cla
 - **A closing quote behind an odd backslash run** is reported undeterminable whatever the dialect, and
   this is the most frequent prompt the rule buys: it covers a literal ending in a backslash (a Windows
   path) *and* `\'` as an escaped apostrophe — which is MySQL's own escape, so an everyday MySQL read
-  such as `… WHERE name = 'O\'Brien'` asks on every execute. Naming the dialect does not narrow this
-  one, because whether `\` escapes is deliberately not a fact the grammar record carries yet (fixtures
-  across this milestone rest on the undeterminable reading). What does *not* happen is a prompt
+  such as `… WHERE name = 'O\'Brien'` asks on every execute.
+  Naming a shipped dialect does not narrow this one: the grammar record carries the fact as `backslashAlwaysEscapes`, and every row declares it false, MySQL included because `NO_BACKSLASH_ESCAPES` in `sql_mode` changes its reading per session.
+  What does *not* happen is a prompt
   for a statement that merely contains a backslash — `SELECT 'a\nb' FROM t`, `… LIKE 'a\_b'` and
   `'C:\\Users\\me'` all resolve and run without one.
 - **A bracketed run a dialect at the default bracket reading cannot close.** `[…]` is read as SQL

@@ -26,8 +26,8 @@
  * one:
  *
  * - `alias-extractor.ts:134-135` blanks literals with a regex that honours
- *   BACKSLASH escapes, which this module reports as undeterminable instead (see
- *   `readQuoted`). Its comment strip (lines 130-132) knows `--` and the block form
+ *   BACKSLASH escapes, which this module reports as undeterminable instead unless
+ *   the grammar declares `backslashAlwaysEscapes` (see `readQuoted`). Its comment strip (lines 130-132) knows `--` and the block form
  *   and no dialect at all, so it does not know `//` either. Its job is autocomplete,
  *   where a wrong alias costs a suggestion; here a wrong literal boundary costs a
  *   bound on a write - or, at the splitter, a fragment that gets executed.
@@ -161,8 +161,8 @@ function hasOddBackslashRunBefore(sql: string, from: number, at: number): boolea
  * A quoted run (`'…'`, `"…"`, `` `…` ``) where the delimiter is escaped by
  * doubling it.
  *
- * `backslashEscapes` marks the delimiters for which a preceding backslash MIGHT
- * also escape. Whether it does is a dialect setting rather than a property of the
+ * For `'` and `"`, a preceding backslash MIGHT also escape the delimiter.
+ * Whether it does is a dialect setting rather than a property of the
  * text - MySQL escapes with backslashes by default, PostgreSQL does not unless the
  * literal is written `E'…'` - and the two readings put the end of the string in
  * different places, which then moves the end of every construct around it. So a
@@ -175,9 +175,21 @@ function hasOddBackslashRunBefore(sql: string, from: number, at: number): boolea
  * Since #297 it costs one thing more, and this rule is where the cost is largest:
  * the confirmation gate asks about text it cannot resolve rather than staying
  * silent, and `\'` is MySQL's own escape for an apostrophe, so an everyday read
- * (`… WHERE name = 'O\'Brien'`) prompts on every execute. Naming the dialect does
- * not narrow it, because whether `\` escapes is deliberately not one of the facts
- * `grammar.ts` carries yet.
+ * (`… WHERE name = 'O\'Brien'`) prompts on every execute. Naming one of the shipped
+ * dialects does not narrow it: `grammar.ts` carries the fact as
+ * `backslashAlwaysEscapes`, and every row declares it false, MySQL included because
+ * `NO_BACKSLASH_ESCAPES` in `sql_mode` changes its reading per session.
+ *
+ * `backslash` says which of three readings applies: `"never"` (a backslash is an
+ * ordinary character), `"ambiguous"` (the undeterminable rule above) and
+ * `"escapes"`, for a dialect that declares the fact, where a backslash and the
+ * character after it are one escaped pair. That last reading leaves no second one
+ * to disagree with, so `'it\'s'` ends where the server ends it, and a lone
+ * backslash at the end of the text leaves the run unterminated. So does a
+ * backslash immediately before a line feed: Databend's string token is
+ * `'([^'\\]|\\.|'')*'` (`token.rs`), whose `.` excludes a line feed, so the server
+ * rejects that text, and the guard refuses it first. A backslash before a
+ * carriage return is still a pair, since `.` matches one.
  */
 /**
  * A `[…]` quoted identifier, whose closing bracket is escaped by doubling.
@@ -376,10 +388,21 @@ function continuesWord(sql: string, index: number): boolean {
   return before !== undefined && (IDENTIFIER_PART.test(before) || before === "$");
 }
 
-function readQuoted(sql: string, index: number, quote: string, kind: SqlSpanKind, backslashEscapes: boolean): SqlSpan {
+function readQuoted(
+  sql: string,
+  index: number,
+  quote: string,
+  kind: SqlSpanKind,
+  backslash: "never" | "ambiguous" | "escapes",
+): SqlSpan {
   let i = index + 1;
 
   while (i < sql.length) {
+    if (backslash === "escapes" && sql[i] === "\\") {
+      if (sql[i + 1] === "\n") break;
+      i += 2;
+      continue;
+    }
     if (sql[i] === quote) {
       // The backslash question is asked BEFORE the doubling rule, because the two
       // meet: `\''` is how a MySQL string ending in an apostrophe is written, and
@@ -388,7 +411,7 @@ function readQuoted(sql: string, index: number, quote: string, kind: SqlSpanKind
       // readings can diverge ONLY at a delimiter behind an odd backslash run,
       // since everywhere else both consume identically and both honour doubling -
       // so `terminated: true` here is a dialect-independent answer.
-      if (backslashEscapes && hasOddBackslashRunBefore(sql, index, i)) {
+      if (backslash === "ambiguous" && hasOddBackslashRunBefore(sql, index, i)) {
         return { kind, end: sql.length, terminated: false };
       }
       // A doubled delimiter is an escape, not the end. Reading it as the end is
@@ -516,17 +539,18 @@ export function readSqlSpan(sql: string, index: number, grammar: SqlGrammar = DE
     if (tagLength > 0 && !continuesWord(sql, index)) return readAlternateQuoted(sql, index, tagLength);
   }
 
-  if (ch === "'") return readQuoted(sql, index, "'", "string", true);
+  const literalBackslash = grammar.backslashAlwaysEscapes ? "escapes" : "ambiguous";
+  if (ch === "'") return readQuoted(sql, index, "'", "string", literalBackslash);
   // `"` is a quoted identifier in every dialect this project supports except
   // MySQL with its default settings, where it is a string - and therefore takes
   // backslash escapes. Either way it is an opaque literal and the doubling rule is
   // the same, so one reading serves both.
-  if (ch === '"') return readQuoted(sql, index, '"', "quoted-identifier", true);
+  if (ch === '"') return readQuoted(sql, index, '"', "quoted-identifier", literalBackslash);
   // Backticks are MySQL's identifier quotes. Without them a backtick-quoted CTE
   // name would read as undeterminable input and cost that statement its bound. No
   // dialect gives a backslash meaning inside them, so one before the closing
   // delimiter is simply part of the name.
-  if (ch === "`") return readQuoted(sql, index, "`", "quoted-identifier", false);
+  if (ch === "`") return readQuoted(sql, index, "`", "quoted-identifier", "never");
 
   // `[…]` quotes an identifier in SQL Server and SQLite, and everything between the
   // brackets is the NAME - `SELECT [a--b] FROM t` selects a column called `a--b`.

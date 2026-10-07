@@ -547,6 +547,19 @@ describe("script", () => {
   );
 });
 
+// Whether `\\` escapes inside every `'…'` and `"…"`. No shipped row declares it: MySQL
+// is the dialect that escapes by default, and `NO_BACKSLASH_ESCAPES` in `sql_mode`
+// turns that off per session, so the row cannot state it for every connection.
+describe("backslashAlwaysEscapes", () => {
+  test("the compatibility default does not read a backslash as an escape", () => {
+    expect(DEFAULT_SQL_GRAMMAR.backslashAlwaysEscapes).toBe(false);
+  });
+
+  test.each(Object.keys(GRAMMAR_COVERAGE) as DatabaseType[])("%s declares false", (type) => {
+    expect(resolveSqlGrammar(type).backslashAlwaysEscapes).toBe(false);
+  });
+});
+
 describe("every database type has a recorded grammar decision", () => {
   test.each(Object.entries(GRAMMAR_COVERAGE))("%s is %s", (type, expected) => {
     const isDefault = resolveSqlGrammar(type as DatabaseType) === DEFAULT_SQL_GRAMMAR;
