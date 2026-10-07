@@ -8,7 +8,7 @@ import {
   unitIsModuleBody,
 } from "@/lib/sql/statement-splitter";
 import type { SplitStatement } from "@/lib/sql/statement-splitter";
-import { resolveSqlGrammar } from "@/lib/sql/grammar";
+import { DEFAULT_SQL_GRAMMAR, resolveSqlGrammar } from "@/lib/sql/grammar";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -613,6 +613,18 @@ describe("countCodeStatements", () => {
 
   test("the default grammar is used when none is given", () => {
     expect(countCodeStatements("SELECT 1; -- note")).toBe(1);
+  });
+
+  // Where a backslash always escapes, `'a\'b'` is one terminated literal, so the
+  // `;` after it is a boundary. Where the reading is undeterminable the literal
+  // runs to the end of the text and hides the second statement.
+  test("an escaped apostrophe ends where the dialect ends it", () => {
+    const sql = "INSERT INTO t VALUES ('a\\'b'); DELETE FROM t";
+    const escapes = { ...DEFAULT_SQL_GRAMMAR, backslashAlwaysEscapes: true };
+
+    expect(countCodeStatements(sql, escapes)).toBe(2);
+    expect(sqlsOf(splitStatements(sql, escapes))).toEqual(["INSERT INTO t VALUES ('a\\'b')", "DELETE FROM t"]);
+    expect(countCodeStatements(sql, DEFAULT_SQL_GRAMMAR)).toBe(1);
   });
 });
 

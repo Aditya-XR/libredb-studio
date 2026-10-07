@@ -139,8 +139,9 @@ const SQLITE_ONLY_SCHEMA = "main";
  * object genuinely named `a\b` cannot be selected. Separating the two cases would buy
  * that one name back at the cost of a rule whose boundary depends on where in the
  * string the character sits — and a selector is a name a caller can also reach by
- * narrowing to its schema instead. The wide rule is the one that stays true if the
- * grammar's escape handling is ever revisited (`docs/BACKLOG.md` S2).
+ * narrowing to its schema instead. Escape handling is now a per-dialect grammar fact
+ * (`backslashAlwaysEscapes`, `docs/BACKLOG.md` S2) that every shipped row declares
+ * false, and the wide rule stays correct whichever way a row declares it.
  */
 function assertSelector(value: string, field: string): string {
   const trimmed = typeof value === "string" ? value.trim() : "";

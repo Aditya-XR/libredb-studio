@@ -832,3 +832,90 @@ describe("hasUnterminatedSpan: `//`", () => {
     expect(hasUnterminatedSpan(sql, DEFAULT_SQL_GRAMMAR)).toBe(true);
   });
 });
+
+// ─── A dialect where a backslash always escapes ─────────────────────────────
+//
+// Where the dialect states that `\` escapes inside every `'…'` and `"…"`, there is
+// no second reading left to disagree with, so a quote behind an odd backslash run
+// is an escaped quote rather than an undeterminable end. No shipped row declares
+// the fact yet (MySQL's reading turns on `NO_BACKSLASH_ESCAPES` in `sql_mode`), so
+// these cases run on a synthetic grammar.
+
+describe("readSqlSpan: a dialect where a backslash always escapes", () => {
+  const ESCAPES: SqlGrammar = { ...DEFAULT_SQL_GRAMMAR, backslashAlwaysEscapes: true };
+
+  test("an escaped apostrophe does not end the string", () => {
+    expect(readSqlSpan("'it\\'s' x", 0, ESCAPES)).toEqual({ kind: "string", end: 7, terminated: true });
+  });
+
+  test("a doubled backslash is one escaped pair, so the quote after it closes", () => {
+    expect(spanOf("'a\\\\' x", 0, ESCAPES)).toBe("string|'a\\\\'");
+  });
+
+  test("an odd run of backslashes escapes the quote after it", () => {
+    expect(spanOf("'a\\\\\\' b' x", 0, ESCAPES)).toBe("string|'a\\\\\\' b'");
+  });
+
+  test("an escaped double quote does not end a double-quoted run", () => {
+    expect(spanOf('"a\\"b" x', 0, ESCAPES)).toBe('quoted-identifier|"a\\"b"');
+  });
+
+  test("a doubled quote is still an escape", () => {
+    expect(spanOf("'it''s' x", 0, ESCAPES)).toBe("string|'it''s'");
+  });
+
+  test("a trailing lone backslash leaves the string unterminated", () => {
+    expect(readSqlSpan("'a\\", 0, ESCAPES)).toEqual({ kind: "string", end: 3, terminated: false });
+    expect(readSqlSpan("'a\\'", 0, ESCAPES)).toEqual({ kind: "string", end: 4, terminated: false });
+  });
+
+  // Databend's string token is `'([^'\\]|\\.|'')*'`, and `.` there excludes a line
+  // feed, so a backslash before one is a lexer error rather than an escaped pair.
+  test("a backslash before a line feed leaves the string unterminated", () => {
+    const sql = "'a\\\nb'; x";
+
+    expect(readSqlSpan(sql, 0, ESCAPES)).toEqual({ kind: "string", end: sql.length, terminated: false });
+  });
+
+  test("a backslash before a carriage return is still an escaped pair", () => {
+    expect(readSqlSpan("'a\\\r\nb' x", 0, ESCAPES)).toEqual({ kind: "string", end: 7, terminated: true });
+  });
+
+  test("with the fact false, a backslash before a line ending reads as on main", () => {
+    expect(readSqlSpan("'a\\\nb'; x", 0, DEFAULT_SQL_GRAMMAR)).toEqual({ kind: "string", end: 6, terminated: true });
+    expect(readSqlSpan("'a\\\r\nb' x", 0, DEFAULT_SQL_GRAMMAR)).toEqual({
+      kind: "string",
+      end: 7,
+      terminated: true,
+    });
+  });
+
+  test("a backtick-quoted name is unchanged: a backslash there is part of the name", () => {
+    expect(spanOf("`a\\` x", 0, ESCAPES)).toBe("quoted-identifier|`a\\`");
+  });
+
+  // The fact at `false` is today's reading: every answer that was undeterminable
+  // stays undeterminable, which is what keeps every shipped row where it was.
+  test.each<string>(["'a\\' , x", "'a\\'' x'", "'\\' , x", "'it\\'s' x"])(
+    "with the fact false, %s stays undeterminable",
+    (sql) => {
+      const grammar: SqlGrammar = { ...DEFAULT_SQL_GRAMMAR, backslashAlwaysEscapes: false };
+
+      expect(readSqlSpan(sql, 0, grammar)?.terminated).toBe(false);
+      expect(readSqlSpan(sql, 0)?.terminated).toBe(false);
+    },
+  );
+
+  test("with the fact false, a double quote behind an odd backslash run stays undeterminable", () => {
+    expect(readSqlSpan('"a\\" x', 0, DEFAULT_SQL_GRAMMAR)?.terminated).toBe(false);
+  });
+});
+
+describe("hasUnterminatedSpan: a dialect where a backslash always escapes", () => {
+  test("an escaped apostrophe is resolvable only where the dialect declares the fact", () => {
+    const sql = "SELECT * FROM t WHERE name = 'O\\'Brien'";
+
+    expect(hasUnterminatedSpan(sql, { ...DEFAULT_SQL_GRAMMAR, backslashAlwaysEscapes: true })).toBe(false);
+    expect(hasUnterminatedSpan(sql, DEFAULT_SQL_GRAMMAR)).toBe(true);
+  });
+});

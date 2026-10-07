@@ -1618,10 +1618,10 @@ describe("isDangerousQuery", () => {
    * The most frequent prompt this rule buys, named rather than left to be
    * discovered: `\'` is MySQL's OWN escape for an apostrophe, and `spans.ts` reports
    * any closing quote behind an odd backslash run as undeterminable whatever the
-   * dialect - backslash semantics are deliberately not a fact the grammar record
-   * carries yet, because fixtures across this milestone rest on the undeterminable
-   * reading. So an everyday MySQL read asks, and naming the dialect does not narrow
-   * it: this is the one cost the channel cannot resolve today.
+   * dialect - the grammar record carries `backslashAlwaysEscapes`, but every shipped
+   * row declares it false, MySQL included, because `NO_BACKSLASH_ESCAPES` changes its
+   * reading per session. So an everyday MySQL read asks, and naming a shipped dialect
+   * does not narrow it: this is the one cost the channel cannot resolve today.
    */
   test("prompts for a literal escaping its apostrophe with a backslash, under either dialect", () => {
     const everyday = "SELECT * FROM t WHERE name = 'it\\'s'";

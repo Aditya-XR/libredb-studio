@@ -252,6 +252,7 @@ The statement splitter, the row limiter, the confirmation gate and the read poli
 | `blockComment` | `"nesting"` | `SELECT 1 /* a /* b */ c */ AS x` answers 1 |
 | `alternateQuoting` | `false` | `SELECT q'[x]' AS x` is a parser error |
 | `doubleSlashComment` | `false` | `SELECT 1 AS x // c` is a parser error |
+| `backslashAlwaysEscapes` | `false` | a backslash in `'...'` is data, and Studio never writes the `E'...'` form |
 | `script` | `{"blocks":"none","separatorLine":null,"unit":"statement"}` | the default (#1312): DataFusion has no procedural bodies and no separator line, so every code `;` ends a statement |
 | `trailingLimitClauses` | `[]` | the default (#1398): no clause of this dialect must follow the row bound, so the limiter appends it at the end of the statement |
 
