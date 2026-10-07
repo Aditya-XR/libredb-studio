@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S7 · 5
-- [Drivers and connections](#drivers-and-connections) — D1-D243, U17 · 147
+- [Drivers and connections](#drivers-and-connections) — D1-D244, U17 · 148
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X26, U2-U93 · 84
@@ -2615,6 +2615,18 @@ In `streamEntryRows`, a stream field named `id` is shown as `id (field)` (`STREA
 Found in the round-2 review of #1552, which introduced the first two edges; the last two predate it.
 
 **Done when:** each option is read only from its option position (after the key and cursor for the scan family, skipping the values of `MATCH`, `COUNT` and `TYPE`), the renamed stream header cannot collide with a field of the same page, a malformed cursor reply raises, and the provider doc says `NOSCORES` is a Valkey option, each with a failing test first in `tests/integration/db/redis-provider.test.ts`.
+
+### D244. Two paths read an inline connection's `id` before anything checks its shape, and answer 500
+
+#1572 made `getOrCreateProvider` and `acquireExecutionProfileProvider` refuse a missing `id` with 400 `CONFIG_ERROR` ahead of the cache key, which is what #1539 asked for.
+Two earlier readers of the same field are still unguarded.
+`resolveConnection` in `src/lib/seed/resolve-connection.ts` calls `connection?.id?.startsWith("seed:")` first thing, so an inline connection whose `id` is not a string (`5`, `0`, `false`, `{}`, `["seed:x"]`) answers 500 `INTERNAL_ERROR` "connection?.id?.startsWith is not a function" on every db route and on test-connection, measured 2026-10-07 on main and on #1572.
+Because that call runs before the `ALLOW_CUSTOM_CONNECTIONS` check, a server with custom connections off answers those ids with the 500 instead of its 403 `CUSTOM_CONNECTIONS_DISABLED`; no socket opens and nothing is cached.
+`withOneShotTunnel` in `src/lib/db/factory.ts` passes `connection.id` to `createSSHTunnel` when the tunnel is enabled and a host and port are set, and `poolKey` in `src/lib/ssh/tunnel.ts` length-frames it, so test-connection with no `id` and an enabled tunnel should throw a `TypeError` (a 500) before the provider's `validate()` can give its 400; read in code, not measured.
+
+Found in the review of #1572; both predate it.
+
+**Done when:** `resolveConnection` answers an inline connection whose `id` is present and not a string with 400 `CONFIG_ERROR` before the policy check, so the policy still answers 403 for every string or absent id, `withOneShotTunnel` refuses a missing `id` before the tunnel as the pooled paths do, and each has a failing route test first under `tests/api/db/`.
 
 ## Value interpolation
 
