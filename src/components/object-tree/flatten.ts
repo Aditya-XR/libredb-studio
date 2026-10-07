@@ -93,6 +93,13 @@ export interface TreeRowModel {
    * itself instead.
    */
   readonly column?: ColumnSchema;
+  /**
+   * The half-open range of `label` that a filter matched, on a filtered OBJECT row and nowhere else.
+   *
+   * Set by `filterRows` in `filter.ts`, never by the walk. The range indexes the label itself
+   * because the filter's case fold keeps the label's length, which is why it folds U+0130 by hand.
+   */
+  readonly match?: readonly [number, number];
 }
 
 /**
