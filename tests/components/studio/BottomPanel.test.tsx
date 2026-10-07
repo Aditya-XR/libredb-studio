@@ -19,6 +19,9 @@ mock.module("@/components/ResultsGrid", () => ({
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const React = require("react");
     capturedResultsGridProps = props;
+    // The grid throwing while it builds its columns, the way TanStack Table's production
+    // build does for a column with an empty id: no message at all.
+    if ((props.result as { fields?: string[] } | undefined)?.fields?.includes("__grid_throws__")) throw new Error("");
     return React.createElement("div", { "data-testid": "resultsgrid" }, "ResultsGrid");
   },
 }));
@@ -120,18 +123,28 @@ mock.module("@/components/PivotTable", () => ({
   },
 }));
 
+/** A schema, and a connection type, the docs and diff views throw on: input one of them cannot draw. */
+const SCHEMA_THROWS = "__schema_throws__";
+const throwsOnSchema = (schema: unknown) =>
+  Array.isArray(schema) && schema.some((object) => (object as { name?: string }).name === SCHEMA_THROWS);
+const TYPE_THROWS = "__type_throws__";
+
 mock.module("@/components/DatabaseDocs", () => ({
-  DatabaseDocs: () => {
+  DatabaseDocs: (props: Record<string, unknown>) => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const React = require("react");
+    if (throwsOnSchema(props.schema) || props.databaseType === TYPE_THROWS) throw new Error("");
     return React.createElement("div", { "data-testid": "databasedocs" }, "DatabaseDocs");
   },
 }));
 
 mock.module("@/components/SchemaDiff", () => ({
-  SchemaDiff: () => {
+  SchemaDiff: (props: Record<string, unknown>) => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const React = require("react");
+    if (throwsOnSchema(props.schema) || (props.connection as { type?: string } | null)?.type === TYPE_THROWS) {
+      throw new Error("");
+    }
     return React.createElement("div", { "data-testid": "schemadiff" }, "SchemaDiff");
   },
 }));
@@ -165,7 +178,7 @@ mock.module("@/lib/storage", () => ({
 
 // ---- Now import bun:test, testing-library, and the component ----
 
-import { describe, test, expect, afterEach, beforeAll } from "bun:test";
+import { describe, test, expect, afterEach, beforeAll, spyOn } from "bun:test";
 import { render, fireEvent, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
@@ -448,6 +461,104 @@ describe("BottomPanel", () => {
     const grid = queryByTestId("resultsgrid");
     expect(grid).not.toBeNull();
     expect(grid!.textContent).toBe("ResultsGrid");
+  });
+
+  /*
+    One boundary holds every panel mode, and Studio renders one panel for every tab, so a
+    result the grid cannot draw used to leave the chunk notice up for every later result,
+    every mode and every tab until a reload (measured live with a SQL Server COUNT(*)).
+  */
+  describe("a result the grid cannot draw", () => {
+    const BAD_RESULT = { rows: [{ x: 1 }], fields: ["__grid_throws__"], rowCount: 1, executionTime: 1 };
+    const GOOD_RESULT = { rows: [{ id: 1 }], fields: ["id"], rowCount: 1, executionTime: 1 };
+
+    test("is named a render error, then the next result is drawn", () => {
+      const quiet = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const props = createDefaultProps({ mode: "results", currentTab: { result: BAD_RESULT } });
+        const { getByTestId, queryByTestId, queryByText, rerender } = render(
+          <BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />,
+        );
+        expect(getByTestId("render-error").textContent).toContain("This view could not be displayed.");
+        expect(queryByTestId("chunk-error")).toBeNull();
+        expect(queryByText("Reload")).toBeNull();
+
+        const next = createDefaultProps({ mode: "results", currentTab: { result: GOOD_RESULT } });
+        rerender(<BottomPanel {...(next as React.ComponentProps<typeof BottomPanel>)} />);
+        expect(queryByTestId("render-error")).toBeNull();
+        expect(getByTestId("resultsgrid")).toBeTruthy();
+      } finally {
+        quiet.mockRestore();
+      }
+    });
+
+    test("another panel mode on the same result is drawn", () => {
+      const quiet = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const props = createDefaultProps({ mode: "results", currentTab: { result: BAD_RESULT } });
+        const { getByTestId, queryByTestId, rerender } = render(
+          <BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />,
+        );
+        expect(getByTestId("render-error")).toBeTruthy();
+
+        const history = createDefaultProps({ mode: "history", currentTab: { result: BAD_RESULT } });
+        rerender(<BottomPanel {...(history as React.ComponentProps<typeof BottomPanel>)} />);
+        expect(queryByTestId("render-error")).toBeNull();
+        expect(getByTestId("queryhistory")).toBeTruthy();
+      } finally {
+        quiet.mockRestore();
+      }
+    });
+  });
+
+  /*
+    The docs and diff views draw the schema, not the result, so a schema one of them cannot
+    draw must not leave the notice up after the schema is refreshed or the connection changes.
+  */
+  describe.each([
+    ["docs", "databasedocs"],
+    ["schemadiff", "schemadiff"],
+  ])("a schema the %s view cannot draw", (mode, testId) => {
+    const BAD_SCHEMA = [{ name: SCHEMA_THROWS }];
+
+    test("is followed by the refreshed schema", () => {
+      const quiet = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const props = createDefaultProps({ mode, schema: BAD_SCHEMA });
+        const { getByTestId, queryByTestId, rerender } = render(
+          <BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />,
+        );
+        expect(getByTestId("render-error")).toBeTruthy();
+
+        const next = createDefaultProps({ mode, schema: [{ name: "orders" }] });
+        rerender(<BottomPanel {...(next as React.ComponentProps<typeof BottomPanel>)} />);
+        expect(queryByTestId("render-error")).toBeNull();
+        expect(getByTestId(testId)).toBeTruthy();
+      } finally {
+        quiet.mockRestore();
+      }
+    });
+
+    test("is followed by another connection over the same schema", () => {
+      const quiet = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const schema = [{ name: "orders" }];
+        const broken = { id: "c1", name: "broken", type: TYPE_THROWS, createdAt: new Date(0) };
+        const props = createDefaultProps({ mode, schema, activeConnection: broken });
+        const { getByTestId, queryByTestId, rerender } = render(
+          <BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />,
+        );
+        expect(getByTestId("render-error")).toBeTruthy();
+
+        const other = { id: "c2", name: "other", type: "postgres", createdAt: new Date(0) };
+        const next = createDefaultProps({ mode, schema, activeConnection: other });
+        rerender(<BottomPanel {...(next as React.ComponentProps<typeof BottomPanel>)} />);
+        expect(queryByTestId("render-error")).toBeNull();
+        expect(getByTestId(testId)).toBeTruthy();
+      } finally {
+        quiet.mockRestore();
+      }
+    });
   });
 
   /**

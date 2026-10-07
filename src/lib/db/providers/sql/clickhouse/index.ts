@@ -473,6 +473,8 @@ function toQueryResult(result: ClickHouseQueryResult, measuredMs: number): Query
 
   return {
     rows,
+    // The transport already numbered a name the server declared twice, so these
+    // are unique and are the keys every row uses.
     fields: textual ? [RAW_TEXT_COLUMN] : (result.fieldNames ?? []),
     // A write returns no rows, so its row count is what the server says it
     // changed - verbatim, including the zero a queued mutation reports.

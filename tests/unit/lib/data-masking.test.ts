@@ -20,6 +20,7 @@ import {
   DEFAULT_MASKING_CONFIG,
   MASKING_CONFIG_KEY,
 } from "@/lib/data-masking";
+import { uniqueFieldNames } from "@/lib/db/utils/result-fields";
 import type { MaskingPattern, MaskingConfig, MaskType } from "@/lib/data-masking";
 import {
   mockMaskingConfigEnabled,
@@ -193,6 +194,52 @@ describe("detectSensitiveColumnsFromConfig", () => {
     expect(result.has("secret_field")).toBe(true);
     expect(result.has("internal_data")).toBe(true);
     expect(result.has("public_field")).toBe(false);
+  });
+
+  test("a repeated sensitive column the result numbered is masked like the column it repeats", () => {
+    const result = detectSensitiveColumnsFromConfig(
+      ["email", "email (2)", "ssn", "ssn (3)", "credit_card (2)"],
+      DEFAULT_MASKING_CONFIG,
+    );
+    expect(result.get("email (2)")).toBe(result.get("email")!);
+    expect(result.get("ssn (3)")).toBe(result.get("ssn")!);
+    expect(result.has("credit_card (2)")).toBe(true);
+  });
+
+  test("a numbered name is masked by its base even alone, and after a second numbering", () => {
+    expect(detectSensitiveColumnsFromConfig(["phone (2)"], mockMaskingConfigEnabled).has("phone (2)")).toBe(true);
+    expect(detectSensitiveColumnsFromConfig(["email (2) (2)"], mockMaskingConfigEnabled).has("email (2) (2)")).toBe(
+      true,
+    );
+  });
+
+  // Pinned against the producer, so a change to the numbered form fails here and not only there.
+  test("every repeat uniqueFieldNames numbers is masked like the column it repeats", () => {
+    const fields = uniqueFieldNames(["email", "id", "email", "email", "id"]);
+    const result = detectSensitiveColumnsFromConfig(fields, DEFAULT_MASKING_CONFIG);
+    expect([...result.keys()]).toEqual(["email", "email (2)", "email (3)"]);
+  });
+
+  test("only the numbered form reads back to its base; any other name keeps its own rule", () => {
+    const config: MaskingConfig = {
+      enabled: true,
+      patterns: [
+        { ...makePattern("email"), id: "base", columnPatterns: ["email"] },
+        { ...makePattern("full"), id: "own", columnPatterns: ["email \\(work\\)"] },
+      ],
+      roleSettings: DEFAULT_MASKING_CONFIG.roleSettings,
+    };
+    const result = detectSensitiveColumnsFromConfig(
+      ["id", "id (2)", "(No column name)", "email (2)", "email (work)", "email (2)x"],
+      config,
+    );
+    // `email (2)` repeats `email` and takes its rule; `email (work)` is not a repeat and matches its own
+    // pattern; `email (2)x` is not the numbered form, so nothing reads it back to `email`; `id` and its
+    // repeat match no pattern.
+    expect([...result.entries()].map(([field, pattern]) => [field, pattern.id])).toEqual([
+      ["email (2)", "base"],
+      ["email (work)", "own"],
+    ]);
   });
 
   test("returns empty map for no fields", () => {

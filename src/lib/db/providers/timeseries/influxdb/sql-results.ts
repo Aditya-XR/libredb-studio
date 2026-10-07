@@ -6,17 +6,23 @@
  * exact digits; NaN and the infinities arrive as null (arrow-json writes them so) and a timestamp stays the engine's
  * text, nanoseconds and UTC with no zone suffix. A line omits the key of a null cell, so the columns are the ordered
  * union of the keys the lines name, in the order they name them: with `SELECT *` the engine's alphabetical order, an
- * explicit projection's own order, and a sparse table's late keys appended. That order is read from the line's text,
- * never from the parsed object, whose key order puts index-like keys (`"1"`) first. An all-null column and the
- * columns of an empty result cannot be known from JSON (the I9 known limit), and no column type is reported.
+ * explicit projection's own order, and a sparse table's late keys appended; an empty key (`SELECT 1 AS ""`) is named
+ * by `uniqueFieldNames`. That order is read from the line's text, never from the parsed object, whose key order puts
+ * index-like keys (`"1"`) first. An all-null column and the columns of an empty result cannot be known from JSON (the
+ * I9 known limit), and no column type is reported.
  *
  * The row cut and the cell budget (rows times columns) stop the read and set `cut`; a row the budget drops adds no
  * column. A line that is not a JSON object, or one nested deeper than `MAX_LINE_DEPTH` (R47), is an
- * `InfluxAnswerShapeError("not-json")`, worded by errors.ts. No pattern reads the server's text (R40): every pass over
+ * `InfluxAnswerShapeError("not-json")`, worded by errors.ts. A line that names a top-level key twice is an
+ * `InfluxAnswerShapeError("repeated-column")` naming the key: measured on 3.12 Core, the engine refuses a projection
+ * of two columns of one name, yet `SELECT c1.usage, c2.usage FROM cpu c1 CROSS JOIN cpu c2` answers
+ * `{"usage":1.5,"usage":1.5}`, and since `JSON.parse` keeps the last value and a line omits the key of a null cell,
+ * which value belongs to which column cannot be recovered, so the result is refused rather than shown a column short. No pattern reads the server's text (R40): every pass over
  * it is one forward walk, and the body is walked line by line, never split whole, so at most `rowCut + 1` line
  * strings exist however short its lines are (R46).
  */
 import { quoteUnsafeIntegers } from "@/lib/db/utils/json-integers";
+import { uniqueFieldNames } from "@/lib/db/utils/result-fields";
 import type { InfluxShapeLimits, ShapedResult } from "./connection-options";
 import { InfluxAnswerShapeError } from "./errors";
 
@@ -68,6 +74,12 @@ function keysInTextOrder(text: string): string[] {
   return keys;
 }
 
+/** The first key a line names twice, or undefined when every key is named once. */
+function repeatedKey(keys: readonly string[]): string | undefined {
+  const seen = new Set<string>();
+  return keys.find((key) => seen.has(key) || !seen.add(key));
+}
+
 /** One line as an object, its integers beyond 2^53 kept as exact digits; anything else is not a row. */
 function parseLine(line: string): { readonly row: Readonly<Record<string, unknown>>; readonly text: string } {
   const text = quoteUnsafeIntegers(line);
@@ -101,8 +113,11 @@ export function shapeJsonlBody(text: string, limits: InfluxShapeLimits): ShapedR
       break;
     }
     const { row, text: lineText } = parseLine(line);
-    const newKeys = keysInTextOrder(lineText).filter((key) => !fields.has(key));
-    const columns = fields.size + new Set(newKeys).size;
+    const keys = keysInTextOrder(lineText);
+    const repeated = repeatedKey(keys);
+    if (repeated !== undefined) throw new InfluxAnswerShapeError("repeated-column", repeated);
+    const newKeys = keys.filter((key) => !fields.has(key));
+    const columns = fields.size + newKeys.length;
     if ((parsedRows.length + 1) * columns > limits.cellBudget) {
       cut = true;
       break;
@@ -111,10 +126,12 @@ export function shapeJsonlBody(text: string, limits: InfluxShapeLimits): ShapedR
     parsedRows.push(row);
   }
 
-  const names = [...fields.keys()];
+  const keys = [...fields.keys()];
+  // The keys are already distinct; `uniqueFieldNames` names an empty one, which the engine answers for `AS ""`.
+  const names = uniqueFieldNames(keys);
   // `Object.fromEntries` defines each cell as an own property, so a column named `__proto__` is a cell like any other.
   const rows = parsedRows.map((row) =>
-    Object.fromEntries(names.map((name) => [name, Object.hasOwn(row, name) ? row[name] : null])),
+    Object.fromEntries(keys.map((key, position) => [names[position], Object.hasOwn(row, key) ? row[key] : null])),
   );
   return { fields: names, rows, cut, warnings: [] };
 }

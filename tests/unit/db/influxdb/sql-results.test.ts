@@ -132,10 +132,26 @@ describe("shapeJsonlBody, values and lines", () => {
     expect(shaped.rows[0]).toEqual({ b: 1, "1": 2, a: { "9": 0, x: [1, "}"] }, "0": '"q', "2": null });
   });
 
-  test("an escaped key is read as its text, and a repeated key counts once", () => {
-    const shaped = shapeJsonlBody('{"a\\u0062":1,"ab":2}\n', LIMITS);
-    expect(shaped.fields).toEqual(["ab"]);
-    expect(shaped.rows).toEqual([{ ab: 2 }]);
+  test("an escaped key is read as its text, so its plain spelling repeats it", () => {
+    expect(shapeJsonlBody('{"a\\u0062":1}\n', LIMITS).fields).toEqual(["ab"]);
+    const error = shapeError('{"a\\u0062":1,"ab":2}\n');
+    expect(error.fault).toBe("repeated-column");
+    expect(error.serverText).toBe("ab");
+  });
+
+  test('an empty key, which 3.12 Core answers for SELECT 1 AS "", is named (No column name) on every row', () => {
+    const shaped = shapeJsonlBody('{"":1,"a":2}\n{"a":3}\n', LIMITS);
+    expect(shaped.fields).toEqual(["(No column name)", "a"]);
+    expect(shaped.rows).toEqual([
+      { "(No column name)": 1, a: 2 },
+      { "(No column name)": null, a: 3 },
+    ]);
+  });
+
+  test("a key a statement spells (No column name) stays apart from the empty one", () => {
+    const shaped = shapeJsonlBody('{"(No column name)":1,"":2}\n', LIMITS);
+    expect(shaped.fields).toEqual(["(No column name)", "(No column name) (2)"]);
+    expect(shaped.rows).toEqual([{ "(No column name)": 1, "(No column name) (2)": 2 }]);
   });
 
   test("a column named __proto__ is an ordinary cell, never the row's prototype", () => {
@@ -158,6 +174,31 @@ describe("shapeJsonlBody, values and lines", () => {
     const error = shapeError(text);
     expect(error.fault).toBe("not-json");
     expect(error.serverText).toBeUndefined();
+  });
+});
+
+describe("shapeJsonlBody, a column named twice", () => {
+  // Measured on 3.12 Core: `SELECT c1.usage, c2.usage FROM cpu c1 CROSS JOIN cpu c2` answers the line below, and
+  // `SELECT *` over the same join repeats every key. JSON.parse keeps the last value and a line omits the key of a
+  // null cell, so which value belongs to which column cannot be recovered: the result is refused, never thinned.
+  test.each([
+    ["two projected columns of one name", '{"usage":1.5,"usage":1.5}\n', "usage"],
+    [
+      "SELECT * over a self join",
+      '{"host":"a","idle":2.5,"time":"2026-10-07T08:48:02.650956539","usage":1.5,"host":"a","idle":2.5,"time":"2026-10-07T08:48:02.650956539","usage":1.5}\n',
+      "host",
+    ],
+    ["a repeat on a later line", '{"a":1}\n{"b":2,"a":1,"b":3}\n', "b"],
+    // Measured: a three-way self join names the key three times.
+    ["three columns of one name", '{"host":"a","host":"a","host":"a"}\n', "host"],
+  ])("%s is a repeated-column shape error naming the column", (_, text, column) => {
+    const error = shapeError(text);
+    expect(error.fault).toBe("repeated-column");
+    expect(error.serverText).toBe(column);
+  });
+
+  test("a key repeated only inside a nested object is a cell, not a column", () => {
+    expect(shapeJsonlBody('{"a":{"x":1,"x":2},"b":[{"x":1},{"x":2}]}\n', LIMITS).fields).toEqual(["a", "b"]);
   });
 });
 

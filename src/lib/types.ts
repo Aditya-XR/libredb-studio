@@ -589,6 +589,15 @@ export interface AgentChartSpec {
 
 export interface QueryResult {
   rows: Record<string, unknown>[];
+  /**
+   * The result's columns, in order. Every name is non-empty and no two are the same, and rows key their
+   * values by these names, so no two columns read one value.
+   * Providers keep the names apart in one of three ways. Most name the columns through `uniqueFieldNames`
+   * (`src/lib/db/utils/result-fields.ts`): a SQL provider reads its rows positionally and keys them by those
+   * names, and a document store renames an empty key (`uniquelyKeyedRows`). Oracle's driver numbers a repeat
+   * itself (`ID_1`). Cassandra refuses a result with a repeated name, because its driver has already kept
+   * only one of the values.
+   */
   fields: string[];
   rowCount: number;
   executionTime: number;
@@ -638,6 +647,7 @@ export interface QueryResult {
 /** One result set of a text that produced several (`QueryResult.resultSets`). */
 export interface QueryResultSet {
   rows: Record<string, unknown>[];
+  /** As `QueryResult.fields`: non-empty, unique, and the keys every row carries. */
   fields: string[];
   columnTypes?: Record<string, string>;
 }

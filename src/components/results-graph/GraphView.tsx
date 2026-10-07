@@ -12,8 +12,9 @@
  * The canvas library arrives through `loadCytoscape`, awaited inside an effect, so
  * nothing here touches `window` at module load or on the server. Tests pass a
  * factory of their own instead of mocking a module. A load that fails is rethrown
- * during render, so it lands in the panel's `ChunkBoundary` like any other view
- * whose chunk never arrived.
+ * during render into the panel's `ChunkBoundary`: `loadCytoscape` names a package
+ * that never arrived a `ChunkLoadError`, which the boundary offers Reload for like
+ * any other missing chunk, and any other failure shows as a render error.
  *
  * Keyboard: the canvas is focusable; `+` and `=` zoom in, `-` zooms out, `0` fits,
  * the arrow keys pan, and Escape clears the selection; a key held with Ctrl, Cmd or
