@@ -441,6 +441,23 @@ throw — it does **not** confirm the cancellation actually took effect. Exposed
   row, not a hardcoded spelling; rerun with
   [`tests/live/mssql-zoneless-values.ts`](../../tests/live/mssql-zoneless-values.ts)
   ([§13.4](#134-optional-verifying-against-a-live-sql-server)).
+- **`datetime` and `smalldatetime` read as the engine's own text too (#1452).** They are as
+  zoneless as `datetime2`, and were left out of #1132, so a `DATETIME` beside a `DATETIME2`
+  holding the same reading rendered as `2026-10-04T12:34:56.123Z` against
+  `2026-10-04 12:34:56.123`. Their fraction comes from the TYPE, not from the column: the
+  driver sends a `scale` only for `time`, `datetime2` and `datetimeoffset` (`tedious`
+  `metadata-parser.js`), so `datetime` is written with the three digits it always prints - its
+  1/300 s ticks rounded to .000/.003/.007, which is also the millisecond `tedious` builds the
+  `Date` from - and `smalldatetime`, stored to the minute, with `:00` seconds. The guard reads
+  their engine text with styles 121 and 120, the ODBC canonical forms `sqlcmd` prints, because
+  their default `CONVERT` style prints `Sep  1 2026 10:30AM`. Measured 2026-10-08 on SQL Server
+  2022 CU27 (16.0.4295.3) through `mssql` 12.7.2 / `tedious` 20.3.0, one row:
+
+  | declared | engine's own text | read BEFORE (the driver's `Date`) | read now |
+  |---|---|---|---|
+  | `DATETIME` `2026-09-01T10:30:00.123` | `2026-09-01 10:30:00.123` | `2026-09-01T10:30:00.123Z` | `2026-09-01 10:30:00.123` |
+  | `DATETIME` `2026-09-01T23:59:59.998` | `2026-09-01 23:59:59.997` | `2026-09-01T23:59:59.997Z` | `2026-09-01 23:59:59.997` |
+  | `SMALLDATETIME` `2026-09-01T10:30:29.999` | `2026-09-01 10:31:00` | `2026-09-01T10:31:00.000Z` | `2026-09-01 10:31:00` |
 - **Binary** (`VARBINARY`/`IMAGE`/`rowversion`) comes back as a Node `Buffer` and is **not**
   stringified by the provider, so it reaches the client as the JSON shape a `Buffer` serializes to and
   is rendered as hex there (§7). Every provider answers this way since 2026-08-24, when MySQL and
@@ -1742,9 +1759,9 @@ docker run --rm -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='Str0ng!Passw0rd' \
 `--cpus 4` is not decoration on a many-core host: SQL Server asserts on the processor topology in a
 container, which is the same reason `database-compose.yml` pins `2022-latest`.
 
-`tests/live/mssql-zoneless-values.ts` (#1132, [§5.3](#53-data-type--parameter-handling)) holds the
+`tests/live/mssql-zoneless-values.ts` (#1132, #1452, [§5.3](#53-data-type--parameter-handling)) holds the
 zoneless-value reading against the server itself: it creates a throwaway database, reads
-`time`/`date`/`datetime2`/`datetimeoffset` through the provider AND as the engine's own `CONVERT`
+`time`/`date`/`datetime2`/`datetime`/`smalldatetime`/`datetimeoffset` through the provider AND as the engine's own `CONVERT`
 text, and requires the two to agree - including that the raw driver value is still the invented
 `Date` the conversion compensates for. Its expectations are the server's own printed text, not
 hardcoded spellings. Supply the password configured on the container:
