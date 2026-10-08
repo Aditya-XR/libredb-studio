@@ -763,7 +763,10 @@ A PL/pgSQL body inside a `$function$` dollar-quoted string is highlighted as Pos
 
 ### 3.1.6 Object edit (#789)
 
-Two kinds accept an edited definition back, `function` and `procedure`, and both declare `acceptsSourceEdits: true`.
+Two kinds accept an edited definition back, `function` and `procedure`, and both declare `acceptsSourceEdits: true` on a server that runs the apply's guard.
+That is measured at connect (#1437), because the guard's two `DO` blocks need `PERFORM` and `pg_proc.xmin` and not every server on this type id has them: `probeRoutineGuard` sends `DO $probe$BEGIN PERFORM p.xmin FROM pg_catalog.pg_proc p WHERE false; END$probe$`, reads success or failure only, and is skipped under the read-only profile like the EXPLAIN probe.
+Measured 2026-10-08: PostgreSQL 18.6 answers `DO`; CockroachDB v26.3.2 runs an empty `DO $$ BEGIN END $$` but answers `0A000 at or near ";": syntax error: unimplemented: this syntax` for the probe and `42703 column "p.xmin" does not exist` for the column, so there neither kind declares the field, the Source read carries no `edit`, and a build is refused before anything is sent.
+Before this, CockroachDB was offered Edit and every apply answered that same `0A000` refusal.
 Everything below was measured on PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1) through `pg`, against a container brought up on `docker/postgres-init/`.
 
 **The three kinds that are REFUSED, each with the engine fact behind it, and one that is deferred.**
@@ -1012,6 +1015,7 @@ Closing that means either a seventh outcome arm or a narrowed sentence in `src/l
 **The limit every claim on this page carries (D62).**
 Every PostgreSQL row above is a claim about 18.4.
 This type id also serves CockroachDB and Materialize, and neither was probed for any of it.
+The one exception is whether the guard runs at all, which every server is now asked at connect (#1437, at the top of this section); CockroachDB v26.3.2 answers no, so none of these rows is reached there.
 That is why the classifier answers `definition` with THE ENGINE'S OWN SENTENCE for a code it does not recognise, rather than guessing at a class, and why a server answering no md5 gets an `unsupported` refusal rather than an unguarded write.
 
 **Reproducing all of it.**

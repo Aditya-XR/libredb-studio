@@ -2310,6 +2310,36 @@ async function probeExplainFormat(client: PoolClient): Promise<ExplainFormat | u
 }
 
 /**
+ * The smallest statement that needs what the guard around a routine edit needs (#1437).
+ *
+ * `buildObjectEdit` wraps the reader's `CREATE` in two `DO` blocks, and both read `pg_proc.xmin`
+ * while the first stores it with `PERFORM set_config(...)`. An empty block is not enough to ask
+ * about: measured on CockroachDB v26.3.2 on 2026-10-08, `DO $$ BEGIN END $$` runs, while a block
+ * holding `PERFORM` answers `at or near ";": syntax error: unimplemented: this syntax` and
+ * `SELECT p.xmin FROM pg_catalog.pg_proc p` answers `column "p.xmin" does not exist`. So every
+ * apply there was refused after the reader had typed it. This block asks for `PERFORM` and for
+ * `xmin` and reads no row; on PostgreSQL 18 it answers `DO`.
+ */
+const ROUTINE_GUARD_PROBE_SQL = "DO $probe$BEGIN PERFORM p.xmin FROM pg_catalog.pg_proc p WHERE false; END$probe$";
+
+/**
+ * Whether this server runs the guard a routine edit is applied under. Run once per `connect()`,
+ * on the client connect already borrowed, beside `probeExplainFormat` and for its reasons: it
+ * reads SUCCESS OR FAILURE and never the message, and nothing here rejects. A server that cannot
+ * run the guard is a fact about the Source tab's Edit control, not about the connection.
+ */
+async function probeRoutineGuard(client: PoolClient): Promise<boolean> {
+  try {
+    await client.query(ROUTINE_GUARD_PROBE_SQL);
+    return true;
+  } catch {
+    // Refused, so no routine is offered for editing. The refusal is the engine's own and the
+    // capability this produces IS the report.
+    return false;
+  }
+}
+
+/**
  * PostgreSQL's maintenance, as PostgreSQL itself runs it.
  *
  * Every statement has both forms - `VACUUM ANALYZE <table>` and bare `VACUUM ANALYZE`, `REINDEX
@@ -2461,6 +2491,14 @@ export class PostgresProvider extends SQLBaseProvider {
   private measuredExplainFormat: ExplainFormat | undefined = "postgres-json";
 
   /**
+   * Whether this server runs the guard a routine edit is applied under, measured by
+   * `probeRoutineGuard()` at connect (#1437). It starts true, which is what the routine kinds
+   * declared before the probe existed, for the reason `measuredExplainFormat` starts at
+   * PostgreSQL's grammar.
+   */
+  private measuredRoutineGuard = true;
+
+  /**
    * Which placements of each maintenance statement this server accepts, measured by
    * `probeMaintenance()` at connect (#1387). Undefined is "not measured", and answers the whole
    * PostgreSQL set for the same reason `measuredExplainFormat` starts at PostgreSQL's grammar.
@@ -2586,7 +2624,10 @@ export class PostgresProvider extends SQLBaseProvider {
           labelPlural: "Functions",
           hasSource: true,
           sourceLanguage: "pgsql",
-          acceptsSourceEdits: true,
+          // Measured at connect, not declared per type id (#1437): an engine on this type id that
+          // cannot run the apply's guard is never offered the edit. Absent rather than false, so
+          // `kindAcceptsSourceEdits` and the Source read's affordance answer from one fact.
+          ...(this.measuredRoutineGuard ? { acceptsSourceEdits: true } : {}),
         },
         {
           id: "procedure",
@@ -2595,7 +2636,7 @@ export class PostgresProvider extends SQLBaseProvider {
           labelPlural: "Procedures",
           hasSource: true,
           sourceLanguage: "pgsql",
-          acceptsSourceEdits: true,
+          ...(this.measuredRoutineGuard ? { acceptsSourceEdits: true } : {}),
         },
         {
           id: "trigger",
@@ -2682,9 +2723,11 @@ export class PostgresProvider extends SQLBaseProvider {
         // answered `postgres-json` anyway. So the profile keeps the static default and
         // the envelope keeps its hole-free guarantee.
         // The maintenance probe is skipped under the profile for the same envelope reason, and
-        // the agent runs no maintenance.
+        // the agent runs no maintenance. So is the routine-guard probe, and the agent edits no
+        // routine.
         if (!this.readOnlyProfile) {
           this.measuredExplainFormat = await probeExplainFormat(client);
+          this.measuredRoutineGuard = await probeRoutineGuard(client);
           const probe = await this.probeMaintenance(client);
           this.measuredMaintenance = probe.measured;
           connectClientFault = probe.discard;

@@ -3877,11 +3877,24 @@ describe("PostgresProvider", () => {
 
     /** The server executes each semicolon-separated command of a simple-protocol string in turn. */
     function splitCommands(text: string): string[] {
-      // Naive split is faithful enough for this suite's corpus (no ';' inside literals).
-      return text
-        .split(";")
-        .map((part) => part.trim())
-        .filter((part) => part.length > 0);
+      // A split that skips dollar-quoted bodies is faithful enough for this suite's corpus: the
+      // only ';' inside a literal is in the `DO` block connect sends (#1437).
+      const commands: string[] = [];
+      let start = 0;
+      let quote: string | null = null;
+      for (let i = 0; i < text.length; i++) {
+        const tag = text[i] === "$" ? /^\$[A-Za-z_]*\$/.exec(text.slice(i))?.[0] : undefined;
+        if (tag !== undefined) {
+          if (quote === null) quote = tag;
+          else if (tag === quote) quote = null;
+          i += tag.length - 1;
+        } else if (text[i] === ";" && quote === null) {
+          commands.push(text.slice(start, i));
+          start = i + 1;
+        }
+      }
+      commands.push(text.slice(start));
+      return commands.map((part) => part.trim()).filter((part) => part.length > 0);
     }
 
     type EngineProtocol = "simple" | "extended";
@@ -4105,6 +4118,14 @@ describe("PostgresProvider", () => {
           case "EXPLAIN":
           case "SHOW":
             return this.rows(this.selectRows);
+          case "DO":
+            // This mock runs no PL/pgSQL, so a block is a write attempt like anything else here,
+            // except the routine-guard probe connect sends (#1437), which reads `pg_proc` under
+            // `WHERE false` and changes nothing.
+            if (/^DO \$probe\$BEGIN PERFORM p\.xmin FROM pg_catalog\.pg_proc p WHERE false; END\$probe\$$/.test(text)) {
+              return { rows: [], fields: [], rowCount: 0 };
+            }
+            return this.write(text, keyword);
           default:
             // Everything else counts as a write attempt (conservative server model).
             return this.write(text, keyword);
@@ -4158,10 +4179,12 @@ describe("PostgresProvider", () => {
       const editor = new PostgresProvider(makePgConfig());
       await editor.connect();
 
-      // The EXPLAIN probe, then the maintenance probe's block (#1387). This fixture records what
-      // reaches the engine mock, and the statements inside the aborted block are refused before it.
+      // The EXPLAIN probe, the routine-guard probe (#1437), then the maintenance probe's block
+      // (#1387). This fixture records what reaches the engine mock, and the statements inside the
+      // aborted block are refused before it.
       expect(fresh.statements.map((s) => s.text)).toEqual([
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT 1",
+        "DO $probe$BEGIN PERFORM p.xmin FROM pg_catalog.pg_proc p WHERE false; END$probe$",
         "BEGIN",
         "ROLLBACK",
       ]);
@@ -4975,6 +4998,123 @@ describe("PostgresProvider EXPLAIN grammar probe", () => {
     await provider.connect();
 
     expect(provider.getCapabilities().explainFormat).toBe("postgres-text");
+    await provider.disconnect();
+  });
+});
+
+/**
+ * The routine-guard probe (#1437). A routine edit is applied between two `DO` blocks that run
+ * `PERFORM` and read `pg_proc.xmin`. Measured 2026-10-08 on CockroachDB v26.3.2: an empty
+ * `DO $$ BEGIN END $$` runs there, a block holding `PERFORM` is refused with the sentence below,
+ * and `pg_proc` has no `xmin`. So every apply there was refused after the reader had typed it.
+ */
+describe("PostgresProvider routine-guard probe (#1437)", () => {
+  const ROUTINE_GUARD_PROBE = "DO $probe$BEGIN PERFORM p.xmin FROM pg_catalog.pg_proc p WHERE false; END$probe$";
+  const COCKROACH_PERFORM_REFUSAL = Object.assign(
+    new Error('at or near ";": syntax error: unimplemented: this syntax'),
+    { code: "0A000" },
+  );
+  let sent: string[];
+
+  /** A server that refuses the probe when `refuse` is set and answers everything else as the fixture does. */
+  function server(refuse: boolean) {
+    return (sql: string) => {
+      sent.push(sql);
+      return refuse && sql === ROUTINE_GUARD_PROBE ? Promise.reject(COCKROACH_PERFORM_REFUSAL) : defaultMockQuery(sql);
+    };
+  }
+
+  const editableKinds = (provider: InstanceType<typeof PostgresProvider>) =>
+    (provider.getCapabilities().objectKinds ?? [])
+      .filter((kind) => kind.acceptsSourceEdits === true)
+      .map((kind) => kind.id)
+      .sort();
+
+  beforeEach(() => {
+    sent = [];
+    mockQueryFn = server(false);
+  });
+
+  test("before connect both routine kinds accept edits, as they always have", () => {
+    const provider = new PostgresProvider(makePgConfig());
+
+    // `POST /api/db/provider-meta` never connects (#457), so its answer stays what it was.
+    expect(editableKinds(provider)).toEqual(["function", "procedure"]);
+    expect(sent).toEqual([]);
+  });
+
+  test("a server that runs the probe keeps the edit on both routine kinds, after one statement", async () => {
+    const provider = new PostgresProvider(makePgConfig());
+    await provider.connect();
+
+    expect(editableKinds(provider)).toEqual(["function", "procedure"]);
+    expect(sent.filter((sql) => sql === ROUTINE_GUARD_PROBE)).toHaveLength(1);
+    await provider.disconnect();
+  });
+
+  test("a server that refuses the probe answers without acceptsSourceEdits on both routine kinds", async () => {
+    mockQueryFn = server(true);
+    const provider = new PostgresProvider(makePgConfig());
+    await provider.connect();
+    const kinds = provider.getCapabilities().objectKinds ?? [];
+
+    expect(editableKinds(provider)).toEqual([]);
+    // Absent rather than false, and the rest of each routine kind is unchanged: the Source tab
+    // still reads the definition.
+    for (const id of ["function", "procedure"]) {
+      const kind = kinds.find((candidate) => candidate.id === id);
+      expect(kind && Object.hasOwn(kind, "acceptsSourceEdits")).toBe(false);
+      expect(kind?.hasSource).toBe(true);
+    }
+    // A refused guard is a fact about the Edit control, not about the connection.
+    expect(provider.isConnected()).toBe(true);
+    await provider.disconnect();
+  });
+
+  test("the Source read of a routine on that server carries no edit affordance", async () => {
+    mockQueryFn = server(true);
+    const provider = new PostgresProvider(makePgConfig());
+    await provider.connect();
+    mockQueryFn = async () => ({
+      rows: [{ definition: MEASURED_FUNCTION_DEFINITION, may_replace: true, owner: "postgres" }],
+    });
+
+    const [part] = (await provider.readObjectSource(["app", "order_total(integer)"], "function")).parts;
+    if (isSourcePartUnavailable(part)) throw new Error("narrowing");
+    expect(part.text).toBe(MEASURED_FUNCTION_DEFINITION);
+    expect(Object.hasOwn(part, "edit")).toBe(false);
+    await provider.disconnect();
+  });
+
+  test("an edit built on that server is refused before anything is sent", async () => {
+    mockQueryFn = server(true);
+    const provider = new PostgresProvider(makePgConfig());
+    await provider.connect();
+    sent = [];
+
+    await expect(
+      provider.buildObjectEdit({
+        path: ["app", "order_total(integer)"],
+        kind: "function",
+        partId: "definition",
+        text: MEASURED_FUNCTION_DEFINITION,
+      }),
+    ).rejects.toThrow('PostgreSQL does not apply an edited definition for the kind "function"');
+    expect(sent).toEqual([]);
+    await provider.disconnect();
+  });
+
+  test("the probe runs again on the next connect, because the next server may be another engine", async () => {
+    mockQueryFn = server(true);
+    const provider = new PostgresProvider(makePgConfig());
+    await provider.connect();
+    expect(editableKinds(provider)).toEqual([]);
+    await provider.disconnect();
+
+    mockQueryFn = server(false);
+    await provider.connect();
+
+    expect(editableKinds(provider)).toEqual(["function", "procedure"]);
     await provider.disconnect();
   });
 });
