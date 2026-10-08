@@ -742,6 +742,35 @@ describe('identifierQuoting "double-always"', () => {
 });
 
 // ============================================================================
+// The "backtick-always" declaration, which Databend makes: Databend folds a bare
+// name to lower case, so a bare `MyTable` would name `mytable`, and the "backtick"
+// arm above leaves a mixed-case name bare. This arm backticks every name.
+// ============================================================================
+
+describe('identifierQuoting "backtick-always"', () => {
+  const alwaysCaps = makeCaps({ defaultPort: 8000, identifierQuoting: "backtick-always" });
+
+  test("quoteIdentifier backticks every name, the mixed-case ones the backtick arm leaves bare included", () => {
+    expect(quoteIdentifier("MyTable", alwaysCaps)).toBe("`MyTable`");
+    expect(quoteIdentifier("orders", alwaysCaps)).toBe("`orders`");
+    expect(quoteIdentifier("a b", alwaysCaps)).toBe("`a b`");
+    // The control: the "backtick" arm leaves the same name bare.
+    expect(quoteIdentifier("MyTable", makeCaps({ identifierQuoting: "backtick" }))).toBe("MyTable");
+  });
+
+  test("quoteIdentifier doubles an embedded backtick so it cannot terminate its quoting", () => {
+    expect(quoteIdentifier("a`b", alwaysCaps)).toBe("`a``b`");
+  });
+
+  test("the object path and the Count text name each segment quoted", () => {
+    expect(quoteObjectPath(["default", "MyTable"], alwaysCaps)).toBe("`default`.`MyTable`");
+    expect(generators.generateCountQuery(["MyTable"], alwaysCaps)).toBe(
+      "SELECT COUNT(*) AS row_count\nFROM `MyTable`;",
+    );
+  });
+});
+
+// ============================================================================
 // previewTimeWindow (InfluxDB spec 6.6, I20): a preview that reads a recent window,
 // newest first, driven by the capability and never by the type-id. The window here
 // is the one InfluxDB 3 declares, written out so the generator's rule is pinned on

@@ -137,6 +137,9 @@ describe("the classification is exhaustive by construction", () => {
         "sshTunnel",
         "type",
         "user",
+        // Databend's warehouse (design 6.1). A compute NAME from the Cloud console's DSN, which picks where a
+        // statement runs and grants nothing, so `public`.
+        "warehouse",
       ].sort(),
     );
   });
@@ -384,6 +387,14 @@ describe("withoutSecretFields", () => {
     const withheld = withoutSecretFields({ ...fullConnection(), password: "" });
     expect(withheld.password).toBe("");
     expect("apiKeySecret" in withheld).toBe(false);
+  });
+
+  test("a managed connection keeps its warehouse and loses its password", () => {
+    const managed: DatabaseConnection = { ...fullConnection(), managed: true, warehouse: "small-xy2t" };
+    const withheld = withoutSecretFields(managed);
+    expect(withheld.warehouse).toBe("small-xy2t");
+    expect("password" in withheld).toBe(false);
+    expect(CONNECTION_FIELDS.warehouse).toBe("public");
   });
 
   test("a managed connection keeps dataServers and loses its password", () => {

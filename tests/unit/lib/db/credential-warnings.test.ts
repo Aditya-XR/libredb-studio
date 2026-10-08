@@ -26,8 +26,8 @@ const MANAGE_NO_EXP_URL_SAFE = "e30.eyJhY2Nlc3MiOiJtIiwic3ViIjoieHg_Pz8_Pz4-In0.
 type Credential = { user?: string; password?: string };
 
 describe("CREDENTIAL_WARNINGS", () => {
-  test("milvus, qdrant, influxdb, influxdb3 and oxia are the shipped types that declare credential warnings (vector-family spec 3.12, InfluxDB spec E12, SB3-1.5)", () => {
-    expect(Object.keys(CREDENTIAL_WARNINGS)).toEqual(["milvus", "qdrant", "influxdb", "influxdb3", "oxia"]);
+  test("milvus, qdrant, influxdb, influxdb3, oxia and databend are the shipped types that declare credential warnings (vector-family spec 3.12, InfluxDB spec E12, SB3-1.5, Databend design 7.2)", () => {
+    expect(Object.keys(CREDENTIAL_WARNINGS)).toEqual(["milvus", "qdrant", "influxdb", "influxdb3", "oxia", "databend"]);
     expect(CREDENTIAL_WARNINGS.milvus?.map((entry) => entry.kind)).toEqual(["pair", "no-secret"]);
     expect(CREDENTIAL_WARNINGS.qdrant?.map((entry) => entry.kind)).toEqual(["jwt", "no-secret"]);
     expect(CREDENTIAL_WARNINGS.oxia?.map((entry) => entry.kind)).toEqual(["jwt"]);
@@ -64,6 +64,32 @@ describe("the oxia row", () => {
     const record: Readonly<Record<string, readonly { readonly kind: string }[] | undefined>> = CREDENTIAL_WARNINGS;
     expect(record.influxdb?.map((entry) => entry.kind)).toEqual(["no-secret"]);
     expect(record.influxdb3?.map((entry) => entry.kind)).toEqual(["no-secret"]);
+  });
+});
+
+/**
+ * Databend's row (design 6.4 and 7.2, probe UC1): a `root` user with no password is `no_password` on the server,
+ * which then accepts any password or none for it, so the dialog warns before Test Connection.
+ */
+describe("the databend row", () => {
+  const ROOT_SENTENCE =
+    "Credential warning: Signing in as root with no password works only when the server's root user has no password, and such a user accepts any password or none, so anyone who can reach the server signs in as its administrator. Set a password for root on the server, or connect as a user of your own.";
+
+  test("declares one pair entry, root with an empty password", () => {
+    expect(CREDENTIAL_WARNINGS.databend).toEqual([
+      expect.objectContaining({ kind: "pair", user: "root", password: "" }),
+    ]);
+  });
+
+  test("root with no password, or an empty one, warns with the framed sentence", () => {
+    expect(credentialWarningFor("databend", { user: "root" })).toBe(ROOT_SENTENCE);
+    expect(credentialWarningFor("databend", { user: "root", password: "" })).toBe(ROOT_SENTENCE);
+  });
+
+  test("root with a password, or another user with none, does not warn", () => {
+    expect(credentialWarningFor("databend", { user: "root", password: "x" })).toBeUndefined();
+    expect(credentialWarningFor("databend", { user: "reader" })).toBeUndefined();
+    expect(credentialWarningFor("databend", {})).toBeUndefined();
   });
 });
 

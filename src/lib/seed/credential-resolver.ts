@@ -14,6 +14,9 @@ const RESOLVABLE_FIELDS = [
   "database",
   // Oxia's data servers (O6): addresses a deployment keeps out of the seed file, as `host` is.
   "dataServers",
+  // Databend's warehouse (I16): the compute a Cloud DSN names, which a deployment keeps beside its host, so a
+  // seeded `${DATABEND_WAREHOUSE}` is resolved rather than sent to Cloud as a literal warehouse name.
+  "warehouse",
   // Elasticsearch API key pair (#708). A seeded `${ELASTIC_API_KEY_ID}` / `${vault:...}`
   // that is not on this list is sent literally and the cluster answers 401 on a key
   // that works. Both halves, not one: either left unresolved is a half-filled pair
@@ -49,6 +52,7 @@ interface VaultResolvableConnection {
   host?: string;
   database?: string;
   dataServers?: string;
+  warehouse?: string;
   apiKeyId?: string;
   apiKeySecret?: string;
   ssl?: ResolvableSsl;

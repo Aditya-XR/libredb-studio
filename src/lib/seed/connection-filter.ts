@@ -99,6 +99,9 @@ export function filterByRoles(connections: SeedConnection[], userRoles: string[]
         // Oxia's data servers (O6), copied for the reason skipObjectScan is: dropped here, a seeded cluster would be
         // refused by the provider for leaders the file did list.
         dataServers: conn.dataServers,
+        // Databend's warehouse, copied for the reason skipObjectScan is: dropped here, a seeded Databend Cloud
+        // connection would be refused for the warehouse the file did name.
+        warehouse: conn.warehouse,
         createdAt: new Date(),
         managed: conn.managed ?? true,
         roles: conn.roles,

@@ -106,6 +106,10 @@ const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
   // reads its literals the way MySQL does, and this row is not an inference from that
   // lineage but the four probes above.
   opensearch: "double-and-backslash",
+  // Databend reads both escapes in a single-quoted string in every one of its five `sql_dialect`s: a doubled quote
+  // is one quote and a backslash escapes the next character, so it is doubled first (design 5.1). The live round
+  // trip of the escaping corpus, `INSERT ... VALUES` included, passed on the pinned image (L4).
+  databend: "double-and-backslash",
   // SQL++ spells its literals the way JSON does — `char ::= unicode-character |
   // '\' ( '\' | '"' | "'" | 'b' | 'f' | 'n' | 'r' | 't' | 'u' hex hex hex hex )`.
   // Doubling is not in that grammar, so a doubled quote is not one literal there.

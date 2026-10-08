@@ -1121,6 +1121,9 @@ export function connectionIdentity(connection: DatabaseConnection): string {
         connection.apiKeyId ?? "",
         // Oxia's data servers: which servers answer is part of which catalog this is; over-keying is the safe direction.
         connection.dataServers ?? "",
+        // Databend's `warehouse` is deliberately absent: it picks compute, not the catalog. Every warehouse of a
+        // tenant reads the same databases and tables, so a held inventory stays true across them; the provider
+        // cache key frames it instead, because there it decides which servers a request reaches.
         connection.agentUser ?? "",
         // The tunnel is part of the ROUTE and not part of the credentials: `host` and
         // `port` above are resolved at the FAR END of it, so the same `db:5432` reached

@@ -216,3 +216,93 @@ describe("typedLiteral: clickhouse", () => {
     expect(typedLiteral(["1"], "Array(String)", "clickhouse", scalar)).toBe("[<1>]");
   });
 });
+
+// Databend's cells arrive as display text (design section 4): a Binary is upper-case hex, a Boolean `1` or `0`, a
+// Variant JSON text, and every number a string. The forms below are the ones M08b inserted on the pinned image; any
+// other declared type is refused until the D14 every-type replay proves its form (X01).
+describe("typedLiteral: databend", () => {
+  test("writes a declared Binary cell's hex text through unhex, never as six quoted characters", () => {
+    expect(typedLiteral("616263", "Binary", "databend", scalar)).toBe("unhex('616263')");
+    expect(typedLiteral("00FF10", "Nullable(Binary)", "databend", scalar)).toBe("unhex('00FF10')");
+    expect(typedLiteral("", "Binary", "databend", scalar)).toBe("unhex('')");
+    // Text that is not whole bytes of hex cannot be the cell a Binary column holds.
+    expect(() => typedLiteral("abc", "Binary", "databend", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("x'; DROP", "Binary", "databend", scalar)).toThrow(UnwritableValue);
+    // Bytes from a host are left to the generic writer, whose BINARY_LITERAL row spells unhex too.
+    expect(typedLiteral(new Uint8Array([1, 2]), "Binary", "databend", scalar)).toBeUndefined();
+  });
+
+  test("writes a Variant through parse_json, with Databend's own literal escaping", () => {
+    expect(typedLiteral('{"a":1,"b":[1,2,"x"]}', "Variant", "databend", scalar)).toBe(
+      `parse_json('{"a":1,"b":[1,2,"x"]}')`,
+    );
+    expect(typedLiteral('"it\'s"', "Nullable(Variant)", "databend", scalar)).toBe(`parse_json('"it''s"')`);
+    expect(typedLiteral({ k: [1, null] }, "Variant", "databend", scalar)).toBe(`parse_json('{"k":[1,null]}')`);
+  });
+
+  test("throws for a Bitmap, a Map, a Tuple and every other type no replay has proven", () => {
+    expect(() => typedLiteral("<bitmap binary>", "Bitmap", "databend", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral('{"k1":1}', "Map(String, Int32)", "databend", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral('(1,"a")', "Tuple(Int32, String)", "databend", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("[1,NULL]", "Nullable(Array(Int32 NULL))", "databend", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("1 day 2:03:00", "Interval", "databend", scalar)).toThrow("a value of type Interval");
+    expect(() => typedLiteral("x", "Map(String, Int32)", "databend", scalar)).toThrow("a value of type Map");
+  });
+
+  // The type is the server's own text and reaches the writer verbatim, and the refusal is written into a `--` comment
+  // of the exported file, so the name it carries is printable ASCII and bounded.
+  test("names a type it has no literal for in printable text, cut at 64 characters", () => {
+    const refusal = (declared: string) => {
+      try {
+        typedLiteral("x", declared, "databend", scalar);
+      } catch (error) {
+        if (error instanceof UnwritableValue) return error.message;
+      }
+      return "not refused";
+    };
+
+    expect(refusal("Mystery\nSELECT 2 AS injected;\r\n--\f\u2028\u0085\0end")).toBe(
+      "a value of type Mystery?SELECT 2 AS injected;??--????end",
+    );
+    expect(refusal(`G${"e".repeat(63)}`)).toBe(`a value of type G${"e".repeat(63)}`);
+    expect(refusal(`G${"e".repeat(64)}`)).toBe(`a value of type G${"e".repeat(63)}...`);
+    expect(refusal("Bitmap")).toBe("a value of type Bitmap");
+  });
+
+  test("writes a number bare, the unsafe 64-bit integers and the exponents included", () => {
+    expect(typedLiteral("-9223372036854775808", "Int64", "databend", scalar)).toBe("-9223372036854775808");
+    expect(typedLiteral("18446744073709551615", "Nullable(UInt64)", "databend", scalar)).toBe("18446744073709551615");
+    expect(typedLiteral("12345678.90", "Nullable(Decimal(10, 2))", "databend", scalar)).toBe("12345678.90");
+    expect(typedLiteral("1e+308", "Float64", "databend", scalar)).toBe("1e+308");
+    expect(typedLiteral(7, "Int32", "databend", scalar)).toBe("7");
+    // Text that is not a number goes to the generic writer, which the INSERT then refuses by name.
+    expect(typedLiteral("seven", "Int32", "databend", scalar)).toBe("<seven>");
+  });
+
+  test("hands a float's non-finite word to the generic writer as the number it is", () => {
+    expect(typedLiteral("NaN", "Float32", "databend", scalar)).toBe("<null>");
+    expect(typedLiteral("-Infinity", "Nullable(Float64)", "databend", scalar)).toBe("<null>");
+    const numbers: unknown[] = [];
+    typedLiteral("Infinity", "Float64", "databend", (value) => {
+      numbers.push(value);
+      return "";
+    });
+    expect(numbers).toEqual([Infinity]);
+  });
+
+  test("writes a Boolean's 1 and 0 as true and false", () => {
+    expect(typedLiteral("1", "Boolean", "databend", scalar)).toBe("true");
+    expect(typedLiteral("0", "Nullable(Boolean)", "databend", scalar)).toBe("false");
+    expect(typedLiteral(true, "Boolean", "databend", scalar)).toBe("true");
+    expect(typedLiteral("yes", "Boolean", "databend", scalar)).toBe("<yes>");
+  });
+
+  test("leaves the quoted types to the generic writer, and an undeclared cell too", () => {
+    for (const declared of ["String", "Nullable(String)", "Date", "Timestamp", "Nullable(Timestamp_Tz)"]) {
+      expect(typedLiteral("2026-10-07 12:34:56.789012", declared, "databend", scalar)).toBe(
+        "<2026-10-07 12:34:56.789012>",
+      );
+    }
+    expect(typedLiteral("616263", undefined, "databend", scalar)).toBeUndefined();
+  });
+});

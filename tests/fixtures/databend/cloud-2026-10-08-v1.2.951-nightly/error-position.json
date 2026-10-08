@@ -1,0 +1,154 @@
+{
+  "scenario": "error-position",
+  "principal": "default",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-warehouse": "default"
+        },
+        "body": {
+          "sql": "SELECT * FRM studio_demo.every_type",
+          "pagination": {
+            "wait_time_secs": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-15>",
+          "x-databend-query-page-rows": "0",
+          "x-databend-query-state": "Failed",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-15>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Failed",
+          "session": {
+            "catalog": "default",
+            "database": "default",
+            "role": "studio_rw",
+            "settings": {},
+            "txn_state": "AutoCommit",
+            "need_sticky": false,
+            "need_keep_alive": false,
+            "internal": "{\"last_node_id\":\"<node-1>\",\"last_query_ids\":[\"<query-15>\"]}"
+          },
+          "error": {
+            "code": 1005,
+            "message": "error: \n  --> SQL:1:10\n  |\n1 | SELECT * FRM studio_demo.every_type\n  |          ^^^ unexpected `FRM`, expecting end of input\n\n"
+          },
+          "warnings": [],
+          "schema": [],
+          "data": [],
+          "affect": null,
+          "result_timeout_secs": 240,
+          "stats": {
+            "scan_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "total_scan": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 0
+          },
+          "stats_uri": "/v1/query/<query-15>",
+          "final_uri": "/v1/query/<query-15>/final",
+          "next_uri": "/v1/query/<query-15>/final",
+          "kill_uri": "/v1/query/<query-15>/kill"
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "pages",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-15>/final",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-warehouse": "default"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-15>",
+          "x-databend-query-page-rows": "0",
+          "x-databend-query-state": "Failed",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-15>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Failed",
+          "session": null,
+          "error": {
+            "code": 1005,
+            "message": "error: \n  --> SQL:1:10\n  |\n1 | SELECT * FRM studio_demo.every_type\n  |          ^^^ unexpected `FRM`, expecting end of input\n\n"
+          },
+          "warnings": [],
+          "schema": [],
+          "data": [],
+          "affect": null,
+          "result_timeout_secs": 240,
+          "stats": {
+            "scan_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "total_scan": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 0
+          },
+          "stats_uri": "/v1/query/<query-15>",
+          "final_uri": "/v1/query/<query-15>/final",
+          "next_uri": null,
+          "kill_uri": "/v1/query/<query-15>/kill"
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

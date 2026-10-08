@@ -66,6 +66,20 @@ describe("quoteLiteral", () => {
     expect(quoteLiteral("a\\b", "couchbase")).toBe("'a\\\\b'");
   });
 
+  test("escapes a backslash first and then doubles the quote on databend, whose every dialect unescapes both", () => {
+    // The four characters a\'b become the eight characters 'a\\''b': the backslash doubled, then the quote doubled.
+    const quoted = quoteLiteral("a\\'b", "databend");
+    expect(quoted).toBe("'a\\\\''b'");
+    expect(quoted.length).toBe(8);
+    // Design 5.1's reference tokenizer: every output is exactly one single-quoted token, whatever the input.
+    const oneToken = /^'(?:[^'\\]|\\[\s\S]|'')*'$/;
+    const corpus = ["", "'", "\\", "\\'", "'\\", "a\\", "\\\\'", "''", "a'b'c", "x\n\u0000y", "`", '"', "--", "/*"];
+    for (const value of corpus) {
+      expect(quoteLiteral(value, "databend")).toMatch(oneToken);
+      expect(unquoteLiteral(quoteLiteral(value, "databend"), "databend")).toBe(value);
+    }
+  });
+
   test("leaves a backslash alone where it is data", () => {
     expect(quoteLiteral("a\\b", "postgres")).toBe("'a\\b'");
     expect(quoteLiteral("a\\b", "sqlite")).toBe("'a\\b'");
@@ -207,6 +221,8 @@ describe("positionalPlaceholder", () => {
     // Nor InfluxDB 3: the engine has placeholders, but the route body is exactly `db`, `q` and
     // `format`, so the provider refuses bound params and a placeholder would go unfilled.
     expect(positionalPlaceholder("influxdb3", 1)).toBeNull();
+    // Nor Databend: the provider refuses bound params and writes every value through `quoteLiteral` (design 5.1).
+    expect(positionalPlaceholder("databend", 1)).toBeNull();
   });
 });
 
@@ -284,7 +300,16 @@ describe("unquoteLiteral", () => {
   // third, half-right copy of the escape rules from being written somewhere else.
   test("round-trips every value quoteLiteral can produce, on every dialect", () => {
     const values = ["", "abc", "it's", "a''b", "a\\b", "a\\", "'", "\\", "a\nb", "a\tb", "a\u0000b", "O'Brien\\"];
-    const dialects: DatabaseType[] = ["postgres", "mysql", "mssql", "couchbase", "duckdb", "clickhouse", "trino"];
+    const dialects: DatabaseType[] = [
+      "postgres",
+      "mysql",
+      "mssql",
+      "couchbase",
+      "duckdb",
+      "clickhouse",
+      "trino",
+      "databend",
+    ];
     for (const dialect of dialects) {
       for (const value of values) {
         expect(unquoteLiteral(quoteLiteral(value, dialect), dialect)).toBe(value);

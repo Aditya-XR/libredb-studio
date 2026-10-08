@@ -99,6 +99,8 @@ const SHIPPED: Readonly<Record<DatabaseType, true>> = Object.freeze({
   influxdb3: true,
   // Oxia (#424): its own provider, doc and integration test, read over its gRPC client API (DECISIONS O2).
   oxia: true,
+  // Databend: its own provider, doc and integration test, read and written over its HTTP query API.
+  databend: true,
   libredb: true,
 });
 
@@ -165,6 +167,8 @@ const EXTERNAL: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   influxdb3: true,
   // A server or cluster the user already runs, reached over Oxia's gRPC client API.
   oxia: true,
+  // A self-hosted server or a Databend Cloud warehouse, reached over its HTTP query API.
+  databend: true,
   // The one false entry. SQLite is a file rather than a server and is still
   // external: it is the user's file, opened from a path they give us. libredb is
   // ours, created by this app, so it is the only id that answers no here.
@@ -247,6 +251,8 @@ export const READ_ONLY_ENFORCED: Record<DatabaseType, boolean> = Object.freeze({
   // and `Health/Check` (O8), and the parser refuses every write verb by name, naming the read-only mode while it
   // holds (O1).
   oxia: true,
+  // No read-only mode: the provider sends the statement the editor holds, as Db2's does.
+  databend: false,
   libredb: false,
 });
 
@@ -297,6 +303,7 @@ export const READS_FILE_ACCESS_POSTURE: Readonly<Record<DatabaseType, boolean>> 
   influxdb: false,
   influxdb3: false,
   oxia: false,
+  databend: false,
   libredb: false,
 });
 
@@ -350,6 +357,7 @@ export const MCP_EXPOSABLE: Readonly<Record<DatabaseType, boolean>> = Object.fre
   // Outside this version, as etcd's: Oxia key paths name Pulsar tenants, namespaces and topics (SEC-05), so no MCP
   // surface lists them until one is designed (BACKLOG B100).
   oxia: false,
+  databend: true,
   libredb: true,
 });
 
@@ -391,6 +399,7 @@ export const CONNECTION_FORM_URI_MODE: Readonly<Record<DatabaseType, boolean>> =
   influxdb: false,
   influxdb3: false,
   oxia: false,
+  databend: false,
   libredb: false,
 });
 
@@ -438,6 +447,7 @@ export const CONNECTION_STRING_ACCEPTED: Readonly<Record<DatabaseType, boolean>>
   influxdb: false,
   influxdb3: false,
   oxia: false,
+  databend: false,
   libredb: false,
 });
 
@@ -473,10 +483,12 @@ export interface WireCompatibleEngine {
  * AlloyDB Omni from a fourth run the same day, OceanBase Community Edition
  * and SingleStore from a fifth run the same day, ScyllaDB from a sixth run on
  * 2026-08-21/22, Apache Doris, Garnet and both Percona distributions from a seventh run
- * on 2026-08-26, ParadeDB, OrioleDB and Databend from an eighth on 2026-08-27, and
+ * on 2026-08-26, ParadeDB and OrioleDB from an eighth on 2026-08-27, and
  * VictoriaMetrics, the first relative of the `prometheus` driver, from a ninth on 2026-09-23, and
  * Redpanda, the first relative of the `kafka` driver, from a tenth on 2026-09-25.
- * The nine MySQL-wire relatives were re-measured together on 2026-09-06 for issues
+ * Databend, probed in the eighth run, is no longer a relative: it ships as the `databend`
+ * type-id over its own HTTP query API, and one product is never counted twice.
+ * The nine MySQL-wire relatives of the day, Databend among them, were re-measured together on 2026-09-06 for issues
  * #573 and #574, at the wire and then in a browser against the built app, and the
  * outcome per engine is recorded in `docs/providers/mysql.md` section 5.5 for the
  * EXPLAIN grammar and section 8 for the SHOW STATUS reads.
@@ -720,21 +732,6 @@ export const WIRE_COMPATIBLE_ENGINES: readonly WireCompatibleEngine[] = [
       "A parameter cannot sit in the LIMIT position under the binary prepared protocol: measured 2026-09-22 through mysql2, the identical statement answers with a literal LIMIT and fails with LIMIT ? on 'mismatched input LIMIT expecting {<EOF>, ;}', while the text protocol takes either. It cost the object browser a 500 on every folder read until the bulk read wrote its bound into the statement instead of binding it. Stock MySQL 8 binds it happily, so this is the relative's constraint and the same one StarRocks states outright.",
       "Row counts and sizes are correct but late: a table read 0 rows and 0 B immediately after a 2000-row insert and the true 2000 rows / 10187 bytes about a minute later, with an ANALYZE in between changing nothing. The lag is self-correcting, so a freshly loaded table looks empty for a while.",
       "A UNIQUE KEY table declares no primary key to the product: information_schema reports COLUMN_KEY as UNI rather than PRI, so the object browser marks no column primary.",
-    ],
-  },
-  {
-    name: "Databend",
-    via: "mysql",
-    tier: "partial",
-    probedVersion: "Databend v1.2.925-patch-11 (advertises MySQL 8.0.90)",
-    caveats: [
-      "The object browser, column metadata, table and storage statistics and inline edit work since 2026-10-04 (browser, on v1.2.925-patch-11, patch-13 and 1.2.881). Databend implements no prepared statement and answers every one with Prepare is not support in Databend, so the provider measures that at connect and binds a parameterised read's values into the statement text there instead.",
-      "Databend has no SHOW STATUS statement at all, no information_schema.processlist and no performance_schema, so the overview, health, session and slow-query panels have no source, and Establish Connection asks for a second click to save the connection.",
-      "The Stored Procedures, Functions, Triggers and Events folders show Databend's own UnknownTable error: it has no information_schema.ROUTINES, TRIGGERS or EVENTS view. Tables and Views count and list normally.",
-      "No index and no foreign key is ever reported: information_schema.statistics and key_column_usage are empty, and the index statistics read is a parse error there (GROUP_CONCAT with ORDER BY is not in its grammar).",
-      "BEGIN, COMMIT and ROLLBACK work and a ROLLBACK discards the rows, but Databend reports no transaction state in the MySQL status flags, so the editor says it cannot verify the transaction and SANDBOX is refused (measured 2026-10-04).",
-      "Strings must be single-quoted: Databend follows the SQL standard and reads a double-quoted value as an identifier, so a double-quoted literal is an unknown-column error.",
-      "EXPLAIN FORMAT='json' does not parse, so the provider sends a plain EXPLAIN there instead (browser, 2026-09-06), and neither Optimize nor Check exists. Analyze runs and reports completion with no report, because Databend answers it with an OK packet rather than MySQL's report rows.",
     ],
   },
   {

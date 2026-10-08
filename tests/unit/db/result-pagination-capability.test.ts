@@ -78,6 +78,8 @@ const EXPECTED: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   influxdb: false,
   influxdb3: true,
   oxia: false,
+  // `LIMIT n OFFSET m` is native, and it inherits `SQLBaseProvider.prepareQuery` (design 2.4).
+  databend: true,
 });
 
 const TYPES = Object.keys(EXPECTED) as DatabaseType[];

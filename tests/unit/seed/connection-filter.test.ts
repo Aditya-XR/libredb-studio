@@ -185,6 +185,15 @@ describe("filterByRoles: engine-specific fields", () => {
     expect(none.dataServers).toBeUndefined();
   });
 
+  it("a seed's warehouse is copied onto the managed connection", () => {
+    const result = filterByRoles([{ ...baseConn, type: "databend", warehouse: "small-xy2t" }], ["user"]);
+    const [none] = filterByRoles([{ ...baseConn }], ["user"]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].warehouse).toBe("small-xy2t");
+    expect(none.warehouse).toBeUndefined();
+  });
+
   it("leaves the mechanism absent on a seeded connection that names none", () => {
     const [managed] = filterByRoles([{ ...baseConn, type: "kafka", port: 9092 }], ["user"]);
 

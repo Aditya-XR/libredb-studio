@@ -21,7 +21,7 @@ describe("OverviewTab DB_TYPES_PREVIEW", () => {
       "key-value": ["redis"],
       "wide-column": ["cassandra"],
       search: ["elasticsearch", "opensearch"],
-      analytics: ["duckdb", "clickhouse", "druid", "trino"],
+      analytics: ["duckdb", "clickhouse", "druid", "trino", "databend"],
     };
     for (const [category, typeIds] of Object.entries(categories)) {
       expect(

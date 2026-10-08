@@ -467,6 +467,21 @@ describe("SeedConnectionSchema: Db2's consent to a cleartext password (#786)", (
     expect(result.data?.dataServers).toBe("a.internal:6648");
   });
 
+  // The schema has no type gate on this field either: `db2` is only a valid seed to carry it.
+  it("warehouse survives parsing (zod strips an undeclared key)", () => {
+    const result = SeedConnectionSchema.safeParse({ ...db2, warehouse: "small-xy2t" });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.warehouse).toBe("small-xy2t");
+  });
+
+  it("rejects a warehouse that is not a string, naming the field", () => {
+    const result = SeedConnectionSchema.safeParse({ ...db2, warehouse: 42 });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.path)).toEqual([["warehouse"]]);
+  });
+
   it("rejects a dataServers that is not a string, naming the field", () => {
     const result = SeedConnectionSchema.safeParse({ ...db2, dataServers: 6648 });
 

@@ -29,10 +29,12 @@ table is still created. An existing table's added indexes are all emitted, becau
 writes no key for one.
 
 MongoDB, Redis, LibreDB, Couchbase, Druid, Elasticsearch, OpenSearch, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant and Oxia receive an explanatory
-comment instead of relational table DDL. Trino and ClickHouse refuse foreign-key clauses;
-Trino refuses primary keys too. Trino has no index grammar, and the diff does not retain enough
+comment instead of relational table DDL. Trino, ClickHouse and Databend refuse foreign-key clauses;
+Trino and Databend refuse primary keys too, so an added table's key is declined in a comment after its `CREATE TABLE`.
+Trino has no index grammar, Databend's indexes are inverted, ngram, vector and spatial search indexes the diff does not record, and the diff does not retain enough
 ClickHouse index metadata to distinguish and recreate its index kinds, so those index changes
 also produce comments. Existing Cassandra and SQLite-family limitations remain explicit.
+Databend gets no transaction wrapper, because a DDL statement commits the open transaction, and a column modification is written as a comment: Databend has `ALTER TABLE ... MODIFY COLUMN`, but the MySQL spelling this generator writes fails `NOT NULL` on an empty table and silently drops an existing default it does not restate.
 
 Review each migration against its target: a diff does not carry original foreign-key constraint
 names, schema qualifiers, cross-table dependency order, or a general type-conversion strategy.

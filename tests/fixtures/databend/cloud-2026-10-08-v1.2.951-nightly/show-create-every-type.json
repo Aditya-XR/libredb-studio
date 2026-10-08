@@ -1,0 +1,185 @@
+{
+  "scenario": "show-create-every-type",
+  "principal": "default",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-warehouse": "default"
+        },
+        "body": {
+          "sql": "SHOW CREATE TABLE studio_demo.every_type",
+          "pagination": {
+            "wait_time_secs": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-4>",
+          "x-databend-query-page-rows": "1",
+          "x-databend-query-state": "Succeeded",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-4>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Succeeded",
+          "session": {
+            "catalog": "default",
+            "database": "default",
+            "role": "studio_rw",
+            "settings": {},
+            "txn_state": "AutoCommit",
+            "need_sticky": false,
+            "need_keep_alive": false,
+            "internal": "{\"last_node_id\":\"<node-1>\",\"last_query_ids\":[\"<query-4>\"]}"
+          },
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "Table",
+              "type": "String"
+            },
+            {
+              "name": "Create Table",
+              "type": "String"
+            }
+          ],
+          "data": [
+            [
+              "every_type",
+              "CREATE TABLE every_type (\n  id INT NOT NULL,\n  i8 TINYINT NULL,\n  i16 SMALLINT NULL,\n  i32 INT NULL,\n  i64 BIGINT NULL,\n  u8 TINYINT UNSIGNED NULL,\n  u64 BIGINT UNSIGNED NULL,\n  f32 FLOAT NULL,\n  f64 DOUBLE NULL,\n  dec DECIMAL(38, 10) NULL,\n  flag BOOLEAN NULL,\n  txt VARCHAR NULL,\n  bin BINARY NULL,\n  d DATE NULL,\n  ts TIMESTAMP NULL,\n  v VARIANT NULL,\n  arr ARRAY(INT NULL) NULL,\n  m MAP(VARCHAR NOT NULL, INT NULL) NULL,\n  tup TUPLE(1 INT NULL, 2 VARCHAR NULL) NULL,\n  bm BITMAP NULL,\n  u16 SMALLINT UNSIGNED NULL,\n  u32 INT UNSIGNED NULL,\n  iv INTERVAL NULL,\n  g GEOMETRY NULL,\n  gg GEOGRAPHY NULL,\n  vec VECTOR(2) NULL,\n  tz TIMESTAMPTZ NULL\n) ENGINE=FUSE"
+            ]
+          ],
+          "affect": null,
+          "result_timeout_secs": 240,
+          "settings": {
+            "timezone": "UTC",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 1,
+              "bytes": 671
+            },
+            "total_scan": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 6
+          },
+          "stats_uri": "/v1/query/<query-4>",
+          "final_uri": "/v1/query/<query-4>/final",
+          "next_uri": "/v1/query/<query-4>/final",
+          "kill_uri": "/v1/query/<query-4>/kill"
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "pages",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-4>/final",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-warehouse": "default"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-4>",
+          "x-databend-query-page-rows": "0",
+          "x-databend-query-state": "Succeeded",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-4>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Succeeded",
+          "session": null,
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "Table",
+              "type": "String"
+            },
+            {
+              "name": "Create Table",
+              "type": "String"
+            }
+          ],
+          "data": [],
+          "affect": null,
+          "result_timeout_secs": 240,
+          "settings": {
+            "timezone": "UTC",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 1,
+              "bytes": 671
+            },
+            "total_scan": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 6
+          },
+          "stats_uri": "/v1/query/<query-4>",
+          "final_uri": "/v1/query/<query-4>/final",
+          "next_uri": null,
+          "kill_uri": "/v1/query/<query-4>/kill"
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

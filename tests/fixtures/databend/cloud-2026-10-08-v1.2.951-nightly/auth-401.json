@@ -1,0 +1,38 @@
+{
+  "scenario": "auth-401",
+  "principal": "wrong",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-warehouse": "default"
+        },
+        "body": {
+          "sql": "SELECT 1",
+          "pagination": {
+            "wait_time_secs": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "error": {
+            "kind": "AuthorizationFailed",
+            "message": "status: 401, message: {\"error\":{\"code\":5100,\"message\":\"Authentication failed: incorrect password\"}}: Authorization failed"
+          }
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

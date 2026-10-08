@@ -21,6 +21,7 @@ const SECOND_SERVER_SPECS = [
   "qdrant-provider.spec.ts",
   "influxdb-providers.spec.ts",
   "oxia-provider.spec.ts",
+  "databend-provider.spec.ts",
 ];
 
 type Project = NonNullable<typeof config.projects>[number];

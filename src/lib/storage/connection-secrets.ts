@@ -57,6 +57,9 @@ export const CONNECTION_FIELDS: Record<keyof DatabaseConnection, FieldClass> = {
   allowInsecureAuth: "public",
   // Addresses, as `host` is. The token they receive is the secret, classified above.
   dataServers: "public",
+  // Databend's warehouse: a compute name from the Cloud console's DSN. It picks where a statement runs and grants
+  // nothing; the password sent with it is the secret, classified above.
+  warehouse: "public",
   managed: "public",
   seedId: "public",
   agentUser: "public",

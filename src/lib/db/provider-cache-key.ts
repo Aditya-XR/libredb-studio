@@ -113,7 +113,7 @@ export async function providerCacheKey(
  * or the fingerprint, and `tests/unit/lib/db/provider-cache-key.test.ts` walks those maps to hold it,
  * because this list is hand-kept and the API key pair was once missing from it. The public fields
  * below (the agent user, what TLS presents and trusts, the mechanism, the auth database, the consent,
- * the data servers, the tunnel's auth method and host key) are outside that walk, so the same file
+ * the data servers, the warehouse, the tunnel's auth method and host key) are outside that walk, so the same file
  * holds them in a table of their own, one row per field.
  *
  * - `password` is the connection's own secret. `connectionString` is NOT here because the
@@ -142,6 +142,10 @@ export async function providerCacheKey(
  *   consent was taken back must not be handed a provider opened under it.
  * - `dataServers` decides which hosts receive the token (O6), so a connection whose list changed must
  *   not be handed a provider whose policy admitted other hosts.
+ * - `warehouse` decides which Databend compute every statement runs on (`X-DATABEND-WAREHOUSE`), and so which
+ *   servers receive the password and which warehouse Cloud resumes and bills, so a connection naming another
+ *   warehouse must not be handed a provider whose requests name this one. The fingerprint does not frame it, and
+ *   `connectionIdentity` leaves it out on purpose: it picks compute, not the catalog.
  * - The tunnel's SECRETS and `hostKeyFingerprint`. Its ROUTE is deliberately absent: `tunnelRoute`
  *   frames the four route values inside the fingerprint already, and this is the half that file
  *   explicitly leaves out as "a credential, not a route".
@@ -164,6 +168,7 @@ async function credentialDigest(connection: DatabaseConnection): Promise<string>
     connection.authSource ?? "",
     connection.allowInsecureAuth === true ? "insecure-auth" : "",
     connection.dataServers ?? "",
+    connection.warehouse ?? "",
     tunnel?.authMethod ?? "",
     tunnel?.password ?? "",
     tunnel?.privateKey ?? "",

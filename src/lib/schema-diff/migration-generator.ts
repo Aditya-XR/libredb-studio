@@ -46,7 +46,30 @@ function defaultClause(col: ColumnDiff, dialect: DatabaseType): string {
 }
 
 /**
- * Canonical type ids whose engine has no column-modification statement at all.
+ * Why a Databend migration names a modified column in a comment rather than altering it (probe L8). Databend HAS
+ * `ALTER TABLE ... MODIFY COLUMN`, measured changing type, nullability and comment with the data kept, so the
+ * sentence never says otherwise: what it declines is this generator's spelling. The MySQL branch's statement runs on a
+ * populated table, but its `NOT NULL` form is refused on an empty one (1058, "Cannot find statistics for column")
+ * and a change that does not restate the default drops it; the PostgreSQL branch's `ALTER COLUMN` is a parse error
+ * (1005).
+ */
+export const DATABEND_COLUMN_MODIFICATION_REASON =
+  "Databend has ALTER TABLE ... MODIFY COLUMN, but the MySQL spelling this generator writes fails NOT NULL on an empty table and silently drops an existing default it does not restate; write the change by hand.";
+
+/** Why an added Databend table declines its key in a comment: probe L11, every `PRIMARY KEY` form is 1005. */
+export const DATABEND_PRIMARY_KEY_REASON = "Databend's CREATE TABLE has no primary-key constraint.";
+
+/**
+ * Databend's index refusal. Its CREATE INDEX always names a kind (INVERTED, NGRAM, VECTOR or SPATIAL search
+ * indexes), with no plain or UNIQUE index to carry the diff's column list and uniqueness.
+ */
+export const DATABEND_INDEX_REFUSAL =
+  "Databend: Cannot generate index DDL. Its indexes are inverted, ngram, vector and spatial search indexes, which the diff does not record; write the index change by hand.";
+
+/**
+ * Canonical type ids whose column modification this generator does not write, each entry's reason saying why.
+ * Most of these engines have no column-modification statement at all; Db2 and Databend have one that the
+ * spelling this generator would emit cannot carry safely.
  *
  * The modified-column path below branches per dialect and ends in a PostgreSQL `else`, so every id
  * without a branch used to be handed `ALTER TABLE ... ALTER COLUMN` no matter what it can run
@@ -147,6 +170,11 @@ const NO_COLUMN_MODIFICATION: Partial<Record<DatabaseType, { label: string; reas
   libredb: {
     label: "LibreDB",
     reason: "The embedded engine speaks a JSON command grammar, not SQL DDL.",
+  },
+  // Not "no column modification": see DATABEND_COLUMN_MODIFICATION_REASON for what was measured.
+  databend: {
+    label: "Databend",
+    reason: DATABEND_COLUMN_MODIFICATION_REASON,
   },
   // Not a table store at all (#1085): a metric is whatever scrapes and recording rules write
   // under its name, and the HTTP API declares no column anywhere. The sentence is the one
@@ -277,6 +305,9 @@ const NO_DROP_IF_EXISTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["ora
  * text is a Qdrant console request. `influxdb` joined on the same fact: its text is an InfluxQL statement, and
  * `influxdb3` on `NO_TABLE_DDL`'s: its text is SQL, but the 3.x planner takes no DDL, so there is no table DDL
  * to wrap. `oxia` joined on the first fact: its text is one `oxia client` read command.
+ *
+ * `databend` joined on the Oracle reason: Databend has `BEGIN`, `COMMIT` and `ROLLBACK`, but a DDL statement commits
+ * the open transaction, so a `BEGIN;` around a migration made of DDL brackets nothing it could roll back.
  */
 const NO_TRANSACTION_WRAPPER: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   "oracle",
@@ -302,6 +333,7 @@ const NO_TRANSACTION_WRAPPER: ReadonlySet<DatabaseType> = new Set<DatabaseType>(
   "influxdb",
   "influxdb3",
   "oxia",
+  "databend",
 ]);
 
 // These engines cannot apply a relational table diff through SQL. In particular,
@@ -328,15 +360,29 @@ const NO_TABLE_DDL: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
 
 // IndexDiff carries column names/uniqueness, not ClickHouse's index expression,
 // kind and granularity. It also cannot distinguish its synthetic sorting-key rows.
-// Trino has no index or foreign-key grammar (docs/providers/trino.md §3.8).
+// Trino has no index or foreign-key grammar (docs/providers/trino.md §3.8). Databend's indexes are search indexes of a
+// named kind (DATABEND_INDEX_REFUSAL), and its constraints are CHECK only, so it declares no foreign key.
 const NO_PORTABLE_INDEX_DDL: Partial<Record<DatabaseType, string>> = {
   clickhouse:
     "ClickHouse: Cannot generate index DDL. The diff does not record the index kind, expression or granularity; write the index change by hand.",
   trino: "Trino: Cannot generate index DDL. Indexes belong to the connector's underlying system, not Trino SQL.",
+  databend: DATABEND_INDEX_REFUSAL,
 };
 const NO_FOREIGN_KEYS: Partial<Record<DatabaseType, string>> = {
   clickhouse: "ClickHouse",
   trino: "Trino",
+  databend: "Databend",
+};
+
+/**
+ * Canonical type ids whose CREATE TABLE has no primary-key constraint, so an added table's key is declined in a
+ * comment after the statement rather than written into it. The comment names no key column. The value completes
+ * `-- <label>: Cannot declare a primary key. <reason>`. Trino was the first, and its output is unchanged by the
+ * move onto this record; Databend refuses every `PRIMARY KEY` form with 1005 (probe L11).
+ */
+const NO_PRIMARY_KEY_CONSTRAINT: Partial<Record<DatabaseType, { label: string; reason: string }>> = {
+  trino: { label: "Trino", reason: "Trino SQL has no primary-key constraint." },
+  databend: { label: "Databend", reason: DATABEND_PRIMARY_KEY_REASON },
 };
 
 // Object names are untrusted metadata. Quoting protects SQL identifiers, but a
@@ -461,8 +507,9 @@ function generateCreateTable(table: TableDiff, dialect: DatabaseType): string {
 
   // Add primary key constraint
   const pkCols = table.columns.filter((c) => c.targetIsPrimary).map((c) => escapeIdentifier(c.columnName, dialect));
-  // Trino SQL has no primary-key constraint, so there the key is named in a comment instead.
-  const keyWritten = pkCols.length > 0 && dialect !== "trino";
+  // An engine with no primary-key constraint gets the key declined in a comment instead (NO_PRIMARY_KEY_CONSTRAINT).
+  const undeclarableKey = NO_PRIMARY_KEY_CONSTRAINT[dialect];
+  const keyWritten = pkCols.length > 0 && undeclarableKey === undefined;
 
   // A key the target can only declare here has to be emitted here, so the closing paren is not
   // written until the constraint list is complete.
@@ -493,8 +540,8 @@ function generateCreateTable(table: TableDiff, dialect: DatabaseType): string {
     });
   }
   lines.push(");");
-  if (pkCols.length > 0 && dialect === "trino") {
-    lines.push("-- Trino: Cannot declare a primary key. Trino SQL has no primary-key constraint.");
+  if (pkCols.length > 0 && undeclarableKey !== undefined) {
+    lines.push(`-- ${undeclarableKey.label}: Cannot declare a primary key. ${undeclarableKey.reason}`);
   }
 
   // Indexes, less the one the PRIMARY KEY line above already builds. An engine that reports

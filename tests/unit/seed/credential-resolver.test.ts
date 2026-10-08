@@ -40,6 +40,7 @@ describe("credential-resolver", () => {
     delete process.env.ELASTIC_API_KEY_ID;
     delete process.env.ELASTIC_API_KEY_SECRET;
     delete process.env.OXIA_DATA_SERVERS;
+    delete process.env.DATABEND_WAREHOUSE;
   });
 
   it("resolves ${VAR} in password field", () => {
@@ -86,6 +87,13 @@ describe("credential-resolver", () => {
     const conn: SeedConnection = { ...baseConn, dataServers: "${OXIA_DATA_SERVERS}" };
     const resolved = resolveConnectionCredentials(conn);
     expect(resolved.dataServers).toBe("a.internal:6648,b.internal:6648");
+  });
+
+  it("resolves ${VAR} in warehouse", () => {
+    process.env.DATABEND_WAREHOUSE = "analytics";
+    const conn: SeedConnection = { ...baseConn, type: "databend", warehouse: "${DATABEND_WAREHOUSE}" };
+    const resolved = resolveConnectionCredentials(conn);
+    expect(resolved.warehouse).toBe("analytics");
   });
 
   it("throws an UndefinedSeedVariableError naming the variable, the connection and the field", () => {

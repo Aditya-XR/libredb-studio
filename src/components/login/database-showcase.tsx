@@ -44,13 +44,16 @@ export function DatabaseShowcase({ variant }: DatabaseShowcaseProps) {
  * The twenty-second entry (#786) took the fourth row at 1366x768 too. The hero column's vertical
  * padding in login-form.tsx pays for that one, because an 8px column gap bought the third row back
  * with 38px left on it, which the next entry would have spent.
+ * The twenty-eighth entry (Databend) wrapped the list into a fifth row at 1366x768 and scrolled the
+ * page to 781px. A 12px column gap keeps four rows there, with the page needing 759px of the 768;
+ * 1280x800 takes five rows at either gap and needs 798px of its 800.
  */
 function DesktopDatabases() {
   return (
     <ul
       aria-label="Supported databases"
       data-testid="database-showcase-desktop"
-      className="flex flex-wrap gap-x-3.5 gap-y-1.5 pointer-events-none select-none"
+      className="flex flex-wrap gap-x-3 gap-y-1.5 pointer-events-none select-none"
     >
       {listShowcaseDatabases().map((db) => {
         const Icon = db.icon;

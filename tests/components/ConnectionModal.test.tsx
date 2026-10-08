@@ -137,6 +137,7 @@ const mockSetSkipObjectScan = mock(() => {});
 const mockSetReadOnly = mock(() => {});
 const mockSetAllowInsecureAuth = mock(() => {});
 const mockSetDataServers = mock(() => {});
+const mockSetWarehouse = mock(() => {});
 const mockSetSaslMechanism = mock(() => {});
 
 let mockFormOverrides: Record<string, unknown> = {};
@@ -157,6 +158,8 @@ function getDefaultForm() {
     setAllowInsecureAuth: mockSetAllowInsecureAuth,
     dataServers: "",
     setDataServers: mockSetDataServers,
+    warehouse: "",
+    setWarehouse: mockSetWarehouse,
     readOnlyOffered: false,
     credentialWarning: undefined as string | undefined,
     host: "localhost",
@@ -283,6 +286,7 @@ const MOCK_CONNECTION_FIELDS: Record<string, string[]> = {
   influxdb: ["host", "port", "user", "password", "database", "allowInsecureAuth"],
   influxdb3: ["host", "port", "password", "database", "allowInsecureAuth"],
   oxia: ["host", "port", "password", "database", "dataServers", "allowInsecureAuth"],
+  databend: ["host", "port", "user", "password", "database", "warehouse", "allowInsecureAuth"],
 };
 /**
  * A field list one test declares on top of the mirrored table, reset before every test. The dataServers cases
@@ -419,6 +423,20 @@ const MOCK_FIELD_COPY: Record<string, MockFieldCopy> = {
     },
     readOnlyHint:
       "Oxia connections are read-only in this version, whether or not this is ticked: Studio sends Oxia no write.",
+  },
+  // Mirrored from the real entry (Databend design 6.1); tests/unit/lib/db-ui-config.test.ts pins the real one.
+  databend: {
+    fieldLabels: { warehouse: "Warehouse" },
+    fieldPlaceholders: { user: "root", database: "default" },
+    fieldHints: {
+      host: "A host name or address, or a pasted https:// address, which is split into Host and Port. Databend Cloud: the host from Connect in the Cloud console, on port 443 with SSL mode verify-system. Self-hosted: the query node, port 8000 unless http_handler_port was changed.",
+      user: "A SQL user. On Databend Cloud: cloudapp, or a user created with CREATE USER; the email you sign in to the Cloud console with is not a SQL user.",
+      database: "The current database for names a statement does not qualify. Empty means default.",
+      warehouse:
+        "Databend Cloud: the warehouse= value of the DSN from Connect. A suspended warehouse resumes on the first statement, opening the connection included, because it reads the object tree, and is billed while it runs; with Warehouse set, Studio sends no background health checks. Self-hosted: leave empty unless your cluster routes requests by warehouse.",
+      allowInsecureAuth:
+        "Ticked, the password crosses the network in cleartext to this host. Databend Cloud never needs this: it serves HTTPS on port 443.",
+    },
   },
 };
 
@@ -1037,6 +1055,9 @@ describe("ConnectionModal", () => {
     expect(queryByText(/postgres:\/\//)).not.toBeNull();
     // A `db2://` paste fills the fields (#786), so the list names it too.
     expect(queryByText(/db2:\/\//)).not.toBeNull();
+    // So does a Databend DSN (Databend design 6.2), in the list and in the box's placeholder.
+    expect(queryByText(/databend:\/\//)).not.toBeNull();
+    expect(document.querySelector('input[placeholder*="databend://"]')).not.toBeNull();
   });
 
   // ── 29b. verify-system is offered, and says what it verifies (D26) ──────
@@ -1602,6 +1623,7 @@ describe("ConnectionModal", () => {
       "saslMechanism",
       "allowInsecureAuth",
       "dataServers",
+      "warehouse",
     ] as const;
 
     /** Each connection-field label a render draws, keyed by the input it names (`htmlFor`). */
@@ -1743,6 +1765,9 @@ describe("ConnectionModal", () => {
         { host: "Host & Instance", password: "Token", database: "Namespace", dataServers: "Data servers" },
         MOCK_FIELD_COPY.oxia.fieldHints ?? {},
       ],
+      // The Warehouse box under its declared label; every declared hint, the consent box's among them, because the
+      // default form's SSL Mode is disable (Databend design 6.1).
+      ["databend", "databend", {}, { ...NETWORKED, warehouse: "Warehouse" }, MOCK_FIELD_COPY.databend.fieldHints ?? {}],
       ["sqlite", "sqlite", {}, FILE_PATH, {}],
       ["duckdb", "duckdb", {}, FILE_PATH, {}],
       ["libredb", "libredb", {}, FILE_PATH, {}],
@@ -1924,6 +1949,38 @@ describe("ConnectionModal", () => {
       mockDeclaredFields = {};
       rerender(React.createElement(ConnectionModal, createDefaultProps()));
       expect(container.querySelector("#dataServers")).toBeNull();
+    });
+
+    test("draws the Warehouse box for databend only, from its field list, labelled and hinted from its declaration", () => {
+      mockFormOverrides = { type: "databend", warehouse: "small-xy2t" };
+      const { container, rerender } = render(React.createElement(ConnectionModal, createDefaultProps()));
+      const box = container.querySelector("#warehouse") as HTMLInputElement;
+      expect(box.value).toBe("small-xy2t");
+      expect(box.getAttribute("autocomplete")).toBe("off");
+      expect(box.getAttribute("spellcheck")).toBe("false");
+      expect(box.getAttribute("aria-describedby")).toBe("warehouse-hint");
+      expect(container.querySelector('label[for="warehouse"]')?.textContent).toBe("Warehouse");
+      expect(container.querySelector('[data-testid="warehouse-hint"]')?.textContent).toBe(
+        MOCK_FIELD_COPY.databend.fieldHints?.warehouse,
+      );
+      fireEvent.change(box, { target: { value: "large-ab12" } });
+      expect(mockSetWarehouse).toHaveBeenCalledWith("large-ab12");
+
+      // With no declared label the dialog's own word labels it.
+      mockDeclaredCopy = { fieldLabels: {}, fieldHints: {} };
+      rerender(React.createElement(ConnectionModal, createDefaultProps()));
+      expect(container.querySelector('label[for="warehouse"]')?.textContent).toBe("Warehouse");
+      expect(container.querySelector("#warehouse")?.getAttribute("aria-describedby")).toBeNull();
+
+      // Every other engine, the one with data servers included, draws no such box.
+      mockDeclaredCopy = {};
+      for (const type of Object.keys(MOCK_CONNECTION_FIELDS)
+        .filter((t) => t !== "databend")
+        .concat("postgres")) {
+        mockFormOverrides = { type };
+        rerender(React.createElement(ConnectionModal, createDefaultProps()));
+        expect(container.querySelector("#warehouse")).toBeNull();
+      }
     });
   });
 });

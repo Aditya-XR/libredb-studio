@@ -1,0 +1,174 @@
+{
+  "scenario": "version",
+  "principal": "default",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "sql": "SELECT version()",
+          "pagination": {
+            "wait_time_secs": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-1>",
+          "x-databend-query-state": "Succeeded",
+          "x-databend-query-page-rows": "1",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-1>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Succeeded",
+          "session": {
+            "catalog": "default",
+            "database": "default",
+            "role": "account_admin",
+            "settings": {},
+            "txn_state": "AutoCommit",
+            "need_sticky": false,
+            "need_keep_alive": false,
+            "internal": "{\"last_node_id\":\"<node-1>\",\"last_query_ids\":[\"<query-1>\"]}"
+          },
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "version()",
+              "type": "String"
+            }
+          ],
+          "data": [
+            [
+              "Databend Query v1.2.951-nightly-9b7eeff9a8(rust-1.100.0-nightly-2026-10-04T22:27:10.143409266Z)"
+            ]
+          ],
+          "affect": null,
+          "result_timeout_secs": 60,
+          "settings": {
+            "timezone": "UTC",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 1,
+              "bytes": 1
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 1,
+              "bytes": 95
+            },
+            "total_scan": {
+              "rows": 1,
+              "bytes": 1
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 1
+          },
+          "stats_uri": "/v1/query/<query-1>",
+          "final_uri": "/v1/query/<query-1>/final",
+          "next_uri": "/v1/query/<query-1>/final",
+          "kill_uri": "/v1/query/<query-1>/kill"
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "pages",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-1>/final",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-1>",
+          "x-databend-query-state": "Succeeded",
+          "x-databend-query-page-rows": "0",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-1>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Succeeded",
+          "session": null,
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "version()",
+              "type": "String"
+            }
+          ],
+          "data": [],
+          "affect": null,
+          "result_timeout_secs": 60,
+          "settings": {
+            "timezone": "UTC",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 1,
+              "bytes": 1
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 1,
+              "bytes": 95
+            },
+            "total_scan": {
+              "rows": 1,
+              "bytes": 1
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 1
+          },
+          "stats_uri": "/v1/query/<query-1>",
+          "final_uri": "/v1/query/<query-1>/final",
+          "next_uri": null,
+          "kill_uri": "/v1/query/<query-1>/kill"
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

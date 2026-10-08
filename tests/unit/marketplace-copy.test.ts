@@ -136,6 +136,11 @@ describe("the explanation claim names only engines that return a plan", () => {
     }
   });
 
+  test("Databend declares its plan format in its directory's index.ts, so it counts as capable", () => {
+    // `providers/sql/databend/index.ts` reads as `databend`; its sibling modules name no type-id DB_UI_CONFIG has.
+    expect(explainCapable).toContain("databend");
+  });
+
   for (const [name, path] of Object.entries(LISTINGS)) {
     test(`${name} scopes its explanation claim to those engines`, () => {
       const content = submittedCopy(path);

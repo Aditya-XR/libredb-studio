@@ -209,6 +209,15 @@ describe("StudioDesktopHeader", () => {
       expect(pulseContainer!.textContent).toContain("Error");
     });
 
+    // A connection Studio sends no background check to (a provider declaring resumesBilledCompute) has not been seen
+    // online, so the line under its name does not say it is, beside a badge that says it was not checked.
+    test('a not-checked connection with no environment shows no "Online" under its name', () => {
+      const { container } = render(<StudioDesktopHeader {...defaultProps} connectionPulse="not-checked" />);
+      const subtitle = container.querySelector("h1")!.closest("div")!.parentElement!.querySelector("p");
+      expect(subtitle?.textContent).not.toContain("Online");
+      expect(container.textContent).toContain("Not checked");
+    });
+
     test('renders not-checked as "Not checked" with a neutral, unanimated dot', () => {
       const { container } = render(<StudioDesktopHeader {...defaultProps} connectionPulse="not-checked" />);
       const pulseContainer = container.querySelector('[title^="Connection: Not checked."]');

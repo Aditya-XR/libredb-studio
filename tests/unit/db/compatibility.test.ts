@@ -12,11 +12,14 @@ import { describe, test, expect } from "bun:test";
 import {
   WIRE_COMPATIBLE_ENGINES,
   compatibleEnginesFor,
+  CONNECTION_FORM_URI_MODE,
+  CONNECTION_STRING_ACCEPTED,
   connectableProductCount,
   EXTERNAL_DATABASE_TYPES,
   isExternalDatabaseType,
   MCP_EXPOSABLE,
   READ_ONLY_ENFORCED,
+  READS_FILE_ACCESS_POSTURE,
   SHIPPED_DATABASE_TYPES,
 } from "@/lib/db/compatibility";
 import type { DatabaseType } from "@/lib/types";
@@ -56,7 +59,6 @@ const COMPOSE_SERVICE_BY_ENGINE: Readonly<Record<string, string>> = {
   StarRocks: "starrocks",
   "Apache Doris": "doris",
   "Percona Server for MySQL": "percona-mysql",
-  Databend: "databend",
   Vitess: "vitess",
   OceanBase: "oceanbase",
   SingleStore: "singlestore",
@@ -274,27 +276,6 @@ describe("wire-compatibility registry", () => {
     expect(parade?.caveats.some((caveat) => caveat.includes("pg_indexes_size"))).toBe(false);
   });
 
-  test("Databend is partial: the object browser answers and the monitoring panels have no source", () => {
-    // Probed 2026-08-27 against `datafuselabs/databend:v1.2.925-patch-11` and registered
-    // query-only, for a reason that was ours: Databend implements no prepared statement
-    // (`Prepare is not support in Databend.`), and every parameterised read went through
-    // mysql2's prepared protocol, so the table list, the schema and the statistics failed
-    // over catalogs that answered literal SQL in full.
-    //
-    // Re-measured 2026-10-04 on that image, on v1.2.925-patch-13 and on 1.2.881, through the
-    // provider and in a browser: the provider binds client-side on a server that refuses to
-    // prepare, and the tree, columns, table and storage stats and inline edit work. What is
-    // left is Databend's own - no SHOW STATUS, no process list, no ROUTINES/TRIGGERS/EVENTS
-    // views - which is `partial` by this registry's definition.
-    const databend = compatibleEnginesFor("mysql").find((engine) => engine.name === "Databend");
-    expect(databend?.tier).toBe("partial");
-    expect(databend?.probedVersion).toBe("Databend v1.2.925-patch-11 (advertises MySQL 8.0.90)");
-    const caveats = databend?.caveats.join(" ") ?? "";
-    expect(caveats).toContain("Prepare is not support in Databend");
-    expect(caveats).toContain("SHOW STATUS");
-    expect(caveats).not.toContain("Nothing else does");
-  });
-
   test("VictoriaMetrics is a Prometheus relative, recorded at the tier its gate-4 probe measured", () => {
     // Probed 2026-09-23 against `victoriametrics/victoria-metrics:v1.152.0`, a single node scraping
     // the compose fixture's targets, through `createDatabaseProvider({ type: "prometheus" })`, with
@@ -420,10 +401,10 @@ describe("wire-compatibility registry", () => {
     expect(compatibleEnginesFor("qdrant")).toEqual([]);
     expect(READ_ONLY_ENFORCED.qdrant).toBe(true);
     expect(MCP_EXPOSABLE.qdrant).toBe(true);
-    // The counts of vector-family spec 10.2, from the sets they count, with Milvus, both InfluxDB types and Oxia
-    // shipped too: each adds one external engine and no relative.
+    // The counts of vector-family spec 10.2, from the sets they count, with Milvus, both InfluxDB types, Oxia and
+    // Databend shipped too: each adds one external engine, and Databend also retires its MySQL-wire relative row.
     expect([SHIPPED_DATABASE_TYPES.length, EXTERNAL_DATABASE_TYPES.length, WIRE_COMPATIBLE_ENGINES.length]).toEqual([
-      27, 26, 28,
+      28, 27, 27,
     ]);
     expect(connectableProductCount()).toBe(54);
   });
@@ -437,7 +418,7 @@ describe("wire-compatibility registry", () => {
     expect(READ_ONLY_ENFORCED.milvus).toBe(true);
     expect(MCP_EXPOSABLE.milvus).toBe(true);
     expect([SHIPPED_DATABASE_TYPES.length, EXTERNAL_DATABASE_TYPES.length, WIRE_COMPATIBLE_ENGINES.length]).toEqual([
-      27, 26, 28,
+      28, 27, 27,
     ]);
     expect(connectableProductCount()).toBe(54);
   });
@@ -452,9 +433,9 @@ describe("wire-compatibility registry", () => {
       expect(READ_ONLY_ENFORCED[type]).toBe(true);
       expect(MCP_EXPOSABLE[type]).toBe(true);
     }
-    // The union's 24 members plus the two and Oxia, less libredb; the relatives are unchanged.
+    // The union's 24 members plus the two, Oxia and Databend, less libredb; the relatives lose Databend's row.
     expect([SHIPPED_DATABASE_TYPES.length, EXTERNAL_DATABASE_TYPES.length, WIRE_COMPATIBLE_ENGINES.length]).toEqual([
-      27, 26, 28,
+      28, 27, 27,
     ]);
     expect(connectableProductCount()).toBe(54);
   });
@@ -467,7 +448,29 @@ describe("wire-compatibility registry", () => {
     expect(READ_ONLY_ENFORCED.oxia).toBe(true);
     expect(MCP_EXPOSABLE.oxia).toBe(false);
     expect([SHIPPED_DATABASE_TYPES.length, EXTERNAL_DATABASE_TYPES.length, WIRE_COMPATIBLE_ENGINES.length]).toEqual([
-      27, 26, 28,
+      28, 27, 27,
+    ]);
+    expect(connectableProductCount()).toBe(54);
+  });
+
+  test("databend ships as an external engine, offered to MCP, with no read-only promise and no relatives", () => {
+    // Self-hosted Databend and Databend Cloud, reached over the HTTP query API by a client of this repository's own.
+    // Its MySQL-wire relative row is retired (owner decision O2): with both, README's "no driver of their own" list
+    // and `connectableProductCount()` would count Databend twice. The provider enforces no read-only mode, so
+    // `readOnly: true` is refused, and MCP is offered, as on Db2.
+    expect(SHIPPED_DATABASE_TYPES).toContain("databend");
+    expect(isExternalDatabaseType("databend")).toBe(true);
+    expect(compatibleEnginesFor("databend")).toEqual([]);
+    expect(READ_ONLY_ENFORCED.databend).toBe(false);
+    expect(MCP_EXPOSABLE.databend).toBe(true);
+    expect(READS_FILE_ACCESS_POSTURE.databend).toBe(false);
+    expect(CONNECTION_FORM_URI_MODE.databend).toBe(false);
+    expect(CONNECTION_STRING_ACCEPTED.databend).toBe(false);
+    expect(WIRE_COMPATIBLE_ENGINES.map((engine) => engine.name)).not.toContain("Databend");
+    expect(compatibleEnginesFor("mysql").map((engine) => engine.name)).not.toContain("Databend");
+    expect(Object.keys(COMPOSE_SERVICE_BY_ENGINE)).not.toContain("Databend");
+    expect([SHIPPED_DATABASE_TYPES.length, EXTERNAL_DATABASE_TYPES.length, WIRE_COMPATIBLE_ENGINES.length]).toEqual([
+      28, 27, 27,
     ]);
     expect(connectableProductCount()).toBe(54);
   });

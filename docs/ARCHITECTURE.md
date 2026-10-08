@@ -5,7 +5,7 @@ This document outlines the architectural patterns, tech stack, and system design
 ## System Overview
 
 LibreDB Studio is a hybrid, cloud-native database management tool that provides an IDE-like experience in the browser.
-It supports **27 database backends** via a Strategy Pattern abstraction: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Trino, Apache Cassandra, Elasticsearch, OpenSearch, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, LibreDB.
+It supports **28 database backends** via a Strategy Pattern abstraction: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Trino, Databend, Apache Cassandra, Elasticsearch, OpenSearch, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, LibreDB.
 The count is the `SHIPPED` record in [`src/lib/db/compatibility.ts`](../src/lib/db/compatibility.ts), which is exhaustive over `DatabaseType`; `elasticsearch` and `opensearch` are two ids served by one provider module, and `influxdb` and `influxdb3` are two ids served by one provider directory with a class each.
 
 It runs in two modes: as a **standalone Next.js app** and as an **embedded npm package** (`@libredb/studio`) consumed by libredb-platform. See [§4.6](#46-workspace-abstraction-npm-package-embedding).
@@ -58,6 +58,7 @@ graph TD
         SQL --> Druid[(Apache Druid)]
         SQL --> Search[(Elasticsearch / OpenSearch)]
         SQL --> Trino[(Trino)]
+        SQL --> Databend[(Databend)]
         SQL --> Cassandra[(Apache Cassandra)]
         SQL --> LibSQL[(libSQL)]
         SQL --> DuckDB[(DuckDB)]
@@ -148,6 +149,7 @@ classDiagram
     SQLBaseProvider <|-- DruidProvider
     SQLBaseProvider <|-- SearchProvider
     SQLBaseProvider <|-- TrinoProvider
+    SQLBaseProvider <|-- DatabendProvider
     SQLBaseProvider <|-- CassandraProvider
     SQLBaseProvider <|-- LibSQLProvider
     SQLBaseProvider <|-- DuckDBProvider
@@ -356,7 +358,7 @@ src/
 └── lib/
     ├── db/                  # Database provider module
     │   ├── providers/
-    │   │   ├── sql/         # postgres, mysql, sqlite (+ sqlite-driver runtime adapter), oracle, db2/ (driver seam + SYSCAT catalog over db2-node), mssql, clickhouse/ (transport seam + SQL over HTTP), druid/ (transport seam + SQL over POST /druid/v2/sql), search/ (transport seam + SQL over HTTP; elasticsearch and opensearch, two ids one module), trino/ (transport seam + SQL over the Trino client protocol), cassandra/ (transport seam + CQL over the native protocol via cassandra-driver), libsql/ (transport seam + SQLite's dialect over the Hrana protocol), duckdb/ (driver seam + an embedded analytical engine over @duckdb/node-api)
+    │   │   ├── sql/         # postgres, mysql, sqlite (+ sqlite-driver runtime adapter), oracle, db2/ (driver seam + SYSCAT catalog over db2-node), mssql, clickhouse/ (transport seam + SQL over HTTP), druid/ (transport seam + SQL over POST /druid/v2/sql), search/ (transport seam + SQL over HTTP; elasticsearch and opensearch, two ids one module), trino/ (transport seam + SQL over the Trino client protocol), databend/ (transport seam + SQL over Databend's HTTP query API), cassandra/ (transport seam + CQL over the native protocol via cassandra-driver), libsql/ (transport seam + SQLite's dialect over the Hrana protocol), duckdb/ (driver seam + an embedded analytical engine over @duckdb/node-api)
     │   │   ├── document/    # mongodb, couchbase/ (transport seam + SQL++ over REST)
     │   │   ├── keyvalue/    # redis, etcd/ (gRPC client seam + an etcdctl subset over etcd's gRPC API via the shared gRPC transport), oxia/ (gRPC client seam + an oxia client read-command console over Oxia's gRPC client API via the shared gRPC transport; key order probed)
     │   │   ├── timeseries/  # prometheus/ (transport seam + PromQL over the Prometheus HTTP API); influxdb/ (influxdb and influxdb3, two classes on two bases

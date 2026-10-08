@@ -74,6 +74,7 @@ const SeedDatabaseType = z.enum([
   "influxdb",
   "influxdb3",
   "oxia",
+  "databend",
 ]);
 
 export const SeedDefaultsSchema = z.object({
@@ -177,6 +178,10 @@ export const SeedConnectionSchema = z
     // Oxia only (O6): an address list the provider parses and refuses entry by entry; resolvable as `host` is
     // (`RESOLVABLE_FIELDS`).
     dataServers: z.string().optional(),
+    // Databend only (design 6.1): the warehouse every statement runs on, a compute name rather than a credential.
+    // Declared for the reason skipObjectScan is: zod strips an undeclared key silently, and a seeded Databend Cloud
+    // connection would lose the warehouse Cloud refuses to run without.
+    warehouse: z.string().optional(),
   })
   .superRefine((conn, ctx) => {
     if (conn.type === "elasticsearch") return;

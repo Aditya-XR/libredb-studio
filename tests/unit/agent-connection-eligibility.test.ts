@@ -137,6 +137,15 @@ describe("which connection a run may be started on", () => {
     expect(startableId(browserCopy(server, { dataServers: undefined }), loaded(server))).toBeNull();
   });
 
+  test("a copy naming another warehouse, or none, is not startable by the seed id (X21)", () => {
+    // Which compute a statement runs on, and which warehouse it resumes and bills: a resolution field, on the
+    // dataServers reasoning.
+    const server = descriptor({ type: "databend", port: 443, warehouse: "small-xy2t" });
+    expect(startableId(browserCopy(server), loaded(server))).toBe("seed:sales");
+    expect(startableId(browserCopy(server, { warehouse: "large-ab12" }), loaded(server))).toBeNull();
+    expect(startableId(browserCopy(server, { warehouse: undefined }), loaded(server))).toBeNull();
+  });
+
   // The field a hand-written comparison forgets: it changes which role the agent
   // executes as, which is the whole point of the least-privilege profile (#328).
   test("a copy carrying its own agent credentials is not startable", () => {

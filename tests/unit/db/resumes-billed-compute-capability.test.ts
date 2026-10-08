@@ -11,7 +11,9 @@ import { CENSUS_CONNECTION } from "../../helpers/census-connection";
  * by an engine whose suspended compute a request resumes and bills (a Databend Cloud warehouse),
  * it keeps Studio from holding that compute awake. Declared anywhere else it would silently drop
  * the health of a connection that costs nothing to check, so this census holds every shipped
- * provider to the flag's absence until an engine that bills a resume declares it.
+ * provider to the flag's absence on a connection that names no billed compute. Databend declares it when its
+ * connection names a Warehouse or its host is Databend Cloud's, whose older form reaches a warehouse with Warehouse
+ * empty (section 4.4 of its provider doc); a self-hosted node without a Warehouse keeps its pulse.
  *
  * Nothing here connects: `createDatabaseProvider` builds each provider over
  * `CENSUS_CONNECTION`'s unconnected configuration, and `getCapabilities()` is a declaration.
@@ -20,5 +22,11 @@ describe("resumesBilledCompute across the shipped providers", () => {
   test.each([...SHIPPED_DATABASE_TYPES])("%s does not declare it", async (type) => {
     const provider = await createDatabaseProvider(CENSUS_CONNECTION[type]);
     expect(provider.getCapabilities().resumesBilledCompute).toBeUndefined();
+  });
+
+  test("databend declares it when its connection names a Warehouse, read from an unconnected provider", async () => {
+    const provider = await createDatabaseProvider({ ...CENSUS_CONNECTION.databend, warehouse: "census-wh" });
+    expect(provider.getCapabilities().resumesBilledCompute).toBe(true);
+    expect(provider.isConnected()).toBe(false);
   });
 });

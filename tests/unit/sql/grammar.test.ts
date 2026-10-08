@@ -441,6 +441,9 @@ const GRAMMAR_COVERAGE: Record<DatabaseType, "established" | "default"> = {
   influxdb3: "established",
   // One `oxia client` read command, not SQL (SB2-4.3): no SQL grammar is established for it, and none is read.
   oxia: "default",
+  // Read off Databend's own lexer (`token.rs`) and parser, and the trailing clause measured on the pinned image (L3);
+  // see the databend block below and DATABEND_GRAMMAR in `grammar.ts` for the source behind each fact.
+  databend: "established",
 };
 
 /**
@@ -518,6 +521,57 @@ describe("influxdb3", () => {
 });
 
 /**
+ * Databend, every fact read off its own lexer (`src/query/ast/src/parser/token.rs`) and parser, with the trailing
+ * clause measured on the pinned image (probe L3): there is no driver package to ask, and the lexer is the source the
+ * server itself runs.
+ */
+describe("databend", () => {
+  const grammar = resolveSqlGrammar("databend");
+
+  test("is a row of its own, not the compatibility default", () => {
+    expect(grammar).not.toBe(DEFAULT_SQL_GRAMMAR);
+  });
+
+  test("`#` is code: the lexer has `#`, `#>`, `#>>` and `#-` as operator tokens and no `#` comment", () => {
+    expect(grammar.hash).toBe("code");
+  });
+
+  test("`[…]` is a subscript and an array literal, never a name quote", () => {
+    // `[` and `]` are plain tokens; names are quoted with `"` or a backtick.
+    expect(grammar.bracket).toBe("subscript");
+  });
+
+  test("block comments do not nest: `lex_comment_block` stops at the first `*/`", () => {
+    expect(grammar.blockComment).toBe("flat");
+  });
+
+  test("`q'…'` and `//` are not in the grammar: `//` is an operator token", () => {
+    expect(grammar.alternateQuoting).toBe(false);
+    expect(grammar.doubleSlashComment).toBe(false);
+  });
+
+  test("a backslash always escapes inside `'…'` and `\"…\"`", () => {
+    // `'([^'\\]|\\.|'')*'` and its `"` twin, under every dialect setting.
+    expect(grammar.backslashAlwaysEscapes).toBe(true);
+  });
+
+  test("a script keeps the default: bodies are `$$` literals", () => {
+    expect(grammar.script).toBe(DEFAULT_SQL_GRAMMAR.script);
+  });
+
+  test("a trailing `FORMAT <name>` follows the row bound", () => {
+    // L3: `SELECT 1 FORMAT JSON LIMIT 5` is 1005 "unexpected `LIMIT`", and `SELECT 1 LIMIT 5 FORMAT JSON` succeeds.
+    expect(grammar.trailingLimitClauses).toHaveLength(1);
+    const [format] = grammar.trailingLimitClauses;
+    expect(format.test("SELECT number FROM numbers(10) FORMAT TabSeparated")).toBe(true);
+    expect(format.test("SELECT 1 format csv ")).toBe(true);
+    expect(format.test("SELECT * FROM (SELECT 1 FORMAT JSON) t")).toBe(false);
+    expect(format.test("SELECT note FROM t WHERE note = 'FORMAT CSV'")).toBe(false);
+    expect(format.test("SELECT format FROM t")).toBe(false);
+  });
+});
+
+/**
  * How a script is cut (#1312). Each non-default row was measured in the end-to-end pass of
  * 2026-10-03/04 before the fact existed, the cost quoted beside it.
  */
@@ -547,17 +601,25 @@ describe("script", () => {
   );
 });
 
-// Whether `\\` escapes inside every `'…'` and `"…"`. No shipped row declares it: MySQL
-// is the dialect that escapes by default, and `NO_BACKSLASH_ESCAPES` in `sql_mode`
-// turns that off per session, so the row cannot state it for every connection.
+// Whether `\\` escapes inside every `'…'` and `"…"`. Databend is the one row that declares
+// it: its lexer escapes with `\\.` in both quotes and no setting turns that off. MySQL is
+// the dialect that escapes by default, and `NO_BACKSLASH_ESCAPES` in `sql_mode` turns that
+// off per session, so its row cannot state it for every connection.
 describe("backslashAlwaysEscapes", () => {
   test("the compatibility default does not read a backslash as an escape", () => {
     expect(DEFAULT_SQL_GRAMMAR.backslashAlwaysEscapes).toBe(false);
   });
 
-  test.each(Object.keys(GRAMMAR_COVERAGE) as DatabaseType[])("%s declares false", (type) => {
-    expect(resolveSqlGrammar(type).backslashAlwaysEscapes).toBe(false);
+  test("databend declares true", () => {
+    expect(resolveSqlGrammar("databend").backslashAlwaysEscapes).toBe(true);
   });
+
+  test.each((Object.keys(GRAMMAR_COVERAGE) as DatabaseType[]).filter((type) => type !== "databend"))(
+    "%s declares false",
+    (type) => {
+      expect(resolveSqlGrammar(type).backslashAlwaysEscapes).toBe(false);
+    },
+  );
 });
 
 describe("every database type has a recorded grammar decision", () => {
@@ -630,6 +692,8 @@ const SQL_TEXT_COVERAGE: Record<DatabaseType, boolean> = {
   // An `oxia client` read command is words split by POSIX shell rules, not SQL text: its quoting is the shell's,
   // which a SQL span reader would report as unreadable (SB2-4.3).
   oxia: false,
+  // SQL, and the statement text IS what the editor sends to `POST /v1/query`; the provider extends SQLBaseProvider.
+  databend: true,
 };
 
 describe("readsSqlText", () => {

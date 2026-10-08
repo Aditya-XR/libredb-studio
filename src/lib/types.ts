@@ -139,7 +139,12 @@ export type DatabaseType =
   // own (`src/lib/db/providers/keyvalue/oxia/`). Its editor text is one `oxia client` read command. Read-only in
   // this version whatever `readOnly` says. The connection's Database field is the namespace and Password is a bearer
   // token; `dataServers` lists a cluster's data servers.
-  | "oxia";
+  | "oxia"
+  // Databend, a cloud data warehouse read and written over its HTTP query API (`POST /v1/query`) by a client of this
+  // repository's own (`src/lib/db/providers/sql/databend/`), extending `SQLBaseProvider`. Self-hosted Databend and
+  // Databend Cloud are the same id: a Cloud connection differs in host, TLS and the `warehouse` below. The
+  // connection's Database field is the session database, inside the `default` catalog.
+  | "databend";
 
 export type ConnectionEnvironment = "production" | "staging" | "development" | "local" | "other";
 
@@ -352,6 +357,13 @@ export interface DatabaseConnection {
    * other engine.
    */
   dataServers?: string;
+  /**
+   * Databend only: the warehouse every statement of this connection runs on, sent as the `X-DATABEND-WAREHOUSE`
+   * header. Databend Cloud requires one and resumes a suspended warehouse on the first statement, billing while it
+   * runs; self-hosted Databend leaves it empty. It picks compute, not the catalog, and it is not a secret. Absent and
+   * empty are one value. Read by no other engine.
+   */
+  warehouse?: string;
   /**
    * Read no catalog when this connection opens.
    *

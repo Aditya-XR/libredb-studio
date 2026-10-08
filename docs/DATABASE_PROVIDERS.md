@@ -70,11 +70,18 @@ src/lib/db/
 │   │   │   ├── transport.ts    #   CassandraTransport seam + neutral result + fault categories
 │   │   │   ├── driver-transport.ts # The one file that imports cassandra-driver
 │   │   │   └── introspect.ts   #   system_schema + system_views -> schema and monitoring
-│   │   └── trino/              # Trino Strategy (SQL over the client protocol, no driver)
-│   │       ├── index.ts        #   TrinoProvider
-│   │       ├── transport.ts    #   TrinoTransport seam + error categories + the dialect descriptor
-│   │       ├── http-transport.ts # The one HTTP implementation (fetch); the nextUri page loop
-│   │       └── introspect.ts   #   information_schema tree + system.runtime/metadata + jmx monitoring
+│   │   ├── trino/              # Trino Strategy (SQL over the client protocol, no driver)
+│   │   │   ├── index.ts        #   TrinoProvider
+│   │   │   ├── transport.ts    #   TrinoTransport seam + error categories + the dialect descriptor
+│   │   │   ├── http-transport.ts # The one HTTP implementation (fetch); the nextUri page loop
+│   │   │   └── introspect.ts   #   information_schema tree + system.runtime/metadata + jmx monitoring
+│   │   └── databend/           # Databend Strategy (SQL over POST /v1/query, no driver)
+│   │       ├── index.ts        #   DatabendProvider
+│   │       ├── transport.ts    #   DatabendTransport seam + neutral outcome types
+│   │       ├── http-transport.ts # The one HTTP implementation (shared node:http(s) transport); the page loop
+│   │       ├── auth-latch.ts   #   A refused sign-in is not sent again by this process for 15 minutes
+│   │       ├── objects.ts      #   system.tables tree + SHOW CREATE source
+│   │       └── introspect.ts   #   system.* monitoring, sessions and the kill (decode.ts, errors.ts, ... session.ts)
 │   ├── document/               # Document Database Providers
 │   │   ├── mongodb.ts          # MongoDB Strategy
 │   │   └── couchbase/          # Couchbase Strategy (SQL++ over REST, no driver)
@@ -167,6 +174,7 @@ BaseDatabaseProvider (abstract)
 │   ├── OpenSearchProvider                  │
 │   ├── TrinoProvider                       │
 │   ├── CassandraProvider                   │
+│   ├── DatabendProvider                    │ (SQL over HTTP)
 │   └── InfluxDB3Provider                   │ (InfluxDB 3 SQL over HTTP, read-only)
 ├── MongoDBProvider ────────────────────────┤ Document Database
 ├── CouchbaseProvider ──────────────────────┤ Document Database (SQL++ over REST)
@@ -197,6 +205,8 @@ and a line comment must be closed by a newline (CQL has `//` as well as `--`) - 
 it is a driver adapter rather than an HTTP one. See [providers/cassandra.md](./providers/cassandra.md).
 
 Being driver-free and reached over HTTP is not what decides the base class. `ClickHouseProvider`, `DruidProvider` and `TrinoProvider` add no driver either, and all three extend `SQLBaseProvider`: double-quoted identifiers are correct in each dialect, so identifier escaping is inherited rather than rewritten. A placeholder helper is not inherited either — `SQLBaseProvider` no longer has one (#304 removed it). Two of them override only `prepareQuery()`, and for opposite reasons. Druid rejects `OFFSET n LIMIT m` — a statement that already ends in an `OFFSET` is therefore sent unlimited instead of being rewritten into a syntax error. Trino rejects the other order: its grammar is `[ OFFSET count ] [ LIMIT count ]`, so measured on 476 `... LIMIT 3 OFFSET 1` answers `mismatched input 'OFFSET'` while the transposed form returns the rows, and the override transposes what the shared limiter emitted rather than rewriting the statement. See [providers/clickhouse.md](./providers/clickhouse.md), [providers/druid.md](./providers/druid.md) and [providers/trino.md](./providers/trino.md).
+
+`DatabendProvider` is a fourth and overrides no `prepareQuery()` at all: `LIMIT n OFFSET m` is native, so the shared limiter's clauses run as written under the Databend grammar row, and its capabilities declare every name quoted in backticks (`identifierQuoting: "backtick-always"`). See [providers/databend.md](./providers/databend.md).
 
 The search providers are the same pattern with one twist: **two type-ids, one module.** `ElasticsearchProvider` and `OpenSearchProvider` are thin subclasses of an internal base in `providers/sql/search/`, because measured against live servers the two products differ only in wire detail (endpoint path, envelope keys, fault names — one row each in the transport's dialect table) and in exactly one thing above the wire. That one thing is `OFFSET`: `LIMIT 2 OFFSET 1` is HTTP 200 on OpenSearch 3.8.0 and HTTP 400 `parsing_exception` on Elasticsearch 9.1.4, so `prepareQuery()` is overridden to **refuse** the second page on Elasticsearch rather than send a clause the grammar has no rule for, or silently drop it and hand the editor page one to append as if it were page two. The difference is declared as a per-product trait, never asked as `this.dialect === …` — the same rule `CLAUDE.md` states for `=== 'mongodb'`. See [providers/elasticsearch.md](./providers/elasticsearch.md) and [providers/opensearch.md](./providers/opensearch.md).
 
@@ -239,7 +249,7 @@ QueryEditor                      /api/db/query
 
 ## Supported Databases
 
-Twenty-seven type-ids are supported by twenty-five provider modules: two pairs share one, `elasticsearch` and `opensearch` in `providers/sql/search/`, and `influxdb` and `influxdb3` in `providers/timeseries/influxdb/`.
+Twenty-eight type-ids are supported by twenty-six provider modules: two pairs share one, `elasticsearch` and `opensearch` in `providers/sql/search/`, and `influxdb` and `influxdb3` in `providers/timeseries/influxdb/`.
 The count is derived from the exhaustive `SHIPPED` record in
 [`src/lib/db/compatibility.ts`](../src/lib/db/compatibility.ts) rather than written here twice. For
 the per-provider reference (driver, pooling, query format,
@@ -264,6 +274,7 @@ monitoring, limitations, …) see the prime docs in **[`docs/providers/`](./prov
 | OpenSearch | `opensearch` | Search (SQL, read-only) | [providers/opensearch.md](./providers/opensearch.md) |
 | Trino | `trino` | SQL (federated query engine) | [providers/trino.md](./providers/trino.md) |
 | Apache Cassandra | `cassandra` | SQL-shaped (CQL, wide-column) | [providers/cassandra.md](./providers/cassandra.md) |
+| Databend | `databend` | SQL (analytics, over HTTP) | [providers/databend.md](./providers/databend.md) |
 | Prometheus | `prometheus` | Time series (PromQL over HTTP, read-only) | [providers/prometheus.md](./providers/prometheus.md) |
 | InfluxDB (InfluxQL) | `influxdb` | Time series (InfluxQL over HTTP, read-only) | [providers/influxdb.md](./providers/influxdb.md) |
 | InfluxDB 3 (SQL) | `influxdb3` | Time series (SQL, Apache DataFusion, read-only) | [providers/influxdb3.md](./providers/influxdb3.md) |
@@ -483,7 +494,7 @@ maintenance operations, and known limitations — is documented per provider und
 [`docs/providers/`](./providers/README.md). Start there for anything specific to PostgreSQL, MySQL,
 Oracle, Db2 LUW, SQL Server, SQLite, libSQL, DuckDB, Redis, MongoDB, Couchbase, ClickHouse, Apache Druid,
 Elasticsearch, OpenSearch, Trino, Apache Cassandra, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL),
-Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, or LibreDB.
+Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend, or LibreDB.
 
 Not every provider has every feature, and the docs record the absences rather than glossing over
 them. Druid is the sharpest case: its SQL has no `UPDATE`, no `DELETE` and no `CREATE TABLE`, no

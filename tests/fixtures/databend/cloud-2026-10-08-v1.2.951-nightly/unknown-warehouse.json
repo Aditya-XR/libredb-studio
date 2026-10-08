@@ -1,0 +1,38 @@
+{
+  "scenario": "unknown-warehouse",
+  "principal": "default",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-warehouse": "studio_no_such_wh"
+        },
+        "body": {
+          "sql": "SELECT 1",
+          "pagination": {
+            "wait_time_secs": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "error": {
+            "kind": "BadWarehouse",
+            "message": "warehouse <tenant> studio_no_such_wh not found: Bad warehouse"
+          }
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

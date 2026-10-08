@@ -33,6 +33,15 @@ export function quoteIdentifier(name: string, dialect: DatabaseType | undefined)
     // polluting the fixtures. It is the fail-safe direction either way - a doubled
     // backtick can only make the engine refuse a name, never make it read one it
     // should not.
+    //
+    // Databend reads a backtick name in all five of its `sql_dialect`s, the default
+    // PostgreSQL one included, and a doubled backtick is the only escape inside it: the
+    // lexer rule has no backslash form, so `x\` is the name `x\`. Measured on the pinned
+    // image (probe L4): names holding a backtick, a backslash, a quote, `;`, `--`, a
+    // newline or a NUL round-trip byte-equal through CREATE TABLE, INSERT and SELECT
+    // under both dialects. A bare name would be folded to lower case there, which is why
+    // the provider quotes every name rather than only the ones that need it.
+    case "databend":
     case "opensearch":
     case "mysql":
       return `\`${name.replace(/`/g, "``")}\``;

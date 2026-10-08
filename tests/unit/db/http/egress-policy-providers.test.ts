@@ -6,6 +6,7 @@ import { ClickHouseProvider } from "@/lib/db/providers/sql/clickhouse";
 import { DruidProvider } from "@/lib/db/providers/sql/druid";
 import { ElasticsearchProvider, OpenSearchProvider } from "@/lib/db/providers/sql/search";
 import { TrinoProvider } from "@/lib/db/providers/sql/trino";
+import { DatabendProvider } from "@/lib/db/providers/sql/databend";
 import { LibSQLProvider } from "@/lib/db/providers/sql/libsql";
 import { LibSQLHranaTransport } from "@/lib/db/providers/sql/libsql/hrana-transport";
 import { CouchbaseProvider } from "@/lib/db/providers/document/couchbase";
@@ -27,6 +28,8 @@ const providers = [
   ["Elasticsearch", "elasticsearch", ElasticsearchProvider],
   ["OpenSearch", "opensearch", OpenSearchProvider],
   ["Trino", "trino", TrinoProvider],
+  // A user and no password (Databend design 3.14): the plaintext refusal needs a password, so the guard is reached.
+  ["Databend", "databend", DatabendProvider],
   ["libSQL", "libsql", LibSQLProvider],
   ["Couchbase", "couchbase", CouchbaseProvider],
   ["Prometheus", "prometheus", PrometheusProvider],

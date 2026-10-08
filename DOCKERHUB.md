@@ -20,7 +20,7 @@
 
 > 📖 **Full documentation, source, and issues:** <https://github.com/libredb/libredb-studio>
 
-Query **PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Redis, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Prometheus, InfluxDB, Apache Kafka, etcd, Neo4j, Milvus, Qdrant and Oxia** from your browser, with AI query assistance, RBAC and OIDC SSO.
+Query **PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Redis, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Databend, Apache Cassandra, Prometheus, InfluxDB, Apache Kafka, etcd, Neo4j, Milvus, Qdrant and Oxia** from your browser, with AI query assistance, RBAC and OIDC SSO.
 
 ---
 
@@ -109,8 +109,8 @@ Every one of those tags is published on three bases, and the suffix is appended 
 
 ## Supported databases
 
-Twenty-six external engines share one interface.
-The twenty-seventh row is the embedded LibreDB store: it ships inside the image, not as a server you reach.
+Twenty-seven external engines share one interface.
+The twenty-eighth row is the embedded LibreDB store: it ships inside the image, not as a server you reach.
 
 | Database | Driver | Highlights |
 | :--- | :--- | :--- |
@@ -130,6 +130,7 @@ The twenty-seventh row is the embedded LibreDB store: it ships inside the image,
 | **Elasticsearch** | none — HTTP | Read-only SQL IDE over `_sql`, mapping-driven index/field explorer, cluster health with per-index document counts and store sizes |
 | **OpenSearch** | none — HTTP | The same read-only IDE over `_plugins/_sql`, from the same provider module; `LIMIT … OFFSET` paging works here |
 | **Trino** | none — HTTP | Full SQL IDE over the client protocol, every configured catalog in one tree, `EXPLAIN (FORMAT JSON)` plans, `system.runtime` monitoring and query cancellation |
+| **Databend** | none, HTTP | SQL IDE over its own query API, self-hosted or a Databend Cloud warehouse; `system.*` monitoring and `KILL QUERY`. No keys, so no inline row edits |
 | **Apache Cassandra** | `cassandra-driver` (pure JS) | CQL editor over the native protocol, keyspace browser with partition and clustering keys marked, `system_views` monitoring. No row counts and no sizes: the only figures Cassandra publishes are partition estimates and whole mebibytes, so neither is shown rather than shown wrong |
 | **Prometheus** | none, HTTP | PromQL editor, metric, rule and target browser |
 | **Apache Kafka** | `@platformatic/kafka` | Topic, group and broker browser, reads by offset or time |
@@ -147,7 +148,7 @@ Prometheus, InfluxDB, Apache Kafka and Oxia are read-only too: Studio calls only
 
 ### Engines with no provider of their own
 
-Twenty-eight further engines speak the wire protocol of one of the twenty-six drivers above, so they connect through it unchanged: pick that driver in the connection dialog. Each was measured against a real instance, and how much worked is recorded per engine.
+Twenty-seven further engines speak the wire protocol of one of the twenty-seven drivers above, so they connect through it unchanged: pick that driver in the connection dialog. Each was measured against a real instance, and how much worked is recorded per engine.
 
 | Engine | Connect as | Support |
 | :--- | :--- | :--- |
@@ -174,7 +175,6 @@ Twenty-eight further engines speak the wire protocol of one of the twenty-six dr
 | VictoriaMetrics | `prometheus` | Partial |
 | Redpanda | `kafka` | Full |
 | Materialize · RisingWave | `postgres` | Partial |
-| Databend | `mysql` | Partial - the editor, object browser and table stats work; overview, health and sessions do not (no `SHOW STATUS`, no process list) |
 
 Details, probed versions and each caveat: [`docs/providers/README.md`](https://github.com/libredb/libredb-studio/blob/main/docs/providers/README.md).
 

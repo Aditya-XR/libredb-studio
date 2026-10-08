@@ -34,6 +34,9 @@ export const EXPECTED_EDIT_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   "cassandra",
   "clickhouse",
   "couchbase",
+  // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: object edit is not implemented in this version
+  // (design 2.3), which docs/providers/databend.md names.
+  "databend",
   // No kind declares `acceptsSourceEdits`: replacing a view leaves its dependent views invalid until
   // their next use, so an edit would break objects the editor never showed (#786), which
   // docs/providers/db2.md names under "Object edit".

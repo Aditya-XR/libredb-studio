@@ -1,0 +1,112 @@
+{
+  "target": "local",
+  "studioCommit": "f13ddcf91a02b2f8d8643265c1d2365c9c7f1c15",
+  "uncommitted": [],
+  "image": "datafuselabs/databend:v1.2.951-nightly@sha256:f63585cae3e096d62580ad51d92abd2f64b57b196af3b51cb01ecae381ec874b",
+  "serverVersion": "Databend Query v1.2.951-nightly-9b7eeff9a8(rust-1.100.0-nightly-2026-10-04T22:27:10.143409266Z)",
+  "capturedAt": "2026-10-08",
+  "scenarios": [
+    {
+      "name": "version",
+      "result": "pass",
+      "ms": 15,
+      "exchanges": 2
+    },
+    {
+      "name": "select-pages",
+      "result": "pass",
+      "ms": 8,
+      "exchanges": 4
+    },
+    {
+      "name": "every-type",
+      "result": "pass",
+      "ms": 15,
+      "exchanges": 2
+    },
+    {
+      "name": "show-create-every-type",
+      "result": "pass",
+      "ms": 8,
+      "exchanges": 2
+    },
+    {
+      "name": "show-create-materialized-view",
+      "result": "pass",
+      "ms": 8,
+      "exchanges": 2
+    },
+    {
+      "name": "ddl",
+      "result": "pass",
+      "ms": 14,
+      "exchanges": 3
+    },
+    {
+      "name": "dml",
+      "result": "pass",
+      "ms": 30,
+      "exchanges": 5
+    },
+    {
+      "name": "temp-table-logout",
+      "result": "pass",
+      "ms": 31,
+      "exchanges": 6
+    },
+    {
+      "name": "begin",
+      "result": "pass",
+      "ms": 9,
+      "exchanges": 5
+    },
+    {
+      "name": "session-echo",
+      "result": "pass",
+      "ms": 10,
+      "exchanges": 3
+    },
+    {
+      "name": "error-position",
+      "result": "pass",
+      "ms": 4,
+      "exchanges": 2
+    },
+    {
+      "name": "auth-401",
+      "result": "pass",
+      "ms": 1,
+      "exchanges": 1
+    },
+    {
+      "name": "kill",
+      "result": "pass",
+      "ms": 1006,
+      "exchanges": 3
+    },
+    {
+      "name": "final",
+      "result": "pass",
+      "ms": 8,
+      "exchanges": 3
+    },
+    {
+      "name": "reader",
+      "result": "pass",
+      "ms": 25,
+      "exchanges": 2
+    },
+    {
+      "name": "insert",
+      "result": "pass",
+      "ms": 20,
+      "exchanges": 2
+    },
+    {
+      "name": "final-kill",
+      "result": "pass",
+      "ms": 7,
+      "exchanges": 4
+    }
+  ]
+}

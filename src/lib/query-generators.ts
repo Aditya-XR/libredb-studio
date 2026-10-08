@@ -48,7 +48,7 @@ function couchbaseQuote(name: string): string {
 
 /**
  * Quote only when the name would not round-trip bare, in the two styles a provider
- * may DECLARE (`ProviderCapabilities.identifierQuoting`), or always, in the third.
+ * may DECLARE (`ProviderCapabilities.identifierQuoting`), or always, in the other two.
  *
  * One object rather than two functions, and looked up rather than branched on: bun's
  * lcov attributes a freshly added function's declaration line to nothing, so two new
@@ -63,6 +63,7 @@ const DECLARED_QUOTING: Record<
   backtick: (name, always) => (!always && /^[A-Za-z_][\w$]*$/.test(name) ? name : couchbaseQuote(name)),
   double: (name, always) => (!always && /^[a-z_][a-z0-9_$]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`),
   "double-always": (name) => `"${name.replaceAll('"', '""')}"`,
+  "backtick-always": (name) => couchbaseQuote(name),
 };
 
 /**

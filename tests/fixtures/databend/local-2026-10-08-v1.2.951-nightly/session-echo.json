@@ -1,0 +1,229 @@
+{
+  "scenario": "session-echo",
+  "principal": "default",
+  "clientSession": true,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-client-caps": "session_header",
+          "x-databend-session": "eyJpZCI6IjxzZXNzaW9uLTU-IiwibGFzdF9yZWZyZXNoX3RpbWUiOjE3OTE0MjQ2MTR9"
+        },
+        "body": {
+          "sql": "SELECT current_database(), now()",
+          "pagination": {
+            "wait_time_secs": 10
+          },
+          "session": {
+            "database": "libredb_demo",
+            "settings": {
+              "http_json_result_mode": "display",
+              "timezone": "Europe/Istanbul",
+              "no_such_setting": "1"
+            }
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-14>",
+          "x-databend-query-state": "Succeeded",
+          "x-databend-query-page-rows": "1",
+          "x-databend-session-id": "<session-5>",
+          "x-databend-session": "eyJpZCI6IjxzZXNzaW9uLTU-IiwibGFzdF9yZWZyZXNoX3RpbWUiOjE3OTE0MjQ2MTR9",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-14>",
+          "session_id": "<session-5>",
+          "node_id": "<node-1>",
+          "state": "Succeeded",
+          "session": {
+            "catalog": "default",
+            "database": "libredb_demo",
+            "role": "account_admin",
+            "settings": {
+              "http_json_result_mode": "display",
+              "timezone": "Europe/Istanbul"
+            },
+            "txn_state": "AutoCommit",
+            "need_sticky": false,
+            "need_keep_alive": false,
+            "internal": "{\"last_node_id\":\"<node-1>\",\"last_query_ids\":[\"<query-14>\"]}"
+          },
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "current_database()",
+              "type": "String"
+            },
+            {
+              "name": "now()",
+              "type": "Timestamp"
+            }
+          ],
+          "data": [
+            [
+              "libredb_demo",
+              "2026-10-08 04:56:54.397844"
+            ]
+          ],
+          "affect": null,
+          "result_timeout_secs": 60,
+          "settings": {
+            "timezone": "Europe/Istanbul",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 1,
+              "bytes": 1
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 1,
+              "bytes": 20
+            },
+            "total_scan": {
+              "rows": 1,
+              "bytes": 1
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 1
+          },
+          "stats_uri": "/v1/query/<query-14>",
+          "final_uri": "/v1/query/<query-14>/final",
+          "next_uri": "/v1/query/<query-14>/final",
+          "kill_uri": "/v1/query/<query-14>/kill"
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "pages",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-14>/final",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-client-caps": "session_header",
+          "x-databend-session": "eyJpZCI6IjxzZXNzaW9uLTU-IiwibGFzdF9yZWZyZXNoX3RpbWUiOjE3OTE0MjQ2MTR9"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-14>",
+          "x-databend-query-state": "Succeeded",
+          "x-databend-query-page-rows": "0",
+          "x-databend-session-id": "<session-5>",
+          "x-databend-session": "eyJpZCI6IjxzZXNzaW9uLTU-IiwibGFzdF9yZWZyZXNoX3RpbWUiOjE3OTE0MjQ2MTR9",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-14>",
+          "session_id": "<session-5>",
+          "node_id": "<node-1>",
+          "state": "Succeeded",
+          "session": null,
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "current_database()",
+              "type": "String"
+            },
+            {
+              "name": "now()",
+              "type": "Timestamp"
+            }
+          ],
+          "data": [],
+          "affect": null,
+          "result_timeout_secs": 60,
+          "settings": {
+            "timezone": "Europe/Istanbul",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 1,
+              "bytes": 1
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 1,
+              "bytes": 20
+            },
+            "total_scan": {
+              "rows": 1,
+              "bytes": 1
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 1
+          },
+          "stats_uri": "/v1/query/<query-14>",
+          "final_uri": "/v1/query/<query-14>/final",
+          "next_uri": null,
+          "kill_uri": "/v1/query/<query-14>/kill"
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "logout",
+      "request": {
+        "method": "POST",
+        "path": "/v1/session/logout",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-client-caps": "session_header",
+          "x-databend-session": "eyJpZCI6IjxzZXNzaW9uLTU-IiwibGFzdF9yZWZyZXNoX3RpbWUiOjE3OTE0MjQ2MTR9"
+        },
+        "body": {},
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-session-id": "<session-5>",
+          "x-databend-session": "eyJpZCI6IjxzZXNzaW9uLTU-IiwibGFzdF9yZWZyZXNoX3RpbWUiOjE3OTE0MjQ2MTR9",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "error": null
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

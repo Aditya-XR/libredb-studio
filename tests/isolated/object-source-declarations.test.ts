@@ -154,6 +154,8 @@ const SOURCE_DECLARATIONS: Readonly<Record<DatabaseType, readonly string[]>> = O
   // Both kinds have a source, JSON under the declared language (DECISIONS O13): a shard's answer and a key's
   // record, serialised by the provider.
   oxia: ["shard/json", "key/json"],
+  // Every kind has a source (design 2.4), Databend's own SQL text.
+  databend: ["table/sql", "view/sql", "materialized_view/sql", "dynamic_table/sql"],
   libredb: [],
 });
 
@@ -243,9 +245,9 @@ describe("the fleet census of object source declarations", () => {
     // The population every assertion below iterates. If this were empty or short, each of those
     // loops would certify only the engines it happened to reach, so it is asserted first.
     expect([...CENSUS_TYPES].sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
-    // EXTERNAL_DATABASE_TYPES.length (26 with db2, neo4j, milvus, qdrant, influxdb, influxdb3 and oxia) plus the embedded
-    // store.
-    expect(CENSUS_TYPES).toHaveLength(27);
+    // EXTERNAL_DATABASE_TYPES.length (27 with db2, neo4j, milvus, qdrant, influxdb, influxdb3, oxia and databend) plus
+    // the embedded store.
+    expect(CENSUS_TYPES).toHaveLength(28);
     expect(Object.keys(SOURCE_DECLARATIONS).sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
   });
 
@@ -263,13 +265,13 @@ describe("the fleet census of object source declarations", () => {
     // `hasSource` moves between the two halves, so both halves must be pinned or the total alone
     // would still be satisfied. Neither half may be edited to match a build: if this fails, the
     // DECLARATION is wrong or the design's table is, and the repair is one of those two.
-    expect(UNCONNECTED_SOURCE_KINDS).toHaveLength(81);
-    expect(rows.filter((row) => row.kind.hasSource === true)).toHaveLength(81);
+    expect(UNCONNECTED_SOURCE_KINDS).toHaveLength(85);
+    expect(rows.filter((row) => row.kind.hasSource === true)).toHaveLength(85);
     // neo4j added four kinds, none source-bearing, db2 five source-bearing kinds and four others, milvus and
-    // qdrant one source-bearing kind each, influxdb and influxdb3 one kind each, neither source-bearing, and oxia
-    // two source-bearing kinds.
+    // qdrant one source-bearing kind each, influxdb and influxdb3 one kind each, neither source-bearing, oxia
+    // two source-bearing kinds, and databend four source-bearing kinds.
     expect(rows.filter((row) => row.kind.hasSource !== true)).toHaveLength(33);
-    expect(rows).toHaveLength(114);
+    expect(rows).toHaveLength(118);
   });
 
   test("the MariaDB branch declares two more, which an unconnected provider cannot show", async () => {
@@ -295,10 +297,10 @@ describe("the fleet census of object source declarations", () => {
       [],
     );
     expect(mariadbRows.filter((row) => row.kind.hasSource === true)).toHaveLength(8);
-    // 83 on a MariaDB connection against 81 unconnected: the design states both numbers because
+    // 87 on a MariaDB connection against 85 unconnected: the design states both numbers because
     // criterion 2's evidence method reads an unconnected provider and would otherwise
     // structurally exclude the two riskiest declarations in the phase.
-    expect(UNCONNECTED_SOURCE_KINDS.length + MARIADB_EXTRA_SOURCE_KINDS.length).toBe(83);
+    expect(UNCONNECTED_SOURCE_KINDS.length + MARIADB_EXTRA_SOURCE_KINDS.length).toBe(87);
   });
 
   /*
@@ -384,8 +386,8 @@ describe("the fleet census of object source declarations", () => {
         throw new Error(`the half-declaration guard never reached ${extra}, so it does not cover the MariaDB branch`);
       }
     }
-    // 114 unconnected kinds plus the MariaDB branch's eight.
-    expect(rows).toHaveLength(122);
+    // 118 unconnected kinds plus the MariaDB branch's eight.
+    expect(rows).toHaveLength(126);
 
     const halfDeclared = rows
       .filter((row) => row.kind.sourceLanguage !== undefined && row.kind.hasSource !== true)

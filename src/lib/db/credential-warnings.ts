@@ -28,7 +28,8 @@ export type CredentialWarning =
   | { readonly kind: "no-secret"; readonly message: string };
 
 /**
- * Each connection type's declared warnings. A provider adds its own row; Milvus, Qdrant, the two InfluxDB types and Oxia declare one each.
+ * Each connection type's declared warnings. A provider adds its own row; Milvus, Qdrant, the two InfluxDB types, Oxia
+ * and Databend declare one each.
  *
  * Milvus (vector-family spec 3.12, E22): every server starts with the documented `root` pair, the default
  * survives a restart with a new configured default, and a server with authorization off, its default, accepts any
@@ -53,6 +54,12 @@ export type CredentialWarning =
  * authorization, so a token's claims never narrow what it reaches, and only a token without `exp` warns. No
  * `no-secret` row: a standalone server has no authentication, so a read-only seed with no token protects nothing
  * more than one with a token, and refusing it would refuse every seed of a standalone server.
+ *
+ * Databend (design 6.4 and 7.2, probe UC1): a `root` user whose `auth_type` is `no_password` is answered 200
+ * whatever password arrives, so `root` with an empty password box signs in only as that user, and the dialog says
+ * the server accepts any password for it. The `pair` kind with an empty password
+ * is the row: it warns for `root` and no password, and for nothing else. A read-only seed is refused for Databend
+ * on `READ_ONLY_ENFORCED` already, so the shared refusal adds no new refusal there.
  */
 export const CREDENTIAL_WARNINGS: Readonly<Partial<Record<DatabaseType, readonly CredentialWarning[]>>> = {
   milvus: [
@@ -104,6 +111,15 @@ export const CREDENTIAL_WARNINGS: Readonly<Partial<Record<DatabaseType, readonly
       access: [],
       message:
         "This token declares no expiry, so it stays valid until the identity provider's signing key changes, and Oxia has no authorization, so it reads and writes every namespace. Prefer a token with an expiry.",
+    },
+  ],
+  databend: [
+    {
+      kind: "pair",
+      user: "root",
+      password: "",
+      message:
+        "Signing in as root with no password works only when the server's root user has no password, and such a user accepts any password or none, so anyone who can reach the server signs in as its administrator. Set a password for root on the server, or connect as a user of your own.",
     },
   ],
 };

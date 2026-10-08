@@ -561,6 +561,34 @@ describe("createDatabaseProvider", () => {
     expect(provider.type).toBe("trino");
   });
 
+  test('creates provider for type "databend"', async () => {
+    // Over a password to a non-loopback host without TLS, and with no Warehouse: the constructor validates nothing
+    // and opens nothing (Databend design 2.3), so the provider is built and declares SQL, the Databend plan format
+    // and no billed compute, with no server running; the plaintext refusal comes from connect().
+    const conn = makeConnection("databend", { port: 8000, database: undefined });
+    const provider = await createDatabaseProvider(conn);
+    expect(provider.type).toBe("databend");
+    const capabilities = provider.getCapabilities();
+    expect(capabilities.queryLanguage).toBe("sql");
+    expect(capabilities.explainFormat).toBe("databend-text");
+    expect(capabilities.enforcesReadOnly).toBeUndefined();
+    expect(capabilities.resumesBilledCompute).toBeUndefined();
+    expect(provider.isConnected()).toBe(false);
+  });
+
+  test("a databend connection with readOnly: true is refused before anything is built (Databend design 5.7)", async () => {
+    const conn = { ...makeConnection("databend", { port: 8000 }), readOnly: true };
+    expect(() => assertReadOnlyHonoured(conn)).toThrow("readOnly: true is refused for databend");
+    await expect(createDatabaseProvider(conn)).rejects.toThrow(DatabaseConfigError);
+  });
+
+  test("the factory error lists databend after trino, in the SQL block", async () => {
+    const conn = makeConnection("not-an-engine");
+    await expect(createDatabaseProvider(conn)).rejects.toThrow(
+      /Supported types: .*\bdruid, trino, databend, cassandra\b/,
+    );
+  });
+
   test('creates provider for type "cassandra"', async () => {
     // `database` carries the KEYSPACE and `localDataCenter` is required by the
     // driver, so a connection missing it cannot be constructed at all.

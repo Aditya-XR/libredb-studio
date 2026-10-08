@@ -661,3 +661,27 @@ export const OxiaIcon: React.FC<IconProps> = ({ className, ...props }) => (
     <circle cx="12" cy="12" r="1.25" />
   </svg>
 );
+
+/**
+ * Databend: a mark drawn for Studio, never Databend's logo.
+ *
+ * A warehouse under its roof with two shelves, the cloud data warehouse a connection reaches, as strokes at the house
+ * weight with no fill, which is what stays identifiable at the 14px the connection list draws.
+ */
+export const DatabendIcon: React.FC<IconProps> = ({ className, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <path d="M3 9.5 12 4l9 5.5" />
+    <path d="M5 8.5V20h14V8.5" />
+    <path d="M8.5 13h7" />
+    <path d="M8.5 16.5h7" />
+  </svg>
+);

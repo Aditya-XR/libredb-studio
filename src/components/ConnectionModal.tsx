@@ -197,6 +197,8 @@ export function ConnectionModal({
     setAllowInsecureAuth,
     dataServers,
     setDataServers,
+    warehouse,
+    setWarehouse,
     connectionString,
     setConnectionString,
     mongoConnectionMode,
@@ -371,7 +373,7 @@ export function ConnectionModal({
                   <Input
                     value={pasteInput}
                     onChange={(e) => setPasteInput(e.target.value)}
-                    placeholder="postgres://user:pass@host:5432/db  or  mongodb://..."
+                    placeholder="postgres://user:pass@host:5432/db  or  mongodb://...  or  databend://..."
                     className="h-9 bg-panel border-hairline focus:border-brand-tint/50 text-xs font-mono flex-1"
                     onKeyDown={(e) => e.key === "Enter" && handlePasteConnectionString()}
                   />
@@ -384,7 +386,7 @@ export function ConnectionModal({
                   </Button>
                 </div>
                 <p className="text-xs text-fg-muted">
-                  Supports: postgres://, mysql://, mongodb://, redis://, oracle://, mssql://, db2://
+                  Supports: postgres://, mysql://, mongodb://, redis://, oracle://, mssql://, db2://, databend://
                 </p>
               </div>
             </motion.div>
@@ -836,6 +838,31 @@ export function ConnectionModal({
                         className="h-10 bg-panel border-hairline focus:border-brand-tint/50 transition-all text-xs font-mono"
                       />
                       <DeclaredFieldHint config={uiConfig} field="dataServers" />
+                    </div>
+                  )}
+
+                  {/*
+                    The warehouse a statement runs on (Databend design 6.1), drawn where the engine takes the field,
+                    the way the data servers are. The provider checks the text and names the field when it refuses it.
+                  */}
+                  {takesConnectionField(type, "warehouse") && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 mb-1">
+                        <Server strokeWidth={1.5} className="w-3 h-3 text-fg-muted" />
+                        <Label htmlFor="warehouse" className="text-xs font-medium text-fg-muted">
+                          {connectionFieldLabel(uiConfig, "warehouse", "Warehouse")}
+                        </Label>
+                      </div>
+                      <Input
+                        id="warehouse"
+                        value={warehouse}
+                        onChange={(e) => setWarehouse(e.target.value)}
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-describedby={describedByHint(uiConfig, "warehouse")}
+                        className="h-10 bg-panel border-hairline focus:border-brand-tint/50 transition-all text-xs font-mono"
+                      />
+                      <DeclaredFieldHint config={uiConfig} field="warehouse" />
                     </div>
                   )}
 

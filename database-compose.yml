@@ -2417,6 +2417,71 @@ services:
           memory: 1G
     memswap_limit: 1G
 
+  # ---------------------------------------------------------------------------------------
+  # Databend over its own HTTP API (the databend provider), the surface Databend Cloud serves on
+  # 443 (docs/providers/databend.md). The compat `databend` service below is the mysql provider's
+  # MySQL-wire probe and is left alone. The fixture, the seed and the measured bounds are
+  # described in docker/databend/README.md.
+  # ---------------------------------------------------------------------------------------
+  databend-http:
+    # Pinned to the exact build the provider is verified against, by tag and by digest: the
+    # captures under tests/fixtures/databend are claims about this build, not about Databend in
+    # general.
+    image: datafuselabs/databend:v1.2.951-nightly@sha256:f63585cae3e096d62580ad51d92abd2f64b57b196af3b51cb01ecae381ec874b
+    container_name: libredb-databend-http
+    restart: unless-stopped
+    environment:
+      # The test credential, spelled as the compat service's.
+      QUERY_DEFAULT_USER: libredb
+      QUERY_DEFAULT_PASSWORD: "Probe123pass!"
+      # Tables live on the container's file system: removing the container resets the fixture.
+      QUERY_STORAGE_TYPE: fs
+    ports:
+      # Loopback only, as the postgres service's.
+      - "127.0.0.1:8000:8000"
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    healthcheck:
+      # /health needs no credential and adds no line to the query log (probe UC5); the image
+      # carries curl.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/health"]
+      start_period: 30s
+      start_interval: 1s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # Bounded from the measured resident size (docker/databend/README.md); no swap past it.
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+    memswap_limit: 1G
+
+  databend-http-seed:
+    # One-shot seed (docker/databend/seed.sh) in the server's own image, which carries sh and
+    # curl, so the seed pulls no image of its own. It replaces what it creates, so a second run
+    # leaves the same fixture.
+    image: datafuselabs/databend:v1.2.951-nightly@sha256:f63585cae3e096d62580ad51d92abd2f64b57b196af3b51cb01ecae381ec874b
+    container_name: libredb-databend-http-seed
+    restart: "no"
+    depends_on:
+      databend-http:
+        condition: service_healthy
+    volumes:
+      - ./docker/databend:/fixtures:ro
+    environment:
+      # The server's default user above.
+      DATABEND_USER: libredb
+      DATABEND_PASSWORD: "Probe123pass!"
+    entrypoint: ["sh", "/fixtures/seed.sh", "http://databend-http:8000"]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+    memswap_limit: 128M
+
   # ==========================================================================
   # Wire-compatible engines (issue #424, Phase 0)
   #

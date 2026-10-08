@@ -39,6 +39,7 @@ describe("fenceTagEngine", () => {
       "influxdb",
       "influxdb3",
       "oxia",
+      "databend",
     ] satisfies DatabaseType[];
 
     for (const engine of engines) expect(fenceTagEngine(engine)).toBe(engine);
@@ -159,6 +160,14 @@ describe("fenceTagEngine", () => {
     for (const tag of ["sh", "bash", "shell", "oxia-client"]) expect(fenceTagEngine(tag)).toBeNull();
     expect(fenceTagEngine("oxia")).toBe("oxia");
     expect(isQueryFenceTag("oxia")).toBe(true);
+  });
+
+  test("databend has no alias: a Databend block is Databend's SQL, and `sql` names no engine", () => {
+    // Before the `databend` type-id a Databend server was a MySQL-wire relative; a ```databend block now names its own
+    // engine, never `mysql`.
+    expect(fenceTagEngine("databend")).toBe("databend");
+    expect(isQueryFenceTag("databend")).toBe(true);
+    expect(fenceTagEngine("sql")).toBeNull();
   });
 
   test("promql is a language tag that still names one engine, because one type-id runs PromQL", () => {

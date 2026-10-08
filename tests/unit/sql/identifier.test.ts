@@ -20,6 +20,7 @@ describe("quoteIdentifier", () => {
     expect(quoteIdentifier("name", "trino")).toBe('"name"');
     expect(quoteIdentifier("name", "mysql")).toBe("`name`");
     expect(quoteIdentifier("name", "mssql")).toBe("[name]");
+    expect(quoteIdentifier("name", "databend")).toBe("`name`");
   });
 
   test("falls back to the standard form when no dialect is known", () => {
@@ -36,6 +37,10 @@ describe("quoteIdentifier", () => {
     expect(quoteIdentifier('a"b', "trino")).toBe('"a""b"');
     expect(quoteIdentifier("a`b", "mysql")).toBe("`a``b`");
     expect(quoteIdentifier("a]b", "mssql")).toBe("[a]]b]");
+    // Databend reads a backtick name in every sql_dialect, and a doubled backtick is
+    // its only escape there (measured, probe L4): a backslash stays data.
+    expect(quoteIdentifier("a`b", "databend")).toBe("`a``b`");
+    expect(quoteIdentifier("x\\", "databend")).toBe("`x\\`");
   });
 
   test("leaves a name that spells SQL inert", () => {

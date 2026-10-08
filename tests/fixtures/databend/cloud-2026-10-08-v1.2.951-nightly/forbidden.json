@@ -1,0 +1,41 @@
+{
+  "scenario": "forbidden",
+  "principal": "default",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json",
+          "x-databend-warehouse": "default"
+        },
+        "body": {
+          "sql": "SHOW WAREHOUSES",
+          "pagination": {
+            "wait_time_secs": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-19>",
+          "x-databend-query-page-rows": "0",
+          "x-databend-query-state": "Failed"
+        },
+        "body": {
+          "error": {
+            "kind": "ForbiddenAccessUser",
+            "message": "Permission denied"
+          }
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

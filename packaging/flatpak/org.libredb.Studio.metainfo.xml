@@ -47,6 +47,7 @@
       <li>Elasticsearch (read-only)</li>
       <li>OpenSearch (read-only)</li>
       <li>Trino</li>
+      <li>Databend</li>
       <li>Apache Cassandra and ScyllaDB</li>
       <li>Prometheus (read-only)</li>
       <li>InfluxDB (InfluxQL, read-only)</li>
@@ -65,7 +66,7 @@
       <li>Schema browser, entity-relationship diagrams and index advice</li>
       <li>Query plans, slow-query and session monitoring</li>
       <li>Optional AI query explanation on PostgreSQL, MySQL, SQLite, libSQL, DuckDB,
-      Couchbase, ClickHouse, Apache Druid and Trino, through Gemini, OpenAI, a local
+      Couchbase, ClickHouse, Apache Druid, Trino and Databend, through Gemini, OpenAI, a local
       Ollama or your own endpoint</li>
       <li>An embedded sample database, so there is something to query on first launch</li>
     </ul>

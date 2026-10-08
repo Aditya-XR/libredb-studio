@@ -1,0 +1,37 @@
+{
+  "scenario": "no-warehouse",
+  "principal": "default",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "sql": "SELECT 1",
+          "pagination": {
+            "wait_time_secs": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "error": {
+            "kind": "WarehouseHeaderRequired",
+            "message": "X-DATABEND-WAREHOUSE is required"
+          }
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

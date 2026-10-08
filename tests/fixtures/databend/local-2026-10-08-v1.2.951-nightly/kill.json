@@ -1,0 +1,142 @@
+{
+  "scenario": "kill",
+  "principal": "default",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "sql": "SELECT count(*) FROM numbers(100000000000) WHERE number % 7 = 3",
+          "pagination": {
+            "wait_time_secs": 1
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-16>",
+          "x-databend-query-state": "Running",
+          "x-databend-query-page-rows": "0",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-16>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Running",
+          "session": {
+            "catalog": "default",
+            "database": "default",
+            "role": "account_admin",
+            "settings": {},
+            "txn_state": "AutoCommit",
+            "need_sticky": false,
+            "need_keep_alive": false,
+            "internal": "{\"last_node_id\":\"<node-1>\",\"last_query_ids\":[\"<query-16>\"]}"
+          },
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "COUNT(*)",
+              "type": "UInt64"
+            }
+          ],
+          "data": [],
+          "affect": null,
+          "result_timeout_secs": 60,
+          "settings": {
+            "timezone": "UTC",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 821493760,
+              "bytes": 6571950080
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "total_scan": {
+              "rows": 100000000000,
+              "bytes": 800000000000
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 1000
+          },
+          "stats_uri": "/v1/query/<query-16>",
+          "final_uri": "/v1/query/<query-16>/final",
+          "next_uri": "/v1/query/<query-16>/page/0",
+          "kill_uri": "/v1/query/<query-16>/kill"
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "kill",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-16>/kill",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "text": ""
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "next",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-16>/page/0",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "error": {
+            "code": 400,
+            "message": "Query <query-16> is closed for canceled"
+          }
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

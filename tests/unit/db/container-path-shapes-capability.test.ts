@@ -45,6 +45,8 @@ const EXPECTED_CONTAINER_PATH_SHAPES: Readonly<
   milvus: "exact",
   // Its one level is the database (InfluxDB spec I11), checked in influxql-provider.ts.
   influxdb: "exact",
+  // Two levels, the catalog and the database, each path exactly as deep (design 2.4).
+  databend: "exact",
   libredb: "exact",
   duckdb: "prefixes",
   mssql: "prefixes",
@@ -152,7 +154,7 @@ describe("the declaration follows the check (#1147)", () => {
     expect(unknownTypeIds(callerFiles)).toEqual([]);
     const callers = callerFiles.map(providerTypeId).sort();
     const declaring = TYPES.filter((type) => EXPECTED_CONTAINER_PATH_SHAPES[type] !== "absent").sort();
-    expect(callers).toHaveLength(18);
+    expect(callers).toHaveLength(19);
     expect(callers).toEqual(declaring);
   });
 });

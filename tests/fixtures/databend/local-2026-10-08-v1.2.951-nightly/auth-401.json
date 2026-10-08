@@ -1,0 +1,38 @@
+{
+  "scenario": "auth-401",
+  "principal": "wrong",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "sql": "SELECT 1",
+          "pagination": {
+            "wait_time_secs": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "error": {
+            "code": 5100,
+            "message": "Authentication failed: incorrect password"
+          }
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

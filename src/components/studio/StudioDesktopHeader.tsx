@@ -63,7 +63,8 @@ export const StudioDesktopHeader = React.memo(function StudioDesktopHeader({
                   • {activeConnection.environment}
                 </span>
               )}
-              {!activeConnection.environment && (
+              {/* A connection Studio does not check (resumesBilledCompute) has not been seen online. */}
+              {!activeConnection.environment && connectionPulse !== "not-checked" && (
                 <span>
                   {" "}
                   • <span className="text-success/80">Online</span>

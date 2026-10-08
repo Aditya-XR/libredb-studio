@@ -376,6 +376,33 @@ describe("BottomPanel", () => {
   });
 
   /**
+   * An engine's message can span lines with a caret under the failing name (Databend's `--> SQL:1:15` excerpt), and a
+   * centred block would centre each line on its own, so the caret would point at another column. The block stays in
+   * the middle of the panel; its lines start at one edge.
+   */
+  test("a multi-line error keeps its columns: its lines start at one edge, not each centred", () => {
+    const runError =
+      "Unknown table no_such_table\n--> SQL:1:15\n  |\n1 | SELECT * FROM no_such_table\n  |               ^^^^^^^^^^^^^";
+    const props = createDefaultProps({
+      mode: "results",
+      currentTab: {
+        id: "tab-1",
+        name: "Query 1",
+        query: "SELECT * FROM no_such_table",
+        result: null,
+        runError,
+        isExecuting: false,
+        type: "sql" as const,
+      },
+    });
+    const { getByTestId } = render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+    const message = getByTestId("run-failure-message");
+    expect(message.textContent).toBe(runError);
+    expect(message.className).toContain("text-left");
+    expect(message.className).toContain("whitespace-pre-wrap");
+  });
+
+  /**
    * A script that stopped on a failing statement keeps the earlier statements' result AND says it
    * stopped (#1385). With no rows to show, the grid is left out: its "The operation was
    * successful" would contradict the failure.

@@ -26,6 +26,7 @@ import {
   MilvusIcon,
   InfluxDBIcon,
   OxiaIcon,
+  DatabendIcon,
 } from "@/components/icons/db-icons";
 
 describe("db-icons", () => {
@@ -56,6 +57,7 @@ describe("db-icons", () => {
     { name: "MilvusIcon", Component: MilvusIcon },
     { name: "InfluxDBIcon", Component: InfluxDBIcon },
     { name: "OxiaIcon", Component: OxiaIcon },
+    { name: "DatabendIcon", Component: DatabendIcon },
   ];
 
   for (const { name, Component } of icons) {
@@ -88,5 +90,13 @@ describe("db-icons", () => {
     const html = renderToStaticMarkup(React.createElement(InfluxDBIcon));
     expect(html).toContain('viewBox="0 0 24 24"');
     expect(html).toContain('fill="none"');
+  });
+
+  test("DatabendIcon is a stroked mark on the house 24-unit grid, drawn for Studio", () => {
+    // A warehouse drawn for Studio, never Databend's logo.
+    const html = renderToStaticMarkup(React.createElement(DatabendIcon));
+    expect(html).toContain('viewBox="0 0 24 24"');
+    expect(html).toContain('fill="none"');
+    expect(html).toContain('stroke="currentColor"');
   });
 });

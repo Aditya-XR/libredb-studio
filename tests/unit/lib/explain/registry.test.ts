@@ -19,6 +19,7 @@ const EVERY_FORMAT: Record<ExplainFormat, true> = {
   "druid-native": true,
   "trino-json": true,
   "duckdb-json": true,
+  "databend-text": true,
 };
 
 /**

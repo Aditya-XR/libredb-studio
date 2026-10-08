@@ -734,8 +734,12 @@ export const BottomPanel = React.memo(function BottomPanel({
                   className="mb-2 h-8 w-8 text-destructive opacity-50"
                 />
                 <p className="text-xs font-medium text-destructive">The query failed.</p>
+                {/*
+                  Left-aligned inside the centred block: an engine's message can span lines with a caret under
+                  the failing name, and centring each line on its own moves the caret off its column.
+                */}
                 <p
-                  className="mt-1 max-w-xl break-words whitespace-pre-wrap font-mono text-xs text-destructive"
+                  className="mt-1 max-w-xl break-words whitespace-pre-wrap text-left font-mono text-xs text-destructive"
                   data-testid="run-failure-message"
                 >
                   {runError}

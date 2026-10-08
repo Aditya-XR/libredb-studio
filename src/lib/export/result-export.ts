@@ -180,6 +180,10 @@ const DIALECT_TYPES: Partial<Record<DatabaseType, Partial<Record<InferredKind, s
   // undefined name`, while BIGINT, DOUBLE PRECISION, BOOLEAN, TIMESTAMP and BLOB are whole types.
   // CLOB, the unbounded character type, rather than a VARCHAR whose bound a cell could pass (#786).
   db2: { text: "CLOB" },
+  // Databend's measured spellings (design 7.2, X01): M08a created `VARCHAR`, `DOUBLE` and `BINARY` columns on the
+  // pinned image and M08c read them back as `String`, `Float64` and `Binary`, unbounded. The standard `TEXT`,
+  // `DOUBLE PRECISION` and `BLOB` were not measured there. `BIGINT`, `BOOLEAN` and `TIMESTAMP` were, as they are.
+  databend: { text: "VARCHAR", numeric: "DOUBLE", binary: "BINARY" },
   oracle: {
     text: "VARCHAR2(4000)",
     integer: "NUMBER(19)",
@@ -571,6 +575,9 @@ const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
   influxdb3: NOTHING_STANDS_ALONE,
   // Oxia has no statement form for an export.
   oxia: NOTHING_STANDS_ALONE,
+  // Measured by M08a and M08c on the pinned image: each was created and read back unbounded (`String`, `Timestamp`
+  // with microseconds, `Binary`). Every other bare name is re-spelled from its family (design 7.2, X01).
+  databend: ["varchar", "timestamp", "binary"],
 };
 
 /**
@@ -584,6 +591,9 @@ const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
  * which `bit(64)`, MySQL's widest, takes for every width. MySQL's bare `datetime`,
  * `timestamp` and `time` have fractional precision 0, which ROUNDS a `.999` replayed into
  * them up to the next second, so they are written at precision 6.
+ *
+ * Databend has no row (design 7.2, X01): its `Timestamp` keeps microseconds without a precision and its `Decimal`
+ * always carries its own, so no bare name it reports narrows the value its INSERT writes back.
  */
 const DIALECT_BARE_SPELLING: Partial<Record<DatabaseType, Readonly<Record<string, string>>>> = {
   postgres: { bit: "bit varying" },
@@ -597,6 +607,10 @@ const DIALECT_BARE_SPELLING: Partial<Record<DatabaseType, Readonly<Record<string
  * The Cassandra driver reports a nested collection without its `frozen<...>` (measured on
  * 5.0.9: a `list<frozen<list<int>>>` column is declared `list<list<int>>`), and CQL refuses
  * that spelling: `Non-frozen collections are not allowed inside collections`.
+ *
+ * Databend has no row (design 7.2, X01): its declared types are written as its query schema spells them
+ * (`Nullable(Array(Int32 NULL))`), and the every-type replay of the provider's local pass is what proves or refutes
+ * that spelling in a CREATE TABLE.
  */
 const DECLARED_TYPE_REWRITE: Partial<Record<DatabaseType, (declared: string) => string>> = {
   cassandra: cqlFrozenNested,
@@ -785,6 +799,10 @@ const BINARY_LITERAL: Record<DatabaseType, BinaryLiteral> = {
   // zero-length blob (`octet_length` 0). `0x0102` is a parser error here.
   duckdb: "unhex",
   clickhouse: "unhex",
+  // Databend reads a quoted string into BINARY through `binary_input_format`, utf-8 by default, so the standard
+  // `X'…'` was not its measured spelling: M08b inserted `unhex('00ff10')` on the pinned image and M08c read back the
+  // three bytes as `00FF10` (design 7.2, X01).
+  databend: "unhex",
   couchbase: "text",
 };
 
@@ -987,7 +1005,9 @@ function oracleZonedTextLiteral(text: string): string | undefined {
  * infinities are quoted text anyway); SQLite reads `9e999` and `-9e999` as its
  * infinities in a `REAL` column, where a quoted `'Infinity'` is stored as TEXT, and has
  * no NaN at all (it stores one as NULL); Oracle AI Database 23.26.3 reads its own
- * constants into `BINARY_DOUBLE` and `BINARY_FLOAT`. Every other dialect, which either
+ * constants into `BINARY_DOUBLE` and `BINARY_FLOAT`; Databend (M08b, on the pinned image) inserted
+ * `'NaN'::FLOAT`, `'inf'::DOUBLE` and `'-inf'::FLOAT` into its `FLOAT` and `DOUBLE` columns and read back NaN,
+ * Infinity and -Infinity. Every other dialect, which either
  * cannot store these values or was not replayed, keeps writing NULL.
  */
 const NON_FINITE_LITERALS: Partial<Record<DatabaseType, Readonly<Record<NonFiniteWord, string>>>> = {
@@ -995,6 +1015,7 @@ const NON_FINITE_LITERALS: Partial<Record<DatabaseType, Readonly<Record<NonFinit
   duckdb: { NaN: "'NaN'", Infinity: "'Infinity'", "-Infinity": "'-Infinity'" },
   sqlite: { NaN: "NULL", Infinity: "9e999", "-Infinity": "-9e999" },
   oracle: { NaN: "BINARY_DOUBLE_NAN", Infinity: "BINARY_DOUBLE_INFINITY", "-Infinity": "-BINARY_DOUBLE_INFINITY" },
+  databend: { NaN: "'NaN'::FLOAT", Infinity: "'inf'::DOUBLE", "-Infinity": "'-inf'::FLOAT" },
 };
 
 function nonFiniteLiteral(word: NonFiniteWord, dialect: DatabaseType | undefined): string {
@@ -1064,11 +1085,14 @@ function sqlValue(
  * literal in the dialect (#1386). One refused statement stops the whole file on replay, so
  * the row is skipped and named instead. The column name is engine output, so it is written
  * as JSON with everything outside printable ASCII replaced: a line break in it would end
- * the comment and put the rest of the name in the file as a statement.
+ * the comment and put the rest of the name in the file as a statement. What the cell holds
+ * can carry engine output too (a Databend type is the server's own text), so it gets the
+ * same replacement.
  */
 function skippedRow(rowIndex: number, column: string, what: string, dialect: DatabaseType | undefined): string {
   const name = JSON.stringify(column).replace(/[^\x20-\x7e]/g, "?");
-  return `-- Row ${rowIndex + 1} skipped: column ${name} holds ${what}, which ${dialect ?? "this dialect"} has no literal for.`;
+  const held = what.replace(/[^\x20-\x7e]/g, "?");
+  return `-- Row ${rowIndex + 1} skipped: column ${name} holds ${held}, which ${dialect ?? "this dialect"} has no literal for.`;
 }
 
 /**

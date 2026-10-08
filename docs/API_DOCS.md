@@ -27,12 +27,12 @@
 
 ## Overview
 
-LibreDB Studio provides a RESTful API for database management operations. The API supports PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant and Oxia.
+LibreDB Studio provides a RESTful API for database management operations. The API supports PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia and Databend.
 
 ### Key Features
 
 - **JWT Authentication** - Secure token-based authentication stored in HTTP-only cookies
-- **Multi-Database Support** - Twenty-six engines: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia
+- **Multi-Database Support** - Twenty-seven engines: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend
 - **AI-Powered Insights** - EXPLAIN explanations, query-safety analysis and schema docs, streamed
 - **Real-time Health Monitoring** - Database metrics and performance insights
 
@@ -808,6 +808,39 @@ carries a plain statement. Four things differ from the other SQL providers:
 - `POST /api/db/cancel` works: cancelling is `DELETE /v1/query/{id}` and abandoning a request does
   **not** stop the work on the cluster.
 - Full reference: [`docs/providers/trino.md`](providers/trino.md).
+
+---
+
+##### Databend Query Format
+
+Databend speaks SQL over its own HTTP query API (`POST /v1/query`, port `8000` by default), so the `sql` field carries a plain statement.
+Four things differ from the other SQL providers:
+
+- **`database` is the default database** of every statement, and a statement may still name any other database in full.
+  `warehouse` names the compute every statement runs on, sent as the `X-DATABEND-WAREHOUSE` header; Databend Cloud requires one and resumes a suspended warehouse on the first statement, billing while it runs.
+- **A password needs TLS.** It travels in a Basic `Authorization` header on every request, so a connection with a password and no SSL mode to a host that is not this machine, and not reached through an SSH tunnel, is refused before any socket unless it sets `allowInsecureAuth`.
+- **No positional parameters.** A request carrying `params` is refused with "Databend's HTTP API takes no bound parameters from Studio; write the value in the statement."
+- **Each statement runs in its own session.** A transaction or a temporary table a statement leaves open ends with it: Studio rolls the transaction back and the response carries a `warning` saying so.
+
+```json
+{
+  "connection": {
+    "type": "databend",
+    "host": "localhost",
+    "port": 8000,
+    "user": "libredb",
+    "database": "libredb_demo"
+  },
+  "sql": "SELECT number, number * 2 AS doubled FROM numbers(3)"
+}
+```
+
+**Notes:**
+- `columnTypes` are Databend's declared type strings verbatim, such as `UInt64` or `Nullable(String)`; an integer past 2^53 and every decimal, date and timestamp value arrive as the server's text.
+- A duplicate output name is disambiguated rather than dropped: `fields` carries `id` and `id (2)`.
+- `POST /api/db/maintenance` accepts `kill` only, and its target is a session id from the Sessions panel (`system.processes.id`), not a query id, which `KILL QUERY` refuses with 1053; the answer's `message` names the session whose current statement Databend was asked to stop.
+- `POST /api/db/cancel` works: cancelling a running statement sends the server a kill for it.
+- Full reference: [`docs/providers/databend.md`](providers/databend.md).
 
 ---
 
@@ -2039,7 +2072,7 @@ The object is one shape on the wire. Fields the server reads from a request body
 change how a connection is opened — are the coordinates and credentials (`id`, `name`, `type`,
 `host`, `port`, `user`, `password`, `database`, `schema`, `connectionString`), plus `ssl`,
 `sshTunnel`, `serviceName` (Oracle), `instanceName` (MSSQL), `localDataCenter` (Cassandra),
-`authSource` (MongoDB), `saslMechanism` (Kafka), `allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia), `dataServers` (Oxia), `queryTimeout`, `agentUser`, `agentPassword`, `apiKeyId`/`apiKeySecret`
+`authSource` (MongoDB), `saslMechanism` (Kafka), `allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia, Databend), `dataServers` (Oxia), `warehouse` (Databend), `queryTimeout`, `agentUser`, `agentPassword`, `apiKeyId`/`apiKeySecret`
 (Elasticsearch, #708), and `readOnly` (#1089). `color`, `environment`, `group`,
 `managed`, `seedId`, and `createdAt` are client-side bookkeeping that travel in the same object.
 
@@ -2067,8 +2100,9 @@ interface DatabaseConnection {
   localDataCenter?: string; // Cassandra only, and REQUIRED there: the driver refuses to connect without it (`datacenter1` on a stock single node)
   authSource?: string; // MongoDB only: the database the credentials live in (`?authSource=admin`). Not the database being opened - without it the driver checks the user against that one, which fails as a credentials error
   saslMechanism?: 'PLAIN' | 'SCRAM-SHA-256' | 'SCRAM-SHA-512'; // Kafka only: the SASL mechanism that checks user and password, absent meaning none. A user or password with no mechanism is refused, and every mechanism requires TLS
-  allowInsecureAuth?: boolean; // Db2, both InfluxDB types and Oxia (#786): connect with no TLS although the password (Db2), the password or token (InfluxDB) or the token (Oxia) then crosses the network in cleartext; without it the Db2 provider refuses a connection that has no TLS, both InfluxDB providers one that sends its secret with no TLS to a host that is not loopback, and the Oxia provider one that sends a token with no TLS to a host that is not this machine (docs/providers/oxia.md section 4.6)
+  allowInsecureAuth?: boolean; // Db2, both InfluxDB types, Oxia and Databend (#786): connect with no TLS although the password (Db2, Databend), the password or token (InfluxDB) or the token (Oxia) then crosses the network in cleartext; without it the Db2 provider refuses a connection that has no TLS, both InfluxDB providers one that sends its secret with no TLS to a host that is not loopback, the Oxia provider one that sends a token with no TLS to a host that is not this machine (docs/providers/oxia.md section 4.6), and the Databend provider one that sends its password with no TLS to a host that is not loopback
   dataServers?: string; // Oxia only: a cluster's data-server addresses, host:port entries separated by commas or whitespace, at most 64; see docs/providers/oxia.md section 4.4
+  warehouse?: string;   // Databend only: the warehouse every statement runs on, sent as the X-DATABEND-WAREHOUSE header; Databend Cloud requires one (the warehouse= value of its DSN) and resumes a suspended one on the first statement, billing while it runs. Not a secret
   skipObjectScan?: boolean; // read no catalog when this connection opens: zero reads on connect, so the editor is usable immediately and the object tree offers a load action instead of scanning (#765, an Oracle owner with 43,512 tables froze the browser on connect)
   readOnly?: boolean;      // refuse writes, value edits and maintenance before any request (#1089). Accepted only where the engine's provider enforces it: true anywhere else is refused at seed load and before any provider is built, and a value that is not a boolean is refused everywhere
   managed?: boolean;       // true = admin-controlled: not editable in the UI, secrets kept on the server
@@ -2079,7 +2113,7 @@ interface DatabaseConnection {
   apiKeySecret?: string;   // the pair's secret half; either alone (after trim) falls back to user/password rather than sending a key built from an empty half
 }
 
-type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia';
+type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend';
 type ConnectionEnvironment = 'production' | 'staging' | 'development' | 'local' | 'other';
 ```
 

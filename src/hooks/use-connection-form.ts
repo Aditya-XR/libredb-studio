@@ -13,8 +13,8 @@ import {
   type QueryWarning,
 } from "@/lib/types";
 import { describeWarning } from "@/components/results-grid/utils";
-import { getDBConfig, hostUriSchemes, offersSshTunnel } from "@/lib/db-ui-config";
-import { parseConnectionString } from "@/lib/connection-string-parser";
+import { connectionFieldRefusal, getDBConfig, hostUriSchemes, offersSshTunnel } from "@/lib/db-ui-config";
+import { databendNotAppliedNotice, parseConnectionString } from "@/lib/connection-string-parser";
 import { parseHostUri, tlsModeAfterScheme, type HostUriResult } from "@/lib/connection-host-uri";
 import { newLocalId } from "@/lib/ids";
 import { READ_ONLY_ENFORCED } from "@/lib/db/compatibility";
@@ -81,6 +81,8 @@ const FIELD_OWNERSHIP: Record<keyof DatabaseConnection, FieldOwnership> = {
   // The text box owns it, so emptying it has to CLEAR it: `preserved` would keep sending the token to servers the
   // user took off the list.
   dataServers: "edited",
+  // Databend's Warehouse box owns it, so emptying it has to CLEAR it, as dataServers.
+  warehouse: "edited",
   group: "preserved",
   managed: "preserved",
   seedId: "preserved",
@@ -186,6 +188,8 @@ export const CONNECTION_FORM_DEFAULTS = {
   allowInsecureAuth: false,
   // A leftover list would let the next connection's token follow the previous cluster's addresses.
   dataServers: "",
+  // A leftover warehouse would resume, and bill, the previous connection's compute for the next one.
+  warehouse: "",
   // SSH tunnel. A leftover tunnel sends the next connection through the previous one's
   // bastion, with that bastion's password or private key.
   showSSH: false,
@@ -380,6 +384,11 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
    * because the provider trims, parses and refuses it entry by entry.
    */
   const [dataServers, setDataServers] = useState(D.dataServers);
+  /**
+   * Databend's warehouse, as typed. Drawn only for an engine that takes the field; stored as typed, because the
+   * provider checks it and names the field when it refuses it.
+   */
+  const [warehouse, setWarehouse] = useState(D.warehouse);
 
   // SSH Tunnel
   const [showSSH, setShowSSH] = useState(D.showSSH);
@@ -429,6 +438,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       readOnly: setReadOnly,
       allowInsecureAuth: setAllowInsecureAuth,
       dataServers: setDataServers,
+      warehouse: setWarehouse,
       showSSH: setShowSSH,
       sshEnabled: setSSHEnabled,
       sshHost: setSSHHost,
@@ -538,6 +548,9 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       // Overwritten for the same reason: a connection that lists no data servers must show an empty box, or the last
       // one edited is saved onto it.
       setDataServers(editConnection.dataServers ?? "");
+      // Overwritten for the same reason: a connection that names no warehouse must show an empty box, or the last one
+      // edited is saved onto it.
+      setWarehouse(editConnection.warehouse ?? "");
       // SSL
       if (editConnection.ssl) {
         setSSLMode(editConnection.ssl.mode);
@@ -760,6 +773,8 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       // Only for an engine that takes it, and only when something is typed: a list left over from a type switch is
       // not sent, and an empty box writes no key. Stored as typed; the provider trims and parses.
       ...(addressedFields.has("dataServers") && dataServers.trim() !== "" ? { dataServers } : {}),
+      // The dataServers rule: only for an engine that takes it, and only when something is typed.
+      ...(addressedFields.has("warehouse") && warehouse.trim() !== "" ? { warehouse } : {}),
     };
   }, [
     sslMode,
@@ -798,6 +813,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     readOnly,
     allowInsecureAuth,
     dataServers,
+    warehouse,
   ]);
 
   /**
@@ -844,8 +860,19 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     return false;
   }, [type, host, showHostRefusal]);
 
+  /**
+   * The engine's declared field checks (`fieldRules`), run on the connection as it would be sent, so the value
+   * judged is the value written; the refusal names the field and never the value, as the timeout's does.
+   */
+  const validateFieldRules = useCallback(() => {
+    const refusal = connectionFieldRefusal(getDBConfig(type), buildConnection());
+    if (refusal === undefined) return true;
+    setTestResult({ tone: "error", message: refusal });
+    return false;
+  }, [type, buildConnection]);
+
   const handleTestConnection = useCallback(async () => {
-    if (!validateQueryTimeout() || !validateHostAddress()) return;
+    if (!validateQueryTimeout() || !validateHostAddress() || !validateFieldRules()) return;
     setIsTesting(true);
     setTestResult(null);
 
@@ -871,10 +898,10 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     } finally {
       setIsTesting(false);
     }
-  }, [buildConnection, probeConnection, validateQueryTimeout, validateHostAddress]);
+  }, [buildConnection, probeConnection, validateQueryTimeout, validateHostAddress, validateFieldRules]);
 
   const handleConnect = useCallback(async () => {
-    if (!validateQueryTimeout() || !validateHostAddress()) return;
+    if (!validateQueryTimeout() || !validateHostAddress() || !validateFieldRules()) return;
     setIsTesting(true);
     setTestResult(null);
 
@@ -957,6 +984,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     resetConnectionFields,
     validateQueryTimeout,
     validateHostAddress,
+    validateFieldRules,
   ]);
 
   const handlePasteConnectionString = useCallback(() => {
@@ -976,8 +1004,14 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
         // they are FILE-based, `showConnectionStringToggle` is false for all three, so
         // this control is never rendered for them and no scheme is being withheld.
         message:
-          "Could not parse connection string. Supported formats: postgres://, mysql://, mongodb://, couchbase://, clickhouse://, libsql://, http(s)://, redis://, oracle://, mssql://, db2://",
+          "Could not parse connection string. Supported formats: postgres://, mysql://, mongodb://, couchbase://, clickhouse://, libsql://, http(s)://, redis://, oracle://, mssql://, db2://, databend://",
       });
+      return;
+    }
+    // A spelling the parser refuses as a whole (a Databend Flight SQL or JDBC URL, a DSN holding a #, a sign-in holding
+    // a / or ?) applies nothing, its type included, and the paste stays open with its text so it can be corrected.
+    if (parsed.refusal) {
+      setTestResult({ tone: "error", message: parsed.refusal });
       return;
     }
 
@@ -992,6 +1026,12 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     if (parsed.user) setUser(parsed.user);
     if (parsed.password) setPassword(parsed.password);
     if (parsed.database) setDatabase(parsed.database);
+    // A paste that names a server names its warehouse too, or none: a leftover one would go to the new host and
+    // resume, and bill, the previous DSN's compute there.
+    if (parsed.host) setWarehouse(parsed.warehouse ?? "");
+    // A Databend paste names no consent to a cleartext password, so it clears one left ticked for another host; a
+    // parse that says nothing of it leaves it as it was, db2:// among them, the one other paste whose form shows it.
+    if (parsed.allowInsecureAuth !== undefined) setAllowInsecureAuth(parsed.allowInsecureAuth);
     // A scheme that IS the transport (https:// for ClickHouse) carries TLS that no
     // field can express. Without this the form keeps its "disable" default and the
     // connection goes out as plaintext HTTP to a TLS port.
@@ -1065,9 +1105,22 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       });
       return;
     }
+    // A Databend paste: the parameters it did not apply, named and never valued, then the TLS parameters it read and
+    // did not apply in Databend's own words, then a notice on what an applied one means.
+    if (parsed.ignoredParameters || parsed.cautions) {
+      const message = [
+        parsed.ignoredParameters ? databendNotAppliedNotice(parsed.ignoredParameters) : undefined,
+        ...(parsed.cautions ?? []),
+        parsed.notice,
+      ].filter(Boolean);
+      setTestResult({ tone: "warning", message: message.join(" ") });
+      return;
+    }
     setTestResult({
       tone: "success",
-      message: "Connection string parsed successfully. Review the fields and connect.",
+      message: ["Connection string parsed successfully. Review the fields and connect.", parsed.notice]
+        .filter(Boolean)
+        .join(" "),
     });
   }, [pasteInput, name, sslMode]);
 
@@ -1102,6 +1155,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     "influxdb",
     "influxdb3",
     "oxia",
+    "databend",
   ];
   const dbTypes = selectableTypes.map((t) => {
     const cfg = getDBConfig(t);
@@ -1194,6 +1248,8 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     setAllowInsecureAuth,
     dataServers,
     setDataServers,
+    warehouse,
+    setWarehouse,
 
     // SSH Tunnel
     showSSH,

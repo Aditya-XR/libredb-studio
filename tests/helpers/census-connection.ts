@@ -90,5 +90,8 @@ export const CENSUS_CONNECTION: Readonly<Record<DatabaseType, DatabaseConnection
   influxdb3: unconnected("influxdb3"),
   // No field beyond UNCONNECTED (SB3-1.3): the constructor validates nothing and opens nothing; the fields are read at connect, which no census reaches.
   oxia: unconnected("oxia"),
+  // No field beyond UNCONNECTED (design 2.3): the constructor never dials or throws, and the connection's rules,
+  // Warehouse's among them, run in connect(), which no census reaches.
+  databend: unconnected("databend"),
   libredb: unconnected("libredb"),
 });

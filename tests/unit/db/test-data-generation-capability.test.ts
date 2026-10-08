@@ -45,6 +45,8 @@ const OFFERED: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   influxdb: false,
   influxdb3: false,
   oxia: false,
+  // No test data (design 2.4).
+  databend: false,
 });
 
 const TYPES = Object.keys(OFFERED) as DatabaseType[];

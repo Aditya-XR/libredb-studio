@@ -8,9 +8,9 @@ import { LAUNCH_E2E_ENV } from "./e2e/helpers/launch-token";
 const port = Number(process.env.E2E_PORT ?? 3000);
 
 // offline-editor.spec.ts, the kafka, etcd, neo4j, milvus and qdrant provider specs, the influxdb
-// providers spec and the oxia provider spec get a second server process on its own port - see the
-// projects and the webServer array below for why. Override with E2E_OFFLINE_PORT under the same
-// collision circumstances as E2E_PORT.
+// providers spec and the oxia and databend provider specs get a second server process on its own
+// port - see the projects and the webServer array below for why. Override with E2E_OFFLINE_PORT
+// under the same collision circumstances as E2E_PORT.
 const offlinePort = Number(process.env.E2E_OFFLINE_PORT ?? 3010);
 
 // passkey.spec.ts gets a third server process: see the chromium-passkey project for why.
@@ -57,10 +57,10 @@ export default defineConfig({
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
       // offline-editor.spec.ts, the kafka, etcd, neo4j, milvus and qdrant provider specs, the influxdb providers
-      // spec and the oxia provider spec run under their own projects below, against the second server,
-      // passkey.spec.ts against the third and launch.spec.ts against the fourth.
+      // spec and the oxia and databend provider specs run under their own projects below, against the second
+      // server, passkey.spec.ts against the third and launch.spec.ts against the fourth.
       testIgnore:
-        /(?:offline-editor|base-path|kafka-provider|etcd-provider|neo4j-provider|milvus-provider|qdrant-provider|influxdb-providers|oxia-provider|passkey|launch)\.spec\.ts/,
+        /(?:offline-editor|base-path|kafka-provider|etcd-provider|neo4j-provider|milvus-provider|qdrant-provider|influxdb-providers|oxia-provider|databend-provider|passkey|launch)\.spec\.ts/,
     },
     {
       // Every other spec in this suite signs in as the same shared user@libredb.org account
@@ -130,6 +130,15 @@ export default defineConfig({
       name: "chromium-oxia",
       use: { ...devices["Desktop Chrome"], baseURL: `http://localhost:${offlinePort}` },
       testMatch: /oxia-provider\.spec\.ts/,
+    },
+    {
+      // databend-provider.spec.ts reaches no Databend, but each of its seven tests signs in and opens the
+      // connection dialog, which spends the shared account's "query" bucket: in a full local run on 2026-10-08
+      // three specs after it on the shared server read "Too many requests. Try again in 46 seconds.", so it
+      // takes the second server for the reason kafka-provider.spec.ts does.
+      name: "chromium-databend",
+      use: { ...devices["Desktop Chrome"], baseURL: `http://localhost:${offlinePort}` },
+      testMatch: /databend-provider\.spec\.ts/,
     },
     {
       // Passkeys need an account registry, so this server runs in store mode (STORAGE_PROVIDER=sqlite)

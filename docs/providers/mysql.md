@@ -375,7 +375,12 @@ their tables (49 under `system`) and views, a table expands to its columns and o
 storage statistics answer, and an inline edit of a `VARCHAR` to `it's \ edited` was saved and read
 back exactly. Through the provider, a value holding all nine characters above round-tripped through an
 `INSERT`, an `UPDATE ... WHERE name = ?` (one row matched) and a read. What stays unavailable there is
-the engine's: see [README.md](./README.md#wire-compatible-engines).
+the engine's: no `information_schema.ROUTINES`, `TRIGGERS` or `EVENTS`, no `SHOW STATUS`, no
+`information_schema.processlist` or `performance_schema`, no index statistics, no foreign keys, and no
+transaction state in the status flags ([§6.0.1](#601-servers-that-report-no-transaction-state)).
+Databend is no longer a relative of this provider: it ships as the `databend` type-id over its own HTTP
+query API ([databend.md](./databend.md)), and these measurements stay as the record of what its MySQL
+handler answers a `mysql` connection.
 
 ### 3.5 No server-side query timeout
 
@@ -2003,11 +2008,11 @@ and the missing threshold are stated at
 [`HEALTH_SLOW_QUERY_LIMIT`](../../src/lib/db/providers/sql/mysql.ts) and pinned by a test that reads
 the statement the health call actually issued.
 
-**Sibling engines.** All nine MySQL-protocol engines in
+**Sibling engines.** All eight MySQL-protocol engines in
 [`compatibility.ts`](../../src/lib/db/compatibility.ts) — MariaDB, Percona Server for MySQL, TiDB,
-StarRocks, Apache Doris, Databend, Vitess, OceanBase, SingleStore — reach this exact code, so every
+StarRocks, Apache Doris, Vitess, OceanBase, SingleStore — reach this exact code, so every
 one of them showed the sentence and none of them shows it now. MariaDB and Percona are the two
-measured above; on the other seven the health line now carries whatever their own
+measured above; on the other six the health line now carries whatever their own
 `performance_schema.events_statements_summary_by_digest` publishes for the connected schema, and an
 empty list where it publishes nothing or the table cannot be read. OceanBase is the one whose reading
 changes shape without changing meaning: its tenants have no `performance_schema` database at all

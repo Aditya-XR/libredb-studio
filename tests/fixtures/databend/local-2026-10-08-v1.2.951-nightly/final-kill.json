@@ -1,0 +1,248 @@
+{
+  "scenario": "final-kill",
+  "principal": "default",
+  "clientSession": false,
+  "exchanges": [
+    {
+      "step": "query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/query",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "sql": "SELECT number FROM numbers(25) ORDER BY number",
+          "pagination": {
+            "wait_time_secs": 10,
+            "max_rows_per_page": 10
+          }
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-20>",
+          "x-databend-query-state": "Running",
+          "x-databend-query-page-rows": "10",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-20>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Running",
+          "session": {
+            "catalog": "default",
+            "database": "default",
+            "role": "account_admin",
+            "settings": {},
+            "txn_state": "AutoCommit",
+            "need_sticky": false,
+            "need_keep_alive": false,
+            "internal": "{\"last_node_id\":\"<node-1>\",\"last_query_ids\":[\"<query-20>\"]}"
+          },
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "number",
+              "type": "UInt64"
+            }
+          ],
+          "data": [
+            [
+              "0"
+            ],
+            [
+              "1"
+            ],
+            [
+              "2"
+            ],
+            [
+              "3"
+            ],
+            [
+              "4"
+            ],
+            [
+              "5"
+            ],
+            [
+              "6"
+            ],
+            [
+              "7"
+            ],
+            [
+              "8"
+            ],
+            [
+              "9"
+            ]
+          ],
+          "affect": null,
+          "result_timeout_secs": 60,
+          "settings": {
+            "timezone": "UTC",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 25,
+              "bytes": 200
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 25,
+              "bytes": 200
+            },
+            "total_scan": {
+              "rows": 25,
+              "bytes": 200
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 2
+          },
+          "stats_uri": "/v1/query/<query-20>",
+          "final_uri": "/v1/query/<query-20>/final",
+          "next_uri": "/v1/query/<query-20>/page/1",
+          "kill_uri": "/v1/query/<query-20>/kill"
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "final",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-20>/final",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-query-id": "<query-20>",
+          "x-databend-query-state": "Succeeded",
+          "x-databend-query-page-rows": "0",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "id": "<query-20>",
+          "session_id": "",
+          "node_id": "<node-1>",
+          "state": "Succeeded",
+          "session": null,
+          "error": null,
+          "warnings": [],
+          "has_result_set": true,
+          "schema": [
+            {
+              "name": "number",
+              "type": "UInt64"
+            }
+          ],
+          "data": [],
+          "affect": null,
+          "result_timeout_secs": 60,
+          "settings": {
+            "timezone": "UTC",
+            "geometry_output_format": "GEOJSON",
+            "binary_output_format": "HEX",
+            "http_json_result_mode": "display"
+          },
+          "stats": {
+            "scan_progress": {
+              "rows": 25,
+              "bytes": 200
+            },
+            "write_progress": {
+              "rows": 0,
+              "bytes": 0
+            },
+            "result_progress": {
+              "rows": 25,
+              "bytes": 200
+            },
+            "total_scan": {
+              "rows": 25,
+              "bytes": 200
+            },
+            "spill_progress": {
+              "file_nums": 0,
+              "bytes": 0
+            },
+            "running_time_ms": 2
+          },
+          "stats_uri": "/v1/query/<query-20>",
+          "final_uri": "/v1/query/<query-20>/final",
+          "next_uri": null,
+          "kill_uri": "/v1/query/<query-20>/kill"
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "next",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-20>/page/1",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "error": {
+            "code": 400,
+            "message": "Query <query-20> is closed for finalized"
+          }
+        },
+        "dropped": []
+      }
+    },
+    {
+      "step": "kill",
+      "request": {
+        "method": "GET",
+        "path": "/v1/query/<query-20>/kill",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "dropped": []
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "x-databend-version": "1.2.951-nightly"
+        },
+        "body": {
+          "text": ""
+        },
+        "dropped": []
+      }
+    }
+  ]
+}

@@ -19,7 +19,7 @@ Three decisions. The first is the consequential one, which is why it is first.
 
 1. **Does it need a driver at all?** Score the engine against the rubric below. A database with a
    first-class HTTP API can be supported with no dependency at all, and that is worth real effort to
-   establish before you start. Twelve shipped type-ids need no driver: SQLite uses the built-in
+   establish before you start. Thirteen shipped type-ids need no driver: SQLite uses the built-in
    `bun:sqlite`/`node:sqlite` via `sqlite-driver.ts`, and the rest reach the engine over HTTP with
    nothing but `fetch`/`node:https`. Couchbase goes over the documented REST endpoints
    ([couchbase.md](./providers/couchbase.md)), ClickHouse over its HTTP interface
@@ -29,8 +29,9 @@ Three decisions. The first is the consequential one, which is why it is first.
    Trino over its own client protocol ([trino.md](./providers/trino.md)), libSQL over the
    Hrana protocol, `POST /v2/pipeline` ([libsql.md](./providers/libsql.md)), Prometheus over its
    HTTP API, `/api/v1/*` ([prometheus.md](./providers/prometheus.md)), Qdrant over its REST API
-   ([qdrant.md](./providers/qdrant.md)), and InfluxDB and InfluxDB 3 over the v1 `/query` API and
-   `/api/v3/query_sql` ([influxdb.md](./providers/influxdb.md) · [influxdb3.md](./providers/influxdb3.md)).
+   ([qdrant.md](./providers/qdrant.md)), InfluxDB and InfluxDB 3 over the v1 `/query` API and
+   `/api/v3/query_sql` ([influxdb.md](./providers/influxdb.md) · [influxdb3.md](./providers/influxdb3.md)),
+   and Databend over its own HTTP query API, `POST /v1/query` ([databend.md](./providers/databend.md)).
    If it does need one, it will be something like `pg`, `mysql2`, `mongodb`, `ioredis`, `oracledb`,
    `mssql` or `db2-node`.
 
@@ -228,10 +229,10 @@ The Memgraph provider is filed as `docs/BACKLOG.md` D141.
 
 ```typescript
 // Before:
-export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia';
+export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend';
 
 // After (example: adding CockroachDB):
-export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'cockroachdb';
+export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 'cockroachdb';
 ```
 
 A type-id may contain a digit: `db2` does.
@@ -873,7 +874,7 @@ For the authoritative, code-verified reference for each shipped provider (extend
 driver, pooling, capabilities, labels, `prepareQuery` behaviour, and limitations), see the prime
 docs — they are the single source of truth and are kept in sync with the code:
 
-**[docs/providers/](./providers/README.md)** → postgres · mysql · oracle · db2 · mssql · sqlite · libsql · duckdb · redis · mongodb · couchbase · clickhouse · druid · elasticsearch · opensearch · trino · cassandra · prometheus · influxdb · influxdb3 · kafka · etcd · neo4j · milvus · qdrant · oxia · libredb
+**[docs/providers/](./providers/README.md)** → postgres · mysql · oracle · db2 · mssql · sqlite · libsql · duckdb · redis · mongodb · couchbase · clickhouse · druid · elasticsearch · opensearch · trino · cassandra · prometheus · influxdb · influxdb3 · kafka · etcd · neo4j · milvus · qdrant · oxia · databend · libredb
 
 When implementing a new provider, the closest existing analogue is the best template: a pooled SQL
 provider (postgres/mysql), an embedded SQL provider (sqlite), a non-SQL provider (mongodb/redis), a
@@ -994,8 +995,8 @@ The integration points, all of which need an entry. This is the list the Strateg
       published engine count silently undercount; it is listed here because the count in `README.md`
       and `docs/BRAND_MESSAGING.md` is derived from it and has to move in the same PR
 - [ ] `package.json` — the driver, **if** it needs one. A driver-free provider leaves it untouched, and
-      fourteen shipped ids do: `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`,
-      `libsql`, `sqlite`, `prometheus`, `qdrant`, `milvus`, `influxdb`, `influxdb3` and `oxia`
+      fifteen shipped ids do: `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`,
+      `libsql`, `sqlite`, `prometheus`, `qdrant`, `milvus`, `influxdb`, `influxdb3`, `oxia` and `databend`
       each add nothing here (`milvus` and `oxia` only extend the `//dependencies` note)
 - [ ] `database-compose.yml` — a service, so the next person can repeat the live pass. A distributed
       engine contributes a `profiles: [...]` set instead, as Druid's seven services do, so the default
@@ -1140,8 +1141,8 @@ Run them before the first edit and again before the commit, and re-derive each h
 
 ```bash
 OUT=(docs CLAUDE.md CONTRIBUTING.md 'README*.md' DOCKERHUB.md snap packaging desktop deploy charts/libredb-studio operator/config e2e ':!docs/BACKLOG.md' ':!docs/llms')
-git grep -n -I -i -E '\b(eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty[- ](one|two|three|four|five|six|seven|eight|nine)|forty[- ](four|five|six|seven|eight|nine)|fifty|fifty[- ](one|two|three|four))\b|\b(1[0-9]|2[0-9]|4[0-9]|5[0-4]) (database backends|database engines|engines|type-ids|providers|drivers)\b|十[七八九]|二十[一二三四五六七八]?|四十[四五六七八九]|五十[一二三四]?|Diecisiete|Dieciocho|Diecinueve|Veinte|veinte|veintiuno|veintidós|veintitrés|veinticinco|veintiséis|veintisiete|veintiocho|cincuenta y (tres|cuatro)|1[789]の|2[0-7]の|सत्रह|अठारह|उन्नीस|बीस|इक्कीस|बाईस|तेईस|पच्चीस|छब्बीस|सत्ताईस|سترہ|اٹھارہ|انیس|بیس|اکیس|بائیس|تئیس|پچیس|چھبیس|ستائیس|Dezoito|Dezenove|Vinte|vinte e (um|dois|três|cinco|seis|sete)|cinquenta e (três|quatro)|Восемнадцат|Девятнадцат|Двадцат|пятьдесят (три|четыре)' -- "${OUT[@]}"   # G1
-git grep -n -I -E 'Oxia|oxia' -- "${OUT[@]}"   # G2, the closest earlier engine (Oxia, for the next provider)
+git grep -n -I -i -E '\b(eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty[- ](one|two|three|four|five|six|seven|eight|nine)|forty[- ](four|five|six|seven|eight|nine)|fifty|fifty[- ](one|two|three|four))\b|\b(1[0-9]|2[0-9]|4[0-9]|5[0-4]) (database backends|database engines|engines|type-ids|providers|drivers)\b|十[七八九]|二十[一二三四五六七八]?|四十[四五六七八九]|五十[一二三四]?|Diecisiete|Dieciocho|Diecinueve|Veinte|veinte|veintiuno|veintidós|veintitrés|veinticinco|veintiséis|veintisiete|veintiocho|cincuenta y (tres|cuatro)|1[789]の|2[0-8]の|सत्रह|अठारह|उन्नीस|बीस|इक्कीस|बाईस|तेईस|पच्चीस|छब्बीस|सत्ताईस|अट्ठाईस|سترہ|اٹھارہ|انیس|بیس|اکیس|بائیس|تئیس|پچیس|چھبیس|ستائیس|اٹھائیس|Dezoito|Dezenove|Vinte|vinte e (um|dois|três|cinco|seis|sete|oito)|cinquenta e (três|quatro)|Восемнадцат|Девятнадцат|Двадцат|пятьдесят (три|четыре)' -- "${OUT[@]}"   # G1
+git grep -n -I -E 'Databend|databend' -- "${OUT[@]}"   # G2, the closest earlier engine (Databend, for the next provider)
 git grep -n -I -i -E 'redis and libredb|redis, libredb|libredb and redis|mongodb and redis|mongodb, redis|redis and mongodb|dialect of (its|their) own|queryDialect' -- "${OUT[@]}"   # G3
 git grep -n -I -E 'Redpanda|redpanda' -- "${OUT[@]}"   # G4, the latest relative
 ```

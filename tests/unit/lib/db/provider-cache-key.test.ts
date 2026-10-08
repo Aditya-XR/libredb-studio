@@ -114,6 +114,17 @@ describe("providerCacheKey frames the data servers a token may be sent to", () =
   });
 });
 
+describe("providerCacheKey frames the Databend warehouse a statement runs on", () => {
+  const databend: DatabaseConnection = { ...base, type: "databend", port: 8000 };
+
+  test("two connections differing only in the warehouse answer different keys", async () => {
+    const analytics = await providerCacheKey({ ...databend, warehouse: "analytics" });
+    expect(analytics).not.toBe(await providerCacheKey({ ...databend, warehouse: "etl" }));
+    expect(analytics).not.toBe(await providerCacheKey(databend));
+    expect(await providerCacheKey({ ...databend, warehouse: "" })).toBe(await providerCacheKey(databend));
+  });
+});
+
 describe("providerCacheKey frames the Elasticsearch API key pair", () => {
   test("two connections differing only in either half, or in having a pair at all, answer different keys", async () => {
     const paired = await providerCacheKey({ ...base, apiKeyId: "key-one", apiKeySecret: "secret-one" });
@@ -213,6 +224,7 @@ describe("providerCacheKey frames every public field that decides who a connecti
     ["authSource", { ...base, authSource: "admin" }, { ...base, authSource: "app" }],
     ["allowInsecureAuth", { ...base, allowInsecureAuth: true }, base],
     ["dataServers", { ...base, dataServers: "a.internal:6648" }, { ...base, dataServers: "b.internal:6648" }],
+    ["warehouse", { ...base, warehouse: "analytics" }, { ...base, warehouse: "etl" }],
     [
       "sshTunnel.authMethod",
       { ...base, sshTunnel: { ...tunnel, authMethod: "privateKey" } },

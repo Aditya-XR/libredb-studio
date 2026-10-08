@@ -3555,6 +3555,16 @@ describe("the identity a held inventory is filed under", () => {
     expect(repointed({ password: "rotated" })).toBe(connectionIdentity(CONNECTION));
   });
 
+  test("a Databend warehouse is the SAME identity, because it picks compute, not the catalog", () => {
+    // Two warehouses of one tenant read the same databases and tables, so a held inventory
+    // stays true across them; the warehouse is not which database this is.
+    const databend: DatabaseConnection = { ...CONNECTION, type: "databend", port: 8000 };
+    expect(connectionIdentity({ ...databend, warehouse: "analytics" })).toBe(
+      connectionIdentity({ ...databend, warehouse: "etl" }),
+    );
+    expect(connectionIdentity({ ...databend, warehouse: "analytics" })).toBe(connectionIdentity(databend));
+  });
+
   test("the identity carries no credential, because a process-lifetime key should not", () => {
     const identity = connectionIdentity({ ...CONNECTION, connectionString: "postgres://u:hunter2@h/db" });
 

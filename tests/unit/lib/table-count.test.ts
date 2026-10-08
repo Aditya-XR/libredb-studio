@@ -92,6 +92,8 @@ const EXPECTED_COUNT: Readonly<Record<DatabaseType, string | null>> = Object.fre
   influxdb3: 'SELECT COUNT(*) AS row_count\nFROM "Order""Items"',
   // One `oxia client` read command (SB2-4.3): the dialect's record withholds the action, and Oxia has no count.
   oxia: null,
+  // `backtick-always` quoting (design 5.1) over the catalog and the database, and no declared terminator, so `;` ends it.
+  databend: 'SELECT COUNT(*) AS row_count\nFROM `c0`.`c1`.`Order"Items`;',
 });
 
 async function censusCapabilities(type: DatabaseType): Promise<ProviderCapabilities> {

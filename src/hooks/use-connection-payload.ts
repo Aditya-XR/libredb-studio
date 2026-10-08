@@ -136,6 +136,9 @@ const CONNECTION_RELEVANCE: Record<keyof DatabaseConnection, FieldRelevance> = {
   // Which addresses a read may reach and the token may be sent to: two copies differing only here reach different
   // servers, so they do not resolve to the same connection.
   dataServers: "resolution",
+  // The warehouse a statement runs on (X21): two copies differing only here reach different compute, so a copy
+  // naming another warehouse does not resolve to the seed's connection, the dataServers reasoning.
+  warehouse: "resolution",
   ssl: "nested",
   sshTunnel: "nested",
 };

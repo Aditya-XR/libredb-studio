@@ -184,16 +184,25 @@ describe("the unions docs/API_DOCS.md inlines in VectorColumn match the publishe
 });
 
 describe("the allowInsecureAuth field names every engine that reads it", () => {
-  test("docs/API_DOCS.md and docs/SEED_CONNECTIONS.md name Db2, both InfluxDB types and Oxia, the types whose form offers the field", () => {
+  test("docs/API_DOCS.md and docs/SEED_CONNECTIONS.md name Db2, both InfluxDB types, Oxia and Databend, the types whose form offers the field", () => {
     const readers = Object.entries(DB_UI_CONFIG)
       .filter(([, config]) => (config.connectionFields as readonly string[] | undefined)?.includes("allowInsecureAuth"))
       .map(([type]) => type);
-    // The control: a fifth type taking the field fails here until both docs name it.
-    expect(readers).toEqual(["db2", "influxdb", "influxdb3", "oxia"]);
-    expect(API_DOCS).toContain("`allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia)");
-    expect(DATA_TYPES).toContain("allowInsecureAuth?: boolean; // Db2, both InfluxDB types and Oxia (#786):");
+    // The control: a sixth type taking the field fails here until both docs name it.
+    expect(readers).toEqual(["db2", "influxdb", "influxdb3", "oxia", "databend"]);
+    expect(API_DOCS).toContain("`allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia, Databend)");
+    expect(DATA_TYPES).toContain("allowInsecureAuth?: boolean; // Db2, both InfluxDB types, Oxia and Databend (#786):");
     expect(read("docs/SEED_CONNECTIONS.md")).toContain(
-      "| `connections[].allowInsecureAuth` | No | absent | Db2, both InfluxDB types and Oxia (#786):",
+      "| `connections[].allowInsecureAuth` | No | absent | Db2, both InfluxDB types, Oxia and Databend (#786):",
     );
+  });
+});
+
+describe("the warehouse field", () => {
+  test("docs/API_DOCS.md names it among the fields the server reads, as Databend's, in the source's field order", () => {
+    expect(API_DOCS).toContain("`dataServers` (Oxia), `warehouse` (Databend)");
+    const fields = topLevelFields(DATA_TYPES, "DatabaseConnection");
+    expect(fields.indexOf("warehouse")).toBe(fields.indexOf("dataServers") + 1);
+    expect(DATA_TYPES).toMatch(/warehouse\?: string; +\/\/ Databend only:/);
   });
 });

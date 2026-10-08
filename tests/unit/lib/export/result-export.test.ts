@@ -5,6 +5,7 @@ import {
   FALLBACK_TABLE_NAME,
   resultExportFileName,
 } from "@/lib/export/result-export";
+import { UnwritableValue } from "@/lib/export/typed-literals";
 
 const source = (over: Partial<Parameters<typeof buildResultExport>[1]> = {}) => ({
   rows: [{ id: 1, name: "Ada" }],
@@ -158,6 +159,8 @@ describe("buildResultExport — sql-insert", () => {
     ["sqlite", "VALUES (NULL, 9e999, -9e999);"],
     ["oracle", "VALUES (BINARY_DOUBLE_NAN, BINARY_DOUBLE_INFINITY, -BINARY_DOUBLE_INFINITY);"],
     ["duckdb", "VALUES ('NaN', 'Infinity', '-Infinity');"],
+    // Databend: the spellings M08b inserted on the pinned image, read back as NaN, inf and -inf.
+    ["databend", "VALUES ('NaN'::FLOAT, 'inf'::DOUBLE, '-inf'::FLOAT);"],
     ["mysql", "VALUES (NULL, NULL, NULL);"],
     ["mssql", "VALUES (NULL, NULL, NULL);"],
     [undefined, "VALUES (NULL, NULL, NULL);"],
@@ -610,6 +613,14 @@ describe("buildResultExport — a binary value in a statement", () => {
     const file = buildResultExport("sql-insert", source({ ...binaryRow(wire), dialect: "db2" }));
 
     expect(file.content).toContain("VALUES (BX'0102deadbeef');");
+  });
+
+  // Databend reads a quoted string into BINARY through `binary_input_format`, utf-8 by default, so `X'…'` is not the
+  // spelling it was measured with: M08b inserted `unhex('00ff10')` and read back the three bytes.
+  test("writes Databend's unhex", () => {
+    const file = buildResultExport("sql-insert", source({ ...binaryRow(wire), dialect: "databend" }));
+
+    expect(file.content).toContain("VALUES (unhex('0102deadbeef'));");
   });
 
   test("writes ClickHouse's unhex", () => {
@@ -1697,6 +1708,65 @@ describe("buildResultExport: a row with a cell the dialect has no literal for (#
       '-- Row 1 skipped: column "a\\nDROP TABLE x; --?" holds an array that is not a list, which trino has no literal for.',
     );
   });
+
+  // The comment cleans what a refusal names on its own, whatever writer raised it. No writer but Databend's names
+  // engine text today, and that one cleans the type first, so a cell that raises the refusal itself, read here by the
+  // Trino writer, stands for the next writer that does.
+  test("cannot let what any writer's refusal names end the comment", () => {
+    const cell = [7];
+    Object.defineProperty(cell, 0, {
+      get() {
+        throw new UnwritableValue("an element\nSELECT 2 AS injected; -- ");
+      },
+    });
+    const content = buildResultExport(
+      "sql-insert",
+      source({ rows: [{ a: cell }], fields: ["a"], dialect: "trino", columnTypes: { a: "array(integer)" } }),
+    ).content;
+
+    expect(content.split("\n")).toHaveLength(1);
+    expect(content).toBe(
+      '-- Row 1 skipped: column "a" holds an element?SELECT 2 AS injected; --?, which trino has no literal for.',
+    );
+  });
+
+  // A Databend type is the server's own text, kept verbatim in `columnTypes`, so a hostile or impersonated endpoint
+  // chooses it, and the comment names a type that has no literal by that text.
+  const plantedType = (end: string) =>
+    buildResultExport(
+      "sql-insert",
+      source({
+        rows: [{ c: "x" }],
+        fields: ["c"],
+        dialect: "databend",
+        columnTypes: { c: `Mystery${end}SELECT 2 AS injected;${end}--` },
+      }),
+    ).content;
+
+  test("cannot let a declared type end the comment", () => {
+    const content = plantedType("\n");
+
+    expect(content.split("\n")).toHaveLength(1);
+    expect(content).toBe(
+      '-- Row 1 skipped: column "c" holds a value of type Mystery?SELECT 2 AS injected;?--, which databend has no literal for.',
+    );
+  });
+
+  // Databend's own lexer ends a `--` comment at a form feed too (`--[^\n\f]*`), and other replaying clients at the rest.
+  test.each<[string, string]>([
+    ["a carriage return", "\r"],
+    ["a carriage return and a line feed", "\r\n"],
+    ["a form feed", "\f"],
+    ["a vertical tab", "\v"],
+    ["a NUL", "\0"],
+    ["a next-line character", "\u0085"],
+    ["a line separator", "\u2028"],
+    ["a paragraph separator", "\u2029"],
+  ])("cannot let a declared type end the comment at %s", (_, end) => {
+    expect(plantedType(end)).toMatch(
+      /^-- Row 1 skipped: column "c" holds a value of type Mystery\?+SELECT [\x20-\x7e]*$/,
+    );
+  });
 });
 
 describe("buildResultExport: the table the producing query read (#1386)", () => {
@@ -1773,5 +1843,69 @@ describe("buildResultExport — markdown and html", () => {
   test("returns text content, never a binary blob", () => {
     expect(typeof buildResultExport("markdown", source()).content).toBe("string");
     expect(typeof buildResultExport("html", source()).content).toBe("string");
+  });
+});
+
+// The four rulings design 7.2 asks of Databend (X01), each from the spellings M08a created and M08c read back on the
+// pinned image. The quote character is the identifier module's, so it is stripped before comparing.
+describe("buildResultExport: Databend's type rulings (X01)", () => {
+  const ddl = (columnTypes: Record<string, string> | undefined, rows: Record<string, unknown>[] = [{ c: null }]) =>
+    buildResultExport(
+      "sql-ddl",
+      source({ rows, fields: Object.keys(rows[0]), dialect: "databend", columnTypes }),
+    ).content.replace(/[`"]/g, "");
+
+  test("DIALECT_TYPES: an inferred column is spelled VARCHAR, DOUBLE and BINARY, the names M08a created", () => {
+    const content = ddl(undefined, [
+      { t: "x", n: 1.5, b: new Uint8Array([1]), i: 7, f: true, d: new Date("2026-10-07T00:00:00Z") },
+    ]);
+    expect(content).toContain("t VARCHAR");
+    expect(content).toContain("n DOUBLE,");
+    expect(content).toContain("b BINARY");
+    expect(content).toContain("i BIGINT");
+    expect(content).toContain("f BOOLEAN");
+    expect(content).toContain("d TIMESTAMP");
+  });
+
+  test("STANDS_ALONE: VARCHAR, TIMESTAMP and BINARY are kept, and a name Databend was not measured with is re-spelled", () => {
+    expect(ddl({ c: "varchar" })).toContain("c varchar");
+    expect(ddl({ c: "Timestamp" })).toContain("c Timestamp");
+    expect(ddl({ c: "Binary" })).toContain("c Binary");
+    expect(ddl({ c: "text" })).toContain("c VARCHAR");
+    expect(ddl({ c: "bytea" })).toContain("c BINARY");
+    expect(ddl({ c: "decimal" })).toContain("c DOUBLE");
+  });
+
+  test("DIALECT_BARE_SPELLING: no row, so a bare datetime is TIMESTAMP and never MySQL's datetime(6)", () => {
+    // Databend's Timestamp keeps microseconds without a precision, so no bare name it reports narrows the value.
+    expect(ddl({ c: "datetime" })).toContain("c TIMESTAMP");
+    expect(ddl({ c: "String" })).toContain("c String");
+  });
+
+  test("DECLARED_TYPE_REWRITE: no row, so a declared composite is written as Databend spelled it", () => {
+    expect(ddl({ c: "Nullable(Array(Int32 NULL))" })).toContain("c Nullable(Array(Int32 NULL))");
+    expect(ddl({ c: "Map(String, Int32)" })).toContain("c Map(String, Int32)");
+  });
+
+  test("a declared Binary cell replays as bytes, and a Binary cell that is not hex skips its row with the #1386 comment", () => {
+    const file = buildResultExport(
+      "sql-insert",
+      source({
+        rows: [{ b: "616263" }, { b: "<bitmap binary>" }],
+        fields: ["b"],
+        dialect: "databend",
+        columnTypes: { b: "Nullable(Binary)" },
+      }),
+    );
+    expect(file.content).toContain("VALUES (unhex('616263'));");
+    expect(file.content).toContain('-- Row 2 skipped: column "b" holds a Binary that is not hex');
+  });
+
+  test("a declared Bitmap row is skipped with the #1386 comment", () => {
+    const file = buildResultExport(
+      "sql-insert",
+      source({ rows: [{ b: "<bitmap binary>" }], fields: ["b"], dialect: "databend", columnTypes: { b: "Bitmap" } }),
+    );
+    expect(file.content).toContain('-- Row 1 skipped: column "b" holds a value of type Bitmap');
   });
 });

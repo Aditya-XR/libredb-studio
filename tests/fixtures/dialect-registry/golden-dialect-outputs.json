@@ -311,6 +311,18 @@
   "selectQuery": "get 'Order\"Items'\n# list --prefix 'Order\"Items/'\n# range-scan --prefix 'Order\"Items/' --limit 50",
   "countQuery": null
  },
+ "databend": {
+  "queryLanguage": "sql",
+  "queryDialect": null,
+  "tabType": "sql",
+  "monacoLanguage": "sql",
+  "offersColumnProfiling": true,
+  "offersCodeGeneration": true,
+  "offersCountQuery": true,
+  "tableQuery": "SELECT * FROM `c0`.`Order\"Items`;",
+  "selectQuery": "SELECT\n  `id`,\n  `name`\nFROM `c0`.`Order\"Items`\nWHERE 1=1\nLIMIT 100;",
+  "countQuery": "SELECT COUNT(*) AS row_count\nFROM `c0`.`Order\"Items`;"
+ },
  "libredb": {
   "queryLanguage": "json",
   "queryDialect": "libredb",
