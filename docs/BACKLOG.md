@@ -28,12 +28,12 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2–S7 · 5
-- [Drivers and connections](#drivers-and-connections) — D1-D253, U17 · 157
+- [Drivers and connections](#drivers-and-connections) — D1-D260, U17 · 164
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U108 · 99
 - [Dependencies](#dependencies) — P1-P9 · 7
-- [Documentation](#documentation) — DOC3-DOC18 · 15
+- [Documentation](#documentation) — DOC3-DOC20 · 17
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H14 · 4
@@ -2730,6 +2730,84 @@ Found 2026-10-08 while fixing the red-team findings on the Databend provider's t
 
 **Done when:** a request stopped before it was handed a socket fails in a way its caller can tell from one stopped after it was sent, by a kind or a flag of its own, as `truncated` marks a cut answer, with a node-transport test that runs two requests under `maxSockets: 1`, stops the queued one, and asserts its failure and that the server received one request, and the Databend transport reads that failure as a stop with nothing sent, with no kill, no logout and `cancelled` or `timeout`, tested.
 
+### D254. Metadata services outside link-local networks are not refused
+
+The byte transport refuses the entries of `LINK_LOCAL_NETWORKS` in `src/lib/db/http/egress-policy.ts` (`169.254.0.0/16` with its IPv4-mapped form and its NAT64 form under the well-known prefix `64:ff9b::/96`, `fe80::/10`, `fd00:ec2::254`) whatever `DB_HTTP_BLOCK_PRIVATE_HOSTS` says (`docs/SECURITY.md` row 0.6).
+A metadata service a cloud serves at any other address is reachable with the guard off, and no primary source for such addresses was read when the list was written.
+The first candidate to verify is Alibaba Cloud's `100.100.100.200`, reported by a reviewer and not yet sourced; it sits in CGNAT `100.64.0.0/10`, which the byte transport refuses only when `DB_HTTP_BLOCK_PRIVATE_HOSTS` is on.
+The second is `169.254.0.0/16` behind the NAT64 local-use prefix `64:ff9b:1::/48`, which the guard's own list holds and `LINK_LOCAL_NETWORKS` does not, so with the guard off the byte transport reaches it.
+The third is the IPv4-compatible form `::169.254.169.254`, which `LINK_LOCAL_NETWORKS` does not match on Bun 1.4.2, Node 24.14 or Node 26.10 (measured 2026-10-10 with the same `BlockList`); the kernel it was probed on does not route `::a.b.c.d` to IPv4, and no primary source says whether any platform does.
+
+Found 2026-10-09 while designing the S3 provider.
+
+**Done when:** each named cloud's documented address is read from a saved primary source and added to `LINK_LOCAL_NETWORKS` or recorded as reachable.
+
+### D255. The shared text transport reads a request's cap again after checking it
+
+`createNodeTransport` in `src/lib/db/http/node-transport.ts` checks `request.maxResponseBytes` in `request()` and then reads it from the caller's object again for every body chunk, so a field that answers differently on a later read sets a cap that was never checked.
+Measured 2026-10-10 on Bun 1.4.2 against a raw local listener: a `maxResponseBytes` getter that answered 100 on its first read and 2 MiB afterwards was read five times, and a 1 MiB body was returned whole instead of failing as `too-large`.
+The same path never checks `method` at all, so a caller that passes `"DELETE"` past the type sends `DELETE` (measured on the same run).
+It also refuses a closed transport and a cancelled signal before it reads the caller's headers, so a header getter that cancels the signal or closes the transport is sent anyway: measured 2026-10-10 on Bun 1.4.2 against a local `node:http` server, both requests resolved and the server received both.
+`createNodeByteTransport` reads each field once, checks the method, and admits a request again once every field has been read; no provider passes such an object today, so this is hardening.
+
+Found 2026-10-10 by the whole-branch review of the S3 byte transport; pre-existing in the text transport.
+
+**Done when:** the text transport reads `method`, `url`, `body`, `form`, `headers`, `signal` and `maxResponseBytes` once, refuses a method other than GET and POST before any socket, refuses a closed transport and a cancelled signal after those reads, and sends only what it checked, with a test per field whose getter answers differently on its second read and a test whose header getter cancels the signal and one whose getter closes the transport, each asserting that nothing is sent.
+
+### D256. A form the text transport cannot serialise leaks its socket slot
+
+`createNodeTransport` in `src/lib/db/http/node-transport.ts` serialises a request's `form` with `payloadOf` after the request has taken its socket slot and outside the try that frees it, so a `form` that `URLSearchParams` cannot read rejects with the raw TypeError and the slot is never freed.
+Measured 2026-10-10 on Bun 1.4.2 with `maxSockets: 1` against a local `node:http` server: a POST whose form held a Symbol value rejected with "TypeError: Cannot convert a Symbol value to a string", and the next GET on the same transport waited until its 1.5 s deadline and failed as a timeout; origin/main behaves the same.
+Queued behind another request it is worse: the TypeError is thrown when the earlier request's answer frees the slot, so it escapes from that request's `end` listener as an uncaught exception, which ends a Node process with no handler, the earlier request never resolves, the queued one never settles, and the next request times out; measured the same day on Bun 1.4.2 and Node 24.14.0, on origin/main as well.
+No provider passes a form value that is not a string today, so this is hardening.
+
+Found 2026-10-10 by the adversarial review of the S3 byte transport; pre-existing in the text transport.
+
+**Done when:** a form that cannot be serialised is refused before any socket slot is taken, with a `DatabaseConfigError` that names no value, and a node-transport test under `maxSockets: 1` asserts that refusal and that the next request completes.
+
+### D257. With the egress guard on, the text transport dials a zoned link-local DNS answer on Bun
+
+With `DB_HTTP_BLOCK_PRIVATE_HOSTS` on, the text transport's lookup is the guard's `publicAddressLookup`, whose check `assertPublicDnsAnswers` in `src/lib/db/http/egress-policy.ts` has no zone rule, and Bun's `BlockList` does not match a zoned address such as `fe80::1%lo` against `fe80::/10`, where Node's does.
+Measured 2026-10-10 on Bun 1.4.2 with `node:dns` mocked to answer `fe80::1%lo`: the text transport dialled it and failed with ECONNREFUSED instead of the guard's refusal.
+The byte transport runs the link-local check, which refuses any zoned IPv6 answer, after the guard's (`guardedLinkLocalRefusingLookup`), so it refuses the same answer.
+
+Found 2026-10-10 by the adversarial review of the S3 byte transport; pre-existing in the guard.
+
+**Done when:** the guard's answer check refuses an IPv6 answer with a zone index on every runtime, with an egress-policy test that mocks `node:dns` to answer `fe80::1%lo` and asserts the guard's sentence and that no socket is opened.
+
+### D258. The text transport sends a queued request whose signal fired with the request ahead of it
+
+When one signal cancels a running request and the requests queued behind it, `EventTarget` calls their abort listeners in order, so the running request's failure frees its socket slot and the shared queue in `src/lib/db/http/node-transport.ts` starts the next request before that request's own listener has run.
+`createNodeTransport` then hands it to the Agent, which dials a socket for it, and only then is it destroyed, so a cancel still costs a connection and its lookup.
+Measured 2026-10-10 on Bun 1.4.2 and Node 24.14 with `maxSockets: 1`: four GETs on one AbortController against a raw listener that never answers all failed as `aborted`, and the listener accepted a second, empty connection after the abort.
+`createNodeByteTransport` fails such a request as cancelled before it is signed or handed to the Agent.
+
+Found 2026-10-10 by the adversarial review of the S3 byte transport; pre-existing in the text transport.
+
+**Done when:** the text transport fails a request taken from the queue with its signal already aborted before it is handed to the Agent, with the same kind and message as today, and a node-transport test with four requests on one signal under `maxSockets: 1` asserts that the listener accepts one connection.
+
+### D259. A 101 answer never settles a text transport request
+
+node:http hands a `101 Switching Protocols` answer to the request's `upgrade` event, never to the response callback, and `createNodeTransport` in `src/lib/db/http/node-transport.ts` has no `upgrade` listener, so the request holds its socket slot until its deadline and is reported as a timeout, or forever without one.
+Measured 2026-10-10 on Bun 1.4.2 and Node 24.14 against a raw listener that answers every request with a 101: a GET with a 1.5 s deadline failed as `timeout` after 1501 ms.
+`createNodeByteTransport` refuses a 101 at once as a network failure and destroys the switched socket.
+
+Found 2026-10-10 by the adversarial review of the S3 byte transport; pre-existing in the text transport.
+
+**Done when:** the text transport fails a 101 answer at once as a `network` failure and destroys its socket, with a node-transport test that asserts the failure arrives well before the deadline and that the next request under `maxSockets: 1` completes.
+
+### D260. A request that fails in flight frees its slot while the Agent still counts its socket
+
+When a request fails after its socket was opened, by a cancel, a deadline or the byte cap, the shared queue in `src/lib/db/http/node-transport.ts` frees its slot at once, but the Agent counts the destroyed socket against `maxSockets` until it has closed, so the next queued request goes to the Agent's own queue, where Node dials a socket even for a request cancelled there.
+Measured 2026-10-10 on Node 24.14 with the byte transport and `maxSockets: 1`: in ten rounds of a GET that failed as `too-large` followed by a queued GET cancelled as the first failed, the listener accepted ten empty connections besides the ten requests; Bun 1.4.2 accepted one.
+The text transport shares the queue, so it behaves the same.
+On the byte transport that next request is signed and handed to the Agent while the Agent still counts the failed request's socket, so it is signed before it reaches a socket; a SigV4 signature stays valid for 15 minutes, so the wait costs no signature.
+A byte answer cut by `truncateAt` already frees its slot only once its request has closed (`resolveCut`).
+
+Found 2026-10-10 while fixing the adversarial review of the S3 byte transport; pre-existing in the shared queue.
+
+**Done when:** every failure that destroys a request's socket frees the slot only once that request has closed, as `resolveCut` does, with every text outcome unchanged, and the runtimes test counts no empty connection after a failed request followed by a queued one cancelled as it fails.
+
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound
@@ -4692,6 +4770,23 @@ Found 2026-10-04 while planning the platform integration, whose gates run in a g
 Not fixed there: that work runs the scan with those two mounts and counts `0 commits scanned.` as a failure, and `CONTRIBUTING.md` is outside it.
 
 **Done when:** `CONTRIBUTING.md` gives a command that scans the branch from a git worktree as well as from a clone, for example by mounting the worktree and the main checkout's `.git` at their own absolute paths, and says that a scan reporting `0 commits scanned.` checked nothing.
+
+### DOC19. CLAUDE.md names a mongodb branch that moved and a Redis method that no longer exists
+
+`CLAUDE.md` (Architecture) lists `src/lib/editor/tab-language.ts` among the three UI files that keep a `=== "mongodb"` branch, but that file has none; the branches are in `src/hooks/use-connection-form.ts` (`type === "mongodb" && authSource`) and `src/components/ConnectionModal.tsx` (`isMongoDB`).
+`CLAUDE.md` (Database Connections) says Redis `getSchema()` uses a non-blocking `SCAN`, but `getSchema` left the provider contract in #789 (`src/lib/db/base-provider.ts`), and comments in `src/lib/db/providers/keyvalue/redis.ts` still name it.
+
+Found 2026-10-09 while designing the S3 provider; pre-existing.
+
+**Done when:** `CLAUDE.md` names the files that hold the branches today and describes the Redis key walk by the method that exists, and the Redis comments name it too.
+
+### DOC20. docs/ADDING_A_PROVIDER.md carries stale counts and an incomplete label table
+
+The guide says seven translated READMEs are gated by `readme:check` where `scripts/readme-check.mjs` gates eight (`README_ko.md` joined in 3d9689aaf); its `getCapabilities()` bullet names two query languages (`sql` | `json`) where its own `ProviderCapabilities` table lists all five; says `QueryEditor` registers six language modules where it registers seven plus `registerDialectConsoles`; has no row for `sessionsEmptyState`, `tableStatsCaption` or `vacuumActionOperation` in its `ProviderLabels` table; and gives two driver-free counts, thirteen in its first decision and fifteen in its checklist.
+
+Found 2026-10-09 while designing the S3 provider; pre-existing.
+
+**Done when:** each count is derived from the code it describes, the label table matches `ProviderLabels`, and the guide states one driver-free count with the list it counts.
 
 ## Release pipeline
 
