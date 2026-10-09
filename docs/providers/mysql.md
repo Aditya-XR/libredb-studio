@@ -814,6 +814,14 @@ the connection the pool check already holds, `probeExplainFormat()`
 that is refused, `EXPLAIN SELECT 1`. The first statement that succeeds names the format
 `getCapabilities()` then declares.
 
+Only when both are refused does it read one base table of the session's database
+(`SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND
+table_type = 'BASE TABLE' LIMIT 1`) and ask the same two grammars, in the same order, about
+`SELECT * FROM <table> LIMIT 0` (#1393). A refusal of `SELECT 1` can be about the statement rather
+than the grammar, as the Vitess 25.0.0-SNAPSHOT row shows. A server that explains `SELECT 1` is never
+asked for a table, so every other row below sends exactly what it sent before. A database with no
+base table, or a lookup the server refuses, leaves no Explain.
+
 Measured 2026-09-06 through `mysql2` 3.24.2 over the text protocol, one connection per engine:
 
 | Engine (image) | `EXPLAIN FORMAT=JSON SELECT 1` | plain `EXPLAIN SELECT 1` | resulting `explainFormat` |
@@ -826,7 +834,7 @@ Measured 2026-09-06 through `mysql2` 3.24.2 over the text protocol, one connecti
 | Apache Doris 4.1.3 (`apache/doris:all-in-one-4.1.3`) | errno 1105 `mismatched input '=' expecting {<EOF>, ';'}(line 1, pos 14)` | ok, one column `Explain String(Nereids Planner)` | `mysql-text` |
 | Vitess 24.0.2 (`vitess/vttestserver:v24.0.2-mysql80`) | ok, one column `EXPLAIN` (the QUOTED `EXPLAIN FORMAT='json'` is errno 1105 there; the unquoted form the probe sends is accepted) | ok, 12 tabular columns | `mysql-json` |
 | Vitess 24.0.4 (`vitess/vttestserver:v24.0.4-mysql84`), re-measured 2026-10-04 | ok | ok | `mysql-json` |
-| Vitess 25.0.0-SNAPSHOT (`vitess/vttestserver:mysql84`, the floating tag, built 2026-10-02), measured 2026-10-04 | errno 1105 `VT03031: EXPLAIN is only supported for single keyspace`, because `SELECT 1` names no table; `EXPLAIN FORMAT=JSON SELECT * FROM customers` is answered | the same `VT03031` | none, so the Explain panel is unavailable on that build (an open defect in the probe's statement, not fixed here) |
+| Vitess 25.0.0-SNAPSHOT (`vitess/vttestserver:mysql84`, the floating tag, built 2026-10-02 and again 2026-10-08), measured 2026-10-04 and 2026-10-09 | errno 1105 `VT03031: EXPLAIN is only supported for single keyspace`, because `SELECT 1` names no table (`SELECT 1 FROM dual` too); `EXPLAIN FORMAT=JSON SELECT * FROM customers LIMIT 0` is answered | the same `VT03031` | `mysql-json` since #1393, from the table form; the lookup answers `customers` through vtgate, which rewrites the schema to the shard's `vt_e2e_0`. An empty keyspace has no table to ask about and still gets none |
 | OceanBase CE 4.4.2 (`oceanbase/oceanbase-ce:4.4.2-lts`, tenant `test`) | ok, 8 rows in one column `Query Plan`, an ASCII plan | ok, 9 rows in the same column | `mysql-json` |
 | Databend 1.2.925 (`datafuselabs/databend:v1.2.925-patch-11`) | errno 1105, SyntaxException | ok, one column `explain`, 5 rows | `mysql-text` |
 

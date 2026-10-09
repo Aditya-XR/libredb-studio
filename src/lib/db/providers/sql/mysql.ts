@@ -641,10 +641,38 @@ async function openTransaction(conn: PoolConnection): Promise<unknown> {
  *   those two changes. Vitess refuses the QUOTED `EXPLAIN FORMAT='json'`, which is a
  *   reason to keep sending the unquoted form the probe and the strategy already use.
  */
-const EXPLAIN_PROBES: readonly (readonly [sql: string, format: ExplainFormat])[] = [
-  ["EXPLAIN FORMAT=JSON SELECT 1", "mysql-json"],
-  ["EXPLAIN SELECT 1", "mysql-text"],
+const EXPLAIN_PROBES: readonly (readonly [prefix: string, format: ExplainFormat])[] = [
+  ["EXPLAIN FORMAT=JSON", "mysql-json"],
+  ["EXPLAIN", "mysql-text"],
 ];
+
+/**
+ * One base table of the session's database, for the probes to name when the server refuses
+ * to explain a statement that names none (#1393).
+ *
+ * Vitess 25.0.0-SNAPSHOT (`vitess/vttestserver:mysql84`, built 2026-10-08) answers
+ * `EXPLAIN FORMAT=JSON SELECT 1`, `EXPLAIN SELECT 1` and `... SELECT 1 FROM dual` with `1105
+ * VT03031: EXPLAIN is only supported for single keyspace`, and answers both grammars for
+ * `SELECT * FROM customers LIMIT 0`. Through vtgate this lookup answers `customers`: vtgate
+ * rewrites the schema to the shard's `vt_e2e_0` and keeps the table's name (measured
+ * 2026-10-09).
+ */
+const EXPLAIN_PROBE_TABLE_SQL =
+  "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' LIMIT 1";
+
+/** The first grammar that explains `statement`, or `undefined` when the server refuses both. */
+const firstExplainFormat = async (queryable: MySQLQueryable, statement: string): Promise<ExplainFormat | undefined> => {
+  for (const [prefix, format] of EXPLAIN_PROBES) {
+    try {
+      await runStatement(queryable, `${prefix} ${statement}`);
+      return format;
+    } catch {
+      // Refused, so try the next grammar. The reason is the engine's own and there is
+      // nothing to report: the capability this produces IS the report.
+    }
+  }
+  return undefined;
+};
 
 /**
  * Which of those grammars this server accepts, or `undefined` when it accepts
@@ -657,20 +685,27 @@ const EXPLAIN_PROBES: readonly (readonly [sql: string, format: ExplainFormat])[]
  * take; asking the server what its grammar accepts is the same answer without the
  * enumeration.
  *
+ * `SELECT 1` is asked first, and a server that explains it is never asked anything else. Only
+ * when both grammars refuse it are they asked again against a table the session's database
+ * holds (`EXPLAIN_PROBE_TABLE_SQL`), because a refusal of `SELECT 1` can be about the statement
+ * rather than the grammar (#1393). `LIMIT 0` keeps the statement a plan with nothing to read. A
+ * database with no base table, or a lookup the server refuses, leaves the answer `undefined`.
+ *
  * Nothing here rejects. A grammar the server does not have is a fact about the
  * Explain panel, not about the connection, and `connect()` must not fail for it.
  */
 const probeExplainFormat = async (queryable: MySQLQueryable): Promise<ExplainFormat | undefined> => {
-  for (const [sql, format] of EXPLAIN_PROBES) {
-    try {
-      await runStatement(queryable, sql);
-      return format;
-    } catch {
-      // Refused, so try the next grammar. The reason is the engine's own and there is
-      // nothing to report: the capability this produces IS the report.
-    }
+  const format = await firstExplainFormat(queryable, "SELECT 1");
+  if (format !== undefined) return format;
+  let table: unknown;
+  try {
+    const [rows] = await runStatement(queryable, EXPLAIN_PROBE_TABLE_SQL);
+    table = rows[0]?.name;
+  } catch {
+    return undefined;
   }
-  return undefined;
+  if (typeof table !== "string" || table === "") return undefined;
+  return firstExplainFormat(queryable, `SELECT * FROM ${escapeMySQLIdentifier(table)} LIMIT 0`);
 };
 
 /**

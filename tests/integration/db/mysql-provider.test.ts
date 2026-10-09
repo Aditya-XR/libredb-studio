@@ -4153,6 +4153,130 @@ describe("MySQLProvider EXPLAIN grammar probe", () => {
     expect(explainProbeCalls()).toEqual([]);
     expect(provider.getCapabilities().explainFormat).toBe("mysql-json");
   });
+
+  /**
+   * Vitess 25.0.0-SNAPSHOT (`vitess/vttestserver:mysql84`, built 2026-10-08) refuses to explain
+   * a statement that names no table, in both grammars, and explains both against a table of the
+   * keyspace (#1393). Measured 2026-10-09 through vtgate, keyspace `e2e`.
+   */
+  describe("a server that refuses to explain SELECT 1 (#1393)", () => {
+    const TABLE_LOOKUP =
+      "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' LIMIT 1";
+    const vitessKeyspaceRefusal = () =>
+      explainRefusal("VT03031: EXPLAIN is only supported for single keyspace", 1105, "ER_UNKNOWN_ERROR", "HY000");
+
+    /**
+     * Vitess 25's answers: both `SELECT 1` forms refused, the lookup answering `tables`, and any
+     * statement named in `refusals` refused as well.
+     */
+    function keyspaceServer(
+      tables: Record<string, unknown>[] | (() => Error),
+      refusals: Record<string, () => Error> = {},
+    ): (sql: string) => Promise<[unknown[], unknown[]]> {
+      const rest = refusing({
+        "explain format=json select 1": vitessKeyspaceRefusal,
+        "explain select 1": vitessKeyspaceRefusal,
+        ...refusals,
+      });
+      return (sql: string) => {
+        if (sql !== TABLE_LOOKUP) return rest(sql);
+        return typeof tables === "function" ? Promise.reject(tables()) : Promise.resolve([tables, []]);
+      };
+    }
+
+    const lookups = () => protocolCalls.filter((c) => c.sql === TABLE_LOOKUP);
+
+    test("it explains a table of the session's database instead, and keeps mysql-json", async () => {
+      mockExecuteFn = keyspaceServer([{ name: "customers" }]);
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const caps = provider.getCapabilities();
+
+      expect(caps.explainFormat).toBe("mysql-json");
+      expect(caps.supportsExplain).toBe(true);
+      expect(explainProbeCalls().map((c) => c.sql)).toEqual([
+        "EXPLAIN FORMAT=JSON SELECT 1",
+        "EXPLAIN SELECT 1",
+        "EXPLAIN FORMAT=JSON SELECT * FROM `customers` LIMIT 0",
+      ]);
+      expect(lookups()).toHaveLength(1);
+      expect(explainProbeCalls().every((c) => c.method === "query")).toBe(true);
+    });
+
+    test("the table is asked in the same order, so a JSON refusal there lands on mysql-text", async () => {
+      mockExecuteFn = keyspaceServer([{ name: "customers" }], {
+        "explain format=json select * from `customers` limit 0": dorisExplainRefusal,
+      });
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+
+      expect(provider.getCapabilities().explainFormat).toBe("mysql-text");
+      expect(
+        explainProbeCalls()
+          .map((c) => c.sql)
+          .slice(2),
+      ).toEqual(["EXPLAIN FORMAT=JSON SELECT * FROM `customers` LIMIT 0", "EXPLAIN SELECT * FROM `customers` LIMIT 0"]);
+    });
+
+    test("the table's name is quoted as an identifier", async () => {
+      mockExecuteFn = keyspaceServer([{ name: "odd`name" }]);
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+
+      expect(explainProbeCalls().map((c) => c.sql)[2]).toBe("EXPLAIN FORMAT=JSON SELECT * FROM `odd``name` LIMIT 0");
+    });
+
+    test("a database with no base table keeps no Explain and still connects", async () => {
+      mockExecuteFn = keyspaceServer([]);
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const caps = provider.getCapabilities();
+
+      expect(provider.isConnected()).toBe(true);
+      expect(caps.supportsExplain).toBe(false);
+      expect("explainFormat" in caps).toBe(false);
+      expect(explainProbeCalls().map((c) => c.sql)).toEqual(["EXPLAIN FORMAT=JSON SELECT 1", "EXPLAIN SELECT 1"]);
+    });
+
+    test("a lookup the server refuses keeps no Explain and still connects", async () => {
+      mockExecuteFn = keyspaceServer(parseErrorExplainRefusal);
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+
+      expect(provider.isConnected()).toBe(true);
+      expect(provider.getCapabilities().supportsExplain).toBe(false);
+      expect(explainProbeCalls()).toHaveLength(2);
+    });
+
+    test("a server that refuses the table form too keeps no Explain and still connects", async () => {
+      mockExecuteFn = keyspaceServer([{ name: "customers" }], {
+        "explain format=json select * from `customers` limit 0": vitessKeyspaceRefusal,
+        "explain select * from `customers` limit 0": vitessKeyspaceRefusal,
+      });
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+
+      expect(provider.isConnected()).toBe(true);
+      expect(provider.getCapabilities().supportsExplain).toBe(false);
+      expect(explainProbeCalls()).toHaveLength(4);
+    });
+
+    test("a server that explains SELECT 1 is never asked for a table", async () => {
+      mockExecuteFn = refusing({ "explain format=json select 1": dorisExplainRefusal });
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+
+      expect(provider.getCapabilities().explainFormat).toBe("mysql-text");
+      expect(lookups()).toEqual([]);
+    });
+  });
 });
 
 // ============================================================================
