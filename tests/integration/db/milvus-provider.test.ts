@@ -307,7 +307,8 @@ describe("Load and Release over the adapter", () => {
     await provider.describeObjects(["default"], "collection");
     await provider.readObjectSource(["default", "docs_int64"], "collection");
     await provider.getMonitoringData();
-    await provider.previewMaintenance("load", ["default", "docs_int64"]);
+    // The preview of a run the mode refuses is refused with it, and reads nothing (#1418).
+    await failure(provider.previewMaintenance("load", ["default", "docs_int64"]));
     for (const never of ["LoadCollection", "ReleaseCollection", "GetLoadingProgress"])
       expect(rpcs(wire)).not.toContain(never);
   });

@@ -568,6 +568,42 @@ describe("MonitoringDashboard", () => {
     expect(providerMetadataCalls[providerMetadataCalls.length - 1]?.id).toBe("c2");
   });
 
+  test("tells the tables tab whether the connection is read-only (#1418)", async () => {
+    const openTables = async () => {
+      const user = userEvent.setup();
+      tablesTabProps.length = 0;
+      let renderResult: ReturnType<typeof render>;
+      await act(async () => {
+        renderResult = render(<MonitoringDashboard />);
+      });
+      const { queryByTestId, container } = renderResult!;
+      const tablesTrigger = Array.from(container.querySelectorAll('[role="tab"]')).find((t) =>
+        t.textContent?.includes("Tables"),
+      ) as HTMLElement;
+      await user.click(tablesTrigger);
+      await waitFor(() => {
+        expect(queryByTestId("monitoring-tablestab")).not.toBeNull();
+      });
+      return tablesTabProps[tablesTabProps.length - 1].readOnly;
+    };
+
+    // The file's default connections carry no readOnly.
+    expect(await openTables()).toBe(false);
+    cleanup();
+
+    const storageModule = await import("@/lib/storage");
+    const storage = storageModule.storage as unknown as Record<string, unknown>;
+    const originalGetConnections = storage.getConnections;
+    storage.getConnections = mock(() => [
+      { id: "c1", name: "Guarded", type: "postgres", host: "localhost", readOnly: true, createdAt: new Date() },
+    ]);
+    try {
+      expect(await openTables()).toBe(true);
+    } finally {
+      storage.getConnections = originalGetConnections;
+    }
+  });
+
   test("hands the hook's previewMaintenance to the tables tab (spec 3.11)", async () => {
     const user = userEvent.setup();
     const previewMaintenance = mock(async () => ({ summary: "Loads users.", facts: [] }));

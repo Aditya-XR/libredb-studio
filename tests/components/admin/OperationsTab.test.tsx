@@ -75,6 +75,11 @@ mock.module("@/hooks/use-monitoring-data", () => ({
       refresh: mockRefresh,
       killSession: mockKillSession,
       runMaintenance: mockRunMaintenance,
+      // The tab reads the outcome (#1418). Derived from the boolean mock above, so every case that drives or asserts
+      // on `mockRunMaintenance` reads as before; a case that needs a reason overrides this through `monitoringOverride`.
+      runMaintenanceOutcome: async (...args: unknown[]) => ({
+        success: await (mockRunMaintenance as unknown as (...call: unknown[]) => boolean)(...args),
+      }),
       maintenanceReport: null,
       ...monitoringOverride,
     };
@@ -2303,6 +2308,131 @@ describe("OperationsTab", () => {
 
       expect(falseView!.queryByTestId("operations-read-only")).toBeNull();
       expect(falseView!.queryByText("Run Analyze")).not.toBeNull();
+    });
+
+    // #1418: the section above was gated and the rows were not, so a read-only connection offered Load on a row,
+    // the route refused it, and the dialog closed with nothing said.
+    const rowTitles = (container: HTMLElement) =>
+      Array.from(container.querySelectorAll("button[title]")).map((button) => button.getAttribute("title"));
+
+    test("draws no per-row maintenance control, where the same connection read-write draws them", async () => {
+      mockConnectionsList = [{ ...readOnlyConnection, readOnly: false }];
+      let writable: ReturnType<typeof render>;
+      await act(async () => {
+        writable = render(<OperationsTab />);
+      });
+      const offered = rowTitles(writable!.container);
+      expect(offered.length).toBeGreaterThan(0);
+      cleanup();
+
+      mockConnectionsList = [readOnlyConnection];
+      let guarded: ReturnType<typeof render>;
+      await act(async () => {
+        guarded = render(<OperationsTab />);
+      });
+      // The row is still listed: only its controls are withheld.
+      expect(guarded!.queryByText("users")).not.toBeNull();
+      expect(rowTitles(guarded!.container)).toEqual([]);
+      // The section above already says why, so the rows do not say it a second time.
+      expect(guarded!.queryByTestId("operations-rows-read-only")).toBeNull();
+    });
+
+    test("says why beside the rows when the engine's only operations are per-row ones", async () => {
+      // Milvus-shaped: Load and Release run on one collection and nothing runs on the whole database, so the
+      // Global Operations section draws nothing and its read-only line is not there to explain the missing controls.
+      mockMetadata = {
+        capabilities: {
+          supportsMaintenance: true,
+          maintenanceOperations: ["disarm"],
+          maintenanceOperationSpecs: { disarm: { label: "Release Object", perEntity: true, global: false } },
+        },
+      };
+      mockConnectionsList = [readOnlyConnection];
+      let guarded: ReturnType<typeof render>;
+      await act(async () => {
+        guarded = render(<OperationsTab />);
+      });
+      expect(guarded!.queryByTestId("operations-read-only")).toBeNull();
+      expect(guarded!.getByTestId("operations-rows-read-only").textContent).toBe(line);
+      expect(rowTitles(guarded!.container)).toEqual([]);
+      cleanup();
+
+      mockConnectionsList = [{ ...readOnlyConnection, readOnly: false }];
+      let writable: ReturnType<typeof render>;
+      await act(async () => {
+        writable = render(<OperationsTab />);
+      });
+      expect(writable!.queryByTestId("operations-rows-read-only")).toBeNull();
+      expect(rowTitles(writable!.container)).toEqual(["Release Object"]);
+    });
+  });
+
+  // =========================================================================
+  // A refusal says why (#1418)
+  //
+  // The route's sentence reached a toast and nothing else: the operation log recorded a red icon with no reason,
+  // and a per-row dialog closed as though the run had been sent.
+  // =========================================================================
+
+  describe("a refused run", () => {
+    const sentence = "This connection is read-only: turn off Read-only in its settings to write.";
+    const refuse = () => {
+      monitoringOverride = {
+        runMaintenanceOutcome: mock(async () => ({ success: false, error: sentence })),
+      };
+    };
+
+    /** The `users` row's vacuum control, the second of its two: a one-click run, with no dialog between. */
+    const clickVacuumOnUsers = async (view: ReturnType<typeof render>) => {
+      const rows = view.container.querySelectorAll(".divide-y > div");
+      const users = Array.from(rows).find((row) => row.textContent?.includes("users"));
+      await act(async () => {
+        fireEvent.click(users!.querySelectorAll("button")[1]!);
+      });
+    };
+
+    test("writes the reason into the operation log entry of a one-click row control", async () => {
+      refuse();
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(<OperationsTab />);
+      });
+      await clickVacuumOnUsers(view!);
+
+      await waitFor(() => expect(view!.queryByText("VACUUM")).not.toBeNull());
+      expect(view!.getByTestId("operation-log-error").textContent).toBe(sentence);
+    });
+
+    test("keeps the per-row dialog open on the reason instead of closing as though it was sent", async () => {
+      mockMetadata = { capabilities: SYNTHETIC_ENTITY_CAPABILITIES };
+      refuse();
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(<OperationsTab />);
+      });
+      await act(async () => {
+        fireEvent.click(view!.container.querySelector('button[title="Release Object"]') as HTMLButtonElement);
+      });
+      const dialog = view!.getByRole("alertdialog", { name: "Release Object" });
+      fireEvent.change(within(dialog).getByLabelText("Type users to confirm"), { target: { value: "users" } });
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole("button", { name: "Release Object" }));
+      });
+
+      await waitFor(() => expect(within(dialog).queryByText(sentence)).not.toBeNull());
+      expect(view!.queryByRole("alertdialog", { name: "Release Object" })).not.toBeNull();
+      expect(view!.getByTestId("operation-log-error").textContent).toBe(sentence);
+    });
+
+    test("a run that worked writes no reason", async () => {
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(<OperationsTab />);
+      });
+      await clickVacuumOnUsers(view!);
+
+      await waitFor(() => expect(view!.queryByText("VACUUM")).not.toBeNull());
+      expect(view!.queryByTestId("operation-log-error")).toBeNull();
     });
   });
 

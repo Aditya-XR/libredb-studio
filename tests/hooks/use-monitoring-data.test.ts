@@ -425,6 +425,71 @@ describe("useMonitoringData", () => {
     expect(mockToastError).toHaveBeenCalled();
   });
 
+  // ── runMaintenanceOutcome carries the refusal's own sentence (#1418) ────
+  //
+  // A boolean cannot say why. The Operations tab writes the reason into its operation log and shows it in the
+  // dialog that asked, so the sentence has to leave the hook as well as reach the toast.
+
+  test("runMaintenanceOutcome carries the route's sentence for a 4xx refusal, and toasts it", async () => {
+    const sentence = "This connection is read-only: turn off Read-only in its settings to write.";
+    mockGlobalFetch({
+      "/api/db/monitoring": { ok: true, json: mockMonitoringResponse },
+      "/api/db/maintenance": { ok: false, status: 400, json: { error: sentence } },
+    });
+    const { result } = renderHook(() => useMonitoringData(mockConnection));
+    await waitFor(() => {
+      expect(result.current.data).not.toBeNull();
+    });
+
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.runMaintenanceOutcome("load", "docs_int64", "default");
+    });
+
+    expect(outcome).toEqual({ success: false, error: sentence });
+    expect(mockToastError).toHaveBeenCalledWith(sentence);
+  });
+
+  test("runMaintenanceOutcome carries the engine's own message for a 200 the engine refused", async () => {
+    mockGlobalFetch({
+      "/api/db/monitoring": { ok: true, json: mockMonitoringResponse },
+      "/api/db/maintenance": { ok: true, json: { success: false, message: "OPTIMIZE failed: no such table" } },
+    });
+    const { result } = renderHook(() => useMonitoringData(mockConnection));
+    await waitFor(() => {
+      expect(result.current.data).not.toBeNull();
+    });
+
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.runMaintenanceOutcome("optimize", "missing");
+    });
+
+    expect(outcome).toEqual({ success: false, error: "OPTIMIZE failed: no such table" });
+  });
+
+  test("runMaintenanceOutcome answers a run that worked with no error, and no connection with no request", async () => {
+    mockGlobalFetch({
+      "/api/db/monitoring": { ok: true, json: mockMonitoringResponse },
+      "/api/db/maintenance": { ok: true, json: { success: true, message: "VACUUM completed" } },
+    });
+    const { result } = renderHook(() => useMonitoringData(mockConnection));
+    await waitFor(() => {
+      expect(result.current.data).not.toBeNull();
+    });
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.runMaintenanceOutcome("vacuum", "users", "public");
+    });
+    expect(outcome).toEqual({ success: true });
+
+    const { result: unselected } = renderHook(() => useMonitoringData(null));
+    await act(async () => {
+      outcome = await unselected.current.runMaintenanceOutcome("vacuum");
+    });
+    expect(outcome).toEqual({ success: false });
+  });
+
   // ── killSession returns false when connection is null ──────────────────
 
   test("killSession returns false when connection is null", async () => {

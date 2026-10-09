@@ -77,10 +77,14 @@ describe("a read-only Milvus connection, down to the client the adapter built", 
     },
   );
 
-  test("every read still answers in read-only mode, the Load preview among them", async () => {
+  test("every read still answers in read-only mode, and the Load preview is refused as the Load is", async () => {
     const { provider, client, mark } = await connected({ ...CONNECTION, readOnly: true });
     expect(await provider.listObjects(["default"], "collection")).toHaveLength(1);
-    expect((await provider.previewMaintenance("load", ["default", "docs_int64"])).refusal).toBeUndefined();
+    // The preview describes a run the mode refuses, so it answers the mode's sentence in place of one (#1418): a
+    // dialog that drew it would offer a confirm button the maintenance route then answers 400 to.
+    await expect(provider.previewMaintenance("load", ["default", "docs_int64"])).rejects.toThrow(
+      readOnlySentence("connection"),
+    );
     const sent = sentAfter(client, mark);
     expect(sent).toContain("showCollections");
     expect(sent).not.toContain("loadCollection");

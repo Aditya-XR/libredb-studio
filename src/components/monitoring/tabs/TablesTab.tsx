@@ -30,6 +30,7 @@ import {
 import { formatBytes } from "@/lib/db/utils/pool-manager";
 import {
   MaintenanceEntityDialog,
+  READ_ONLY_MAINTENANCE,
   closedEntityDialog,
   entityRequest,
   type EntityDialogOpening,
@@ -207,6 +208,11 @@ interface TablesTabProps {
    * a preview is not offered: the tab would have no way to show what it does before it runs.
    */
   onPreviewMaintenance?: LoadMaintenancePreview;
+  /**
+   * The connection is marked read-only (#1418). Its provider refuses every maintenance operation, so no row draws a
+   * control: the rule the Operations tab follows, read from the same public field by the one caller.
+   */
+  readOnly?: boolean;
 }
 
 export function TablesTab({
@@ -217,6 +223,7 @@ export function TablesTab({
   isAdmin = true,
   capabilities,
   labels,
+  readOnly = false,
 }: TablesTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -320,7 +327,7 @@ export function TablesTab({
   // Every declared operation outside `MaintenanceType` that runs on one row follows the tab's own, in declaration
   // order and under a generic icon (spec 3.11). One whose spec asks for a preview is offered only where this tab was
   // handed a way to read one.
-  const availableActions: RowAction[] = [
+  const declaredActions: RowAction[] = [
     ...MAINTENANCE_ACTIONS.flatMap((action) => {
       const control = maintenanceControl(capabilities, action.type, "perEntity");
       return control.offered ? [{ ...action, label: control.label ?? action.label }] : [];
@@ -335,6 +342,10 @@ export function TablesTab({
     (action) =>
       onPreviewMaintenance !== undefined || maintenanceControl(capabilities, action.type, "perEntity").preview !== true,
   );
+  // Withheld on a read-only connection, where each would end in the provider's refusal (#1418). The placeholder a row
+  // with no control draws then says why, and says nothing where there was never a control to withhold.
+  const availableActions = readOnly ? [] : declaredActions;
+  const withheldForReadOnly = readOnly && isAdmin && declaredActions.length > 0;
 
   // Both halves have to be true for the dead end U22 names: the engine declares a control
   // that takes ONE table, and this panel has no table to offer it on. `statsAbsent` covers
@@ -505,7 +516,12 @@ export function TablesTab({
                             ))}
                           </div>
                         ) : (
-                          <span className="text-xs text-muted-foreground">-</span>
+                          <span
+                            className="text-xs text-muted-foreground"
+                            title={withheldForReadOnly ? READ_ONLY_MAINTENANCE : undefined}
+                          >
+                            -
+                          </span>
                         )}
                       </TableCell>
                     </TableRow>

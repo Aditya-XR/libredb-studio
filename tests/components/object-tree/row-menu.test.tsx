@@ -181,6 +181,32 @@ describe("the row menu is driven by the declaration", () => {
     expect(menuItems()).toEqual(["Generate Query", "Profile Table", "Generate Code", "Generate Test Data"]);
   });
 
+  test("a read-only connection's row menu offers no maintenance item (#1418)", async () => {
+    const withMaintenance = {
+      ...oneLevel,
+      supportsMaintenance: true,
+      maintenanceOperations: ["vacuum", "analyze"],
+    } as ProviderCapabilities;
+    // The maintenance page is one more destination the shell hands over; without it no item is offered at all.
+    const handlers = { ...allHandlers([]), onOpenMaintenance: () => undefined };
+    const openOrders = async (connection: DatabaseConnection) => {
+      installFetch();
+      render(<ObjectTree connection={connection} capabilities={withMaintenance} actions={handlers} />);
+      await screen.findByRole("treeitem", { name: /Tables/ });
+      await userEvent.click(row(/Tables/));
+      await waitFor(() => expect(screen.getByText("orders")).toBeTruthy());
+      fireEvent.contextMenu(row(/orders/));
+      return menuItems();
+    };
+
+    const writable = await openOrders(connectionOf());
+    expect(writable).toEqual(expect.arrayContaining(["Analyze Table", "Vacuum Table"]));
+    cleanup();
+
+    const readOnly = await openOrders({ ...connectionOf(), readOnly: true });
+    expect(readOnly).toEqual(writable.filter((item) => item !== "Analyze Table" && item !== "Vacuum Table"));
+  });
+
   test("a relation that declares no row writes is offered everything but the row writer", async () => {
     await openTree();
     fireEvent.contextMenu(row(/order_summary/));

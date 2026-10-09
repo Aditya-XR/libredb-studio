@@ -89,13 +89,17 @@ These refusals are permanent: promoting one is a new owner decision, not a measu
 
 ### 3.4 The read-only mode
 
-With `readOnly` on the connection or in an agent execution profile, Load and Release are refused before any request, with a sentence naming where the mode was set:
+With `readOnly` on the connection or in an agent execution profile, Load and Release are refused before any request, with a sentence naming where the mode was set.
+Their preview is refused in the same sentence and reads nothing, so the dialog shows the refusal in place of a preview and offers no confirm button:
 
 | Where the mode was set | Refusal |
 |---|---|
 | The operator's seed file | This connection is read-only (set in the operator's seed file). |
 | A connection of the user's own | This connection is read-only: turn off Read-only in its settings to write. |
 | An agent execution profile, on a connection that is not read-only | This run opens the connection read-only (agent execution profile). |
+
+Studio does not offer what the mode would refuse: on a read-only connection the tree's row menu and the collection rows of Admin > Operations and of Monitoring > Tables draw neither Load nor Release, and Operations says "This connection is read-only: use a read-write connection for maintenance" beside the collections.
+A refusal that still happens is shown in the dialog that asked and written into the operation log entry.
 
 Every console request of this version is a read, so the mode changes nothing else.
 The mode binds a `user` only on a managed seed whose secret only the seed holds, and only when the server has authorization enabled: Milvus with `authorizationEnabled: false`, its default, accepts any credential or none, so a connection that works proves nothing about the server, and Studio cannot tell.

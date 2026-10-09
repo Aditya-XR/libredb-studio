@@ -154,7 +154,9 @@ describe("docs/providers/etcd.md section 3.4 states the read-only mode the provi
     const marker = "Writes, value edits and maintenance are refused on this connection";
     const operations = "This connection is read-only: use a read-write connection for maintenance";
     expect(read("src/components/read-only-marker.tsx")).toContain(`title="${marker}"`);
-    expect(read("src/components/admin/tabs/OperationsTab.tsx")).toContain(operations);
+    // One constant since #1418, beside the dialog the Operations and Tables tabs share, so both say the same line.
+    expect(read("src/components/maintenance-entity-dialog.tsx")).toContain(operations);
+    expect(read("src/components/admin/tabs/OperationsTab.tsx")).toContain("READ_ONLY_MAINTENANCE");
     expect(READ_ONLY).toContain(`titled "${marker}"`);
     expect(READ_ONLY).toContain(`shows "${operations}"`);
   });

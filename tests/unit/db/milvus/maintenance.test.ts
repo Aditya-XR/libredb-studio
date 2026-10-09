@@ -746,6 +746,23 @@ describe("what is refused before any request", () => {
     },
   );
 
+  // The preview of a run the connection refuses would read the collection's state and offer a confirm button
+  // the route then answers 400 to (#1418).
+  test.each(["seed", "connection", "execution-profile"] as const)(
+    "a read-only connection (%s) refuses the preview of Load and Release with the same sentence, and reads nothing",
+    async (readOnly) => {
+      const client = createFakeMilvusClient(CATALOG);
+      for (const type of ["load", "release"] as const) {
+        // oxlint-disable-next-line no-await-in-loop -- one refusal at a time, each with no call.
+        const error = await failure(
+          previewMilvusMaintenance(client, { ...testSurface(), readOnly }, type, ["default", "docs_int64"]),
+        );
+        expect(error.message).toBe(readOnlySentence(readOnly));
+      }
+      expect(client.calls).toEqual([]);
+    },
+  );
+
   test("an operation Milvus does not run, no collection, and a name Milvus could not hold", async () => {
     const client = createFakeMilvusClient(CATALOG);
     const { context } = maintenance();

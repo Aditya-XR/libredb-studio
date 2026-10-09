@@ -292,6 +292,18 @@ describe("POST /api/db/maintenance/preview", () => {
     expect(auditEvents).toEqual([]);
   });
 
+  test("a read-only connection's preview is refused with the read-only sentence, and nothing is read", async () => {
+    const connection = await serve({ ...CONNECTION, readOnly: true });
+    const response = await preview(
+      post("/api/db/maintenance/preview", { connection, type: "load", target: "docs_int64", container: "default" }),
+    );
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect((await parseResponseJSON<{ error: string }>(response)).error).toBe(
+      "This connection is read-only: turn off Read-only in its settings to write.",
+    );
+    expect(client.calls).toEqual([]);
+  });
+
   test("an unknown collection is refused with the collection sentence after exactly one DescribeCollection", async () => {
     const connection = await serve();
     const response = await preview(

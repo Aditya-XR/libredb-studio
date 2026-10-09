@@ -328,6 +328,21 @@ describe("rowActions and maintenance", () => {
     expect(idsFor(objectRow("table"), mysql)).not.toContain("maintenance-vacuum");
   });
 
+  test("a read-only connection is offered no maintenance item, and keeps every other one (#1418)", () => {
+    // Its provider refuses every maintenance operation, and each of these items only opens the page that would
+    // send one: an item that leads to a refusal is worse than no item.
+    const declared = capabilitiesOf({ objectKinds: [table, view, routine], ...SYNTHETIC_ENTITY_CAPABILITIES });
+    for (const capabilities of [postgres, declared]) {
+      const ids = (readOnly: boolean) =>
+        rowActions({ row: objectRow("table"), object: orders, capabilities, handlers: allHandlers(), readOnly }).map(
+          (action) => action.id,
+        );
+      const maintenance = ids(false).filter((id) => id.startsWith("maintenance-"));
+      expect(maintenance.length).toBeGreaterThan(0);
+      expect(ids(true)).toEqual(ids(false).filter((id) => !id.startsWith("maintenance-")));
+    }
+  });
+
   test("an operation that names its kinds is offered on those kinds' rows only (#786)", () => {
     // Db2-shaped: RUNSTATS and REORG run on a table and refuse a view, which is a relation too.
     const db2 = capabilitiesOf({

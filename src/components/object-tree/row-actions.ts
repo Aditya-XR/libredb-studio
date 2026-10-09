@@ -143,6 +143,11 @@ export interface TreeRowActionContext {
   /** The engine's own wording. Only the maintenance items read it. */
   readonly labels?: ProviderLabels;
   readonly handlers: TreeRowActionHandlers;
+  /**
+   * The connection is marked read-only. Its provider refuses every maintenance operation, so the maintenance items
+   * are withheld: each only opens the page that would send one (#1418).
+   */
+  readonly readOnly?: boolean;
 }
 
 export function rowActions({
@@ -151,6 +156,7 @@ export function rowActions({
   capabilities,
   labels,
   handlers,
+  readOnly = false,
 }: TreeRowActionContext): readonly TreeRowAction[] {
   // A COLUMN row is not an object and is not addressable as one. The `kind === undefined` guard
   // below already answers nothing for it, because a column row carries no kind id; this line is
@@ -166,7 +172,7 @@ export function rowActions({
   if (row.kind === "folder") return folderActions(row.path, kind, capabilities, handlers);
   // An object row whose object the cache no longer holds: an action with no target is
   // worse than no action, because it looks like it addresses the row under the pointer.
-  return object === undefined ? [] : objectActions(object, kind, capabilities, labels, handlers);
+  return object === undefined ? [] : objectActions(object, kind, capabilities, labels, handlers, readOnly);
 }
 
 function objectActions(
@@ -175,6 +181,7 @@ function objectActions(
   capabilities: ProviderCapabilities,
   labels: ProviderLabels | undefined,
   handlers: TreeRowActionHandlers,
+  readOnly: boolean,
 ): readonly TreeRowAction[] {
   const actions: TreeRowAction[] = [];
   const isRelation = kind.role === "relation";
@@ -227,7 +234,7 @@ function objectActions(
   }
 
   const maintenance = handlers.onOpenMaintenance;
-  if (isRelation && maintenance !== undefined) {
+  if (isRelation && maintenance !== undefined && !readOnly) {
     // The row's KIND is asked as well: an operation may run on some relation kinds and not
     // others, Db2's RUNSTATS refusing a view (#786).
     const analyze = maintenanceControl(capabilities, "analyze", "perEntity", kind.id);

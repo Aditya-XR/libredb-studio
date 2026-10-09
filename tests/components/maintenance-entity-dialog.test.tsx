@@ -223,6 +223,12 @@ describe("MaintenanceEntityDialog with a preview", () => {
   test.each<[string, unknown, string]>([
     ["an Error", new Error("Unauthorized. Admin access required."), "Unauthorized. Admin access required."],
     ["a value that is not an Error", "the preview route is down", "the preview route is down"],
+    // What a read-only connection's preview answers (#1418): the provider's own sentence, in place of a preview.
+    [
+      "the provider's read-only refusal",
+      new Error("This connection is read-only: turn off Read-only in its settings to write."),
+      "This connection is read-only: turn off Read-only in its settings to write.",
+    ],
   ])("a preview that fails with %s shows its words, with no confirm button", async (_label, failure, words) => {
     const { view, confirmButton } = renderDialog(
       PREVIEWED,

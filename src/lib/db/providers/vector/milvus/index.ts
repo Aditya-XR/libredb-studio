@@ -427,10 +427,16 @@ export class MilvusProvider extends BaseDatabaseProvider {
     );
   }
 
-  /** What a Load or a Release will do, read calls only. */
+  /** What a Load or a Release will do, read calls only; refused, as the run is, on a read-only connection. */
   public async previewMaintenance(type: MaintenanceOperation, path: readonly string[]): Promise<MaintenancePreview> {
     const { session, context } = this.surface();
-    return previewMilvusMaintenance(session.client, context, type, path);
+    const { readOnly } = session.options;
+    return previewMilvusMaintenance(
+      session.client,
+      { ...context, ...(readOnly === undefined ? {} : { readOnly }) },
+      type,
+      path,
+    );
   }
 
   /** The Milvus principal an audit row names: a user name (a `user:password` token's too) or the word "token", never any part of a secret. */

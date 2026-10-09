@@ -32,6 +32,12 @@ import {
  * opens no dialog and sends with one click, which is every shipped provider's controls.
  */
 
+/**
+ * Said wherever a read-only connection's maintenance controls are withheld (#1418): its provider refuses every
+ * maintenance operation, so neither surface offers one. Kept beside the dialog the two surfaces already share.
+ */
+export const READ_ONLY_MAINTENANCE = "This connection is read-only: use a read-write connection for maintenance";
+
 /** Everything the dialog needs about one per-row request, read from the operation's spec by `entityRequest`. */
 export interface MaintenanceEntityRequest {
   readonly type: MaintenanceOperation;

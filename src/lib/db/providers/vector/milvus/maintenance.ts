@@ -299,16 +299,21 @@ async function releasePreview(
 }
 
 /**
- * The preview of a per-row operation, read RPCs only. The path's names are checked with no call; DescribeCollection
- * runs first, because it is the target's existence check and lists the vector fields, so an unknown collection or
- * database is refused in errors.ts's sentence before any other read.
+ * The preview of a per-row operation, read RPCs only, or its refusal with no call on a read-only connection. The
+ * path's names are checked with no call; DescribeCollection runs first, because it is the target's existence check and
+ * lists the vector fields, so an unknown collection or database is refused in errors.ts's sentence before any other
+ * read.
  */
 export async function previewMilvusMaintenance(
   client: MilvusPreviewClient,
-  context: MilvusSurfaceContext,
+  context: MilvusPreviewContext,
   type: MaintenanceOperation,
   path: readonly string[],
 ): Promise<MaintenancePreview> {
+  // The run itself is refused on a read-only connection, so a preview would describe a Load that cannot happen and
+  // offer the confirm button the route then answers 400 to (#1418). Refused here in the same sentence, before any read.
+  const readOnly = refuseReadOnly(context);
+  if (readOnly !== undefined) throw new QueryError(readOnly, PROVIDER);
   if (type !== "load" && type !== "release") throw notRun(type);
   const target = maintenanceTarget(path, context.database);
   const describe = await surfaceCall(context, `preview of collection ${target.collection}`, target, (options) =>
@@ -327,9 +332,13 @@ export type MilvusMaintenanceClient = Pick<
   "getLoadState" | "getLoadingProgress" | "loadCollection" | "releaseCollection"
 >;
 
-export interface MilvusMaintenanceContext extends MilvusSurfaceContext {
+/** What the preview and the run both read beside the surface. */
+export interface MilvusPreviewContext extends MilvusSurfaceContext {
   /** Where the connection's read-only mode was set, if it is read-only. */
   readonly readOnly?: MilvusReadOnlySource;
+}
+
+export interface MilvusMaintenanceContext extends MilvusPreviewContext {
   /** The provider instance's one-load lock. */
   readonly lock: MilvusLoadLock;
   /** Aborted by `disconnect()`: it ends a wait for the lock and the poll's sleep, so nothing outlives the provider. */

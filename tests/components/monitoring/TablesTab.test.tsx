@@ -199,6 +199,32 @@ describe("TablesTab", () => {
     expect(onRunMaintenance).toHaveBeenCalledWith("reindex", "users", "public");
   });
 
+  test("a read-only connection draws no per-row maintenance control, and the placeholder says why (#1418)", () => {
+    const props = { data: makeData(), loading: false, onRunMaintenance: mock(async () => true), isAdmin: true };
+    const writable = render(<TablesTab {...props} capabilities={makeCapabilities()} />);
+    expect(writable.container.querySelector('button[title="Analyze"]')).not.toBeNull();
+    cleanup();
+
+    const guarded = render(<TablesTab {...props} capabilities={makeCapabilities()} readOnly />);
+    for (const title of ["Analyze", "Vacuum", "Reindex"]) {
+      expect(guarded.container.querySelector(`button[title="${title}"]`)).toBeNull();
+    }
+    // The row is still listed, with the placeholder a row with no control has always drawn.
+    expect(guarded.queryByText("users")).not.toBeNull();
+    const placeholder = guarded.getAllByText("-")[0]!;
+    expect(placeholder.getAttribute("title")).toBe(
+      "This connection is read-only: use a read-write connection for maintenance",
+    );
+  });
+
+  test("the placeholder of a row that never had a control says nothing about read-only", () => {
+    // No declared capabilities: nothing was withheld, so there is no reason to give.
+    const { getAllByText } = render(
+      <TablesTab data={makeData()} loading={false} onRunMaintenance={mock(async () => true)} isAdmin readOnly />,
+    );
+    expect(getAllByText("-")[0]!.getAttribute("title")).toBeNull();
+  });
+
   test("shows non-admin placeholder for actions", () => {
     const { queryAllByText } = render(
       <TablesTab data={makeData()} loading={false} onRunMaintenance={mock(async () => true)} isAdmin={false} />,

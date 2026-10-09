@@ -8,6 +8,13 @@ import type { MaintenancePreview, MaintenanceResult, MonitoringData, MonitoringO
 import { toast } from "sonner";
 import { TimeSeriesBuffer, type TimeSeriesPoint } from "@/lib/time-series-buffer";
 
+/** What one maintenance run came to: whether it happened, and the refusal's own sentence when it did not. */
+export interface MaintenanceOutcome {
+  readonly success: boolean;
+  /** The route's sentence for a refused request, or the engine's own for a run it reported failed. */
+  readonly error?: string;
+}
+
 interface UseMonitoringDataReturn {
   data: MonitoringData | null;
   loading: boolean;
@@ -21,6 +28,8 @@ interface UseMonitoringDataReturn {
   refresh: () => Promise<void>;
   killSession: (pid: number | string) => Promise<boolean>;
   runMaintenance: (type: string, target?: string, container?: string) => Promise<boolean>;
+  /** `runMaintenance` with its reason: for a caller that records or shows why a run was refused. */
+  runMaintenanceOutcome: (type: string, target?: string, container?: string) => Promise<MaintenanceOutcome>;
   /** Rows from the last maintenance call on this selection, or null when that call had none. */
   maintenanceReport: Pick<MaintenanceResult, "rows" | "fields"> | null;
   previewMaintenance: (type: string, target: string, container?: string) => Promise<MaintenancePreview>;
@@ -280,10 +289,12 @@ export function useMonitoringData(
     [fetchData],
   );
 
-  const runMaintenance = useCallback(
-    async (type: string, target?: string, container?: string): Promise<boolean> => {
+  // The run and why it did not happen. `runMaintenance` below is this, read as a boolean: a caller that writes the
+  // reason somewhere the toast is not (the Operations tab's log, the dialog that asked) needs the sentence too (#1418).
+  const runMaintenanceOutcome = useCallback(
+    async (type: string, target?: string, container?: string): Promise<MaintenanceOutcome> => {
       const currentConnection = connectionRef.current;
-      if (!currentConnection) return false;
+      if (!currentConnection) return { success: false };
 
       // Read before the await: the table belongs to the selection that asked for
       // it, not to whichever one is on screen when the reply arrives.
@@ -316,13 +327,14 @@ export function useMonitoringData(
         // whole surface recorded a completed operation. A provider that reports no verdict
         // keeps the old reading: only an explicit `false` is a refusal.
         if (result.success === false) {
-          toast.error(result.message || `${type} failed`);
+          const refusal: string = result.message || `${type} failed`;
+          toast.error(refusal);
           setReportState({ selection: selectionSeq, report: null });
           // Refreshed anyway: a refused operation can still have moved part of the state
           // it was asked about (Oracle rebuilds index by index), so the panels must not
           // keep showing what was true before the attempt.
           await fetchData();
-          return false;
+          return { success: false, error: refusal };
         }
 
         toast.success(result.message || `${type} completed successfully`);
@@ -331,15 +343,21 @@ export function useMonitoringData(
         // Refresh data after maintenance
         await fetchData();
 
-        return true;
+        return { success: true };
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : `Failed to run ${type}`;
         toast.error(errorMessage);
         setReportState({ selection: selectionSeq, report: null });
-        return false;
+        return { success: false, error: errorMessage };
       }
     },
     [fetchData],
+  );
+
+  const runMaintenance = useCallback(
+    async (type: string, target?: string, container?: string): Promise<boolean> =>
+      (await runMaintenanceOutcome(type, target, container)).success,
+    [runMaintenanceOutcome],
   );
 
   // What one per-row operation will do (spec 3.11). Raised rather than toasted: the dialog that asked shows the
@@ -381,6 +399,7 @@ export function useMonitoringData(
     refresh,
     killSession,
     runMaintenance,
+    runMaintenanceOutcome,
     maintenanceReport: connection !== null && reportState?.selection === selection.seq ? reportState.report : null,
     previewMaintenance,
   };

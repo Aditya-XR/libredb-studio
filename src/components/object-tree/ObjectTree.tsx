@@ -248,8 +248,15 @@ export function ObjectTree({
     (row: TreeRowModel): readonly TreeRowAction[] =>
       actions === undefined
         ? []
-        : rowActions({ row, object: tree.objectFor(row), capabilities, labels, handlers: actions }),
-    [actions, capabilities, labels, tree],
+        : rowActions({
+            row,
+            object: tree.objectFor(row),
+            capabilities,
+            labels,
+            handlers: actions,
+            readOnly: connection.readOnly === true,
+          }),
+    [actions, capabilities, connection.readOnly, labels, tree],
   );
 
   /**

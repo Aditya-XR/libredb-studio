@@ -326,6 +326,8 @@ export function MonitoringDashboard({ isEmbedded = false }: MonitoringDashboardP
                   // `withConnectedMaintenance`.
                   capabilities={withConnectedMaintenance(metadata?.capabilities, data?.maintenance)}
                   labels={metadata?.labels}
+                  // The provider refuses every maintenance operation on a read-only connection (#1418).
+                  readOnly={selectedConnection?.readOnly === true}
                 />
               </TabsContent>
               <TabsContent value="storage" className="h-full m-0 p-0">
