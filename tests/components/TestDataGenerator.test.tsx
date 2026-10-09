@@ -1429,4 +1429,65 @@ describe("TestDataGenerator foreign keys and unique columns (#1400)", () => {
     expect(emails[0]).toBe("user1@example.com");
     expect(emails[9]).toBe("user10@example.com");
   });
+
+  /**
+   * Math.random answers every value twice in a row, so each row's first draw repeats the row
+   * before it: a generator that does not look at what the column already holds writes duplicates.
+   */
+  function pairedRandom() {
+    let calls = 0;
+    return spyOn(Math, "random").mockImplementation(() => Math.floor(calls++ / 2) / 100);
+  }
+
+  test("a numeric UNIQUE column is distinct within one run even where the draws repeat", () => {
+    const random = pairedRandom();
+    try {
+      const stock: DetailedObject = {
+        name: "stock",
+        kind: "table",
+        path: ["app", "stock"],
+        indexes: [{ name: "stock_qty_key", columns: ["qty"], unique: true }],
+        columns: [column("qty", "int")],
+      };
+      const quantities = executed(stock, postgresCaps)
+        .split("\n")
+        .filter((line) => line.startsWith("  ("))
+        .map((line) => line.replace(/[,;]$/, ""));
+      expect(quantities).toHaveLength(10);
+      expect(new Set(quantities).size).toBe(10);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  test("the MongoDB insertMany arm gives a numeric UNIQUE index's field distinct values within one run", () => {
+    const random = pairedRandom();
+    try {
+      const ages = (
+        JSON.parse(executed(mongoUsers([{ name: "age_1", columns: ["age"], unique: true }]), jsonCaps)).documents as {
+          age: number;
+        }[]
+      ).map((doc) => doc.age);
+      expect(ages).toHaveLength(10);
+      expect(new Set(ages).size).toBe(10);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  test("a UNIQUE column whose generator has only two values gives up after a few draws instead of looping", () => {
+    const flags: DetailedObject = {
+      name: "flags",
+      kind: "table",
+      path: ["app", "flags"],
+      indexes: [{ name: "flags_active_key", columns: ["active"], unique: true }],
+      columns: [column("active", "boolean")],
+    };
+    const rows = executed(flags, postgresCaps)
+      .split("\n")
+      .filter((line) => line.startsWith("  ("))
+      .map((line) => line.replace(/[,;]$/, ""));
+    expect(rows).toHaveLength(10);
+    expect(new Set(rows).size).toBeLessThanOrEqual(2);
+  });
 });

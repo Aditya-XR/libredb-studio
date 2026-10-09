@@ -107,6 +107,8 @@ const NUMERIC_GENERATORS: ReadonlySet<string> = new Set(["price", "age", "intege
  */
 const LEFT_OUT_GENERATORS: ReadonlySet<string> = new Set(["autoIncrement", "foreignKey"]);
 
+const FOREIGN_KEY_FAKER = { generator: "foreignKey", example: "an existing id" };
+
 /**
  * The generators whose value has a FORMAT a suffix would break: numbers, booleans, dates, UUIDs, IP
  * addresses, colours, phone numbers and hashes. Every other generator writes free text, so a suffix
@@ -131,21 +133,43 @@ const FORMAT_BOUND_GENERATORS: ReadonlySet<string> = new Set([
   "objectId",
 ]);
 
+/** How many draws a unique column's value gets before the generator is taken to have run out. */
+const MAX_DISTINCT_DRAWS = 20;
+
 /**
- * A value for a column under a unique constraint (#1400). A free-text generator's value is made
- * distinct from the other rows of the same run and from any earlier run: `token` is fixed for one
- * generation and new for the next, and the row index keeps the rows of one run apart where the
- * generator picks from a short list. A generator with a format of its own (see
- * {@link FORMAT_BOUND_GENERATORS}) is returned as it is, so a unique numeric or date column can
- * still repeat.
+ * The value of a column under a unique constraint (#1400), distinct from the other rows of the same
+ * run. A free-text value gets a suffix: `token` is fixed for one generation and new for the next, so
+ * it is also distinct from any earlier run, and the row index keeps the rows of one run apart where
+ * the generator picks from a short list. A generator with a format of its own (see
+ * {@link FORMAT_BOUND_GENERATORS}) cannot take a suffix, so it is drawn again, up to
+ * {@link MAX_DISTINCT_DRAWS} times, until the column has not used the value in this run. That makes
+ * it distinct within a run only where the generator has enough values: a boolean has two, so its
+ * later rows still repeat. `taken` holds what each column has used so far in the run.
  */
-function uniqueValue(generator: string, value: string, index: number, token: string): string {
-  if (FORMAT_BOUND_GENERATORS.has(generator)) return value;
-  if (generator === "email") {
-    const at = value.indexOf("@");
-    return `${value.slice(0, at)}.${token}${value.slice(at)}`;
+function uniqueValue(
+  column: string,
+  generator: string,
+  next: () => unknown,
+  index: number,
+  token: string,
+  taken: Map<string, Set<string>>,
+): unknown {
+  let used = taken.get(column);
+  if (used === undefined) {
+    used = new Set();
+    taken.set(column, used);
   }
-  return `${value}-${token}-${index + 1}`;
+  let value = next();
+  if (typeof value === "string" && !FORMAT_BOUND_GENERATORS.has(generator)) {
+    if (generator === "email") {
+      const at = value.indexOf("@");
+      return `${value.slice(0, at)}.${token}${value.slice(at)}`;
+    }
+    return `${value}-${token}-${index + 1}`;
+  }
+  for (let draw = 1; draw < MAX_DISTINCT_DRAWS && used.has(JSON.stringify(value)); draw++) value = next();
+  used.add(JSON.stringify(value));
+  return value;
 }
 
 /**
@@ -372,26 +396,20 @@ export function TestDataGenerator({
   const columnConfigs = useMemo(() => {
     if (!tableSchema?.columns) return [];
     const foreignKeyColumns = new Set(tableSchema.foreignKeys?.map((fk) => fk.columnName));
-    return tableSchema.columns
-      .map((col) => ({
-        ...col,
-        // The FAMILY where the provider reports one, and the declaration otherwise (#1033):
-        // MySQL and MariaDB report `enum('int','text')` in `type`, and every test below is a
-        // substring test, so the declaration alone types an ENUM of two words as a number.
-        // A JSON language's dotted name is a document path, and a SQL column's dot is part of
-        // its name, so only the JSON arm reads the leaf (#1468).
-        faker:
-          queryLanguage === "json"
-            ? inferDocumentFakerType(col.name, col.baseType ?? col.type)
-            : inferFakerType(col.name, col.baseType ?? col.type),
-      }))
-      .map((col) =>
-        // A foreign key is decided by the catalog, not by its name: `dept_id` and `manager` are both
-        // references, and `manager` would otherwise be generated as an age (#1400).
-        foreignKeyColumns.has(col.name)
-          ? { ...col, faker: { generator: "foreignKey", example: "an existing id" } }
-          : col,
-      );
+    return tableSchema.columns.map((col) => {
+      // The FAMILY where the provider reports one, and the declaration otherwise (#1033):
+      // MySQL and MariaDB report `enum('int','text')` in `type`, and every test below is a
+      // substring test, so the declaration alone types an ENUM of two words as a number.
+      // A JSON language's dotted name is a document path, and a SQL column's dot is part of
+      // its name, so only the JSON arm reads the leaf (#1468).
+      const inferred =
+        queryLanguage === "json"
+          ? inferDocumentFakerType(col.name, col.baseType ?? col.type)
+          : inferFakerType(col.name, col.baseType ?? col.type);
+      // A foreign key is decided by the catalog, not by its name: `dept_id` and `manager` are both
+      // references, and `manager` would otherwise be generated as an age (#1400).
+      return { ...col, faker: foreignKeyColumns.has(col.name) ? FOREIGN_KEY_FAKER : inferred };
+    });
   }, [tableSchema, queryLanguage]);
 
   const foreignKeyNames = columnConfigs.filter((c) => c.faker.generator === "foreignKey").map((c) => c.name);
@@ -409,6 +427,8 @@ export function TestDataGenerator({
     ]);
     // One token per generation, so Regenerate and the next opening give values no earlier run used.
     const runToken = uniqueColumns.size > 0 ? randomHex(3) : "";
+    // What each unique column has already written in this run.
+    const taken = new Map<string, Set<string>>();
 
     // Read through `capabilities` rather than `queryLanguage` so the declaration is in hand
     // for the address below; `queryLanguage` is the same field and stays in the deps.
@@ -422,13 +442,11 @@ export function TestDataGenerator({
       const docs = Array.from({ length: rowCount }, (_, i) => {
         const doc = Object.create(null) as Record<string, unknown>;
         for (const col of leafCols) {
-          const value = documentFieldValue(col.faker.generator, col.baseType ?? col.type, i);
+          const next = () => documentFieldValue(col.faker.generator, col.baseType ?? col.type, i);
           setNestedValue(
             doc,
             col.name,
-            uniqueColumns.has(col.name) && typeof value === "string"
-              ? uniqueValue(col.faker.generator, value, i, runToken)
-              : value,
+            uniqueColumns.has(col.name) ? uniqueValue(col.name, col.faker.generator, next, i, runToken, taken) : next(),
           );
         }
         return doc;
@@ -453,8 +471,10 @@ export function TestDataGenerator({
     const rows = Array.from({ length: rowCount }, (_, i) => {
       const values = cols.map((col) => {
         const gen = FAKE[col.faker.generator as keyof typeof FAKE];
-        const generated = gen ? gen(i) : `value_${i}`;
-        const val = uniqueColumns.has(col.name) ? uniqueValue(col.faker.generator, generated, i, runToken) : generated;
+        const next = (): string => (gen ? gen(i) : `value_${i}`);
+        const val = uniqueColumns.has(col.name)
+          ? String(uniqueValue(col.name, col.faker.generator, next, i, runToken, taken))
+          : next();
         // Determine if value should be quoted. The generator is picked by column
         // NAME and this test reads the column TYPE, so the two can disagree —
         // `phone BIGINT` yields `+1-555-…`. The value itself decides, not the
