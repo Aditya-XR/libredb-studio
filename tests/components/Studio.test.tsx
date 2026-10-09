@@ -2330,6 +2330,35 @@ describe("Studio", () => {
     expect(mockSetSchema).toHaveBeenCalledWith([]);
   });
 
+  test("connection-change effect fetches schema once even after metadata arrives late (#1402)", () => {
+    connMgrOverride = { activeConnection: pgConn };
+    metadataOverride = { metadata: null };
+    const { rerender } = render(<Studio />);
+    expect(mockFetchSchema).toHaveBeenCalledTimes(1);
+
+    // Simulates `useProviderMetadata` resolving after the connection is already set, with the
+    // connection itself unchanged: before the fix this re-ran the connection-change effect and
+    // issued a second, identical schema read.
+    metadataOverride = {};
+    rerender(<Studio />);
+    expect(mockFetchSchema).toHaveBeenCalledTimes(1);
+  });
+
+  test("connection-change effect re-reads schema when an edit keeps the same id (#1402)", () => {
+    connMgrOverride = { activeConnection: pgConn };
+    const { rerender } = render(<Studio />);
+    expect(mockFetchSchema).toHaveBeenCalledTimes(1);
+    expect(mockResetTransactionState).toHaveBeenCalledTimes(1);
+
+    // Editing a connection keeps its `id` (use-connection-form.ts) but produces a new object:
+    // keying the effect on the id alone would miss this and leave the old schema/transaction
+    // state in place after a save.
+    connMgrOverride = { activeConnection: { ...pgConn, database: "other" } };
+    rerender(<Studio />);
+    expect(mockFetchSchema).toHaveBeenCalledTimes(2);
+    expect(mockResetTransactionState).toHaveBeenCalledTimes(2);
+  });
+
   // --- profiler/codegen/testdata callbacks ---
   //
   // On the mobile schema tab since the sidebar became the object tree: these four are

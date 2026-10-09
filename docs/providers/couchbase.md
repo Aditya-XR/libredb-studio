@@ -712,6 +712,10 @@ scope is `_default`, in that bucket only, because an unqualified SQL++ keyspace 
 explorer. Marking only the bucket would leave the tree's first paint opening a bucket and stopping,
 with no counts read at all.
 
+The connect-time inventory read (autocomplete, the ERD) is scoped the same way (#1402): it lists
+the pinned bucket's scopes without listing every other bucket's, while the tree still lists every
+bucket lazily, one container at a time.
+
 ### 6a.2 Which catalog, and why not the obvious one
 
 | Read | Catalog | Why not the alternative |

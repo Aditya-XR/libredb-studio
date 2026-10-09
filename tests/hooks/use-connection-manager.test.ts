@@ -2669,6 +2669,152 @@ describe("the object inventory the explorer reads", () => {
 });
 
 // =============================================================================
+// Scoping the connect-time read to the session default on a two-level engine (#1402)
+// =============================================================================
+//
+// Left to `/api/db/objects/inventory`'s own enumeration, a two-level engine (catalog → schema)
+// is walked whole on every connect: one listing per schema of every catalog. The hook instead
+// makes one cheap top-level listing first and, when it marks a session default, a second
+// listing scoped to that one catalog - the explicit `containers` it then hands the inventory
+// route. A single-level engine (postgres, used everywhere else in this file) has nothing to
+// scope and never makes either request, which the bodies/paths assertions below also cover.
+describe("scoping the connect-time read to the session default", () => {
+  afterEach(() => {
+    restoreGlobalFetch();
+  });
+
+  const providerMetaTwoLevel = () => ({
+    ok: true,
+    json: {
+      capabilities: {
+        queryLanguage: "sql",
+        containerLevels: [{ id: "catalog" }, { id: "schema" }],
+        objectKinds: PG_OBJECT_KINDS,
+      },
+      labels: {},
+    },
+  });
+
+  /** `/api/db/objects/containers`: the top level with no `parent`, a level's children otherwise. */
+  const containersRoute =
+    (
+      topLevel: { path: string[]; isSessionDefault?: boolean }[],
+      children: Record<string, { path: string[]; isSessionDefault?: boolean }[]> = {},
+    ) =>
+    async (req: Request) => {
+      const body = (await req.json()) as { parent?: string[] };
+      if (body.parent === undefined) return { ok: true, json: topLevel };
+      return { ok: true, json: children[JSON.stringify(body.parent)] ?? [] };
+    };
+
+  test("scopes to the pinned catalog's schemas when the top level marks a default", async () => {
+    const bodies: { kinds?: string[] }[] = [];
+    mockGlobalFetch({
+      "/api/db/provider-meta": providerMetaTwoLevel(),
+      "/api/db/objects/containers": containersRoute(
+        [{ path: ["memory"], isSessionDefault: true }, { path: ["tpch"] }],
+        {
+          '["memory"]': [{ path: ["memory", "default"], isSessionDefault: true }, { path: ["memory", "app"] }],
+        },
+      ),
+      "/api/db/objects/inventory": inventoryRoute(OBJECTS, bodies),
+    });
+
+    const { result } = renderHook(() => useConnectionManager(true));
+
+    await act(async () => {
+      await result.current.fetchSchema(makeConnection());
+    });
+
+    expect(bodies[0]).toMatchObject({
+      containers: [
+        ["memory", "default"],
+        ["memory", "app"],
+      ],
+    });
+    // `tpch`, the other catalog, was never descended into - no listing for it was made.
+    expect(result.current.defaultContainer).toEqual(["memory", "default"]);
+  });
+
+  test("declines a default schema on a tie, same as the unscoped route would (#1592)", async () => {
+    const bodies: { kinds?: string[] }[] = [];
+    mockGlobalFetch({
+      "/api/db/provider-meta": providerMetaTwoLevel(),
+      "/api/db/objects/containers": containersRoute([{ path: ["memory"], isSessionDefault: true }], {
+        '["memory"]': [
+          { path: ["memory", "default"], isSessionDefault: true },
+          { path: ["memory", "app"], isSessionDefault: true },
+        ],
+      }),
+      "/api/db/objects/inventory": inventoryRoute(OBJECTS, bodies),
+    });
+
+    const { result } = renderHook(() => useConnectionManager(true));
+
+    await act(async () => {
+      await result.current.fetchSchema(makeConnection());
+    });
+
+    expect(bodies[0]).toMatchObject({
+      containers: [
+        ["memory", "default"],
+        ["memory", "app"],
+      ],
+    });
+    expect(result.current.defaultContainer).toBeUndefined();
+  });
+
+  test("falls back to the route's own enumeration when nothing is pinned", async () => {
+    const bodies: { kinds?: string[] }[] = [];
+    mockGlobalFetch({
+      "/api/db/provider-meta": providerMetaTwoLevel(),
+      "/api/db/objects/containers": containersRoute([{ path: ["memory"] }, { path: ["tpch"] }]),
+      "/api/db/objects/inventory": inventoryRoute(OBJECTS, bodies),
+    });
+
+    const { result } = renderHook(() => useConnectionManager(true));
+
+    await act(async () => {
+      await result.current.fetchSchema(makeConnection());
+    });
+
+    expect(bodies[0]).not.toHaveProperty("containers");
+  });
+
+  test("falls back to the route's own enumeration when the pinned catalog has no schemas of its own", async () => {
+    const bodies: { kinds?: string[] }[] = [];
+    mockGlobalFetch({
+      "/api/db/provider-meta": providerMetaTwoLevel(),
+      "/api/db/objects/containers": containersRoute([{ path: ["empty"], isSessionDefault: true }], {
+        '["empty"]': [],
+      }),
+      "/api/db/objects/inventory": inventoryRoute(OBJECTS, bodies),
+    });
+
+    const { result } = renderHook(() => useConnectionManager(true));
+
+    await act(async () => {
+      await result.current.fetchSchema(makeConnection());
+    });
+
+    expect(bodies[0]).not.toHaveProperty("containers");
+  });
+
+  test("a single-level engine never calls the containers route at all", async () => {
+    const fetchMock = mockGlobalFetch(catalogRoutes());
+
+    const { result } = renderHook(() => useConnectionManager(true));
+
+    await act(async () => {
+      await result.current.fetchSchema(makeConnection());
+    });
+
+    const paths = fetchMock.mock.calls.map((call) => new URL(String(call[0]), "http://localhost:3000").pathname);
+    expect(paths).not.toContain("/api/db/objects/containers");
+  });
+});
+
+// =============================================================================
 // ALLOW_CUSTOM_CONNECTIONS: what the editor lists and makes active
 // =============================================================================
 //

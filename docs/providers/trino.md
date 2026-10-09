@@ -164,6 +164,14 @@ configured connector having to be reachable for one refresh. The object tree rea
 container at a time, so listing catalog names costs one `SHOW CATALOGS` and nothing under a catalog
 is touched until a reader opens it.
 
+**The connect-time inventory read (autocomplete, the ERD) is a separate reader, and it is scoped to
+the pin too (#1402).** It does not walk the tree one container at a time; left to name nothing, it
+asked every catalog's schemas up front, which on a cluster with Hive or Iceberg catalogs was a full
+metastore walk on every page load. It now makes one cheap top-level listing first and, when that
+marks a session default, a second listing scoped to that one catalog, so autocomplete and the ERD see
+the pinned catalog's tables without the other catalogs being read at all. A connection with no catalog
+pinned falls back to the old unscoped read, same as before this fix.
+
 **Cross-catalog queries still work.** Nothing about this pin constrains the editor: `SELECT * FROM
 other_catalog.some_schema.t JOIN tpch.tiny.nation ON …` runs exactly as typed.
 

@@ -640,6 +640,7 @@ The resuming sentence of section 4.4 and the slot wait above are no statement's 
 
 The tree has two container levels, Catalog and Database, and four object kinds, each read from the catalog's own `system.tables` by its `table_type`: `table` (`BASE TABLE`), `view` (`VIEW`), `materialized_view` (`MATERIALIZED VIEW`) and `dynamic_table` (`DYNAMIC TABLE`).
 Catalogs come from `system.catalogs`, and a catalog's databases from its own `system.databases` without `system` and `information_schema`; the session's database is marked in the default catalog.
+The connect-time inventory read (autocomplete, the ERD) is scoped to the session-default catalog, `default`, not walked across every catalog (#1402): autocomplete and the ERD see that catalog's databases, while the tree still lists every catalog lazily, one container at a time.
 An object's row count and size come from `system.tables`, the nearest number from 2^53 up (section 5.4), and a materialized view is listed with neither, since its row there says 0 rows and 0 bytes whatever it holds (measured on the pinned image).
 One statement counts every kind of a database; a `table_type` spelling no kind is read from is raised by name, never dropped:
 

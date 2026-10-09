@@ -794,6 +794,8 @@ schemas holding objects. `ATTACH ':memory:' AS name` works too, which is what th
 
 A database alone is therefore a real address as well as a database and a schema, and the declaration states it as `containerPathShapes: "prefixes"`: a database-level read answers for every schema in that database.
 
+The connect-time inventory read (autocomplete, the ERD) is scoped to the session-default database, not walked across every `ATTACH`ed one (#1402): autocomplete and the ERD see the connected database's schemas, while the tree still lists every attached database lazily, one container at a time.
+
 #### Four kinds, and one `duckdb_*` function behind each
 
 | Kind | Role | Catalog function | Note |

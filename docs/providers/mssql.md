@@ -775,8 +775,12 @@ identifier that is already interpolated as a name.
 
 Why the level needs it at all: first paint walks the container chain down to the session default at
 the DEEPEST declared level and reads the counts there (#789). An engine that marks only its outer
-level opens a database and stops, with no folder and no count. This is the only two-level engine, so
-it is the only one where the distinction exists.
+level opens a database and stops, with no folder and no count. Only a two-level engine has this
+distinction, so each one marks its session default at both levels.
+
+The connect-time inventory read (autocomplete, the ERD) is scoped the same way (#1402): it sees the
+connected database's schemas without listing every other database on the server, while the tree
+still lists all of them lazily, one container at a time.
 
 > **UNVERIFIED against a live server.** The two columns are implemented from Microsoft's documented
 > behaviour of `SCHEMA_NAME()` and `DB_NAME()`; no SQL Server was available when they were added. The
