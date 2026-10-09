@@ -2230,6 +2230,23 @@ describe("MongoDBProvider", () => {
       await provider.connect();
     });
 
+    test("skips system.* collections and keeps one whose name only starts with those letters", async () => {
+      // Monitoring listed `system.views` and `system.buckets.readings` while the tree hid both
+      // (#1428). The bucket here has no time-series parent, so the earlier duplicate-bucket
+      // check would have kept it; the reserved prefix is what drops it. `systemetrics` does
+      // not start with `system.` and is a collection a person created.
+      mockCollections = [
+        { name: "orders", type: "collection" },
+        { name: "system.views", type: "collection" },
+        { name: "system.buckets.readings", type: "collection" },
+        { name: "systemetrics", type: "collection" },
+      ];
+
+      const stats = await provider.getTableStats();
+
+      expect(stats.map((row) => row.tableName).sort()).toEqual(["orders", "systemetrics"]);
+    });
+
     test("returns collection stats", async () => {
       const stats = await provider.getTableStats();
       expect(stats).toBeArray();

@@ -382,16 +382,19 @@ return nothing from `pg_depend`.
 
 Citations, by engine: Materialize's
 [system catalog](https://materialize.com/docs/sql/system-catalog/) (`mz_catalog`, `mz_internal`,
-`mz_introspection`); CockroachDB's
+`mz_introspection`). `mz_unsafe` and `mz_catalog_unstable` are not on that page; Materialize
+v26.44.1 listed both beside a user's own schemas, so they are excluded on that measurement.
+RisingWave's [`rw_catalog`](https://docs.risingwave.com/sql/system-catalogs/rw-catalog) holds its
+system tables; RisingWave 3.1.0 listed 74 of them as user objects. CockroachDB's
 [system catalogs](https://www.cockroachlabs.com/docs/stable/system-catalogs), which enumerates
 exactly four (`crdb_internal` and `pg_extension` are the two stock PostgreSQL lacks); TimescaleDB's
 own `sql/pre_install/schemas.sql`, which creates all seven; Cloudberry's
 [schema documentation](https://cloudberry.apache.org/docs/operate-with-data/operate-with-db-objects/create-and-manage-schemas/)
-for `gp_toolkit`, `pg_aoseg` and `pg_bitmapindex`. Two entries rest on measurement rather than a
-document, and are marked as such in the code: Cloudberry's `pg_ext_aux` (the PAX auxiliary tables),
-which its schema page does not list, and AlloyDB's `google_ml`, which Google's docs never name —
-traced through `pg_depend` to the `google_ml_integration` extension the Omni image enables by
-default.
+for `gp_toolkit`, `pg_aoseg` and `pg_bitmapindex`. Entries that rest on measurement rather than a
+document are marked as such in the code: Cloudberry's `pg_ext_aux` (the PAX auxiliary tables),
+which its schema page does not list; Materialize's `mz_unsafe` and `mz_catalog_unstable`; and
+AlloyDB's `google_ml`, which Google's docs never name — traced through `pg_depend` to the
+`google_ml_integration` extension the Omni image enables by default.
 
 ### 3.1.4 What the object surface declares, and which catalog answers for it
 

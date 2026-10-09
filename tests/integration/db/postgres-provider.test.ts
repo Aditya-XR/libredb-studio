@@ -2272,10 +2272,15 @@ describe("PostgresProvider", () => {
     // confirmed against a live instance. They are the schemas a wire-compatible
     // engine puts in pg_tables/information_schema alongside a user's own tables.
     const DOCUMENTED_ENGINE_SCHEMAS = [
-      // Materialize - materialize.com/docs/sql/system-catalog/
+      // Materialize - materialize.com/docs/sql/system-catalog/ documents the first three.
+      // The other two were measured on v26.44.1 (#1428).
       "mz_catalog",
       "mz_internal",
       "mz_introspection",
+      "mz_unsafe",
+      "mz_catalog_unstable",
+      // RisingWave - docs.risingwave.com/sql/system-catalogs/rw-catalog. Measured on 3.1.0.
+      "rw_catalog",
       // CockroachDB - cockroachlabs.com/docs/stable/system-catalogs
       "crdb_internal",
       "pg_extension",

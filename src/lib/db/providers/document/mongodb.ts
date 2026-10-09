@@ -2040,6 +2040,12 @@ export class MongoDBProvider extends BaseDatabaseProvider {
         continue;
       }
 
+      // Every other namespace the server reserves, `system.views` included. The object
+      // browser already skips these through `MONGODB_INTERNAL_PREFIX`; Monitoring was
+      // listing them as tables (#1428). `systemetrics` does not start with the prefix
+      // and stays.
+      if (collName.startsWith(MONGODB_INTERNAL_PREFIX)) continue;
+
       try {
         const collStats = await this.db!.command({ collStats: collName });
 

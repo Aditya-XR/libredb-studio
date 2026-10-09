@@ -586,7 +586,8 @@ Inside a database, the reserved namespace prefix is **`system.` with the dot**. 
 `systemetrics` is created without complaint. The fixture holds `systemetrics`, so a rule written on
 the letters `system` without the dot fails a test by name. The two internal namespaces the fixture's
 own listing contains are `system.views` (created the moment a view is) and
-`system.buckets.readings` (the bucket collection behind the time series one).
+`system.buckets.readings` (the bucket collection behind the time series one). `getTableStats()`
+applies the same prefix, so Monitoring's Tables list does not show either of them.
 
 `listDatabases` is sent as `{ listDatabases: 1, nameOnly: true, authorizedDatabases: true }`. The
 flag is load-bearing rather than tidy: the server's default for it depends on whether the connecting
@@ -925,7 +926,7 @@ Every method is wrapped in try/catch. Degradation reports the absence rather tha
 | `getPerformanceMetrics()` | `serverStatus` (WiredTiger + opcounters) | cache-hit %, **ops/sec** (`query`+`insert`+`update`+`delete` opcounters ÷ uptime — *total operations, not just queries*), buffer-pool % (cache bytes), `deadlocks: 0`. **Every field is optional**: each one is present only if its reading was, and a failed `serverStatus` reports `{}` ([§7.1](#71-what-the-panel-shows-when-the-cache-cannot-be-measured)) |
 | `getSlowQueries()` | `system.profile` | per-op time/returned; **`[]` if the profiler isn't enabled** (`db.setProfilingLevel(1)`); sorted by `millis` (slowest) — note `getHealth()`'s slow-query block instead sorts by `ts` (most recent) and emits a placeholder row when disabled |
 | `getActiveSessions()` | `currentOp` | opid, ns, lock waits, duration — ⚠️ the **`user` field is populated from `op.client`** (the client `host:port`), **not** an authenticated user |
-| `getTableStats()` | `collStats` per collection | row count + data/index/total sizes, `totalIndexSize` carried as the byte figure `indexSizeBytes` and not only as formatted text; a time series collection is **one** row, because the server's internal `system.buckets.<name>` duplicate is skipped rather than summed beside it |
+| `getTableStats()` | `collStats` per collection | row count + data/index/total sizes, `totalIndexSize` carried as the byte figure `indexSizeBytes` and not only as formatted text; a time series collection is **one** row, because the server's internal `system.buckets.<name>` duplicate is skipped rather than summed beside it; every other `system.*` namespace (`system.views` included) is skipped with the same `system.` prefix the object browser uses, so Monitoring lists the same collections the tree does. `systemetrics` does not start with that prefix and stays |
 | `getIndexStats()` | `$indexStats` + `indexes()` | **real `scans`** (`accesses.ops`); `indexSize` `N/A`; **`indexType` only distinguishes `text` vs `btree`** — `hashed`/`2dsphere`/`2d`/wildcard/clustered are all mislabelled `btree` |
 | `getStorageStats()` | `dbStats` + WiredTiger | Data / Indexes / Storage / WiredTiger cache (with usage %) |
 
