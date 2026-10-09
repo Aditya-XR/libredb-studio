@@ -107,28 +107,40 @@ const NUMERIC_GENERATORS: ReadonlySet<string> = new Set(["price", "age", "intege
  */
 const LEFT_OUT_GENERATORS: ReadonlySet<string> = new Set(["autoIncrement", "foreignKey"]);
 
-/** The free-text generators, whose value stays valid text with a suffix added. */
-const SUFFIXABLE_GENERATORS: ReadonlySet<string> = new Set([
-  "email",
-  "username",
-  "url",
-  "imageUrl",
-  "fullName",
-  "firstName",
-  "lastName",
-  "company",
-  "address",
-  "sentence",
-  "text",
+/**
+ * The generators whose value has a FORMAT a suffix would break: numbers, booleans, dates, UUIDs, IP
+ * addresses, colours, phone numbers and hashes. Every other generator writes free text, so a suffix
+ * keeps it valid.
+ */
+const FORMAT_BOUND_GENERATORS: ReadonlySet<string> = new Set([
+  ...NUMERIC_GENERATORS,
+  "autoIncrement",
+  "foreignKey",
+  "boolean",
+  "date",
+  "datetime",
+  "uuid",
+  "ip",
+  "color",
+  "phone",
+  "hash",
+  "json",
+  "object",
+  "array",
+  "null",
+  "objectId",
 ]);
 
 /**
- * A value for a column under a unique constraint, distinct from the same column's values in an
- * earlier run (#1400). `token` is fixed for one generation and new for the next; the row index keeps
- * the rows of one run apart where the generator picks from a short list.
+ * A value for a column under a unique constraint (#1400). A free-text generator's value is made
+ * distinct from the other rows of the same run and from any earlier run: `token` is fixed for one
+ * generation and new for the next, and the row index keeps the rows of one run apart where the
+ * generator picks from a short list. A generator with a format of its own (see
+ * {@link FORMAT_BOUND_GENERATORS}) is returned as it is, so a unique numeric or date column can
+ * still repeat.
  */
 function uniqueValue(generator: string, value: string, index: number, token: string): string {
-  if (!SUFFIXABLE_GENERATORS.has(generator)) return value;
+  if (FORMAT_BOUND_GENERATORS.has(generator)) return value;
   if (generator === "email") {
     const at = value.indexOf("@");
     return `${value.slice(0, at)}.${token}${value.slice(at)}`;
@@ -390,6 +402,14 @@ export function TestDataGenerator({
     // Filter out the columns the engine or the user fills in
     const cols = columnConfigs.filter((c) => !LEFT_OUT_GENERATORS.has(c.faker.generator));
 
+    // The columns under a unique constraint: the primary key and every column of a unique index.
+    const uniqueColumns = new Set([
+      ...cols.filter((c) => c.isPrimary).map((c) => c.name),
+      ...tableSchema.indexes.filter((index) => index.unique).flatMap((index) => index.columns),
+    ]);
+    // One token per generation, so Regenerate and the next opening give values no earlier run used.
+    const runToken = uniqueColumns.size > 0 ? randomHex(3) : "";
+
     // Read through `capabilities` rather than `queryLanguage` so the declaration is in hand
     // for the address below; `queryLanguage` is the same field and stays in the deps.
     if (capabilities?.queryLanguage === "json") {
@@ -402,7 +422,14 @@ export function TestDataGenerator({
       const docs = Array.from({ length: rowCount }, (_, i) => {
         const doc = Object.create(null) as Record<string, unknown>;
         for (const col of leafCols) {
-          setNestedValue(doc, col.name, documentFieldValue(col.faker.generator, col.baseType ?? col.type, i));
+          const value = documentFieldValue(col.faker.generator, col.baseType ?? col.type, i);
+          setNestedValue(
+            doc,
+            col.name,
+            uniqueColumns.has(col.name) && typeof value === "string"
+              ? uniqueValue(col.faker.generator, value, i, runToken)
+              : value,
+          );
         }
         return doc;
       });
@@ -423,13 +450,6 @@ export function TestDataGenerator({
     const colNames = cols
       .map((c) => (capabilities === undefined ? `"${c.name}"` : quoteIdentifier(c.name, capabilities)))
       .join(", ");
-    // The columns under a unique constraint: the primary key and every column of a unique index.
-    const uniqueColumns = new Set([
-      ...cols.filter((c) => c.isPrimary).map((c) => c.name),
-      ...tableSchema.indexes.filter((index) => index.unique).flatMap((index) => index.columns),
-    ]);
-    // One token per generation, so Regenerate and the next opening give values no earlier run used.
-    const runToken = uniqueColumns.size > 0 ? randomHex(3) : "";
     const rows = Array.from({ length: rowCount }, (_, i) => {
       const values = cols.map((col) => {
         const gen = FAKE[col.faker.generator as keyof typeof FAKE];

@@ -1367,4 +1367,66 @@ describe("TestDataGenerator foreign keys and unique columns (#1400)", () => {
     expect(statement).toContain("'user1@example.com'");
     expect(statement).toContain("'user10@example.com'");
   });
+
+  test("short pick-list values of a UNIQUE column are distinct within one run", () => {
+    // Every pick lands on the first entry, the worst case for a short list: without a suffix all
+    // ten rows would carry the same city, country, status and paragraph.
+    const random = spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const places: DetailedObject = {
+        name: "places",
+        kind: "table",
+        path: ["app", "places"],
+        indexes: [
+          { name: "places_city_key", columns: ["city"], unique: true },
+          { name: "places_country_key", columns: ["country"], unique: true },
+          { name: "places_status_key", columns: ["status"], unique: true },
+          { name: "places_description_key", columns: ["description"], unique: true },
+        ],
+        columns: [
+          column("city", "varchar(50)"),
+          column("country", "varchar(50)"),
+          column("status", "varchar(20)"),
+          column("description", "text", { baseType: "text" }),
+        ],
+      };
+      const rows = executed(places, postgresCaps)
+        .split("\n")
+        .filter((line) => line.startsWith("  ("));
+      expect(rows).toHaveLength(10);
+      for (let position = 0; position < 4; position++) {
+        const values = rows.map((row) => row.match(/'[^']*'/g)![position]);
+        expect(new Set(values).size).toBe(10);
+      }
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  const mongoUsers = (indexes: DetailedObject["indexes"]): DetailedObject => ({
+    name: "users",
+    kind: "table",
+    path: ["shop", "users"],
+    indexes,
+    columns: [column("name", "VARCHAR(100)"), column("email", "VARCHAR(255)"), column("age", "int")],
+  });
+
+  const mongoEmails = (schema: DetailedObject): string[] =>
+    (JSON.parse(executed(schema, jsonCaps)).documents as { email: string }[]).map((doc) => doc.email);
+
+  test("the MongoDB insertMany arm gives a UNIQUE index's field distinct values, within a run and between runs", () => {
+    const schema = mongoUsers([{ name: "email_1", columns: ["email"], unique: true }]);
+    const first = mongoEmails(schema);
+    cleanup();
+    const second = mongoEmails(schema);
+    for (const email of first) expect(email).toMatch(/^user\d+\.[0-9a-f]{6}@example\.com$/);
+    expect(new Set(first).size).toBe(10);
+    expect(first.filter((email) => second.includes(email))).toEqual([]);
+  });
+
+  test("the MongoDB insertMany arm keeps the plain email where no unique index names the field", () => {
+    const emails = mongoEmails(mongoUsers([{ name: "email_1", columns: ["email"], unique: false }]));
+    expect(emails[0]).toBe("user1@example.com");
+    expect(emails[9]).toBe("user10@example.com");
+  });
 });
