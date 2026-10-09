@@ -2426,10 +2426,20 @@ describe("RedisProvider", () => {
       await provider.connect();
     });
 
-    test("analyze returns server info", async () => {
+    test("analyze returns one row per key:value metric", async () => {
       const result = await provider.runMaintenance("analyze");
+      const metrics = MOCK_INFO_STRING.split("\n").filter((line) => {
+        const trimmed = line.trim();
+        return trimmed.length > 0 && !trimmed.startsWith("#") && trimmed.indexOf(":") > 0;
+      });
+
       expect(result.success).toBe(true);
-      expect(result.message).toContain("Server info retrieved");
+      expect(result.rows).toHaveLength(metrics.length);
+      expect(result.fields).toEqual(["section", "key", "value"]);
+      expect(result.message).toBe(`Server info retrieved (${metrics.length} metrics)`);
+      expect(result.rows).toContainEqual({ section: "Server", key: "redis_version", value: "7.2.4" });
+      expect(result.rows).toContainEqual({ section: "Stats", key: "keyspace_misses", value: "100" });
+      expect(result.rows?.some((row) => String(row.key).startsWith("#"))).toBe(false);
     });
 
     test("unsupported maintenance type throws", async () => {

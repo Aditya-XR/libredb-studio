@@ -2739,8 +2739,17 @@ export class RedisProvider extends BaseDatabaseProvider {
         case "analyze": {
           const info = await this.client!.info();
           const executionTime = Math.round(performance.now() - startTime);
-          const lines = info.split("\n").length;
-          return { success: true, executionTime, message: `Server info retrieved (${lines} metrics)` };
+          // The same parser the editor uses for a typed `INFO`. Counting every line
+          // treated `# Server` headers and the blank lines between sections as metrics
+          // and then threw the reply away (#1453).
+          const parsed = this.parseInfoResult(info);
+          return {
+            success: true,
+            executionTime,
+            message: `Server info retrieved (${parsed.rowCount} metrics)`,
+            rows: parsed.rows,
+            fields: parsed.fields,
+          };
         }
       }
       throw new QueryError(`Unsupported maintenance type for Redis: ${type}`, "redis");

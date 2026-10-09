@@ -711,6 +711,180 @@ describe("useMonitoringData", () => {
     expect(mockToastSuccess).toHaveBeenCalledWith("VACUUM completed on public.users");
   });
 
+  // ── runMaintenance keeps rows, and drops them when the next result has none ─
+
+  test("runMaintenance exposes the rows a result carried, then clears them", async () => {
+    let calls = 0;
+    mockGlobalFetch({
+      "/api/db/monitoring": { ok: true, json: mockMonitoringResponse },
+      "/api/db/maintenance": () => {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            ok: true,
+            json: {
+              success: true,
+              message: "Server info retrieved (1 metrics)",
+              rows: [{ section: "Server", key: "redis_version", value: "7.2.4" }],
+              fields: ["section", "key", "value"],
+            },
+          };
+        }
+        return { ok: true, json: { success: true, message: "VACUUM completed" } };
+      },
+    });
+
+    const { result } = renderHook(() => useMonitoringData(mockConnection));
+
+    await waitFor(() => {
+      expect(result.current.data).not.toBeNull();
+    });
+
+    await act(async () => {
+      await result.current.runMaintenance("analyze");
+    });
+
+    expect(result.current.maintenanceReport).toEqual({
+      rows: [{ section: "Server", key: "redis_version", value: "7.2.4" }],
+      fields: ["section", "key", "value"],
+    });
+
+    await act(async () => {
+      await result.current.runMaintenance("vacuum");
+    });
+
+    expect(result.current.maintenanceReport).toBeNull();
+  });
+
+  test("a refused or failed maintenance call clears the table the last one left", async () => {
+    const infoReply = {
+      ok: true,
+      json: {
+        success: true,
+        message: "Server info retrieved (1 metrics)",
+        rows: [{ section: "Server", key: "redis_version", value: "7.2.4" }],
+        fields: ["section", "key", "value"],
+      },
+    };
+    const replies: Array<() => typeof infoReply> = [
+      () => infoReply,
+      () => ({ ok: true, json: { success: false, message: "refused" } }) as unknown as typeof infoReply,
+      () => infoReply,
+      () => {
+        throw new Error("Network failure");
+      },
+    ];
+    mockGlobalFetch({
+      "/api/db/monitoring": { ok: true, json: mockMonitoringResponse },
+      "/api/db/maintenance": () => (replies.shift() as () => typeof infoReply)(),
+    });
+
+    const { result } = renderHook(() => useMonitoringData(mockConnection));
+    await waitFor(() => {
+      expect(result.current.data).not.toBeNull();
+    });
+
+    for (let i = 0; i < 2; i += 1) {
+      await act(async () => {
+        await result.current.runMaintenance("analyze");
+      });
+      expect(result.current.maintenanceReport?.rows).toHaveLength(1);
+
+      await act(async () => {
+        await result.current.runMaintenance("analyze");
+      });
+      expect(result.current.maintenanceReport).toBeNull();
+    }
+  });
+
+  test("a result with rows but no fields, or fields but no rows, is not a table", async () => {
+    const replies = [
+      { success: true, message: "a", rows: [{ k: 1 }] },
+      { success: true, message: "b", fields: ["k"] },
+      { success: true, message: "c", rows: [], fields: ["k"] },
+    ];
+    mockGlobalFetch({
+      "/api/db/monitoring": { ok: true, json: mockMonitoringResponse },
+      "/api/db/maintenance": () => ({ ok: true, json: replies.shift() }),
+    });
+
+    const { result } = renderHook(() => useMonitoringData(mockConnection));
+    await waitFor(() => {
+      expect(result.current.data).not.toBeNull();
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      await act(async () => {
+        await result.current.runMaintenance("analyze");
+      });
+      expect(result.current.maintenanceReport).toBeNull();
+    }
+  });
+
+  // ── A switch while the call is in flight does not adopt its table ──────
+
+  test("a connection switch while maintenance is in flight leaves the table with the selection that asked", async () => {
+    const secondConnection: DatabaseConnection = {
+      ...mockConnection,
+      id: "mon-pg-2",
+      name: "Second DB",
+    };
+
+    // Hold the maintenance reply open, so the switch below happens while the
+    // call that connection 1 asked for is still outstanding. The table that
+    // reply carries must not appear under connection 2.
+    let releaseMaintenance: (() => void) | undefined;
+    const maintenanceHeld = new Promise<void>((resolve) => {
+      releaseMaintenance = resolve;
+    });
+
+    mockGlobalFetch({
+      "/api/db/monitoring": { ok: true, json: mockMonitoringResponse },
+      "/api/db/maintenance": async () => {
+        await maintenanceHeld;
+        return {
+          ok: true,
+          json: {
+            success: true,
+            message: "Server info retrieved (1 metrics)",
+            rows: [{ section: "Server", key: "redis_version", value: "7.2.4" }],
+            fields: ["section", "key", "value"],
+          },
+        };
+      },
+    });
+
+    const { result, rerender } = renderHook(({ conn }) => useMonitoringData(conn), {
+      initialProps: { conn: mockConnection as DatabaseConnection },
+    });
+
+    await waitFor(() => {
+      expect(result.current.data).not.toBeNull();
+    });
+
+    let maintenanceDone: Promise<boolean> | undefined;
+    act(() => {
+      maintenanceDone = result.current.runMaintenance("analyze");
+    });
+
+    rerender({ conn: secondConnection });
+
+    expect(result.current.maintenanceReport).toBeNull();
+
+    releaseMaintenance?.();
+
+    await act(async () => {
+      await maintenanceDone;
+    });
+
+    expect(result.current.maintenanceReport).toBeNull();
+
+    // Coming back is a new selection, so the table does not reappear.
+    rerender({ conn: mockConnection });
+
+    expect(result.current.maintenanceReport).toBeNull();
+  });
+
   // ── runMaintenance uses fallback when result.message empty ─────────────
 
   test("runMaintenance uses fallback when result.message is empty", async () => {

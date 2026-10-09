@@ -1027,6 +1027,23 @@ Milvus's provider implements `engineUser()`: the Milvus user name, the user name
 }
 ```
 
+A response can also carry `rows` (an array of objects) and `fields` (their column order), when the operation's answer is a table to read rather than only a sentence.
+Redis `analyze` is the only operation that fills them today: it runs `INFO` and returns one row per `key:value` metric, with the columns `section`, `key` and `value`, and the count in `message` is the number of rows.
+`fields` is present whenever `rows` is, and both are absent on every other operation.
+
+```json
+{
+  "success": true,
+  "executionTime": 3,
+  "message": "Server info retrieved (2 metrics)",
+  "rows": [
+    { "section": "Server", "key": "redis_version", "value": "7.2.4" },
+    { "section": "Clients", "key": "connected_clients", "value": "1" }
+  ],
+  "fields": ["section", "key", "value"]
+}
+```
+
 **Response (401 Unauthorized):**
 ```json
 {

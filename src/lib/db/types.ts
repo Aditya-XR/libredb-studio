@@ -127,6 +127,17 @@ export interface MaintenanceResult {
   success: boolean;
   executionTime: number;
   message: string;
+  /**
+   * The table this operation produced, when its answer is something to read rather
+   * than only a sentence. `fields` is present whenever `rows` is.
+   *
+   * Redis `analyze` is `INFO`: each `key:value` line is one row and the section it sat
+   * under travels with it, so the count in the message is `rows.length` (#1453). Both
+   * are absent on every operation that only succeeded or failed.
+   */
+  rows?: Record<string, unknown>[];
+  /** Column order for `rows`. */
+  fields?: string[];
 }
 
 /**

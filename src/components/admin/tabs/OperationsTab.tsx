@@ -53,6 +53,7 @@ import {
   maintenanceControl,
   type ActiveSessionDetails,
   type MaintenanceOperation,
+  type MaintenanceResult,
   type MaintenanceType,
   type TableStats,
 } from "@/lib/db/types";
@@ -169,6 +170,50 @@ function closedDialog(current: TypedDialogOpening | null): TypedDialogOpening | 
 const UNNAMED_CONNECTION =
   "This operation is confirmed by typing the connection's name, and this connection has none. Give it a name in its connection settings first.";
 
+/**
+ * The table a maintenance call handed back. Redis Run Info is the one that has rows:
+ * each `INFO` metric is one row, and the panel scrolls because a full reply is a
+ * couple of hundred of them (#1453).
+ */
+function MaintenanceResultTable({ report }: { report: Pick<MaintenanceResult, "rows" | "fields"> }) {
+  const rows = report.rows ?? [];
+  const fields = report.fields ?? [];
+  return (
+    <div className="rounded-xl border border-hairline bg-panel" data-testid="maintenance-result">
+      <div className="p-4 border-b border-hairline">
+        <span className="text-xs font-bold text-fg-secondary">Result ({rows.length})</span>
+      </div>
+      <div className="max-h-[360px] overflow-y-auto">
+        <Table>
+          <TableHeader>
+            <TableRow className="border-hairline hover:bg-transparent">
+              {fields.map((field) => (
+                <TableHead key={field} className="text-xs text-fg-muted font-bold uppercase">
+                  {field.charAt(0).toUpperCase() + field.slice(1)}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow
+                key={fields.map((field) => String(row[field] ?? "")).join("\u001f")}
+                className="border-hairline hover:bg-fill"
+              >
+                {fields.map((field) => (
+                  <TableCell key={field} className="font-mono text-xs text-fg-secondary py-2 align-top break-all">
+                    {String(row[field] ?? "")}
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 export function OperationsTab() {
   // Only the operator's CHOICE is state; the list and the selected object are both
   // calculated during render from it. `useAllConnections` is read here, above the
@@ -251,10 +296,8 @@ export function OperationsTab() {
   // is reactive so it settles as soon as the capability arrives.
   const monitoringOptions = useMemo(() => ({ includeTables: true, includeIndexes: false, includeStorage: false }), []);
 
-  const { data, loading, error, refresh, killSession, runMaintenance, previewMaintenance } = useMonitoringData(
-    selectedConnection,
-    monitoringOptions,
-  );
+  const { data, loading, error, refresh, killSession, runMaintenance, maintenanceReport, previewMaintenance } =
+    useMonitoringData(selectedConnection, monitoringOptions);
   // Both maintenance surfaces ask ONE question - `maintenanceControl` in
   // src/lib/db/types.ts - so that neither can offer a control the other's engine
   // rejects. `capabilities` may be undefined here (provider-meta in flight, or its
@@ -710,6 +753,8 @@ export function OperationsTab() {
           </p>
         </div>
       )}
+
+      {maintenanceReport && <MaintenanceResultTable report={maintenanceReport} />}
 
       {/* Tables + Sessions Split */}
       <div className="grid gap-6 md:grid-cols-2">

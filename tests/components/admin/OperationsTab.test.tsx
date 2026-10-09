@@ -75,6 +75,7 @@ mock.module("@/hooks/use-monitoring-data", () => ({
       refresh: mockRefresh,
       killSession: mockKillSession,
       runMaintenance: mockRunMaintenance,
+      maintenanceReport: null,
       ...monitoringOverride,
     };
   }),
@@ -375,6 +376,33 @@ describe("OperationsTab", () => {
     expect(queryByText("Run Analyze")).toBeNull();
     expect(queryByText("Update Statistics")).toBeNull();
     expect(queryByText("Reclaim Space")).toBeNull();
+  });
+
+  test("renders the rows a maintenance result carried", async () => {
+    monitoringOverride = {
+      maintenanceReport: {
+        fields: ["section", "key", "value"],
+        rows: [
+          { section: "Server", key: "redis_version", value: "7.2.4" },
+          { section: "Clients", key: "connected_clients", value: "12" },
+        ],
+      },
+    };
+    let renderResult: ReturnType<typeof render>;
+    await act(async () => {
+      renderResult = render(<OperationsTab />);
+    });
+    const { queryByText, getByTestId } = renderResult!;
+    const table = getByTestId("maintenance-result");
+
+    expect(queryByText("Result (2)")).not.toBeNull();
+    expect(within(table).queryByText("Section")).not.toBeNull();
+    expect(within(table).queryByText("Key")).not.toBeNull();
+    expect(within(table).queryByText("Value")).not.toBeNull();
+    expect(within(table).queryByText("redis_version")).not.toBeNull();
+    expect(within(table).queryByText("7.2.4")).not.toBeNull();
+    expect(within(table).queryByText("connected_clients")).not.toBeNull();
+    expect(within(table).queryByText("12")).not.toBeNull();
   });
 
   test("falls back to the generic wording when the provider ships no labels", async () => {

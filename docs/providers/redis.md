@@ -1730,7 +1730,7 @@ Redis exposes a single maintenance operation:
 
 | Type | Behaviour |
 |------|-----------|
-| `analyze` | Runs `INFO` and reports the number of lines in the output as a snapshot. Non-destructive. |
+| `analyze` | Runs `INFO` and returns one row per `key:value` metric (`section`, `key`, `value`), parsed by `parseInfoResult`. The count in the message is that row count: section headers and blank lines are not metrics. The Operations tab renders the rows. Non-destructive. |
 | anything else | Throws `QueryError` (`Unsupported maintenance type for Redis`) |
 
 This is reflected in `getCapabilities().maintenanceOperations = ['analyze']`. The admin Operations
