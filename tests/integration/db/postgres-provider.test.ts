@@ -6583,6 +6583,108 @@ describe("PostgreSQL extension-owned objects (#1429)", () => {
 });
 
 /**
+ * The places #1429 did not reach, because they read other catalogs (#1599).
+ *
+ * With PostGIS in `public`, the Overview counted `spatial_ref_sys` as a table and its
+ * primary key as an index, and the Triggers folder listed a trigger on that table, while the
+ * Tables folder already hid the table. The mock answers the extension's objects unless the
+ * statement carries the ownership test for them, the same way the #1429 mock does.
+ */
+describe("PostgreSQL objects on extension-owned tables (#1599)", () => {
+  function makeProvider() {
+    return new PostgresProvider(makePgConfig());
+  }
+
+  const TRIGGER_DEFINITION =
+    "CREATE TRIGGER srs_audit AFTER UPDATE ON public.spatial_ref_sys FOR EACH ROW EXECUTE FUNCTION audit()";
+
+  function extensionTables(statements: string[], refuseOwnership = false) {
+    return async (sql: string) => {
+      statements.push(sql);
+      if (refuseOwnership && sql.includes("pg_depend")) {
+        throw Object.assign(new Error('relation "pg_depend" does not exist'), { code: "42P01" });
+      }
+      const tableOwnershipTested = /c\.oid NOT IN \(SELECT d\.objid FROM pg_depend d [^)]*'pg_class'::regclass/.test(
+        sql,
+      );
+      const tables = /table_schema, table_name\) NOT IN \(SELECT n\.nspname, c\.relname FROM pg_class c/.test(sql)
+        ? 1
+        : 2;
+      const indexes = /schemaname, tablename\) NOT IN \(SELECT n\.nspname, c\.relname FROM pg_class c/.test(sql)
+        ? 1
+        : 2;
+      const triggers = tableOwnershipTested
+        ? [{ name: "orders_stamp", parent: "orders" }]
+        : [
+            { name: "orders_stamp", parent: "orders" },
+            { name: "srs_audit", parent: "spatial_ref_sys" },
+          ];
+      if (sql.includes("as table_count")) {
+        return { rows: [{ table_count: String(tables), index_count: String(indexes) }] };
+      }
+      // COUNTS_SQL is one UNION whose relation arm carries the same pg_class test, so the trigger
+      // count is answered from the trigger arm's own text, which starts at SELECT 'trigger'.
+      if (sql.includes("GROUP BY kind")) {
+        const triggerArm = sql.slice(sql.indexOf("SELECT 'trigger'"));
+        const triggerArmTested = /c\.oid NOT IN \(SELECT d\.objid FROM pg_depend d [^)]*'pg_class'::regclass/.test(
+          triggerArm,
+        );
+        return { rows: [{ kind: "trigger", n: triggerArmTested ? 1 : 2 }] };
+      }
+      if (sql.includes("pg_get_triggerdef"))
+        return { rows: tableOwnershipTested ? [] : [{ definition: TRIGGER_DEFINITION }] };
+      if (sql.includes("tgname")) return { rows: triggers };
+      return defaultMockQuery(sql);
+    };
+  }
+
+  test("the Overview counts leave out a table an extension created, and its indexes", async () => {
+    mockQueryFn = extensionTables([]);
+    const provider = makeProvider();
+    await provider.connect();
+
+    const overview = await provider.getOverview();
+    expect(overview.tableCount).toBe(1);
+    expect(overview.indexCount).toBe(1);
+    await provider.disconnect();
+  });
+
+  test("the Triggers folder lists, counts and reads only triggers on the user's own tables", async () => {
+    mockQueryFn = extensionTables([]);
+    const provider = makeProvider();
+    await provider.connect();
+
+    expect((await provider.listObjects(["public"], "trigger")).map((object) => object.path)).toEqual([
+      ["public", "orders", "orders_stamp"],
+    ]);
+    expect((await provider.countObjects(["public"])).trigger).toEqual({ count: 1 });
+    await expect(provider.readObjectSource(["public", "spatial_ref_sys", "srs_audit"], "trigger")).rejects.toThrow(
+      /holds no trigger called "srs_audit"/,
+    );
+    await provider.disconnect();
+  });
+
+  test("an engine without pg_depend still counts, lists and reads, with the test dropped", async () => {
+    const statements: string[] = [];
+    mockQueryFn = extensionTables(statements, true);
+    const provider = makeProvider();
+    await provider.connect();
+
+    const overview = await provider.getOverview();
+    expect(overview.tableCount).toBe(2);
+    expect(overview.indexCount).toBe(2);
+    expect(await provider.listObjects(["public"], "trigger")).toHaveLength(2);
+    expect(statements.at(-1)).not.toContain("pg_depend");
+    expect((await provider.countObjects(["public"])).trigger).toEqual({ count: 2 });
+    expect(statements.at(-1)).not.toContain("pg_depend");
+    const document = await provider.readObjectSource(["public", "spatial_ref_sys", "srs_audit"], "trigger");
+    expect(statements.at(-1)).not.toContain("pg_depend");
+    expect(document.parts[0]).toMatchObject({ text: TRIGGER_DEFINITION });
+    await provider.disconnect();
+  });
+});
+
+/**
  * The fifth provider method (#789): every relation of one kind in one schema, described in
  * ONE round trip.
  *
@@ -7064,7 +7166,9 @@ const EXPECTED_TRIGGER_SOURCE_SQL =
   "FROM pg_catalog.pg_trigger t " +
   "JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid " +
   "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
-  "WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = $3 AND NOT t.tgisinternal";
+  "WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = $3 AND NOT t.tgisinternal " +
+  "AND c.oid NOT IN (SELECT d.objid FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid " +
+  "WHERE d.classid = 'pg_class'::regclass AND d.deptype = 'e')";
 
 describe("PostgreSQL object source", () => {
   function makeProvider() {

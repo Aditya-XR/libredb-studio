@@ -365,6 +365,17 @@ All nine accept the clause. The listings and counts retry without it on an engin
 refuses `pg_depend` or `pg_extension`, through `queryListing()` and `queryCounts()`, and
 `describeObjects()` already runs through the fallback chain that drops it.
 
+Three places read other catalogs and needed the same test on their own (#1599). The
+Overview's table and index counts read `information_schema.tables` and `pg_indexes`, which
+name a table instead of carrying its oid, so `extensionMemberTableExclusion()` asks by
+schema and name; an index is left out by asking about the table it sits on. The Triggers
+folder's count, listing and source read leave out a trigger whose table an extension created,
+since that table is already hidden. Measured 2026-10-08 on the `postgis/postgis:17-3.5`
+image as it ships (PostgreSQL 17.5, PostGIS 3.5.2, with topology and the tiger geocoder),
+plus `orders` with one trigger and a second trigger added to `spatial_ref_sys`: the Overview
+went from 38 tables and 76 indexes to 1 and 1, and the Triggers folder from 2 triggers to
+one. CockroachDB 26.3.2 answers the new statements with the same counts as before.
+
 The fixed list stays for schemas the *engine itself* builds in, which are not
 extension-owned: measured, CockroachDB's `crdb_internal` and Cloudberry's `pg_ext_aux`
 return nothing from `pg_depend`.

@@ -577,6 +577,20 @@ function extensionMemberExclusion(oidColumn: string, catalog: "pg_class" | "pg_p
   );
 }
 
+// The same relation test for a catalog that names a table rather than carrying its oid:
+// information_schema.tables and pg_indexes, which the Overview counts read (#1599). An
+// index is not an extension member itself, it depends on its table, so `spatial_ref_sys_pkey`
+// is left out by asking about the table it sits on. Free of parentheses inside, like the two
+// tests above, so the same fallback strips it.
+function extensionMemberTableExclusion(schemaColumn: string, nameColumn: string): string {
+  return (
+    `(${schemaColumn}, ${nameColumn}) NOT IN (SELECT n.nspname, c.relname FROM pg_class c ` +
+    `JOIN pg_namespace n ON n.oid = c.relnamespace ` +
+    `JOIN pg_depend d ON d.objid = c.oid AND d.classid = 'pg_class'::regclass AND d.deptype = 'e' ` +
+    `JOIN pg_extension e ON e.oid = d.refobjid)`
+  );
+}
+
 // `kcu.column_name` is `information_schema.sql_identifier`, and node-postgres has no array
 // parser for `sql_identifier[]`: uncast, the list reached `objectDetailFromRow` as the text
 // `{id}`, where `includes()` became a substring test that flagged `i` and `d` as keys too,
@@ -741,10 +755,10 @@ function isMissingConstraintColumnUsageError(error: unknown): boolean {
 // the driver serves engines nobody here has run. One that has no pg_depend or
 // pg_extension drops the clause and keeps the fixed list, which is what it filtered
 // on before ownership was asked at all. Both forms go: the schema test and the
-// per-object test `extensionMemberExclusion()` writes.
+// per-object tests `extensionMemberExclusion()` and `extensionMemberTableExclusion()` write.
 function withoutExtensionOwnershipTest(sql: string): string {
   return sql.replace(
-    /\s+AND\s+[\w.]+ NOT IN \(SELECT (?:n\.nspname FROM pg_namespace n|d\.objid FROM pg_depend d) JOIN pg_[^)]*\)/g,
+    /\s+AND\s+(?:[\w.]+|\([\w., ]+\)) NOT IN \(SELECT (?:n\.nspname FROM pg_namespace n|d\.objid FROM pg_depend d|n\.nspname, c\.relname FROM pg_class c) JOIN pg_[^)]*\)/g,
     "",
   );
 }
@@ -864,13 +878,16 @@ const COUNTS_ROUTINE_ARM = `
 
 // `tgisinternal` excludes the triggers PostgreSQL creates for a foreign key or a
 // deferred unique constraint. A user never wrote them and cannot drop them on their own,
-// so counting them would report a number nobody could reconcile with their own DDL.
+// so counting them would report a number nobody could reconcile with their own DDL. A
+// trigger on a table an extension created goes with the table, which the Tables folder
+// already hides (#1599).
 const COUNTS_TRIGGER_ARM = `
           SELECT 'trigger'
           FROM pg_catalog.pg_trigger t
           JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = $1 AND NOT t.tgisinternal`;
+          WHERE n.nspname = $1 AND NOT t.tgisinternal
+          AND ${extensionMemberExclusion("c.oid", "pg_class")}`;
 
 // One statement, one GROUP BY, one round trip for the whole folder row. `kind IS NULL`
 // drops the relkinds and prokinds the CASE has no name for (an index, a TOAST table, an
@@ -1005,7 +1022,8 @@ const LIST_TRIGGERS_SQL = `
         FROM pg_catalog.pg_trigger t
         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = $1 AND NOT t.tgisinternal`;
+        WHERE n.nspname = $1 AND NOT t.tgisinternal
+          AND ${extensionMemberExclusion("c.oid", "pg_class")}`;
 
 // ============================================================================
 // Object source (#789 Phase 2)
@@ -1100,14 +1118,16 @@ const SOURCE_ROUTINE_SQL = `
 
 // Three binds, because a trigger is addressed by its TABLE as well as by its name: `tgname`
 // is unique per table and not per schema, which is the nesting `attachedTo: "table"` declares
-// and `LIST_TRIGGERS_SQL` produces. `NOT tgisinternal` is the same exclusion the listing and
-// the count apply, so a path this provider never listed cannot be read here either.
+// and `LIST_TRIGGERS_SQL` produces. `NOT tgisinternal` and the ownership test are the same
+// exclusions the listing and the count apply, so a path this provider never listed cannot be
+// read here either.
 const SOURCE_TRIGGER_SQL = `
         SELECT pg_catalog.pg_get_triggerdef(t.oid, false) AS definition
         FROM pg_catalog.pg_trigger t
         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = $3 AND NOT t.tgisinternal`;
+        WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = $3 AND NOT t.tgisinternal
+        AND ${extensionMemberExclusion("c.oid", "pg_class")}`;
 
 /**
  * What ONE kind's definition text is, alongside the statement that reads it.
@@ -1957,8 +1977,10 @@ const OVERVIEW_SIZE_SQL = `
 const OVERVIEW_COUNTS_SQL = `
         SELECT
           (SELECT count(*) FROM information_schema.tables
-            WHERE ${schemaExclusion("table_schema")} AND table_type IN (${USER_TABLE_TYPES})) as table_count,
-          (SELECT count(*) FROM pg_indexes WHERE ${schemaExclusion("schemaname")}) as index_count
+            WHERE ${schemaExclusion("table_schema")} AND table_type IN (${USER_TABLE_TYPES})
+            AND ${extensionMemberTableExclusion("table_schema", "table_name")}) as table_count,
+          (SELECT count(*) FROM pg_indexes WHERE ${schemaExclusion("schemaname")}
+            AND ${extensionMemberTableExclusion("schemaname", "tablename")}) as index_count
       `;
 
 // getPerformanceMetrics: buffer cache hit ratio. NULL when there is nothing to
@@ -3546,6 +3568,21 @@ export class PostgresProvider extends SQLBaseProvider {
   }
 
   /**
+   * One source read, retried once without the extension ownership test the trigger statement
+   * carries (#1599), on the same engines and for the same reason as `queryCounts`. Every other
+   * refusal leaves raw, so `readObjectSource` still files a missing source catalog as an
+   * unavailable part and maps the rest.
+   */
+  private async querySource(client: PoolClient, sql: string, params: unknown[]) {
+    try {
+      return await client.query(sql, params);
+    } catch (error) {
+      if (!isMissingExtensionCatalogError(error)) throw error;
+      return client.query(withoutExtensionOwnershipTest(sql), params);
+    }
+  }
+
+  /**
    * How many objects of each declared kind one schema holds.
    *
    * Three outcomes, and the type keeps all three apart. A kind the GROUP BY answered for
@@ -3879,7 +3916,7 @@ export class PostgresProvider extends SQLBaseProvider {
     const client = await this.pool!.connect();
     let rows: SourceRow[];
     try {
-      rows = (await client.query(statement.sql, statement.params)).rows as SourceRow[];
+      rows = (await this.querySource(client, statement.sql, statement.params)).rows as SourceRow[];
     } catch (error) {
       if (!isMissingSourceCatalogError(error)) throw mapDatabaseError(error, "postgres", statement.sql);
       return {
