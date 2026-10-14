@@ -386,7 +386,7 @@ stand in for, because both read the WHOLE fleet at once:
 
 **Override the metadata hooks** so the shared UI renders correctly:
 
-- `getCapabilities()` — query language (`sql` | `json`), `defaultPort`, supported `maintenanceOperations`, the `supportsExplain`/`supportsConnectionString`/`supportsCreateTable` flags, and `schemaRefreshPattern`.
+- `getCapabilities()` — query language (one of the five `queryLanguage` values in the table below), `defaultPort`, supported `maintenanceOperations`, the `supportsExplain`/`supportsConnectionString`/`supportsCreateTable` flags, and `schemaRefreshPattern`.
 - `getLabels()` — only if the generic SQL wording ("Table" / "row" / "Select Top 50" / …) doesn't fit. Non-relational providers relabel it (Redis → "Key Pattern"/"key", MongoDB → "Collection"/"document").
 - `prepareQuery()` — only if your dialect needs non-standard pagination. SQL `LIMIT` injection is inherited from `SQLBaseProvider`; Oracle/SQL Server override it for `FETCH FIRST` / `TOP`; the non-SQL providers make it a metadata-only pass-through.
 
@@ -886,6 +886,9 @@ comment. Three surfaces read labels today, plus the agent's prompt layer:
 | `reindexGlobalDesc` (optional) | Admin Operations tab, reindex card description paragraph. Absent = the hardcoded *"Reconstructs all indexes in the database."* Declare the triad wherever that sentence is false — on SQLite `reindex` is a bare `REINDEX`, which rebuilds every index in the file rather than reconstructing them per table (#464). Declaring it is pointless where the card cannot render: Couchbase's `reindex` spec sets `global: false`, so its triad reaches nothing |
 | `statementLanguage` (optional) | The agent's plan contract (`src/lib/agent/investigation.ts`), stated verbatim to the model. No UI surface reads it. Declared only where the engine's own name misleads a model about what a "statement" is here |
 | `slowQueriesEmptyState` (optional) | Monitoring **Queries** tab, the "Slowest Queries" empty state. Absent = PostgreSQL's *"Enable pg_stat_statements extension to see query stats."*, which is what the component hardcoded for every engine until #463. Declare it wherever that sentence is false, and the panel drops the `pg_stat_statements required` badge as well |
+| `vacuumActionOperation` (optional) | Specifies which maintenance operation the `vacuumAction` label refers to. Absent = `vacuum`. |
+| `sessionsEmptyState` (optional) | Monitoring Sessions tab and admin Operations session list empty-state message. Absent = "No active sessions found." |
+| `tableStatsCaption` (optional) | Caption explaining when the table statistics list represents a subset of the database's tables. Absent = no caption. |
 
 The `*Global*` triads reach only the card, never the per-table button, and only where the card
 renders: the analyze card is gated on `analyze`, the vacuum card on the **literal** `vacuum`, the
@@ -1176,7 +1179,7 @@ range) is still checked on its numeral only, deliberately, so that no numeral go
       `make -C operator bundle`**: `operator/bundle/manifests/...` is generated from it, and the
       `Verify operator bundle is up to date` step re-runs the generator and diffs, so a hand-wrapped
       YAML folded scalar fails the gate even when the text is identical to what it wants
-- [ ] `README.md` + the seven translations `bun run readme:check` gates (`README_zh.md`, `README_ja.md`, `README_es.md`, `README_ur.md`, `README_hi.md`, `README_pt.md`, `README_ru.md`), `DOCKERHUB.md`, `docs/BRAND_MESSAGING.md` — the
+- [ ] `README.md` + the eight translations `bun run readme:check` gates (`README_zh.md`, `README_ja.md`, `README_es.md`, `README_ur.md`, `README_hi.md`, `README_pt.md`, `README_ru.md`, `README_ko.md`), `DOCKERHUB.md`, `docs/BRAND_MESSAGING.md` — the
       engine tables and every prose numeral. **Separate the denominators before touching a numeral**:
       type-ids the factory builds, external drivers (that set minus the embedded store), wire-compatible
       relatives, and their sum. `connectableProductCount()` is the arithmetic's one definition — derive
