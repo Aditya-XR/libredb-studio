@@ -105,7 +105,8 @@ const SQLITE_CONTAINER_PATH_ENGINE: ContainerPathShapeEngine = {
 // stays accurate (same pattern as postgres.ts).
 // ============================================================================
 
-// Size of a :memory: database (no file to stat).
+// The database's size as SQLite counts it: its live pages, read through the WAL.
+// Used for file databases and :memory: alike (#1449).
 const MEMORY_DB_SIZE_SQL = `
           SELECT (page_count * page_size) as size
           FROM pragma_page_count(), pragma_page_size()
@@ -2239,18 +2240,20 @@ export class SQLiteProvider extends SQLBaseProvider {
    * :memory: half of this - `result?.size || 0` cannot tell a measured zero from
    * `sizeStmt.get()` returning no row, or a row whose `size` is `undefined` - is
    * fixed once here rather than twice.
+   *
+   * A file database is sized the same way as `:memory:`, by `page_count * page_size`,
+   * not by its file on disk (#1449). In WAL journal mode a write lands in the `-wal` and
+   * reaches the main file only at a checkpoint, so the main file alone undercounts:
+   * measured on SQLite 3.53.0 with 1,000 rows, a 4 KB main file beside a 104 KB `-wal`,
+   * and the Storage tab drew tables and indexes at 1000% and 900% of the database. The
+   * main file plus the `-wal` overcounts instead: the `-wal` is not truncated by a
+   * checkpoint, and before one it can hold several copies of the same page (measured in
+   * review: 36,864 + 45,352 bytes after `PRAGMA wal_checkpoint(PASSIVE)` against 36,864
+   * live). `page_count` reads through the WAL and counts each live page once, which is
+   * also what `dbstat` measures tables and indexes against. The `-wal` keeps its own row
+   * in `getStorageStats()`.
    */
   private async readDatabaseSizeBytes(): Promise<number | undefined> {
-    const dbPath = this.getDatabasePath();
-    if (dbPath !== ":memory:") {
-      try {
-        return fs.statSync(dbPath).size;
-      } catch {
-        // Absent: the catch cannot tell "file does not exist yet" apart from any
-        // other statSync failure.
-        return undefined;
-      }
-    }
     try {
       const result = (await (await this.getHandle()).get(MEMORY_DB_SIZE_SQL)) as { size?: number } | null;
       // A type check, not `|| 0`: page_count * page_size answering a real zero is

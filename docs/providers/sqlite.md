@@ -1116,13 +1116,10 @@ placeholder `indexSize` already used, and every consumer gates on the absent `ta
 
 ### 7.3 When the database size is not measurable
 
-`getHealth()` and `getOverview()` share one private reader, `readDatabaseSizeBytes()`, which sizes the
-database two ways, by `dbPath`:
+`getHealth()` and `getOverview()` share one private reader, `readDatabaseSizeBytes()`, which sizes
+every database, file-backed and `:memory:` alike, by the pages SQLite counts (§7.4):
 
 ```ts
-// File-backed
-return fs.statSync(dbPath).size;
-// :memory: — no file to stat
 const result = sizeStmt.get() as { size?: number }; // SELECT (page_count * page_size) as size ...
 return typeof result?.size === "number" ? result.size : undefined;
 ```
@@ -1159,6 +1156,28 @@ lets a real zero-page `:memory:` result through exactly as before, and (in princ
 still reaches `formatBytes(0)`. The absence is spelled `=== undefined` (a type check on the `:memory:`
 arm, not a falsy test) plus a conditional spread in `getOverview()`'s return — a falsy test would erase
 that very measurement, which is the mistake `|| 0` was making.
+
+### 7.4 The database size is `page_count * page_size`, WAL included (#1449)
+
+This provider opens a writable file in WAL journal mode (§3.2), so a write lands in the `-wal`
+file and reaches the main file only at a checkpoint. `dbstat` and `page_count` read through the
+WAL, but the database size used to be the main file alone. Measured on SQLite 3.53.0 with 1,000
+rows written through Studio: a 4 KB main file beside a 104 KB `-wal`, and the Storage tab drew
+Tables at 1000% and Indexes at 900% of the database.
+
+The size `readDatabaseSizeBytes()` reports for a file is now **`page_count * page_size`**, the same
+read `:memory:` uses. It reads through the WAL and counts each live page once, which is the figure
+`dbstat` measures tables and indexes against, so no Storage share exceeds 100%.
+
+Adding the `-wal` file to the main file would overcount instead. A checkpoint copies the pages into
+the main file but does **not** truncate the `-wal`, so after one the same pages are in both files;
+and before one, the `-wal` can hold older copies of a page beside the current one. Measured with
+1,000 rows after `PRAGMA wal_checkpoint(PASSIVE)`: main file 36,864 B plus `-wal` 45,352 B is
+82,216 B, while `page_count * page_size` is 36,864 B.
+
+`getStorageStats()` still lists the files themselves: the main file, and the `-wal` as its own
+**WAL** row, which is what the Storage tab's WAL tile reads. Those rows are the bytes on disk, so
+their sum can be larger than the database size.
 
 ---
 

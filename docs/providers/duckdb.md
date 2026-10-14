@@ -1194,7 +1194,7 @@ and one index.
 | Version | `v1.5.5`, from `version()` |
 | Database size | `2.0 MiB` — a **string** from `pragma_database_size()`, parsed to bytes for the gauge (§3.5) |
 | Blocks | `block_size` 262144, `total_blocks` 8, `used_blocks` 8, `free_blocks` 0 |
-| WAL size | `0 bytes` on a checkpointed database — again a string |
+| WAL size | `0 bytes` on a checkpointed database — again a string; the Storage tab's WAL tile reads the `.wal` file itself (below) |
 | Memory usage | `2.0 MiB`; `duckdb_memory()` breaks it down in real bytes: `BASE_TABLE` 2097152 |
 | Memory limit | `50.0 GiB` on the probe machine — 80% of host RAM, so **never asserted in a test** |
 | Temporary files | Empty, from `duckdb_temporary_files()` — a real reading, not a gap |
@@ -1205,6 +1205,25 @@ and one index.
 
 Where a reading is absent it is reported as absent with the reason, never as `0`: a zero on a size
 panel reads as an empty database, which is a claim about the user's data.
+
+### 7.1 Rows still in the `.wal` (#1449)
+
+Before its first checkpoint, a file database keeps every row in its `.wal`, and
+`pragma_database_size()` answers `database_size` `0 bytes` over it. Measured on v1.5.5 with
+1,000 rows: a 12,288-byte main file beside a 32,083-byte `.wal`, and Monitoring drew
+"DB Size 0 B" over a database holding data. That `0` is not the size of the database, so where
+the engine answers `0` for a **file** database, the provider falls back to the files on disk:
+
+- **Database size** (Overview and Health) is the main file plus its `.wal`
+  (`withFileSizes` in [`introspect.ts`](../../src/lib/db/providers/sql/duckdb/introspect.ts)).
+- **Storage** lists the main file at its own size and the `.wal` as a row of its own named
+  **WAL**, the row the Storage tab's WAL tile reads (the same shape the SQLite provider
+  publishes). A checkpointed database has no `.wal` file and gets no WAL row.
+
+`introspect.ts` reads only SQL, so the provider (`readFileSizes()` in
+[`index.ts`](../../src/lib/db/providers/sql/duckdb/index.ts)) stats the two files and hands the
+sizes in. A size the engine did measure is kept as it is, and an in-memory database is unchanged:
+it has no file, and still reports its memory usage (§3.5).
 
 ---
 

@@ -101,6 +101,7 @@ import { findCodeWord } from "@/lib/sql/words";
 import { hasUnterminatedSpan } from "@/lib/sql/spans";
 import { type DuckDBClient, MEMORY_TARGET, describeOpenFailure, openDuckDBClient } from "./client";
 import {
+  type DuckDBFileSizes,
   readActiveSessions,
   readHealth,
   readIndexStats,
@@ -349,6 +350,18 @@ const READ_ONLY_FORBIDDEN_WORDS: ReadonlyArray<{ word: string; reason: string }>
   { word: "DELTA_SCAN", reason: "delta_scan reads a table outside this database" },
   { word: "ICEBERG_SCAN", reason: "iceberg_scan reads a table outside this database" },
 ];
+
+/**
+ * A file's size in bytes, or `undefined` when it cannot be stat'd - a `.wal` does not
+ * exist at all after a checkpoint, which is an absent file rather than an empty one.
+ */
+function fileSizeOrUndefined(file: string): number | undefined {
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Refuse a named form before the engine is asked - the belt, not the boundary.
@@ -1336,14 +1349,25 @@ export class DuckDBProvider extends SQLBaseProvider {
   // Health & monitoring
   // ==========================================================================
 
+  /**
+   * The database's files as the filesystem measures them, for the readings that fall back
+   * to them when the engine answers 0 (#1449, see `withFileSizes`). `undefined` for an
+   * in-memory database, which has no file.
+   */
+  private readFileSizes(): DuckDBFileSizes | undefined {
+    const dbPath = this.getDatabasePath();
+    if (dbPath === MEMORY_TARGET) return undefined;
+    return { mainBytes: fileSizeOrUndefined(dbPath), walBytes: fileSizeOrUndefined(`${dbPath}.wal`) };
+  }
+
   public async getHealth(): Promise<HealthInfo> {
     this.ensureConnected();
-    return readHealth(this.client!);
+    return readHealth(this.client!, this.readFileSizes());
   }
 
   public async getOverview(): Promise<DatabaseOverview> {
     this.ensureConnected();
-    return readOverview(this.client!);
+    return readOverview(this.client!, this.readFileSizes());
   }
 
   /**
@@ -1386,7 +1410,7 @@ export class DuckDBProvider extends SQLBaseProvider {
 
   public async getStorageStats(): Promise<StorageStats[]> {
     this.ensureConnected();
-    return readStorageStats(this.client!);
+    return readStorageStats(this.client!, this.readFileSizes());
   }
 
   // ==========================================================================

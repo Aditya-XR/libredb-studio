@@ -275,6 +275,30 @@ export interface DuckDBDatabaseSize {
 }
 
 /**
+ * The database's files as the filesystem measures them (#1449). This file reads only SQL,
+ * so the provider stats the files and hands the sizes in. Each is `undefined` when its file
+ * cannot be stat'd: a `.wal` does not exist at all after a checkpoint.
+ */
+export interface DuckDBFileSizes {
+  mainBytes: number | undefined;
+  walBytes: number | undefined;
+}
+
+/**
+ * The database size, with the files on disk standing in where the engine answers 0 (#1449).
+ *
+ * Before its first checkpoint a file database keeps every row in its `.wal`, and
+ * `pragma_database_size()` answers database_size "0 bytes" over it: measured on v1.5.5 with
+ * 1,000 rows, a 12,288-byte main file beside a 32,083-byte `.wal`. That 0 is not the size
+ * of the database, so the main file plus its `.wal` is published instead. An in-memory
+ * database never reaches this: it publishes no `databaseSizeBytes` and has no files.
+ */
+export function withFileSizes(size: DuckDBDatabaseSize, files: DuckDBFileSizes | undefined): DuckDBDatabaseSize {
+  if (size.databaseSizeBytes !== 0 || files?.mainBytes === undefined) return size;
+  return { ...size, databaseSizeBytes: files.mainBytes + (files.walBytes ?? 0) };
+}
+
+/**
  * The database's own footprint.
  *
  * An IN-MEMORY database publishes neither `databaseSizeBytes` nor `walSizeBytes`, and
@@ -385,12 +409,13 @@ async function readCatalog(client: DuckDBClient): Promise<{ catalogName: string;
   return { catalogName: row.catalog_name ?? DEFAULT_SCHEMA, version: row.version ?? "unknown" };
 }
 
-export async function readOverview(client: DuckDBClient): Promise<DatabaseOverview> {
-  const [{ version }, size, counts] = await Promise.all([
+export async function readOverview(client: DuckDBClient, files?: DuckDBFileSizes): Promise<DatabaseOverview> {
+  const [{ version }, engineSize, counts] = await Promise.all([
     readCatalog(client),
     readDatabaseSize(client),
     client.run(COUNTS_SQL),
   ]);
+  const size = withFileSizes(engineSize, files);
   const row = (counts.rows[0] ?? {}) as Record<string, unknown>;
 
   return {
@@ -412,8 +437,8 @@ export async function readOverview(client: DuckDBClient): Promise<DatabaseOvervi
   };
 }
 
-export async function readHealth(client: DuckDBClient): Promise<HealthInfo> {
-  const size = await readDatabaseSize(client);
+export async function readHealth(client: DuckDBClient, files?: DuckDBFileSizes): Promise<HealthInfo> {
+  const size = withFileSizes(await readDatabaseSize(client), files);
 
   return {
     activeConnections: 1,
@@ -521,7 +546,7 @@ export async function readIndexStats(client: DuckDBClient): Promise<IndexStats[]
   }));
 }
 
-export async function readStorageStats(client: DuckDBClient): Promise<StorageStats[]> {
+export async function readStorageStats(client: DuckDBClient, files?: DuckDBFileSizes): Promise<StorageStats[]> {
   const [size, pathResult, tempFiles] = await Promise.all([
     readDatabaseSize(client),
     client.run(DATABASE_PATH_SQL),
@@ -534,6 +559,10 @@ export async function readStorageStats(client: DuckDBClient): Promise<StorageSta
   // its data in memory, where `memory_usage` is the figure that measures it (283.0 MiB
   // over 10 million rows, measured, against a database_size of "0 bytes").
   const location = ((pathResult.rows[0] ?? {}) as { path?: string | null }).path ?? null;
+  // The main file's own bytes where the engine answered 0 over rows still in the `.wal`
+  // (#1449, see `withFileSizes`). The `.wal` gets its own row below, so it is not added here.
+  const mainBytes =
+    size.databaseSizeBytes === 0 && files?.mainBytes !== undefined ? files.mainBytes : size.databaseSizeBytes;
   const stats: StorageStats[] = [
     location === null
       ? {
@@ -545,13 +574,27 @@ export async function readStorageStats(client: DuckDBClient): Promise<StorageSta
       : {
           name: "Main Database",
           location,
-          size: size.databaseSizeBytes === undefined ? "N/A" : formatBytes(size.databaseSizeBytes),
-          sizeBytes: size.databaseSizeBytes ?? 0,
+          size: mainBytes === undefined ? "N/A" : formatBytes(mainBytes),
+          sizeBytes: mainBytes ?? 0,
           ...(size.walSizeBytes === undefined
             ? {}
             : { walSize: formatBytes(size.walSizeBytes), walSizeBytes: size.walSizeBytes }),
         },
   ];
+
+  // The `.wal` as a row of its own, when there is one (#1449). The Storage tab's WAL tile
+  // reads the row NAMED "WAL", the same shape `sqlite.ts` publishes, so a size carried
+  // only on the main row above left that tile reading "N/A" beside a `.wal` holding data.
+  if (location !== null && files?.walBytes !== undefined) {
+    stats.push({
+      name: "WAL",
+      location: `${location}.wal`,
+      size: formatBytes(files.walBytes),
+      sizeBytes: files.walBytes,
+      walSize: formatBytes(files.walBytes),
+      walSizeBytes: files.walBytes,
+    });
+  }
 
   // Only when there is one. DuckDB spills to disk under memory pressure and reports
   // nothing at all when it did not, so an always-present row of zeroes would claim a

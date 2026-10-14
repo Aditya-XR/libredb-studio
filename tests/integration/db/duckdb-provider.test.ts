@@ -31,6 +31,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1213,6 +1214,39 @@ describe("monitoring", () => {
     expect(main.location).toBeDefined();
     expect(realpathSync.native(main.location!)).toBe(realpathSync.native(dbPath));
     expect(main.sizeBytes).toBeGreaterThan(0);
+  });
+
+  // #1449: before the first checkpoint, every row of a file database lives in its `.wal`.
+  // `pragma_database_size()` then answers database_size "0 bytes" (measured on v1.5.5 with
+  // 1,000 rows: 12,288 bytes in the main file, 32,083 in the `.wal`), so Monitoring drew
+  // "DB Size 0 B" over a database holding data. The Storage tab's WAL tile reads a row
+  // NAMED "WAL" (StorageTab.tsx), and DuckDB published its WAL size only on the main row,
+  // so the tile read "N/A" beside a `.wal` file with data in it.
+  test("a file database with rows only in the WAL reports a non-zero size and a WAL row (#1449)", async () => {
+    const dbPath = join(workDir, "wal-only.duckdb");
+    provider = new DuckDBProvider(makeConfig({ database: dbPath }));
+    await provider.connect();
+    await provider.query("CREATE TABLE customers (id INTEGER PRIMARY KEY, name VARCHAR, email VARCHAR)");
+    await provider.query(
+      "INSERT INTO customers SELECT i, 'user' || i, 'user' || i || '@example.com' FROM range(1, 1001) t(i)",
+    );
+
+    // The precondition, so the test cannot pass for the wrong reason: no checkpoint has
+    // run, and the rows are in the `.wal`.
+    const walBytes = statSync(`${dbPath}.wal`).size;
+    expect(walBytes).toBeGreaterThan(0);
+
+    const overview = await provider.getOverview();
+    expect(overview.databaseSizeBytes).toBeGreaterThan(0);
+    expect(overview.databaseSize).not.toBe("0 B");
+    // getHealth() reads the same size, so it must agree.
+    expect((await provider.getHealth()).databaseSize).toBe(overview.databaseSize);
+
+    // The row the WAL tile reads, carrying the `.wal` file's size.
+    const wal = (await provider.getStorageStats()).find((s) => s.name === "WAL");
+    expect(wal).toBeDefined();
+    expect(wal!.sizeBytes).toBe(walBytes);
+    expect(wal!.walSizeBytes).toBe(walBytes);
   });
 
   test("storage stats name an in-memory database as such", async () => {

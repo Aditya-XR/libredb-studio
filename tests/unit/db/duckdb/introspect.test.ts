@@ -35,6 +35,7 @@ import {
   readStorageStats,
   readTableBytes,
   readTableStats,
+  withFileSizes,
 } from "@/lib/db/providers/sql/duckdb/introspect";
 import { CACHE_HIT_RATIO_UNAVAILABLE } from "@/lib/monitoring-cache-ratio";
 
@@ -394,6 +395,52 @@ describe("readOverview", () => {
   });
 });
 
+/**
+ * A file database before its first checkpoint (#1449): measured on v1.5.5 with 1,000 rows,
+ * `pragma_database_size()` answered "0 bytes" over a 12,288-byte main file and a
+ * 32,083-byte `.wal`.
+ */
+const WAL_ONLY_SIZE_ROW = { ...DB_SIZE_ROW, database_size: "0 bytes", wal_size: "31.3 KiB" };
+const WAL_ONLY_FILES = { mainBytes: 12288, walBytes: 32083 };
+
+describe("withFileSizes (#1449)", () => {
+  test("an engine 0 over a file database becomes the main file plus its .wal", () => {
+    expect(withFileSizes({ databaseSizeBytes: 0, blockSize: 262144 }, WAL_ONLY_FILES)).toEqual({
+      databaseSizeBytes: 44371,
+      blockSize: 262144,
+    });
+  });
+
+  test("a .wal that does not exist adds nothing", () => {
+    expect(withFileSizes({ databaseSizeBytes: 0 }, { mainBytes: 12288, walBytes: undefined })).toEqual({
+      databaseSizeBytes: 12288,
+    });
+  });
+
+  test("a size the engine measured is kept as it is", () => {
+    expect(withFileSizes({ databaseSizeBytes: 2097152 }, WAL_ONLY_FILES)).toEqual({ databaseSizeBytes: 2097152 });
+  });
+
+  test("with no file to measure, the engine's answer stands", () => {
+    expect(withFileSizes({ databaseSizeBytes: 0 }, undefined)).toEqual({ databaseSizeBytes: 0 });
+    expect(withFileSizes({ databaseSizeBytes: 0 }, { mainBytes: undefined, walBytes: 4096 })).toEqual({
+      databaseSizeBytes: 0,
+    });
+  });
+
+  test("the overview and health read the file sizes where the engine answered 0", async () => {
+    const client = stubClient([
+      ["current_database() AS catalog_name", [{ catalog_name: "warehouse", version: "v1.5.5" }]],
+      ["pragma_database_size()", [WAL_ONLY_SIZE_ROW]],
+      ["AS table_count", [{ table_count: "1", index_count: "0" }]],
+    ]);
+
+    const overview = await readOverview(client, WAL_ONLY_FILES);
+    expect(overview.databaseSizeBytes).toBe(44371);
+    expect((await readHealth(client, WAL_ONLY_FILES)).databaseSize).toBe(overview.databaseSize);
+  });
+});
+
 describe("readHealth", () => {
   test("reports the size and says plainly that it has no ratio, no queries and no sessions", async () => {
     const health = await readHealth(stubClient([["pragma_database_size()", [DB_SIZE_ROW]]]));
@@ -599,6 +646,39 @@ describe("readStorageStats", () => {
         walSizeBytes: 4096,
       },
     ]);
+  });
+
+  test("a .wal on disk gets a row of its own, named for the WAL tile (#1449)", async () => {
+    const client = stubClient([
+      ["pragma_database_size()", [WAL_ONLY_SIZE_ROW]],
+      ["duckdb_databases()", [{ path: "/tmp/libredb-duckdb/warehouse.duckdb" }]],
+      ["duckdb_temporary_files()", []],
+    ]);
+
+    const [main, wal] = await readStorageStats(client, WAL_ONLY_FILES);
+
+    // The main file's own bytes rather than the engine's 0; the .wal is not added twice.
+    expect(main.sizeBytes).toBe(12288);
+    expect(wal).toEqual({
+      name: "WAL",
+      location: "/tmp/libredb-duckdb/warehouse.duckdb.wal",
+      size: "31.33 KB",
+      sizeBytes: 32083,
+      walSize: "31.33 KB",
+      walSizeBytes: 32083,
+    });
+  });
+
+  test("a checkpointed file with no .wal lists no WAL row", async () => {
+    const client = stubClient([
+      ["pragma_database_size()", [DB_SIZE_ROW]],
+      ["duckdb_databases()", [{ path: "/tmp/libredb-duckdb/warehouse.duckdb" }]],
+      ["duckdb_temporary_files()", []],
+    ]);
+
+    const stats = await readStorageStats(client, { mainBytes: 2097152, walBytes: undefined });
+
+    expect(stats.map((row) => row.name)).toEqual(["Main Database"]);
   });
 
   test("an in-memory database reports the memory it measured, never a zero-byte file", async () => {

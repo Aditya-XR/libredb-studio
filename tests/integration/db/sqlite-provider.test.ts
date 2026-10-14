@@ -656,6 +656,38 @@ describe("SQLiteProvider", () => {
         expect(overview.databaseSizeBytes).toBe(0);
         expect(overview.databaseSize).not.toBe("N/A");
       });
+
+      // `databaseSizeBytes` used to be initialised to 0 and left there by an empty
+      // catch, so a read that never answered published a measured-looking zero
+      // indistinguishable from a genuinely empty database (#546). Since #1449 a file
+      // database is sized by this same `page_count * page_size` read, so a refused
+      // read is the one failure left, for both kinds of database. Only the size read
+      // is intercepted: the table count below is the control that the failure stays
+      // contained to the one reading it belongs to.
+      test("a size read that fails leaves databaseSizeBytes absent, not 0", async () => {
+        provider = new SQLiteProvider(makeSQLiteConfig());
+        await provider.connect();
+        await provider.query("CREATE TABLE v (id INTEGER PRIMARY KEY)");
+        failReadsMatching(provider, "page_count", "disk I/O error");
+
+        const overview = await provider.getOverview();
+        expect(overview.databaseSizeBytes).toBeUndefined();
+        expect("databaseSizeBytes" in overview).toBe(false);
+        expect(overview.databaseSize).toBe("N/A");
+        expect(overview.tableCount).toBe(1);
+      });
+
+      // Review on #1050: `getHealth()` used to report a failed size read as
+      // "Unknown" while `getOverview()` reported the same failure as "N/A" - two
+      // different sentences for the same unmeasured database. Both read the same
+      // helper and say the same thing.
+      test("getHealth reads N/A, not Unknown, when the size read fails", async () => {
+        provider = new SQLiteProvider(makeSQLiteConfig());
+        await provider.connect();
+        failReadsMatching(provider, "page_count", "disk I/O error");
+
+        expect((await provider.getHealth()).databaseSize).toBe("N/A");
+      });
     });
   });
 
@@ -989,26 +1021,6 @@ describe("SQLiteProvider", () => {
       expect(health.activeSessions[0].database).toBe("health.db");
     });
 
-    // Review on #1050: `getHealth()` used to report a failed file stat as
-    // "Unknown" while `getOverview()` reported the same failure as "N/A" - two
-    // different sentences for the same unmeasured database. Both now read the
-    // same helper and say the same thing.
-    test("getHealth reads N/A, not Unknown, when the file cannot be stat'd", async () => {
-      const dbPath = join(fileTmpDir, "unreadable-health.db");
-      provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
-      await provider.connect();
-      await provider.query("CREATE TABLE h (id INTEGER PRIMARY KEY)");
-
-      const spy = spyOn(fsNode, "statSync").mockImplementation(() => {
-        throw new Error("EACCES: permission denied, stat");
-      });
-      try {
-        expect((await provider.getHealth()).databaseSize).toBe("N/A");
-      } finally {
-        spy.mockRestore();
-      }
-    });
-
     test("getOverview reads the database size from the file", async () => {
       const dbPath = join(fileTmpDir, "overview.db");
       provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
@@ -1018,37 +1030,6 @@ describe("SQLiteProvider", () => {
       const overview = await provider.getOverview();
       expect(overview.databaseSizeBytes).toBeGreaterThan(0);
       expect(overview.tableCount).toBe(1);
-    });
-
-    // `databaseSizeBytes` used to be initialised to 0 and left there by an empty
-    // catch, so a read that never answered published a measured-looking zero
-    // indistinguishable from a genuinely empty database (#546). It is optional
-    // exactly so a failed read can say nothing instead (src/lib/db/types.ts).
-    //
-    // `statSync` is mocked rather than deleting the file out from under the
-    // connection: a bun:sqlite handle over a removed file answers "disk I/O
-    // error" on the VERY NEXT query too (measured), which would take the table
-    // and index counts down with it and test a different failure than this one.
-    test("getOverview omits databaseSizeBytes, and databaseSize reads N/A, when the file cannot be stat'd", async () => {
-      const dbPath = join(fileTmpDir, "unreadable.db");
-      provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
-      await provider.connect();
-      await provider.query("CREATE TABLE v (id INTEGER PRIMARY KEY)");
-
-      const spy = spyOn(fsNode, "statSync").mockImplementation(() => {
-        throw new Error("EACCES: permission denied, stat");
-      });
-      try {
-        const overview = await provider.getOverview();
-        expect(overview.databaseSizeBytes).toBeUndefined();
-        expect("databaseSizeBytes" in overview).toBe(false);
-        expect(overview.databaseSize).toBe("N/A");
-        // The table/index counts come from the open handle, not statSync, so the
-        // rest of the overview is unaffected by the mocked failure.
-        expect(overview.tableCount).toBe(1);
-      } finally {
-        spy.mockRestore();
-      }
     });
 
     test("getStorageStats lists the main database plus WAL and SHM sidecar files", async () => {
@@ -1070,6 +1051,62 @@ describe("SQLiteProvider", () => {
       const wal = stats.find((s) => s.name === "WAL")!;
       expect(wal.location).toBe("storage.db-wal");
       expect(typeof wal.walSizeBytes).toBe("number");
+    });
+
+    // #1449: in WAL journal mode a write lands in the `-wal` file and reaches the main
+    // file only at a checkpoint. The database size used to be the main file alone, while
+    // `dbstat` and `page_count` read through the WAL, so the Storage tab drew tables and
+    // indexes at several times the database they belong to (reported as 400% and 200%,
+    // reproduced as 1000% and 900% with 1,000 rows on SQLite 3.53.0).
+    test("getOverview counts data still in the WAL, so no table or index outgrows the database (#1449)", async () => {
+      const dbPath = join(fileTmpDir, "wal-size.db");
+      provider = new SQLiteProvider(makeSQLiteConfig({ database: dbPath }));
+      await provider.connect();
+      // No checkpoint until the connection closes: the rows below stay in the -wal.
+      await provider.query("PRAGMA wal_autocheckpoint = 0");
+      await provider.query("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
+      await provider.query("CREATE INDEX idx_customers_email ON customers (email)");
+      await provider.query(
+        `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+         INSERT INTO customers (name, email) SELECT 'user' || i, 'user' || i || '@example.com' FROM n`,
+      );
+
+      // The precondition, so the test cannot pass for the wrong reason: the data is in
+      // the WAL, and the main file alone is smaller than what the database holds.
+      const walBytes = statSync(`${dbPath}-wal`).size;
+      expect(walBytes).toBeGreaterThan(0);
+      const pages = (
+        await provider.query("SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()")
+      ).rows[0] as { bytes: number };
+      expect(statSync(dbPath).size).toBeLessThan(pages.bytes);
+
+      const overview = await provider.getOverview();
+      // The pages SQLite itself counts for this database, WAL included.
+      expect(overview.databaseSizeBytes).toBe(pages.bytes);
+      // getHealth() reads the same size, so it must agree.
+      expect((await provider.getHealth()).databaseSize).toBe(overview.databaseSize);
+
+      // The acceptance criterion itself, where this SQLite build can measure it:
+      // tables plus indexes never exceed 100% of the database.
+      if (await hasDbstat(provider)) {
+        const stats = await provider.getTableStats();
+        const customers = stats.find((s) => s.tableName === "customers")!;
+        expect(customers.tableSizeBytes! + customers.indexSizeBytes!).toBeLessThanOrEqual(overview.databaseSizeBytes!);
+      }
+
+      // The WAL keeps its own row in the Storage tab.
+      const storage = await provider.getStorageStats();
+      expect(storage.find((s) => s.name === "WAL")!.sizeBytes).toBe(walBytes);
+
+      // After a checkpoint the pages are in the main file too, and the -wal is NOT
+      // truncated: main file plus -wal would count them twice (review on #1449).
+      await provider.query("PRAGMA wal_checkpoint(PASSIVE)");
+      const checkpointed = (
+        await provider.query("SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()")
+      ).rows[0] as { bytes: number };
+      expect(statSync(`${dbPath}-wal`).size).toBeGreaterThan(0);
+      expect(statSync(dbPath).size + statSync(`${dbPath}-wal`).size).toBeGreaterThan(checkpointed.bytes);
+      expect((await provider.getOverview()).databaseSizeBytes).toBe(checkpointed.bytes);
     });
 
     // ── disconnect() has to RELEASE the file, not schedule its release ────────
