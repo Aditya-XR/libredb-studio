@@ -2650,8 +2650,8 @@ Found in the review of #1572; both predate it.
 
 ### D246. The confirmation gate does not know Databend's destructive forms
 
-`isDangerousQuery` in `src/components/QuerySafetyDialog.tsx` asks first for a statement whose operative keyword is in `DANGEROUS_KEYWORDS` (`DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `GRANT`, `REVOKE`, `UPDATE`), or whose code holds an `UPDATE` followed by `SET`, and that one set serves every SQL engine.
-Databend has destructive forms the set does not name: `INSERT OVERWRITE`, `REPLACE INTO`, `MERGE INTO`, `OPTIMIZE TABLE ... PURGE`, the `VACUUM` forms, `FLASHBACK TABLE`, `COPY INTO ... PURGE = true`, `REMOVE @stage`, `EXECUTE IMMEDIATE`, `CALL` and a `SETTINGS (...)` clause.
+`isDangerousQuery` in `src/components/QuerySafetyDialog.tsx` asks first for a statement whose operative keyword is in `DANGEROUS_KEYWORDS` (`DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `GRANT`, `REVOKE`, `UPDATE`, `MERGE`), or whose code holds an `UPDATE` followed by `SET`, and that one set serves every SQL engine.
+Databend has destructive forms the set does not name: `INSERT OVERWRITE`, `REPLACE INTO`, `OPTIMIZE TABLE ... PURGE`, the `VACUUM` forms, `FLASHBACK TABLE`, `COPY INTO ... PURGE = true`, `REMOVE @stage`, `EXECUTE IMMEDIATE`, `CALL` and a `SETTINGS (...)` clause.
 Some write from a SELECT shape: `nextval` and the table functions `fuse_amend`, `set_cache_capacity`, `fuse_vacuum2`, `fuse_vacuum_temporary_table` and the two `fuse_vacuum_drop_*_index` (`table_function_factory.rs` in Databend's source).
 So Run sends each of them with no confirmation unless its text also holds an `UPDATE ... SET` pair; `docs/providers/databend.md` states the list under its known limitations.
 
@@ -3392,12 +3392,12 @@ Found 2026-10-12 while designing the Snowflake provider.
 
 **Done when:** the limiter reads both forms as an existing bound on the Snowflake dialect, with tests that it neither appends a second bound nor misses a larger one.
 
-### D331. The confirmation gate's per-dialect forms exist only for Snowflake
+### D331. Most SQL engines declare no confirmation forms of their own
 
-`SqlGrammar.confirmForms` and `confirmCodeForms` let a dialect name the destructive forms the shared keyword set misses, and only Snowflake's row declares them.
-Other engines' replace, merge, call, unload and opaque-text forms still run unconfirmed; D246 covers Databend's, and the rest have no entry.
+`SqlGrammar.confirmForms` and `confirmCodeForms` let a dialect name the destructive forms the shared keyword set misses, and only the Snowflake and Spark rows declare a full set; PostgreSQL's row declares only its `DO` block.
+`MERGE` asks on every engine, as shared vocabulary; other engines' replace, call, unload and opaque-text forms still run unconfirmed; D246 covers Databend's, and the rest have no entry.
 
-Found 2026-10-12 while designing the Snowflake provider.
+Found 2026-10-12 while designing the Snowflake provider; narrowed 2026-10-14 when `MERGE` joined the shared set and PostgreSQL's row named `DO`.
 
 **Done when:** every SQL engine's row declares its own confirmation forms, each form is pinned by `isDangerousQuery` for that engine, also behind comments, and each provider doc lists what its gate asks for.
 

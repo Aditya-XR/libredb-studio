@@ -583,13 +583,15 @@ export function QuerySafetyDialog({
 }
 
 /**
- * Statements whose own keyword is enough to want a confirmation: they delete rows,
+ * Statements whose own keyword is enough to want a confirmation: they change or delete rows,
  * remove objects or change who may reach them.
  *
  * The same vocabulary the six anchored patterns here used to spell out, now tested
- * against one reading of the statement instead of re-derived per keyword.
+ * against one reading of the statement instead of re-derived per keyword. `MERGE` joined it
+ * later: it updates, deletes or inserts rows on every engine that has it, whichever `WHEN`
+ * branches it carries, so it is shared vocabulary rather than a form each grammar row declares.
  */
-const DANGEROUS_KEYWORDS = new Set(["DELETE", "DROP", "TRUNCATE", "ALTER", "GRANT", "REVOKE", "UPDATE"]);
+const DANGEROUS_KEYWORDS = new Set(["DELETE", "DROP", "TRUNCATE", "ALTER", "GRANT", "REVOKE", "UPDATE", "MERGE"]);
 
 /**
  * The words that open a procedural block or a branch of one rather than a statement of

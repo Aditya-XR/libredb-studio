@@ -109,11 +109,30 @@ function literalFollows(text: string, from: number, grammar: SqlGrammar): boolea
   return false;
 }
 
-/** Whether a code occurrence of `word` is followed by a string literal (`literalFollows`). */
-function wordThenLiteralInCode(text: string, word: string, grammar: SqlGrammar): boolean {
+/**
+ * Whether the next code after `from`, past whitespace and comments, opens a routine body: a string literal or a
+ * dollar-quoted run, the two forms PostgreSQL takes a `DO` block's code in. A word, a quoted name or a `(` does not.
+ */
+function bodyFollows(text: string, from: number, grammar: SqlGrammar): boolean {
+  let i = from;
+  for (let span = readSqlSpan(text, i, grammar); span !== null; span = readSqlSpan(text, i, grammar)) {
+    if (span.kind === "string" || span.kind === "dollar-string") return true;
+    if (span.kind !== "whitespace" && span.kind !== "line-comment" && span.kind !== "block-comment") return false;
+    i = span.end;
+  }
+  return false;
+}
+
+/** Whether a code occurrence of `word` is followed by what `follows` looks for (`literalFollows`, `bodyFollows`). */
+function wordThenInCode(
+  text: string,
+  word: string,
+  follows: (text: string, from: number, grammar: SqlGrammar) => boolean,
+  grammar: SqlGrammar,
+): boolean {
   let found = findCodeWord(text, word, 0, grammar);
   while (found !== null) {
-    if (literalFollows(text, found.end, grammar)) return true;
+    if (follows(text, found.end, grammar)) return true;
     found = findCodeWord(text, word, found.end, grammar);
   }
   return false;
@@ -203,7 +222,8 @@ function dollarQuotedInCode(text: string, grammar: SqlGrammar): boolean {
 
 function codeFormInText(text: string, form: ConfirmCodeForm, grammar: SqlGrammar): boolean {
   if ("prefix" in form) return prefixInCode(text, form.prefix, grammar);
-  if ("wordThenLiteral" in form) return wordThenLiteralInCode(text, form.wordThenLiteral, grammar);
+  if ("wordThenLiteral" in form) return wordThenInCode(text, form.wordThenLiteral, literalFollows, grammar);
+  if ("wordThenBody" in form) return wordThenInCode(text, form.wordThenBody, bodyFollows, grammar);
   if ("quotedCall" in form) return quotedCallInCode(text, form.quotedCall, grammar);
   if ("computedCall" in form) return computedCallInCode(text, form.computedCall, grammar);
   if ("dollarQuoted" in form) return dollarQuotedInCode(text, grammar);

@@ -523,13 +523,12 @@ Object edit is not in this version: no Spark kind accepts definition edits, and 
 
 ## 9. The confirmation gate
 
-The gate asks before every DELETE, DROP, TRUNCATE, ALTER, GRANT, REVOKE and UPDATE as for every SQL engine, and the Spark grammar row adds these forms.
+The gate asks before every DELETE, DROP, TRUNCATE, ALTER, GRANT, REVOKE, UPDATE and MERGE as for every SQL engine, and the Spark grammar row adds these forms.
 
 At the operative keyword:
 
 - `CREATE OR REPLACE` replaces a table, view or function.
 - `REPLACE TABLE` replaces a table.
-- `MERGE` writes rows.
 - `LOAD DATA` loads files into a table, OVERWRITE replacing it.
 - `CALL` runs a catalog procedure the gate cannot read.
 - `EXECUTE IMMEDIATE` runs text the gate cannot read.

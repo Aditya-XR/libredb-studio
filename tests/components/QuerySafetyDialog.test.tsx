@@ -2403,6 +2403,7 @@ describe("Snowflake's confirmation forms", () => {
   });
 
   // Today's answers on four other engines, measured before the forms existed, so the forms reach no other dialect.
+  // MERGE asks on every engine, as shared vocabulary rather than a Snowflake form.
   test.each([
     ["postgres", false],
     ["mssql", false],
@@ -2410,7 +2411,7 @@ describe("Snowflake's confirmation forms", () => {
     ["bigquery", false],
   ] as const)("%s keeps its verdicts", (type, expected) => {
     expect(isDangerousQuery("CREATE OR REPLACE VIEW v AS SELECT 1", type)).toBe(expected);
-    expect(isDangerousQuery("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", type)).toBe(expected);
+    expect(isDangerousQuery("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", type)).toBe(true);
     expect(isDangerousQuery("CALL p()", type)).toBe(expected);
     expect(isDangerousQuery("COPY INTO t FROM @s", type)).toBe(expected);
     expect(isDangerousQuery("SELECT SYSTEM$X()", type)).toBe(expected);
@@ -2793,5 +2794,63 @@ describe("Apache Spark's confirmation forms", () => {
     expect(isDangerousQuery("SELECT IDENTIFIER('reflect')('a', 'b')", type)).toBe(false);
     expect(isDangerousQuery("SET spark.sql.variable.substitute=true", type)).toBe(false);
     expect(isDangerousQuery("SELECT TRANSFORM(a) USING 'cat' FROM t", type)).toBe(false);
+  });
+});
+
+// MERGE writes rows on every engine that has it, whichever WHEN branches it carries, so it is a shared keyword like
+// UPDATE and DELETE rather than a form each row declares.
+describe("MERGE asks on every SQL engine", () => {
+  test.each([
+    ["MERGE t USING s ON 1=1 WHEN MATCHED THEN DELETE;", "mssql"],
+    ["MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "postgres"],
+    ["merge into t using s on t.id = s.id when not matched then insert values (s.id)", "postgres"],
+    ["WITH s AS (SELECT 1 AS id) MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "postgres"],
+    ["-- sync\nMERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN DELETE WHERE 1 = 1", "oracle"],
+    ["BEGIN MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN DELETE WHERE 1 = 1; END;", "oracle"],
+    ["MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "db2"],
+    ["MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "duckdb"],
+    ["MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "trino"],
+    ["MERGE ds.t USING ds.s ON t.id = s.id WHEN MATCHED THEN DELETE", "bigquery"],
+    ["MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "databend"],
+    ["MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "snowflake"],
+    ["MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "spark"],
+    ["SELECT 1; MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "postgres"],
+  ] as const)("%j on %s", (sql, type) => {
+    expect(isDangerousQuery(sql, type)).toBe(true);
+  });
+
+  test("a name or a literal that only spells the word does not ask", () => {
+    expect(isDangerousQuery("SELECT * FROM merge_log", "postgres")).toBe(false);
+    expect(isDangerousQuery("SELECT 'MERGE INTO t' AS note", "mssql")).toBe(false);
+  });
+});
+
+// PostgreSQL's DO runs an anonymous block whose body is a literal the gate does not read, so it asks whatever the body
+// does; the DO of ON CONFLICT and of CREATE RULE is followed by a word, never by a body, and does not.
+describe("a PostgreSQL DO block asks", () => {
+  test.each([
+    "DO $$ BEGIN DELETE FROM t; END $$",
+    "DO $body$ BEGIN DROP TABLE t; END $body$",
+    "do /* c */ $$ BEGIN RAISE NOTICE 'x'; END $$",
+    "DO 'BEGIN DELETE FROM t; END'",
+    "DO LANGUAGE plpgsql $$ BEGIN DELETE FROM t; END $$",
+    "SELECT 1; DO $$ BEGIN DELETE FROM t; END $$",
+  ])("%j", (sql) => {
+    expect(isDangerousQuery(sql, "postgres")).toBe(true);
+  });
+
+  test.each([
+    "INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING",
+    "BEGIN; INSERT INTO t VALUES (1) ON CONFLICT (id) DO NOTHING; COMMIT;",
+    "CREATE RULE r AS ON INSERT TO t DO INSTEAD NOTHING",
+    "SELECT 'DO $$ BEGIN DELETE FROM t; END $$' AS note",
+    "SELECT do FROM t WHERE do = 'x'",
+  ])("does not ask for %j", (sql) => {
+    expect(isDangerousQuery(sql, "postgres")).toBe(false);
+  });
+
+  test("MySQL's DO, which evaluates expressions, is not read as a block", () => {
+    expect(isDangerousQuery("DO SLEEP(1)", "mysql")).toBe(false);
+    expect(isDangerousQuery("DO 'x'", "mysql")).toBe(false);
   });
 });

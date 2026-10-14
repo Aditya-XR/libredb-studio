@@ -73,10 +73,14 @@ function sectionOf(text: string, heading: string): string {
   return lines.slice(start, end < 0 ? lines.length : end).join("\n");
 }
 
-/** How section 9 names a code form: its words, its prefix, its word before a string, the call it reads, or `$$...$$`. */
+/**
+ * How section 9 names a code form: its words, its prefix, its word before a string or a body, the call it reads, or
+ * `$$...$$`.
+ */
 function namedForm(form: ConfirmCodeForm): string {
   if ("prefix" in form) return form.prefix;
   if ("wordThenLiteral" in form) return `${form.wordThenLiteral} '<command>'`;
+  if ("wordThenBody" in form) return `${form.wordThenBody} $$...$$`;
   if ("quotedCall" in form) return form.quotedCall;
   if ("computedCall" in form) return `${form.computedCall}(...)(...)`;
   if ("dollarQuoted" in form) return "$$...$$";

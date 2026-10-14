@@ -937,7 +937,7 @@ A seed takes the same fields, as [SEED_CONNECTIONS.md](../SEED_CONNECTIONS.md) s
 ## 13. Known limitations
 
 - Databend has no read-only session Studio can open, and SELECT-shaped writers exist (`nextval` and six table functions), so there is no agent execution and no MCP `run_read_query` ([B103](../BACKLOG.md)).
-- The confirmation gate does not know Databend's destructive forms: `INSERT OVERWRITE`, `REPLACE INTO`, `MERGE INTO`, `OPTIMIZE TABLE ... PURGE`, the `VACUUM` forms, `FLASHBACK TABLE`, `COPY INTO ... PURGE = true`, `REMOVE @stage`, `EXECUTE IMMEDIATE`, `CALL`, a `SETTINGS (...)` clause and the SELECT-shaped writers run with no confirmation ([D246](../BACKLOG.md)).
+- The confirmation gate does not know Databend's destructive forms: `INSERT OVERWRITE`, `REPLACE INTO`, `OPTIMIZE TABLE ... PURGE`, the `VACUUM` forms, `FLASHBACK TABLE`, `COPY INTO ... PURGE = true`, `REMOVE @stage`, `EXECUTE IMMEDIATE`, `CALL`, a `SETTINGS (...)` clause and the SELECT-shaped writers run with no confirmation ([D246](../BACKLOG.md)).
 - A dollar-quoted run tagged other than `$$` (`$name$`) is refused, because Databend reads `$name` as a variable; use `$$`.
 - A form feed is refused anywhere in the text, because it ends a `--` comment in Databend.
 - A stage name (`@...`) holding a backslash, `--`, `/*`, a dollar quote or a bracket is refused, because Databend's stage token takes each into the name while Studio reads a quote, a comment, a literal or an array there; a space ends the name, so a comment can follow it.

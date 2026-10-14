@@ -322,7 +322,9 @@ export interface SqlGrammar {
    * Forms that ask for a confirmation wherever they appear in a statement's code, strings and comments skipped: a
    * word sequence, the start of an identifier (`{ prefix: "SYSTEM$" }` matches `SYSTEM$CLUSTERING_INFORMATION`),
    * a word whose next code, past whitespace and comments, is a string literal (`{ wordThenLiteral: "USING" }`
-   * matches `TRANSFORM (a) USING 'cat'` and not `JOIN u USING (id)`), a closed quoted name whose text is the name,
+   * matches `TRANSFORM (a) USING 'cat'` and not `JOIN u USING (id)`), a word whose next code is a routine body, a string
+   * literal or a dollar-quoted run (`{ wordThenBody: "DO" }` matches `DO $$ ... $$` and not `ON CONFLICT DO NOTHING`),
+   * a closed quoted name whose text is the name,
    * compared without case, that a `(` follows (`{ quotedCall: "REFLECT" }` matches `` `Reflect`('a') ``), a word
    * followed by a parenthesised run and then a `(` (`{ computedCall: "IDENTIFIER" }` matches `IDENTIFIER('f')(1)`, a
    * call whose function name the run computes), or a dollar-quoted run, read at each character (`{ dollarQuoted: true }`
@@ -377,12 +379,14 @@ export interface ConfirmFormWhen {
 
 /**
  * A form `SqlGrammar.confirmCodeForms` looks for: a word sequence, an identifier prefix, a word a literal follows, a
- * quoted name called as a function, a word whose parenthesised run names the function called, or a dollar-quoted run.
+ * word a routine body follows, a quoted name called as a function, a word whose parenthesised run names the function
+ * called, or a dollar-quoted run.
  */
 export type ConfirmCodeForm =
   | readonly string[]
   | { readonly prefix: string }
   | { readonly wordThenLiteral: string }
+  | { readonly wordThenBody: string }
   | { readonly quotedCall: string }
   | { readonly computedCall: string }
   | { readonly dollarQuoted: true };
@@ -482,6 +486,10 @@ const POSTGRES_GRAMMAR: SqlGrammar = {
   // this row and have no such clause: a statement of theirs ending in these words
   // is one the server refuses bound or unbound, so the reading costs neither.
   trailingLimitClauses: [/\s+AS\s+OF\s+(?:AT\s+LEAST\s+)?(?:\d+|'[^']*')\s*$/i],
+  // `DO` runs an anonymous block whose code is a literal, `$$ ... $$` or `'...'`, which the gate does not read, so it
+  // asks whatever the block does; `DO LANGUAGE <name>` writes the language before the body. The `DO` of
+  // `ON CONFLICT DO NOTHING | UPDATE` and of `CREATE RULE ... DO INSTEAD | ALSO` is followed by a word and does not ask.
+  confirmCodeForms: [{ wordThenBody: "DO" }, ["DO", "LANGUAGE"]],
 };
 /**
  * DuckDB, every fact measured on v1.5.5 through `@duckdb/node-api` 1.5.5-r.4.
@@ -940,7 +948,6 @@ const SNOWFLAKE_GRAMMAR: SqlGrammar = {
     ["CREATE", "OR", "REPLACE"],
     ["CREATE", "OR", "ALTER"],
     ["INSERT", "OVERWRITE"],
-    ["MERGE"],
     ["COPY"],
     ["REMOVE"],
     ["RM"],
@@ -1112,12 +1119,11 @@ const SPARK_GRAMMAR: SqlGrammar = {
   script: DEFAULT_SQL_GRAMMAR.script,
   // LIMIT must precede OFFSET, so a trailing OFFSET takes the bound before it.
   trailingLimitClauses: [/\s+OFFSET\s+\d+\s*$/i],
-  // Replace a table, view or function; write rows; load files into a table; run a catalog procedure or text the gate
-  // cannot read; load code or make the driver fetch a URL (ADD JAR, FILE, ARCHIVE and their plurals).
+  // Replace a table, view or function; load files into a table; run a catalog procedure or text the gate cannot read;
+  // load code or make the driver fetch a URL (ADD JAR, FILE, ARCHIVE and their plurals). MERGE is shared vocabulary.
   confirmForms: [
     ["CREATE", "OR", "REPLACE"],
     ["REPLACE", "TABLE"],
-    ["MERGE"],
     ["LOAD", "DATA"],
     ["CALL"],
     ["EXECUTE", "IMMEDIATE"],

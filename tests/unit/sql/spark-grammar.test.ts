@@ -134,7 +134,6 @@ describe("the Spark grammar", () => {
     expect(grammar.confirmForms).toEqual([
       ["CREATE", "OR", "REPLACE"],
       ["REPLACE", "TABLE"],
-      ["MERGE"],
       ["LOAD", "DATA"],
       ["CALL"],
       ["EXECUTE", "IMMEDIATE"],

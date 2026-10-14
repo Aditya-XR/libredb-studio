@@ -1791,6 +1791,12 @@ Measured 2026-10-04 on PostgreSQL 18.6: a `SELECT *` over a table with `integer[
 That row differed in one cell that never reached the export as itself, the JSON document `null` in a `json` column; it now arrives as its text and replays as the document, so the same comparison answers no rows ([§5.5](#55-the-types-read-as-the-engines-text)).
 Before this, the same file stopped at its first row with `ERROR: malformed array literal: "[1,2,3]"`.
 
+### 5.8 The confirmation gate
+
+The editor's confirmation gate asks before the shared destructive keywords, `MERGE` among them ([query-optimization.md](../editor/query-optimization.md#destructive-statement-confirmation)).
+On this dialect it also asks before a `DO` block, whatever the block does: the block's code is a literal, `$$ ... $$` or `'...'`, which the gate does not read.
+The grammar row's `confirmCodeForms` names `DO` followed by a body and `DO LANGUAGE` ([`grammar.ts`](../../src/lib/sql/grammar.ts)), so the `DO` of `INSERT ... ON CONFLICT DO NOTHING` and of `CREATE RULE ... DO INSTEAD`, which a word follows, does not ask.
+
 ---
 
 ## 6. Schema introspection

@@ -602,8 +602,8 @@ Completion offers Snowflake's own clauses and functions (the grammar's `completi
 ## 9. The confirmation gate
 
 The gate is a browser confirmation, not a boundary: it asks before a statement runs from the editor, and the role decides what can happen.
-On top of the shared destructive keywords it asks for these Snowflake forms, at the top level and inside a block.
-Forms that replace, overwrite, unload or delete: `CREATE OR REPLACE`, `CREATE OR ALTER` (which drops the columns its new definition leaves out), `INSERT OVERWRITE`, `MERGE`, `COPY`, `REMOVE` and `RM`.
+On top of the shared destructive keywords, `MERGE` among them, it asks for these Snowflake forms, at the top level and inside a block.
+Forms that replace, overwrite, unload or delete: `CREATE OR REPLACE`, `CREATE OR ALTER` (which drops the columns its new definition leaves out), `INSERT OVERWRITE`, `COPY`, `REMOVE` and `RM`.
 Forms that run text or work the gate cannot read: `EXECUTE IMMEDIATE`, `EXECUTE TASK`, `EXECUTE ALERT`, `EXECUTE NOTEBOOK`, `EXECUTE JOB SERVICE`, `EXECUTE DBT PROJECT` and `CALL`.
 Forms that spend credits on their own, once or on a schedule: `CREATE WAREHOUSE`, `CREATE TASK`, `CREATE ALERT`, `CREATE COMPUTE POOL`, `CREATE SERVICE`, `CREATE DYNAMIC TABLE`, `CREATE TRANSIENT DYNAMIC TABLE`, `CREATE MATERIALIZED VIEW`, `CREATE SECURE MATERIALIZED VIEW`, `CREATE PIPE`, `CREATE DYNAMIC ICEBERG TABLE` and `CREATE CORTEX SEARCH SERVICE`.
 Forms that change who gets in or what leaves the account: `CREATE USER`, `CREATE ROLE`, `CREATE NETWORK POLICY`, `CREATE NETWORK RULE`, `CREATE EXTERNAL ACCESS INTEGRATION`, `CREATE API INTEGRATION`, `CREATE SECURITY INTEGRATION`, `CREATE NOTIFICATION INTEGRATION`, `CREATE STORAGE INTEGRATION`, `CREATE SHARE`, `CREATE REPLICATION GROUP` and `CREATE FAILOVER GROUP`.

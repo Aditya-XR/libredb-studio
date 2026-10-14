@@ -566,7 +566,9 @@ same reading the auto-limiter uses, so the two cannot disagree about where a sta
 
 | Statement | Confirmation |
 |-----------|--------------|
-| `DELETE` / `DROP` / `TRUNCATE` / `ALTER` / `GRANT` / `REVOKE` / `UPDATE` | Yes |
+| `DELETE` / `DROP` / `TRUNCATE` / `ALTER` / `GRANT` / `REVOKE` / `UPDATE` / `MERGE` | Yes |
+| A PostgreSQL `DO` block (`DO $$ … $$`, `DO '…'`, `DO LANGUAGE …`), whatever its body does, since the gate does not read the body | Yes |
+| The `DO` of `ON CONFLICT DO NOTHING` or `CREATE RULE … DO INSTEAD`, which a word follows | No |
 | Any of those behind a comment (`-- note`, `/* note */`, MySQL's `# note`, several stacked) | Yes |
 | A `WITH` whose CTE list precedes one (`WITH x AS (…) DELETE FROM …`) | Yes |
 | A `WITH` whose CTE list *contains* an `UPDATE … SET` (PostgreSQL's data-modifying CTE) | Yes |
