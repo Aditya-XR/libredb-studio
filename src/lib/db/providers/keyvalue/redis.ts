@@ -277,7 +277,7 @@ const REDIS_CONTAINER_LEVELS: ContainerLevels = Object.freeze([
 /**
  * The two kinds this engine has, and the three candidates that are deliberately absent.
  *
- * `keyspace` is the grouping `getSchema()` has always produced: a bounded `SCAN` of 1000
+ * `keyspace` is the grouping produced by the bounded `SCAN` of 1000
  * keys, collapsed to one row per prefix. Those rows are this server's own summary and NOT
  * objects anybody named, which is what `tablesAreDerivedGroupings` says, and the
  * declaration carries that refusal forward - see the note on that flag in
@@ -451,8 +451,8 @@ function containerDatabase(capabilities: ProviderCapabilities, container: readon
  * The grouping one key belongs to: `user:123` and `user:456` are both `user:*`, and a key
  * with no colon is its own grouping.
  *
- * Module-level and shared, so `getSchema()` and the object surface can never group the same
- * keyspace two different ways.
+ * Module-level and shared, so every caller groups the keyspace through this one function
+ * and the same keyspace can never be grouped two different ways.
  */
 function keyGrouping(key: string): string {
   const colonIdx = key.indexOf(":");
@@ -734,8 +734,8 @@ function scanRows(
  * one; `value` and `type` carry the value types SAMPLED from the first three keys of the
  * grouping, which is why a grouping holding strings and hashes reads `string/hash`.
  *
- * Shared by `getSchema()` and `describeObject`, so the flat model and the object model
- * cannot describe the same grouping differently while both surfaces are live.
+ * Shared by every caller that describes a grouping, so the same grouping cannot be
+ * described two different ways.
  */
 function keyGroupColumns(sampledTypes: ReadonlySet<string>): ColumnSchema[] {
   const types = Array.from(sampledTypes);
@@ -1204,7 +1204,7 @@ export class RedisProvider extends BaseDatabaseProvider {
       // prefixes it grouped rather than declared objects. It emits no `foreignKeys`
       // field at all; this says why (#414).
       declaresForeignKeys: false,
-      // `getSchema()` SCANs 1000 keys and groups them by the text before the first
+      // The bounded `SCAN` of 1000 keys groups them by the text before the first
       // colon, so every row it returns is this server's own summary of real key names
       // — `user:*` is a grouping, not a key, and nothing can be addressed by it (#414).
       //
@@ -1727,13 +1727,13 @@ export class RedisProvider extends BaseDatabaseProvider {
   /**
    * One bounded `SCAN` walk of ONE database, collapsed to one entry per key grouping.
    *
-   * THE single enumerator for the `keyspace` kind: `getSchema()`, `countObjects`,
-   * `listObjects` and `describeObject` all read this and nothing else reads the keyspace.
+   * THE single enumerator for the `keyspace` kind: `countObjects`, `listObjects` and
+   * `describeObject` all read this and nothing else reads the keyspace.
    * That is where standing ruling 5f is held on an engine whose catalog is a command rather
    * than a query - there is no second SCAN with a different MATCH for a count and a listing
    * to drift apart in, and the count is the SIZE of the map this returns.
    *
-   * Bounded at 1000 keys on purpose, and it is the same bound `getSchema()` has always had:
+   * Bounded on purpose - this is the bounded `SCAN` of 1000 keys:
    * a full walk of a production keyspace is unbounded work on the server. What that costs is
    * real and is written down in the provider doc: on a keyspace larger than the bound, the
    * groupings are the groupings of a SAMPLE.
@@ -1990,9 +1990,9 @@ export class RedisProvider extends BaseDatabaseProvider {
    *
    * One function because a caller joins the two answers together: two copies would be two
    * chances for the bulk read to spell a grouping's columns differently from the single read
-   * of the same grouping. It goes through `keyGroupColumns`, which is also what `getSchema()`
-   * builds its rows from, so all three surfaces describe one grouping one way while the flat
-   * one is still live.
+   * of the same grouping. It goes through `keyGroupColumns`, the one function every caller
+   * describes a grouping with, so a grouping's columns are spelled the same way wherever
+   * it is described.
    */
   private static keyspaceDetail(path: readonly string[], types: ReadonlySet<string>): ObjectDetail {
     return { path: [...path], columns: keyGroupColumns(types), indexes: [], foreignKeys: [] };
