@@ -28,12 +28,12 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
-- [Drivers and connections](#drivers-and-connections) — D1-D348, U17 · 248
+- [Drivers and connections](#drivers-and-connections) — D1-D362, U17 · 262
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U139 · 129
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U144 · 134
 - [Dependencies](#dependencies) — P1-P9 · 7
-- [Documentation](#documentation) — DOC3-DOC25 · 22
+- [Documentation](#documentation) — DOC3-DOC33 · 30
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H14 · 4
@@ -3562,6 +3562,161 @@ Found 2026-10-13 while reviewing #1629.
 
 **Done when:** the profile lives in its own module under a `sql/mysql/` directory, its pure checks have unit tests of their own, and `tests/integration/db/mysql-provider.test.ts` and `tests/live/mysql-agent-profile.ts` pass unchanged.
 
+### D349. Milvus `wkbToWkt` reads any byte order but 1 as big-endian, and names a mixed multi-geometry by its container
+
+`wkbToWkt` in `src/lib/db/providers/vector/milvus/field-data.ts` reads a geometry's byte order as `data.getUint8(at) === 1`, so every value other than 1 is read as big-endian, although WKB defines only 0 (big-endian) and 1 (little-endian).
+A value whose byte-order byte is 2, with big-endian fields, decodes as `POINT (1 2)` instead of being reported as a form Studio does not decode.
+The multi-geometry branch decodes each part with `geometry()` and keeps only its body without checking the part's type, so a MULTIPOINT holding a LINESTRING is written `MULTIPOINT ((0 0, 1 1))`, WKT that names a value it does not hold; MULTILINESTRING and MULTIPOLYGON share the branch.
+Both measured 2026-10-14 on `main` with a scratch script over `wkbToWkt`.
+
+Found 2026-10-13 while reviewing the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** a byte order other than 0 or 1 answers undefined, a MULTIPOINT, MULTILINESTRING or MULTIPOLYGON part that is not a POINT, LINESTRING or POLYGON respectively answers undefined, and `tests/unit/db/milvus/field-data.test.ts` has a case for each.
+
+### D350. The schema-diff migration says BigQuery has no foreign-key constraint
+
+`NO_FOREIGN_KEYS` in `src/lib/schema-diff/migration-generator.ts` names BigQuery, so an added or dropped foreign key is declined with `-- BigQuery: Cannot add a foreign key. The engine has no foreign-key constraint.` (and the `Cannot drop` twin).
+BigQuery does have foreign keys, declared `NOT ENFORCED`, as it has primary keys, and the same file's `NO_PRIMARY_KEY_CONSTRAINT` row for BigQuery already says so for the primary key: "BigQuery accepts a primary key only as PRIMARY KEY (...) NOT ENFORCED."
+The decline itself may stay; its reason is false.
+
+Found 2026-10-13 while reviewing the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** BigQuery's foreign-key decline gives a reason of its own (the key exists only as `FOREIGN KEY (...) REFERENCES ... NOT ENFORCED`), or the generator writes that form, with the BigQuery cases in `tests/unit/schema-diff/migration-dialects.test.ts` pinning the new text.
+
+### D351. Snowflake's unreadable-value sentence writes "a OBJECT" and "a ARRAY"
+
+`SNOWFLAKE_DECODE_SENTENCES.unreadable` in `src/lib/db/providers/sql/snowflake/decode.ts` composes `Snowflake sent a ${columnType} value in column ...` with a fixed "a".
+`columnTypeOf` passes an unnamed type through upper-cased, and `decodeCell` refuses a non-string cell of any type, so an OBJECT or ARRAY column yields "Snowflake sent a OBJECT value" and "Snowflake sent a ARRAY value" (measured 2026-10-14 on `main` through `decodeCell`).
+The named types (NUMBER, DECFLOAT, FLOAT, VARCHAR, BOOLEAN, BINARY, DATE, TIME, the three TIMESTAMP types) all take "a", so only the pass-through names are wrong.
+
+Found 2026-10-14 while reviewing the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** the sentence chooses its article from the type name it composes, as `KEY_TYPE_NAMES` in `auth.ts` does for key types, and `tests/unit/db/snowflake/decode.test.ts` pins the OBJECT and ARRAY sentences.
+
+### D352. The Spark purity guards read only each pure module's own imports, so a pure module can reach the transport through a sibling
+
+`tests/unit/db/spark/seam-guard.test.ts` (`PURE_MODULES`, `IO_MODULE`, `NO_IO_TARGET`, `pureFindings`) and `tests/unit/db/spark/pure-seam-guard.test.ts` (`PURE`, `FORBIDDEN`, `PURE_SIBLINGS`) check the specifiers each pure module of `src/lib/db/providers/sql/spark/` writes, and neither follows an import into the file it names.
+`pure-seam-guard` admits `./constants`, `./errors` and `./namespace` as pure siblings without reading them, and `seam-guard` flags a relative specifier only when it resolves under `src/lib/db/grpc` or `src/lib/logger`.
+So a line `import "./grpc-client";` added to `namespace.ts` makes `values.ts` and `schema.ts` load `@grpc/grpc-js`, `node:tls` and `src/lib/db/grpc/channel.ts`, and both guards stay green.
+The review planted that line in a scratch copy and both files still passed; re-read 2026-10-14 on `main` at 5b77948ee, where both guards still compare each module's own specifiers only.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** both guards walk each pure module's runtime imports transitively (relative and `@/` specifiers resolved, `import type` skipped) and apply their rule to every file reached, and a case in each guard fails on an impure import planted in a sibling such as `namespace.ts`.
+
+### D353. The Spark gRPC runtime cases never run on the Node major production uses
+
+`tests/unit/db/spark/grpc-runtimes.test.ts` runs its bundled child under `Bun.which("node")`, which in the `Unit & Integration Tests` job is the Node 24 that `.github/workflows/ci.yml` installs.
+The job's Node 26 step runs `tests/unit/db/http/node-transport-runtimes.test.ts`, `tests/unit/db/s3/client-wire.test.ts`, `tests/unit/db/rabbitmq/dial-runtimes.test.ts` and `tests/unit/db/snowflake/key-runtimes.test.ts`, and not the Spark file, while the `Dockerfile` runner stage is `node:26.11.1-trixie-slim`.
+A grpc-js or TLS behaviour that differs on Node 26 would reach users with every check green; the Bun parent already holds the stricter IP server-name rule, which narrows the gap.
+Verified 2026-10-14 by reading `ci.yml`, the `Dockerfile` and the test on `main` at 5b77948ee.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** the existing Node 26 step's runner command also names `tests/unit/db/spark/grpc-runtimes.test.ts` (no new step), and the CI log of that step shows the Spark runtime cases passing under Node 26.
+
+### D354. A type-only import cycle joins the connection-string parser and Spark's sc:// reader
+
+`src/lib/db/providers/sql/spark/sc-uri.ts` imports `type { ParsedConnection }` from `src/lib/connection-string-parser.ts`, and that file imports `parseSparkConnectUri` from `sc-uri.ts`.
+Nothing cycles at run time, since the import is type-only and `TYPE_ONLY` in `tests/unit/db/spark/pure-seam-guard.test.ts` keeps it so.
+A cycle checker that counts type imports reports one more cycle under `src/` than on 22543b91b (the review counted 15 against 14, the new one being this pair).
+Verified 2026-10-14 by reading both files' imports on `main` at 5b77948ee.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** `ParsedConnection` lives in a types module both files import, or `sc-uri.ts` declares the shape it returns structurally, and `tests/unit/db/spark/pure-seam-guard.test.ts` asserts that `sc-uri.ts` imports nothing from `@/lib/connection-string-parser`.
+
+### D355. A discarded Spark metadata session is never released, so each server restart leaves one session open until its idle timeout
+
+`SparkSessions.discardMetadata` in `src/lib/db/providers/sql/spark/session.ts`, which `readMetadata` calls when a read meets a closed or changed session, releases a handle still in setup but only removes a completed one from `open`, and sends no ReleaseSession for it.
+`releaseAll` releases only the handles left in `open`, so the discarded session is never released; the review fix that makes `releaseAll` wait for statement setups and releases in flight does not reach it.
+The docblock's premise, that the server closed the session it discards, does not hold after a restart: the first read sends the old session id, and Spark 4.2.0's `SparkConnectSessionManager.getOrCreateIsolatedSession` creates and stores a holder for the unknown id before `validateSessionId` refuses it with `INVALID_HANDLE.SESSION_CHANGED`.
+That holder then stays on the server until Spark's 60-minute idle timeout, one per connected provider per restart.
+Request and statement sessions do not leak this way, since `endScope` and `endStatementSession` release them, and ReleaseSession on a session the server already closed is a no-op.
+`tests/unit/db/spark/session.test.ts` pins the current behaviour: its case "the metadata session gets both settings lists in one call, and is one handle until discarded, unreleased" expects no release of the discarded id.
+Verified 2026-10-14 by reading `session.ts` on `main` at 5b77948ee.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** a discarded metadata session whose setup completed is released once, and `tests/unit/db/spark/session.test.ts` shows, over the fake, a metadata read answered SESSION_CHANGED followed by one ReleaseSession of the old id before the repeat, with the "unreleased" case changed to expect that release.
+
+### D356. The Spark request builder tests compare shapes with toEqual, which ignores an undefined key
+
+Every request shape in `tests/unit/db/spark/requests.test.ts` is asserted with `toEqual`, nine assertions in all, and the relation step's "no reattach option" check is `expect(JSON.stringify(request)).not.toContain("reattach")`.
+Both ignore a key whose value is `undefined`, so a builder that gained `reattach_options: undefined`, or a `releaseSessionRequest` that gained `client_observed_server_side_session_id: undefined`, passes them.
+There is no wire effect today, since protobufjs `fromObject` skips undefined fields and the tests over the fake decode the wire; the provider plan's rule is that an exact shape is asserted with `toStrictEqual`.
+Verified 2026-10-14 by reading the test on `main` at 5b77948ee.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** the nine shape assertions in `tests/unit/db/spark/requests.test.ts` use `toStrictEqual`, and the relation step asserts that `"reattach_options" in request` is false.
+
+### D357. A Spark struct with a repeated field name is keyed differently by the query path and the command path
+
+On the relation path (a query), `valueOf` in `src/lib/db/providers/sql/spark/values.ts` keys a struct by `uniqueFieldNames` over the DataType's names, so `struct(a.id, b.id)` reads `{"id":1,"id (2)":2}` with column type `struct<id:int,id:int>`.
+On the command path (a command's inline answer), `columnsFromArrow` in `src/lib/db/providers/sql/spark/schema.ts` takes the names Spark's Arrow writer numbered (`id_0`, `id_1`, the form `arrowFieldNames` derives), so the same struct reads `{"id_0":1,"id_1":2}` with type `struct<id_0:int,id_1:int>`.
+`tests/unit/db/spark/values.test.ts` pins the relation form, and section 6.2 of `docs/providers/spark.md` says nothing about repeated names, so neither form is a stated contract.
+The review measured both forms with a probe over one Arrow batch; re-read 2026-10-14 on `main` at 5b77948ee, where both code paths are unchanged.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** both paths key a repeated field name by one rule, section 6.2 of `docs/providers/spark.md` states it in one sentence, and `tests/unit/db/spark/values.test.ts` reads the same struct through both paths and gets the same keys and column type.
+
+### D358. Every Spark Arrow stream passes the IPC pre-check twice
+
+`readRelationAnswer` in `src/lib/db/providers/sql/spark/result-stream.ts` and `decodeInline` in `src/lib/db/providers/sql/spark/execute.ts` call `checkIpcStream` and then `readIpcColumns`, and `readIpcColumns` in `src/lib/db/providers/sql/spark/arrow.ts` calls `checkIpcStream` again to count the record batches.
+Each pass walks every message header and, through `checkOffsets` in `ipc-guard.ts`, every value of every offsets buffer, so the pre-check of a 32 MiB result is paid twice.
+This is cost, not correctness: both passes refuse the same streams.
+Verified 2026-10-14 by reading the three call sites on `main` at 5b77948ee.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** each stream is pre-checked once (`readIpcColumns` takes the result of the check its caller ran, or one entry point checks and reads), a stream with more than one record batch is still refused before apache-arrow reads it, and a case in `tests/unit/db/spark/arrow.test.ts` counts one `checkIpcStream` pass per stream.
+
+### D359. CI's Node 26 step pins 26.10.0 and says it matches the Dockerfile, which runs 26.11.1
+
+The Node 26 step of the `Unit & Integration Tests` job in `.github/workflows/ci.yml` installs Node 26.10.0, asserts `v26.10.0`, and its comment says production runs on Node 26.10.0, the Dockerfile's runner stage.
+The `Dockerfile`'s builder and runner stages are `node:26.11.1-trixie-slim`, so the transport, S3 client wire, RabbitMQ dial and Snowflake key runtime cases that step runs are measured on a Node release production does not run (checked 2026-10-14 on `main` at 5b77948ee).
+A behaviour change in 26.11.1 that those cases pin would reach users with the step green.
+
+Found 2026-10-14 while filing the Apache Spark provider's follow-ups (#1759); pre-existing.
+
+**Done when:** the Node 26 step installs and asserts the version the `Dockerfile` runner stage names, and a test reads both files and fails when they differ.
+
+### D360. The RabbitMQ hostile-peer test can fail on a loaded machine while the ignores-close peer still holds its socket
+
+`tests/unit/db/rabbitmq/hostile-peers.test.ts` (R-S10) asserts `openAfter: 0` for every hostile peer, where `openAfter` counts the accepted sockets of the fake peer in `tests/helpers/rabbitmq-fake-peer.ts` that have not seen their close yet.
+In a full local run of all 1,478 test files at 20 jobs on a loaded machine (326 s, against 108 s for the same suite unloaded), the "ignores-close" peer under Bun ended with `openAfter: 1` and the file failed; run alone right after, the file passed 6 of 6 (2026-10-14, on the #1764 branch with `main` at 5b77948ee merged in).
+The file's docblock already records a loaded macOS runner taking up to 3,540 ms to see that close and bounds the helper's wait at 5 s, so a heavier load uses up that margin.
+
+Found 2026-10-14 while merging #1759 and #1764; pre-existing since #1703.
+
+**Done when:** the assertion no longer depends on how fast the peer observes the close (for example it checks that the client destroyed its socket and awaits the peer's close under the file's own budget), and the file passes ten full runs at twice the core count in jobs.
+
+### D361. The MongoDB server-selection test waits out the driver's real 30 s bound and ran past the 300 s file budget on a loaded machine
+
+`tests/integration/db/mongodb-server-selection.test.ts` drives the real driver against a closed port and measures the driver's 30 s server-selection bound on the wall clock, so the file takes about 40 s alone.
+In the same loaded run as D360 the runner stopped it at `DEFAULT_FILE_TIMEOUT_MS` (300 s, `tests/runner/options.ts`); run alone right after, it passed 2 of 2 in 40.5 s.
+Why the load stretched it past seven times its own duration was not measured.
+
+Found 2026-10-14 while merging #1759 and #1764; pre-existing since #1518.
+
+**Done when:** the cause of the stretch is measured, and the file either passes ten loaded full runs within the default budget or measures the bound in a way that does not wait on the wall clock.
+
+### D362. A Spark connection takes no agent credential: the factory asks for a user Apache Spark refuses
+
+`assertAgentCredentialForm` in `src/lib/db/factory.ts` takes `agentPassword` alone only from a provider whose capabilities declare `agentCredential: "token"`, and asks every other engine for both `agentUser` and `agentPassword`, which the agent profile then opens with as the connection's user and password.
+`SparkProvider` declares no `agentCredential`, and `src/lib/db/providers/sql/spark/connection-options.ts` refuses any non-empty User with `SPARK_FIELD_SENTENCES.userNotTaken`, since a Spark Connect session's identity is its token.
+So no agent credential works on a Spark connection: an `agentPassword` alone is refused as an incomplete agent credential, and an `agentUser` beside it is refused by Spark's User check.
+Plan-mode grounding and the operations workflow, which both acquire through the `agent-operations` profile, then meet one of the two refusals instead of reading the schema.
+With no agent credential stored, both run under the connection's own token, and the connection dialog has no input for one, so only a record written through the API or storage reaches this.
+`tests/unit/db/agent-credential-capability.test.ts` pins `TOKEN_ENGINES` to Kubernetes alone.
+Verified 2026-10-14 by reading `factory.ts`, `connection-options.ts` and that test on `main` at 59cdfd09b.
+
+Found 2026-10-14 in the integration review of #1759 and #1764; Spark behaved the same before #1764 added the token form.
+
+**Done when:** `SparkProvider.getCapabilities()` declares `agentCredential: "token"`, `TOKEN_ENGINES` includes `spark`, a factory test shows an `agentPassword` alone becoming the token of the agent's Spark session and an `agentUser` refused, and section 8.3 of `docs/providers/spark.md` says so in one sentence.
+
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound
@@ -5398,6 +5553,60 @@ Found 2026-10-13 while reviewing #1629.
 
 **Done when:** the claim's height no longer grows with the engine list (for example a count with the names behind a disclosure), the spacing #1629 took back is restored, and `tests/components/LoginPage.test.tsx` still pins that the claim names only engines agent mode executes on.
 
+### U140. The connection dialog's field census leaves six shipped types out
+
+The docblock of the "declared connection-field copy (#1085)" block in `tests/components/ConnectionModal.test.tsx` says its `SHIPPED` table holds "every shipped type", but the table has no row for BigQuery, Snowflake, Neo4j, MQTT, Firestore or OPC UA, six of the thirty-seven in `SHIPPED_DATABASE_TYPES` (counted 2026-10-14 on `main` at 59cdfd09b, where #1759 added Apache Spark's row).
+The same docblock calls Prometheus and Kafka "the shipped entries that declare either" label or hint, while `src/lib/db-ui-config.ts` now declares field copy for libSQL, Db2, etcd, Neo4j, Milvus, Qdrant, InfluxDB and InfluxDB 3 as well.
+So a change to the labels or hints of those six types reaches no census row.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** `SHIPPED` has a row for every id in `SHIPPED_DATABASE_TYPES`, a test holds the two sets equal so the next type cannot be left out, and the docblock names the declaring entries by what they declare rather than by a list.
+
+### U141. JSON export drops an own `__proto__` key from every engine's rows
+
+`jsonSafe` in `src/lib/export/json.ts` rebuilds an object as `out[key] = ...` over `Object.entries`, so an own key named `__proto__` sets the copy's prototype instead of a property, and `JSON.stringify` then leaves it out.
+`binaryCellsAsHex` in the same file builds a row the same way, so a column named `__proto__` is dropped from the row as well.
+Measured 2026-10-14 on `main`: `jsonText(JSON.parse('{"__proto__":{"a":1},"b":2}'))` answers `{"b":2}`, nested inside another value too, and `binaryCellsAsHex` of a row with a `__proto__` column answers the row without it.
+Every engine's JSON export, Copy as JSON and row-detail Copy JSON go through these two functions.
+
+Found 2026-10-13 while reviewing the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** both functions build their copy with `Object.fromEntries` or `Object.defineProperty`, so an own `__proto__` key survives as data, and `tests/unit/lib/export/json.test.ts` pins it for a nested value and for a column.
+
+### U142. The login page's engine list has no room left at 1366x768 once Apache Spark lands
+
+The desktop engine list on the login page (`DesktopDatabases` in `src/components/login/database-showcase.tsx`) wraps one pill per engine, and its docblock records how each new engine has been paid for out of the row gap, now 4px (`gap-y-1`) with thirty-six entries.
+The Apache Spark provider (#1759) measured on 2026-10-13 that the thirty-seventh entry wraps 1366x768 into a sixth row and scrolls it to 777px at 4px, and moved the gap to 2px (`gap-y-0.5`), where the four sizes need 784, 767, 749 and 695px of 800, 768, 900 and 1080.
+That leaves 1px at 1366x768 and no smaller row gap to give, so the engine after Spark will make the page scroll at that size.
+U139 is the same pressure on the agent claim above it.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); a known upcoming limit of `main`'s layout.
+
+**Done when:** the list's height no longer grows with the engine count (for example a fixed number of rows with the rest behind a count, or columns sized to the viewport), the row gap is back at 4px or more, and `e2e/login.spec.ts` asserts no vertical scroll at 1280x800 and 1366x768 with one engine added past the shipped set.
+
+### U143. A skipped INSERT row names the dialect by its type id
+
+When a cell has no literal in the target dialect, the SQL INSERT export writes `-- Row N skipped: column X holds <held>, which <dialect> has no literal for.` (`skippedRow` in `src/lib/export/result-export.ts`).
+`<dialect>` is the `DatabaseType` id, so the file reads "which snowflake has no literal for", "which trino ...", "which cassandra ...", where every other sentence a user reads names the engine by its display label ("Snowflake", "Trino", "Apache Cassandra").
+On `main` no held phrase (`UnwritableValue` in `src/lib/export/typed-literals.ts`) ends in a "which" clause of its own, so the line does not yet read "which" twice; a held phrase that adds one would.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** the comment names the engine by its `DB_UI_CONFIG` label, the "which" clause cannot follow a held phrase that already has one (a sentence shape that does not chain two relative clauses), and the skipped-row cases in `tests/unit/lib/export/result-export.test.ts` pin the new text.
+
+### U144. Nothing ties the SQL export's Spark literal shapes to the text forms Spark's decoder writes
+
+`SPARK_TEMPORAL` and `SPARK_ANSI_INTERVAL` in `src/lib/export/typed-literals.ts` accept a Spark temporal or ANSI interval cell only in the text form that `dateText`, `timestampText`, `timeText`, `yearMonthText` and `dayTimeText` in `src/lib/db/providers/sql/spark/temporal.ts` write, and refuse any other as `UnwritableValue`, which skips the row.
+`tests/unit/lib/export/typed-literals.test.ts` imports only `@/lib/export/typed-literals` and uses hand-typed strings, and no test under `tests/` feeds the decoder's output to `typedLiteral`.
+So a change to one form in `temporal.ts` (for example `Z` for `+00:00`) would make the SQL INSERT export skip every row holding such a cell, with every test green.
+The two agree today: the review passed decoder output for years 0, -1 and +10000, a zoned timestamp at year 0, `timeText` at 23:59:59.999999999 and negative intervals through `typedLiteral(..., "spark")`, and each came back as a literal.
+Verified 2026-10-14 on `main` at 5b77948ee: no test file imports both modules.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** a test under `tests/unit/lib/export/` renders edge values through the functions of `temporal.ts` and asserts that `typedLiteral(..., "spark")` writes each as a literal.
+
 ## Dependencies
 
 ### P1. The desktop shell's `glib` advisory has no reachable fix while Tauri v2 targets GTK 3
@@ -5850,6 +6059,96 @@ Section 5.1 says the provider sends `jobs.cancel` when the call fails or is abor
 Found 2026-10-12 while designing the Snowflake provider.
 
 **Done when:** the sentence names only what aborts the call today, or BigQuery gains `cancelQuery` and the route's abort reaches it, with the doc and a test saying which.
+
+### DOC26. docs/AGENT.md counts the measured models as thirty-six, a number that moved with the engines
+
+The end of "Supported models" in `docs/AGENT.md` says "What the thirty-six have is a measurement.", while the section opens "Thirty-five models run every agent surface.".
+The sentence counted models until the Snowflake merge (a6c304a8c), whose sweep of engine numerals from thirty-five to thirty-six took this model count with them.
+Neither number matches `docs/llms/README.md`, the table the section points to, which opens "Forty-six models are supported." and then speaks of "the thirty-five" a paragraph later.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** the model count is settled from the table's rows, `docs/AGENT.md` and `docs/llms/README.md` state the same number (or `docs/AGENT.md` points to the table instead of counting), and a test reads the count from the table so an engine-count sweep can no longer reach it.
+
+### DOC27. README_ko.md names MQTT and RabbitMQ twice in two engine lists
+
+The engine sentence that opens the overview of `README_ko.md` and the engines bullet of its feature list both list "Apache Kafka, MQTT, RabbitMQ, etcd, ..." and end with "Kubernetes, MQTT, RabbitMQ, OPC UA", so both engines appear twice in each (checked 2026-10-14 on `main` at 5b77948ee).
+The same two places in `README.md` and `README_zh.md` name them once, at the end.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** both Korean lines name each engine once in `README.md`'s order, and `readme:check` still passes.
+
+### DOC28. The README newest-engine chain test lost its RabbitMQ to Snowflake link
+
+The README chain case in `tests/unit/db/s3/provider-doc.test.ts` pins each "X came before Y" link of `README.md`'s newest-engine history, and its own comment says each link is pinned at both ends.
+The Snowflake provider (31c3ca8c3) added `expect(readme).toContain("RabbitMQ came before Snowflake: the management API browses")`, and the merge that brought in OPC UA beside it dropped that line: the chain now pins "Snowflake came before OPC UA" and "Firestore came before RabbitMQ" with nothing between, so `README.md:132` can be deleted or reworded and the test stays green.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** the case pins "RabbitMQ came before Snowflake" again, its comment names that link, and a test derives the chain's links from the README's lines so that no link can be skipped.
+
+### DOC29. Seven hand-kept engine lists miss BigQuery and Firestore, and CATALOG_LISTING.md says they are complete
+
+No gate reads these lists for completeness, and each misses engines that shipped (checked 2026-10-14 on `main` at 5b77948ee against the labels of `EXTERNAL_DATABASE_TYPES`; #1759 added Apache Spark to every one of them):
+
+- The engine lists of `packaging/winget/LibreDB.Studio.locale.en-US.yaml.tmpl`, `packaging/chocolatey/libredb-studio.nuspec.tmpl`, `desktop/src-tauri/tauri.conf.json`, `snap/snapcraft.yaml` and `deploy/koyeb/CATALOG_SUBMISSION.md` miss BigQuery and Firestore.
+- The "Databases it speaks:" lists of `packaging/flatpak/org.libredb.Studio.metainfo.xml` and `packaging/flatpark/org.libredb.Studio.metainfo.xml` miss BigQuery, Firestore and Snowflake.
+
+`packaging/linux/nfpm.yaml`, which is gated, names all of them, with Firestore after Couchbase and BigQuery between Databend and Snowflake.
+The BigQuery (#1672) and Firestore (#1695) changes never added themselves to the seven files, and the Snowflake change never reached the two metainfo lists.
+`deploy/rancher/CATALOG_LISTING.md` then says three false things about them:
+
+- Lines 111-118 say winget's, chocolatey's and tauri's "exhaustive descriptions still name every engine", and that the claim "was false until a review read them", which reads as true again; it is not.
+- Line 109 says the AUR package "is twelve ahead" and that its `pkgdesc` says thirty, while `packaging/aur/PKGBUILD` pins `pkgver=0.17.0` (eighteen engines) and its `pkgdesc` says thirty-six, so it is eighteen ahead, and the list of engines 0.17.0 lacks stops at MQTT, without BigQuery, Firestore, RabbitMQ, Snowflake, OPC UA or Apache Spark.
+- Line 107's pointer "see BACKLOG D39 - nothing counts these lists" lands on D39, a slow-query entry.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** the seven lists name every shipped engine in `nfpm.yaml`'s order (Firestore written "Firestore (read-only)" in the metainfo lists, as they write the other read-only engines), the three `CATALOG_LISTING.md` passages say what is true and point at this entry or its successor, and a test compares each list with the shipped labels so the next engine cannot miss one.
+
+### DOC30. OPC UA is missing from the README connection caption, stack table and prerequisites
+
+The connection screenshot's caption, the stack table's Database row and the prerequisites' target database list in `README.md` name every external engine but OPC UA, and so do the same three places in `README_zh.md` and the screenshot block of `README_ko.md` (checked 2026-10-14 on `main` at 5b77948ee).
+The stack table's Database row and the prerequisites' target database list of `README_ko.md` lag further: they also miss Firestore, BigQuery, Databend, Snowflake, S3-compatible object storage, Kubernetes and Apache Spark.
+The not-SQL sentence of `README_zh.md` and of `README_ko.md` starts at Oxia, where the one in `README.md` names OPC UA, Kubernetes and S3-compatible object storage first.
+The other six translations' engine lists name OPC UA.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** each of these lines names the engines its English counterpart names, and `readme:check` or a README test compares each list with the shipped labels.
+
+### DOC31. A composed-sql.ts comment says every shipped grammar row declares backslashAlwaysEscapes false
+
+The docblock above `assertSelector` in `src/lib/agent/composed-sql.ts` says the per-dialect fact `backslashAlwaysEscapes` is one "that every shipped row declares false".
+In `src/lib/sql/grammar.ts`, `DATABEND_GRAMMAR`, `BIGQUERY_GRAMMAR` and `SNOWFLAKE_GRAMMAR` declare it `true`.
+The function's rule, refusing any backslash in a selector, is unaffected: the docblock already says it is correct whichever way a row declares the fact, so only the sentence is stale.
+S2's heading and its "Every shipped row but Databend's" sentence in this file are stale the same way.
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** the docblock says the rule holds whichever way a row declares the fact without counting the rows, and S2's heading and sentence name the rows that declare it `true` or stop counting them.
+
+### DOC32. docs/AGENT.md says composed-sql.ts composes for four engines
+
+The repository layout in `docs/AGENT.md` annotates `composed-sql.ts` as "the SQL the SERVER writes, per dialect: four of the thirty-seven".
+`CATALOG_COMPOSERS` in `src/lib/agent/composed-sql.ts` has five rows (PostgreSQL, SQLite, DuckDB, SQL Server and MySQL) since #1629 added MySQL's; the thirty-seven is the size of `DatabaseType`, which moves with every engine (#1759 made it thirty-seven).
+
+Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
+
+**Done when:** the annotation names the composed dialects, or counts `CATALOG_COMPOSERS` with no denominator that moves with each engine, and `tests/unit/agent-documentation.test.ts` holds it to the record.
+
+### DOC33. snowflake.md does not say that a database whose schemas fail to list is named as not read and the plan walk goes on
+
+The Apache Spark provider changed `enumerateGroundingContainers` in `src/lib/agent/tools.ts`: a container the walk scope reads nothing below (`scopeReadsUnder` in `src/lib/db/container-walk.ts`) whose listing fails with a `DatabaseError` is now named in the inventory as not read, with the provider's sentence, and the walk goes on, where before the failure ended the capture.
+Snowflake declares two container levels and `agentWalkScope` with `whenNoDefault` in `src/lib/db/providers/sql/snowflake/index.ts`, so the change reaches it: another database the role sees whose `SHOW SCHEMAS` fails no longer ends plan mode's capture.
+`docs/AGENT.md` states the rule for every scoped provider, while section 8.3 of `docs/providers/snowflake.md` still says only that the inventory counts the schemas it did not read and names the ones it did.
+Kubernetes and RabbitMQ declare one container level, so the walk's loop never runs for them.
+Verified 2026-10-14 on `main`: `git diff 22543b91b..5b77948ee -- docs/providers/snowflake.md` is empty.
+
+Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
+
+**Done when:** section 8.3 of `docs/providers/snowflake.md` says that a database whose schemas fail to list is named in the inventory as not read, with Snowflake's sentence, and the walk goes on, and `tests/unit/db/snowflake/provider-doc.test.ts` pins that sentence.
 
 ## Release pipeline
 
