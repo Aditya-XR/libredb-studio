@@ -113,7 +113,7 @@ describe("the connection dialog's secret fields turn spell checking, autocorrect
   test("on Snowflake's key-pair and access-token sign-in methods", () => {
     // Each sign-in method draws its own credential, so each is walked on Snowflake's own form: the key and its
     // passphrase for a key pair, the token in the password box for an access token. The Host box counts as well,
-    // since it takes a pasted account URL.
+    // since it takes a pasted account URL, and is added by id because its placeholder is the identifier alone.
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: getDBConfig("snowflake").label }));
     const drawn: Record<string, string[]> = {};
@@ -122,6 +122,9 @@ describe("the connection dialog's secret fields turn spell checking, autocorrect
       fireEvent.change(document.getElementById("authMethod") as HTMLSelectElement, { target: { value: method } });
       const fields = new Map<string, Field>();
       collect(fields);
+      // Account takes a pasted account URL, which can carry a token, though its placeholder no longer shows one.
+      const account = document.getElementById("host") as Field;
+      fields.set(keyOf(account), account.cloneNode() as Field);
       drawn[method] = [...fields.keys()].sort();
       for (const [key, field] of fields) {
         found.set(`${method}:${key}`, field);

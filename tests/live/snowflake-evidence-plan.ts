@@ -609,7 +609,7 @@ const tag = (kind: string): string => `libredb-studio:${kind}`;
 const CONNECT: ScenarioStatement = { sql: "SHOW WAREHOUSES LIKE 'STUDIO_PROBE_WH'", tag: tag("connect"), timeout: 30 };
 const CONNECT_NO_WAREHOUSE: ScenarioStatement = { sql: "SHOW DATABASES LIMIT 1", tag: tag("connect"), timeout: 30 };
 const ROLE_CHECK: ScenarioStatement = {
-  sql: "SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s",
+  sql: "SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s, CURRENT_USER() AS u, CURRENT_DATABASE() AS d, CURRENT_SCHEMA() AS c, CURRENT_WAREHOUSE() AS w",
   tag: tag("role-check"),
   timeout: 30,
 };

@@ -160,6 +160,25 @@ describe("compareNumeric", () => {
     expect(compareNumeric("1e999", "5")).toBeGreaterThan(0);
   });
 
+  test("orders exponents of any size, as far as Snowflake DECFLOAT reaches and beyond", () => {
+    expect(sortAsc(["1.23e40", "-4.2e-5432", "1e16384", "0.1", "-1e16384", "4.2e-5432", "0"])).toEqual([
+      "-1e16384",
+      "-4.2e-5432",
+      "0",
+      "4.2e-5432",
+      "0.1",
+      "1.23e40",
+      "1e16384",
+    ]);
+    expect(compareNumeric("1e16384", "1e16383")).toBeGreaterThan(0);
+    expect(compareNumeric("-1e-16383", "-2e-16383")).toBeGreaterThan(0);
+    expect(compareNumeric("10e16383", "1e16384")).toBe(0);
+    expect(compareNumeric("0.00e99999", "-0")).toBe(0);
+    expect(compareNumeric("1e99999999999999999999", "1e99999999999999999998")).toBeGreaterThan(0);
+    expect(compareNumeric("0.000125e3", "0.125")).toBe(0);
+    expect(compareNumeric("1.25", "1.3")).toBeLessThan(0);
+  });
+
   test("ranks non-finite values like PostgreSQL: -Infinity, finite, Infinity, NaN", () => {
     const sorted = sortAsc([
       "NaN",

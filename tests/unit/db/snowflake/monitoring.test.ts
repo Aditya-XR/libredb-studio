@@ -52,6 +52,8 @@ function setup(
     ...(options.extra ?? []),
     [/^SHOW WAREHOUSES /, () => warehouseAnswer(["STUDIO_WH", state])()],
     [/^SHOW DATABASES /, () => showResult(["name"], [["SALES"], ["ANALYTICS"]])],
+    [/^SHOW TERSE TABLES /, () => showResult(["name"], [["ORDERS"], ["ITEMS"], ["USERS"]])],
+    [/^SHOW INDEXES /, () => showResult(["name"], [["ORDERS_IDX"]])],
     [/QUERY_HISTORY_BY_WAREHOUSE.*total_elapsed_time DESC/, SLOW_ROWS],
     [/QUERY_HISTORY_BY_WAREHOUSE.*'RUNNING', 'QUEUED'/, RUNNING_ROWS],
     [/^SELECT COUNT\(\*\) AS n /, PERFORMANCE_ROWS],
@@ -167,21 +169,57 @@ describe("each panel's statement", () => {
     expect(harness.sql()).toEqual(["SHOW WAREHOUSES LIKE 'My WH'", PERFORMANCE_SQL.replace(WH, `'"My WH"'`)]);
   });
 
-  test("overview: the warehouse row and the database count", async () => {
+  test("overview: the warehouse row, the database count, and the tables and indexes it measured (SF-036)", async () => {
     const harness = setup();
     const overview = await harness.monitoring.getOverview();
     expect(harness.calls).toEqual([
       { sql: STATE_SQL, tag: SNOWFLAKE_QUERY_TAGS.monitoring },
       { sql: "SHOW DATABASES LIMIT 10000", tag: SNOWFLAKE_QUERY_TAGS.monitoring },
+      { sql: 'SHOW TERSE TABLES IN DATABASE "SALES" LIMIT 10000', tag: SNOWFLAKE_QUERY_TAGS.monitoring },
+      { sql: 'SHOW INDEXES IN DATABASE "SALES"', tag: SNOWFLAKE_QUERY_TAGS.monitoring },
     ]);
     expect(overview).toEqual({
-      version: `Snowflake: 2 databases visible to role ${ROLE}; warehouse studio_wh STARTED, X-Small, 2 running, 1 queued`,
+      version: `Snowflake: 2 databases visible to role ${ROLE}; warehouse studio_wh STARTED, X-Small, 2 running and 1 queued, Studio's own reads included`,
       uptime: "N/A",
       maxConnections: 0,
       databaseSize: "N/A",
-      tableCount: 0,
-      indexCount: 0,
+      tableCount: 3,
+      indexCount: 1,
     });
+  });
+
+  test("overview of a suspended warehouse names no running or queued count (SF-036)", async () => {
+    const harness = setup();
+    harness.suspend();
+    expect((await harness.monitoring.getOverview()).version).toBe(
+      `Snowflake: 2 databases visible to role ${ROLE}; warehouse studio_wh SUSPENDED, X-Small`,
+    );
+    harness.setState("RESIZING");
+    harness.at(SNOWFLAKE_MONITORING_TTL_MS + 1);
+    expect((await harness.monitoring.getOverview()).version).toContain("RESIZING, X-Small, 2 running and 1 queued");
+  });
+
+  test("overview with Database empty counts the account's tables and indexes", async () => {
+    const harness = setup({ database: undefined });
+    await harness.monitoring.getOverview();
+    expect(harness.sql().slice(2)).toEqual(["SHOW TERSE TABLES IN ACCOUNT LIMIT 10000", "SHOW INDEXES IN ACCOUNT"]);
+  });
+
+  test("overview counts 10,000 tables as a floor and says what it counted", async () => {
+    const many = Array.from({ length: 10_000 }, (_, index) => [`T${index}`]);
+    const inDatabase = setup({ extra: [[/^SHOW TERSE TABLES /, () => showResult(["name"], many)]] });
+    expect(await inDatabase.monitoring.getOverview()).toMatchObject({
+      tableCount: 10_000,
+      tableCountSampledFrom: "the first 10,000 tables Snowflake listed in database SALES",
+    });
+    const inAccount = setup({
+      database: undefined,
+      extra: [[/^SHOW TERSE TABLES /, () => showResult(["name"], many)]],
+    });
+    expect((await inAccount.monitoring.getOverview()).tableCountSampledFrom).toBe(
+      "the first 10,000 tables Snowflake listed in the account",
+    );
+    expect((await setup().monitoring.getOverview()).tableCountSampledFrom).toBeUndefined();
   });
 
   test("overview of a warehouse the role does not see says so", async () => {
@@ -332,7 +370,12 @@ describe("the warehouse-state gate (SR18)", () => {
       SNOWFLAKE_MONITORING_SENTENCES.suspended("studio_wh"),
     );
     // The overview's second call reused its row; the gate read the state fresh.
-    expect(harness.sql()).toEqual([STATE_SQL, "SHOW DATABASES LIMIT 10000", "SHOW DATABASES LIMIT 10000", STATE_SQL]);
+    const counts = [
+      "SHOW DATABASES LIMIT 10000",
+      'SHOW TERSE TABLES IN DATABASE "SALES" LIMIT 10000',
+      'SHOW INDEXES IN DATABASE "SALES"',
+    ];
+    expect(harness.sql()).toEqual([STATE_SQL, ...counts, ...counts, STATE_SQL]);
     expect(harness.calls.some((call) => IS_READ.test(call.sql))).toBe(false);
   });
 
@@ -354,7 +397,11 @@ describe("the warehouse-state gate (SR18)", () => {
     }
     expect(harness.calls).toEqual([]);
     const overview = await harness.monitoring.getOverview();
-    expect(harness.sql()).toEqual(["SHOW DATABASES LIMIT 10000"]);
+    expect(harness.sql()).toEqual([
+      "SHOW DATABASES LIMIT 10000",
+      'SHOW TERSE TABLES IN DATABASE "SALES" LIMIT 10000',
+      'SHOW INDEXES IN DATABASE "SALES"',
+    ]);
     expect(overview.version).toBe(`Snowflake: 2 databases visible to role ${ROLE}`);
   });
 

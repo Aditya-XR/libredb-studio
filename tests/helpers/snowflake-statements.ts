@@ -59,7 +59,12 @@ export interface Harness {
 const opened: Harness[] = [];
 
 export function setup(
-  input: { readonly context?: SnowflakeContext; readonly queryTimeoutMs?: number; readonly secrets?: string[] } = {},
+  input: {
+    readonly context?: SnowflakeContext;
+    readonly queryTimeoutMs?: number;
+    readonly secrets?: string[];
+    readonly failure?: Partial<typeof FAILURE> | { readonly authMethod: "keypair" | "pat"; readonly user?: string };
+  } = {},
 ): Harness {
   const transports = scriptedTransports();
   const clock = fakeClock();
@@ -71,7 +76,7 @@ export function setup(
     origin: ORIGIN,
     context: input.context ?? CONTEXT,
     queryTimeoutMs: input.queryTimeoutMs ?? 60_000,
-    failure: FAILURE,
+    failure: { ...FAILURE, ...input.failure },
     secrets: () => input.secrets ?? ["pat-secret"],
     deps,
   });
@@ -130,12 +135,31 @@ export async function caught(promise: Promise<unknown>): Promise<unknown> {
   throw new Error("expected a rejection");
 }
 
-/** The role check's answer: the effective role and the secondary roles value, as `CURRENT_SECONDARY_ROLES()` sends it. */
-export const roleAnswer = (role: string, secondary: string | null = '{"roles":"","value":""}'): ScriptedAnswer =>
+/**
+ * The role check's answer: the effective role, the secondary roles value, as `CURRENT_SECONDARY_ROLES()` sends it,
+ * the signed-in user, `FAILURE.user` by default, and the current database, schema and warehouse, `CONTEXT`'s by
+ * default (null where a name did not resolve).
+ */
+export const roleAnswer = (
+  role: string,
+  secondary: string | null = '{"roles":"","value":""}',
+  user: string | null = FAILURE.user,
+  names: {
+    readonly database?: string | null;
+    readonly schema?: string | null;
+    readonly warehouse?: string | null;
+  } = {},
+): ScriptedAnswer =>
   resultAnswer({
-    columns: [
-      { name: "R", type: "text" },
-      { name: "S", type: "text" },
+    columns: ["R", "S", "U", "D", "C", "W"].map((name) => ({ name, type: "text" })),
+    rows: [
+      [
+        role,
+        secondary,
+        user,
+        names.database === undefined ? (CONTEXT.database ?? null) : names.database,
+        names.schema === undefined ? (CONTEXT.schema ?? null) : names.schema,
+        names.warehouse === undefined ? (CONTEXT.warehouse ?? null) : names.warehouse,
+      ],
     ],
-    rows: [[role, secondary]],
   });

@@ -468,6 +468,28 @@ describe("POST /api/db/query", () => {
     expect(data.code).toBe("QUERY_ERROR");
   });
 
+  test("a syntax error that names the bound Studio added says so; one that does not is left alone (SF-022)", async () => {
+    const send = async (message: string) => {
+      (mockProvider.query as ReturnType<typeof mock>).mockRejectedValueOnce(new QueryError(message));
+      const req = createMockRequest("/api/db/query", {
+        method: "POST",
+        body: { connection: validConnection, sql: "SELECT * FROM D_PARENT WHERE" },
+      });
+      const res = await POST(req as never);
+      return { status: res.status, data: await parseResponseJSON<{ error: string; code: string }>(res) };
+    };
+
+    const named = await send("SQL compilation error: syntax error line 1 at position 29 unexpected 'LIMIT'.");
+    expect(named.status).toBe(400);
+    expect(named.data.code).toBe("QUERY_ERROR");
+    expect(named.data.error).toEndWith(
+      "unexpected 'LIMIT'. Studio added the clause LIMIT 50 to this statement to bound its rows, so a position or token this error names may be in that clause rather than in your text.",
+    );
+    expect((await send("Object 'D_PARENT' does not exist or not authorized.")).data.error).toBe(
+      "Object 'D_PARENT' does not exist or not authorized.",
+    );
+  });
+
   test("returns 408 for TimeoutError", async () => {
     (mockProvider.query as ReturnType<typeof mock>).mockRejectedValueOnce(
       new TimeoutError("Query timed out after 30000ms"),

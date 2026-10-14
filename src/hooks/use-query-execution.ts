@@ -1263,9 +1263,14 @@ export function useQueryExecution({
    * the first slot, `tabId` reads it as a tab that holds no run, and the button
    * silently cancels nothing — the type checker permits it, because an optional
    * parameter still satisfies `() => void`. Wrap it: `() => cancelQuery()`.
+   *
+   * `silent` cancels the same way and raises no toast of its own. Closing a running tab uses it (SF-023): the close
+   * already shows its Undo toast, and a cancel toast raised a moment later stacked on top of it, so a click aimed at
+   * Undo landed on the cancel toast. Stop keeps every toast below.
    */
   const cancelQuery = useCallback(
-    async (tabId?: string) => {
+    async (tabId?: string, options: { readonly silent?: boolean } = {}) => {
+      const silent = options.silent === true;
       const targetTabId = tabId ?? activeTabIdRef.current;
       const run = runsRef.current.get(targetTabId);
       if (!run) return;
@@ -1278,17 +1283,17 @@ export function useQueryExecution({
       // goes on. Asked of the declared capability first, so a provider with no cancel at
       // all is not posted a cancel it can only refuse.
       if (metadata?.capabilities.supportsQueryCancel === false) {
-        toast(STOPPED_WAITING);
+        if (!silent) toast(STOPPED_WAITING);
         return;
       }
       if (!run.serverCancellable) {
-        toast(RUN_NOT_CANCELLABLE);
+        if (!silent) toast(RUN_NOT_CANCELLABLE);
         return;
       }
 
       // Shown at once and replaced by the verdict: a cancel the server has to confirm can
       // take seconds (a wire-protocol cancel waits up to 3 s for the run to end).
-      const pending = toast({ title: "Cancelling...", variant: "loading" });
+      const pending = silent ? undefined : toast({ title: "Cancelling...", variant: "loading" });
 
       // Also cancel on the server side: aborting the fetch drops the response,
       // it does not stop the statement the engine is still executing. That holds for
@@ -1319,6 +1324,7 @@ export function useQueryExecution({
           logger.warn("Query cancellation request failed", { route: "use-query-execution" });
         }
       }
+      if (silent) return;
       toast({
         ...(confirmed
           ? { title: "Query Cancelled", description: "Query execution was cancelled." }

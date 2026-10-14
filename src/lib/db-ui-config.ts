@@ -42,9 +42,10 @@ import type { HostUriScheme } from "@/lib/connection-host-uri";
 import type { ConnectionImportDeclaration } from "@/lib/connection-import";
 import { CREDENTIAL_WARNINGS, type CredentialWarning } from "@/lib/db/credential-warnings";
 import {
-  SNOWFLAKE_ACCOUNT_PATTERN,
   SNOWFLAKE_FIELD_SENTENCES,
+  snowflakeAccountRefusal,
   snowflakeHostHint,
+  snowflakeHostIdentity,
 } from "@/lib/db/providers/sql/snowflake/account-host";
 
 // DB brand icons share the same interface as LucideIcon (className + SVG props)
@@ -146,6 +147,12 @@ export interface DatabaseUIConfig {
    */
   hostHint?: (host: string) => string | undefined;
   /**
+   * The server a Host text names, for telling whether a pasted connection string names the server already in the box
+   * or another one, whose credentials the form then drops. Read through `hostIdentity`; absent, the text trimmed and
+   * lower-cased.
+   */
+  hostIdentity?: (host: string) => string;
+  /**
    * The sentence under the connection dialog's Read-only toggle, where this engine's mode differs from
    * the dialog's own sentence, which says the mode can be turned off. Neo4j declares one because its
    * connections are read-only whether or not the box is ticked (spec A7). Read through `readOnlyHint`.
@@ -218,6 +225,12 @@ export interface ConnectionFieldRule {
   readonly format?: { readonly pattern: RegExp; readonly sentence: string };
   /** A field that is not blank and passes `format` must hold `min` to `max` characters, or `sentence` is the refusal. */
   readonly charRange?: { readonly min: number; readonly max: number; readonly sentence: string };
+  /**
+   * A field that is not blank and passes the two above is read by this function, whose answer is the refusal, or
+   * undefined where it passes: for a check a pattern cannot state, such as Snowflake's Account, which the dialog reads
+   * with the very function `connect()` reads it with.
+   */
+  readonly check?: (value: string) => string | undefined;
 }
 
 /**
@@ -257,6 +270,8 @@ export const DATABEND_FIELD_HINTS: Readonly<Partial<Record<ConnectionField, stri
  * The sentences the connection dialog draws under Snowflake's fields, exported so the docs can be held to them.
  */
 export const SNOWFLAKE_FIELD_HINTS: Readonly<Partial<Record<ConnectionField, string>>> = Object.freeze({
+  // Drawn while the Account text does not read yet; once it reads, the derived "Studio connects to" hint replaces it.
+  host: "An account identifier such as myorg-myaccount, or its https:// URL.",
   user: "The user's login name (LOGIN_NAME).",
   privateKey: "Paste the private key's contents. Studio reads no key file.",
   privateKeyPassphrase: "Only for an encrypted key.",
@@ -272,10 +287,9 @@ export const SNOWFLAKE_FIELD_HINTS: Readonly<Partial<Record<ConnectionField, str
  * so the dialog reads its pattern and sentences directly rather than a copy.
  */
 export const SNOWFLAKE_FIELD_RULES: Readonly<Partial<Record<ConnectionField, ConnectionFieldRule>>> = Object.freeze({
-  host: {
-    required: SNOWFLAKE_FIELD_SENTENCES.accountEmpty,
-    format: { pattern: SNOWFLAKE_ACCOUNT_PATTERN, sentence: SNOWFLAKE_FIELD_SENTENCES.accountFormat },
-  },
+  // connect()'s own reading of the text (SF-025), so the dialog refuses exactly what Test would, a padded account
+  // passes, and the hint under the box appears only for a text both take.
+  host: { required: SNOWFLAKE_FIELD_SENTENCES.accountEmpty, check: snowflakeAccountRefusal },
   user: { required: SNOWFLAKE_FIELD_SENTENCES.userEmpty },
   // Each credential is required only under its own sign-in method: `fieldShownWhen` hides the other one, and a
   // hidden field's rules are not checked.
@@ -965,7 +979,9 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     // drawn while SSL Mode is disable.
     connectionFields: ["host", "port", "user", "password", "database", "warehouse", "allowInsecureAuth"],
     fieldLabels: { warehouse: "Warehouse" },
-    fieldPlaceholders: { user: "root", database: "default" },
+    // No User example: `root` contradicted the dialog's own warning against signing in as root with no password, and
+    // the hint under the box names the users to choose (SF-039), so the box shows the dialog's own `user`.
+    fieldPlaceholders: { database: "default" },
     fieldHints: DATABEND_FIELD_HINTS,
     fieldRules: DATABEND_FIELD_RULES,
     hostAcceptsUri: ["http", "https"],
@@ -990,7 +1006,13 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     fieldPlaceholders: {
       database: "my-gcp-project",
       location: "detected (e.g. EU, US, europe-west3)",
-      password: "key JSON, a ya29… token, or empty for server credentials (if enabled)",
+      // Short enough for the box at phone width; the full text measured 446 px in a 448 px box at 1440 px (SF-039),
+      // so what an empty box means is said in the hint below it.
+      password: "key JSON, a ya29… token, or empty",
+    },
+    fieldHints: {
+      password:
+        "The whole key file's JSON, or a bearer token. Empty uses the server's own credentials, where the deployment enables them.",
     },
   },
   snowflake: {
@@ -1037,7 +1059,8 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
       ],
     },
     fieldPlaceholders: {
-      host: "myorg-myaccount or https://myorg-myaccount.snowflakecomputing.com",
+      // The identifier alone: the URL form was cut at "snowflakecomputing.c" at 1440 px (SF-043), and the hint says it.
+      host: "myorg-myaccount",
       privateKey: "-----BEGIN PRIVATE KEY-----",
       // No example for these three: a name such as user or default reads as a value already typed, and each box's
       // hint says what it takes.
@@ -1048,6 +1071,8 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     fieldHints: SNOWFLAKE_FIELD_HINTS,
     // Once the Account reads, the hint names the host Studio connects to.
     hostHint: snowflakeHostHint,
+    // `myorg-myacct` and `https://MYORG-MYACCT.snowflakecomputing.com` are one account.
+    hostIdentity: snowflakeHostIdentity,
     fieldRules: SNOWFLAKE_FIELD_RULES,
     // One credential at a time: the key and its passphrase for a key pair, the token for an access token.
     fieldShownWhen: {
@@ -1459,6 +1484,8 @@ export function connectionFieldRefusal(config: DatabaseUIConfig, connection: Dat
     ) {
       return rule.charRange.sentence;
     }
+    const checked = rule.check?.(String(value));
+    if (checked !== undefined) return checked;
   }
   return undefined;
 }

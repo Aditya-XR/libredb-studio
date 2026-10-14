@@ -17,6 +17,11 @@
  * Each scenario's requests are checked against the fixture's, in order: the method, the path and its query (a
  * submit's `requestId` is the run's own), and the whole body. What is BUILT, each answer in the shape the capture
  * shows, and why:
+ * - the role check's columns past `R` and `S` (the user since SF-005, the database, schema and warehouse since SF-019): the capture sent the two-column check, so
+ *   `load()` widens every captured role check to `SNOWFLAKE_ROLE_CHECK_SQL`, its added cells answered as the account
+ *   answers that connection (`widenRoleCheck`);
+ * - every submit body without `parameters.timezone`: the capture sent `timezone: "UTC"`, which Studio stopped sending
+ *   so statements run in the user's own TIMEZONE (SF-009), so `load()` takes it out (`withoutTimezone`);
  * - the role check answering another role: the account refuses a role the credentials may not use at connect with
  *   390186 (`refusal-390186`, `role-restricted-pat-show`), so no captured role check answers another role;
  * - a role holding no warehouse (391920): the account answers it only with secondary roles off, which this capture
@@ -62,7 +67,7 @@ import { SnowflakeProvider } from "@/lib/db/providers/sql/snowflake/index";
 import { SNOWFLAKE_INTROSPECT_SENTENCES, SNOWFLAKE_KIND_IDS } from "@/lib/db/providers/sql/snowflake/introspect";
 import { SNOWFLAKE_MONITORING_SENTENCES } from "@/lib/db/providers/sql/snowflake/monitoring";
 import { SNOWFLAKE_ROWS_SENTENCES } from "@/lib/db/providers/sql/snowflake/rows";
-import { SNOWFLAKE_STATEMENT_SENTENCES } from "@/lib/db/providers/sql/snowflake/statements";
+import { SNOWFLAKE_ROLE_CHECK_SQL, SNOWFLAKE_STATEMENT_SENTENCES } from "@/lib/db/providers/sql/snowflake/statements";
 import { MAX_UNLIMITED_ROWS } from "@/lib/db/utils/query-limiter";
 import { historyMaskOf, maskStatementForHistory } from "@/lib/history-mask";
 import { logger } from "@/lib/logger";
@@ -116,7 +121,71 @@ interface Scenario {
   readonly stopped?: { readonly statement: number; readonly sql: string; readonly reason: string };
 }
 
-const load = (name: string): Scenario => JSON.parse(readFileSync(join(FIXTURES, `${name}.json`), "utf8")) as Scenario;
+/** A configured name as the account answers it once resolved (the capture's names are unquoted), or null when empty. */
+const named = (value: string): string | null => (value.trim() === "" ? null : value.toUpperCase());
+
+/** The role check as the capture sent it, before the columns Studio's check added since were in it. */
+const CAPTURED_ROLE_CHECK = "SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s";
+
+/**
+ * The columns the role check reads past the captured two, each with the cell the account answers for the scenario's
+ * connection: on the trial every user's NAME is its login name upper-cased. BUILT, in the captured columns' shape.
+ */
+const ROLE_CHECK_ADDED: readonly { readonly name: string; readonly cell: (c: FixtureConnection) => string | null }[] = [
+  { name: "U", cell: (connection) => connection.user.toUpperCase() },
+  { name: "D", cell: (connection) => named(connection.database) },
+  { name: "C", cell: (connection) => named(connection.schema) },
+  { name: "W", cell: (connection) => named(connection.warehouse) },
+];
+
+type Row = readonly (string | null)[];
+
+/**
+ * The scenario with its captured role check widened to `SNOWFLAKE_ROLE_CHECK_SQL`: the statement in the submit's
+ * body, and the added columns and cells in the answer that carries the check's `R` and `S` columns. BUILT.
+ */
+function widenRoleCheck(scenario: Scenario): Scenario {
+  if (scenario.connection === undefined) return scenario;
+  const exchanges = scenario.exchanges.map((exchange) => {
+    const { request, response } = exchange;
+    if (request.body?.statement === CAPTURED_ROLE_CHECK) {
+      return { ...exchange, request: { ...request, body: { ...request.body, statement: SNOWFLAKE_ROLE_CHECK_SQL } } };
+    }
+    const meta = response.body.resultSetMetaData as { rowType?: { name: string }[] } | undefined;
+    const rowType = meta?.rowType;
+    if (rowType?.length !== 2 || rowType[0].name !== "R" || rowType[1].name !== "S") return exchange;
+    const cells = ROLE_CHECK_ADDED.map((column) => column.cell(scenario.connection));
+    const body = {
+      ...response.body,
+      resultSetMetaData: {
+        ...meta,
+        rowType: rowType.concat(ROLE_CHECK_ADDED.map((column) => Object.assign({}, rowType[1], { name: column.name }))),
+      },
+      data: (response.body.data as Row[]).map((row) => row.concat(cells)),
+    };
+    return { ...exchange, response: { ...response, body } };
+  });
+  return { ...scenario, exchanges };
+}
+
+/**
+ * The scenario with `parameters.timezone` taken out of every captured request body: the trial captured
+ * `timezone: "UTC"`, which Studio no longer sends, so each statement runs in the user's own TIMEZONE (SF-009). Every
+ * other field is compared as recorded. BUILT.
+ */
+function withoutTimezone(scenario: Scenario): Scenario {
+  const exchanges = scenario.exchanges.map((exchange) => {
+    const body = exchange.request.body as { parameters?: Record<string, unknown> } | undefined;
+    if (body?.parameters === undefined || !("timezone" in body.parameters)) return exchange;
+    const parameters = { ...body.parameters };
+    delete parameters.timezone;
+    return { ...exchange, request: { ...exchange.request, body: { ...exchange.request.body, parameters } } };
+  });
+  return { ...scenario, exchanges };
+}
+
+const load = (name: string): Scenario =>
+  withoutTimezone(widenRoleCheck(JSON.parse(readFileSync(join(FIXTURES, `${name}.json`), "utf8")) as Scenario));
 
 /** A fixture's answer as the scripted transport gives it: a partition compressed again, a non-JSON body as text. */
 function answerOf(response: FixtureExchange["response"]): ScriptedAnswer {
@@ -158,9 +227,13 @@ function withRows(
 /** The index of the role check's status answer in every captured connect: the SHOW, its GET, the check, its GET. */
 const ROLE_CHECK_ANSWER = 3;
 
-/** A scenario whose role check answers `role` with the secondary roles cell `secondary`. BUILT. */
+/** A scenario whose role check answers `role` with the secondary roles cell `secondary`, its other cells kept. BUILT. */
 function roleCheckAnswering(scenario: Scenario, role: string, secondary: string): Scenario {
-  return { ...scenario, exchanges: withRows(scenario.exchanges, ROLE_CHECK_ANSWER, [[role, secondary]]) };
+  const [captured] = scenario.exchanges[ROLE_CHECK_ANSWER].response.body.data as Row[];
+  return {
+    ...scenario,
+    exchanges: withRows(scenario.exchanges, ROLE_CHECK_ANSWER, [[role, secondary, ...captured.slice(2)]]),
+  };
 }
 
 /** The secondary roles cell with none active, as connect-pat captured it, and in M38's shape with `roles` active. */
@@ -333,10 +406,7 @@ describe("connect", () => {
     const { entry, scenario } = replayed("connect-keypair");
     await entry.provider.connect();
     expectRequests(entry.transports.requests, scenario.exchanges);
-    expect(statementsSent(entry)).toEqual([
-      "SHOW WAREHOUSES LIKE 'STUDIO_PROBE_WH'",
-      "SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s",
-    ]);
+    expect(statementsSent(entry)).toEqual(["SHOW WAREHOUSES LIKE 'STUDIO_PROBE_WH'", SNOWFLAKE_ROLE_CHECK_SQL]);
     for (const request of entry.transports.requests)
       expect(bearerOf(request)).toMatch(/^eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+$/);
     expect(entry.provider.isConnected()).toBe(true);
@@ -352,15 +422,40 @@ describe("connect", () => {
     expect(entry.provider.connectWarnings()).toEqual([]);
   });
 
+  test("by PAT with User naming another user: the role check's CURRENT_USER() refuses the connect (SF-005)", async () => {
+    const { entry } = replayed("connect-pat", { user: "studio_svc" });
+    const error = await caught(entry.provider.connect());
+    expect(error).toBeInstanceOf(AuthenticationError);
+    expect((error as Error).message).toBe(SNOWFLAKE_ERROR_SENTENCES.tokenUserMismatch("STUDIO_PAT", "studio_svc"));
+    expect(statementsSent(entry)).toEqual(["SHOW WAREHOUSES LIKE 'STUDIO_PROBE_WH'", SNOWFLAKE_ROLE_CHECK_SQL]);
+    expect(entry.provider.isConnected()).toBe(false);
+  });
+
+  test("a Database and Schema that do not resolve: Test Connection cautions on the database (SF-019, BUILT)", async () => {
+    // Measured 2026-10-14: the check under database D_NODB and schema D_NOSCHEMA answers NULL for both names.
+    const captured = load("connect-keypair");
+    const [row] = captured.exchanges[ROLE_CHECK_ANSWER].response.body.data as Row[];
+    const scenario = {
+      ...captured,
+      exchanges: withRows(captured.exchanges, ROLE_CHECK_ANSWER, [[...row.slice(0, 3), null, null, row[5]]]),
+    };
+    const { entry } = replayed(scenario, { database: "D_NODB", schema: "D_NOSCHEMA" });
+    await entry.provider.connect();
+    expect(entry.provider.isConnected()).toBe(true);
+    expect(entry.provider.connectWarnings()).toEqual([
+      {
+        code: "SNOWFLAKE_UNRESOLVED_DATABASE",
+        message: SNOWFLAKE_STATEMENT_SENTENCES.unresolvedDatabase("D_NODB", "STUDIO_RW"),
+      },
+    ]);
+  });
+
   test("browse-only, with no warehouse field: Test Connection succeeds with the empty-warehouse and secondary-role cautions", async () => {
     const { entry, scenario } = replayed("connect-no-warehouse");
     expect(scenario.connection.warehouse).toBe("");
     await entry.provider.connect();
     expectRequests(entry.transports.requests, scenario.exchanges);
-    expect(statementsSent(entry)).toEqual([
-      "SHOW DATABASES LIMIT 1",
-      "SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s",
-    ]);
+    expect(statementsSent(entry)).toEqual(["SHOW DATABASES LIMIT 1", SNOWFLAKE_ROLE_CHECK_SQL]);
     expect(entry.transports.requests.every((request) => bodyOf(request).warehouse === undefined)).toBe(true);
     expect(entry.provider.isConnected()).toBe(true);
     expect(entry.provider.connectWarnings()).toEqual([
@@ -383,8 +478,10 @@ describe("each refusal the fixtures hold, with its class and its sentence", () =
     expect(error).toBeInstanceOf(AuthenticationError);
     // The account answered "JWT token is invalid. null": no login-failure id, so the sentence names none.
     expect(scenario.exchanges[0].response.body.message).toBe("JWT token is invalid. null");
-    expect(error.message).toStartWith("Snowflake refused the key pair (JWT token is invalid). ");
-    expect(error.message).toContain("Studio signed as ACMEORG-PROBEACCT.STUDIO_READER with the key whose fingerprint");
+    expect(error.message).toStartWith(
+      "Snowflake refused the key pair (JWT token is invalid) for ACMEORG-PROBEACCT.STUDIO_READER: no user has this login name, or the key whose fingerprint is SHA256:",
+    );
+    expect(error.message).not.toContain("PUBLIC_KEY");
     expect(error.message).not.toContain("SYSTEM$GET_LOGIN_FAILURE_DETAILS");
     expect(error.fixStatement).toMatch(
       /^ALTER USER <name> ADD KEY PAIR libredb_studio_[0-9a-f]{8} PUBLIC_KEY = '[A-Za-z0-9+/=]+'$/,
@@ -474,6 +571,20 @@ describe("each refusal the fixtures hold, with its class and its sentence", () =
       expect(error.query).toBe(sql);
     },
   );
+
+  test("404 on the first submit: an account the host does not have, not a gone result (BUILT, SF-011)", async () => {
+    const connect = load("refusal-422");
+    const entry = build(connectionFor(connect.connection));
+    entry.transports.answer(
+      { method: "POST", path: /^\/api\/v2\/statements$/ },
+      { status: 404, text: "<html><body>File not Found</body></html>" },
+    );
+    const error = await caught(entry.provider.connect());
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect(error.message).toBe(SNOWFLAKE_ERROR_SENTENCES.accountNotFound(`${ACCOUNT}.snowflakecomputing.com`));
+    expect(error.message).not.toBe(SNOWFLAKE_ERROR_SENTENCES.resultGone);
+    expect(entry.transports.requests).toHaveLength(1);
+  });
 
   test("404: the status GET of a handle whose result Snowflake no longer holds (BUILT)", async () => {
     const connect = load("refusal-422");
@@ -671,8 +782,9 @@ describe("every type of the type table", () => {
     await entry.provider.connect();
     const result = await entry.provider.query("SELECT * FROM STUDIO_DEMO.PROBE.EVERY_TYPE ORDER BY 1 NULLS LAST");
     expectRequests(entry.transports.requests, scenario.exchanges);
-    // The SQL API's rowType names a structured, geospatial or FILE column `object` and a UUID `text`, so a result
-    // types them as such; describe reads the catalog's full spelling from SHOW COLUMNS.
+    // The SQL API's rowType names a structured, geospatial or FILE column `object` and a UUID `text`; a geospatial
+    // one also carries `extTypeName`, which types it GEOGRAPHY or GEOMETRY (SF-033). Describe reads the catalog's full
+    // spelling from SHOW COLUMNS.
     expect(result.columnTypes).toEqual({
       ID: "NUMBER(38,0)",
       N38: "NUMBER(38,0)",
@@ -695,8 +807,8 @@ describe("every type of the type table", () => {
       SO: "OBJECT",
       SA: "ARRAY",
       M: "OBJECT",
-      GEOG: "OBJECT",
-      GEOM: "OBJECT",
+      GEOG: "GEOGRAPHY",
+      GEOM: "GEOMETRY",
       U: "VARCHAR",
       VEC: "VECTOR",
       FL: "OBJECT",
@@ -901,10 +1013,13 @@ describe("the dashboard's other panels, the inventory and a view's source", () =
     entry.transports.requests.splice(0);
     statement(entry, WAREHOUSE, [["STUDIO_PROBE_WH", "STARTED", "X-Small", "1", "0"]]);
     statement(entry, ["name"], [["STUDIO_DEMO"]]);
+    statement(entry, ["name"], [["E_TYPES"]]);
+    statement(entry, ["name"], []);
     const overview = await entry.provider.getOverview();
     expect(overview.version).toBe(
-      "Snowflake: 1 databases visible to role STUDIO_RW; warehouse STUDIO_PROBE_WH STARTED, X-Small, 1 running, 0 queued",
+      "Snowflake: 1 databases visible to role STUDIO_RW; warehouse STUDIO_PROBE_WH STARTED, X-Small, 1 running and 0 queued, Studio's own reads included",
     );
+    expect([overview.tableCount, overview.indexCount]).toEqual([1, 0]);
     statement(entry, WAREHOUSE, [["STUDIO_PROBE_WH", "STARTED", "X-Small", "1", "0"]]);
     statement(
       entry,
@@ -996,9 +1111,8 @@ describe("a role-restricted PAT with another configured role", () => {
     expect(bodyOf(entry.transports.requests[0]).role).toBe("STUDIO_NOWH");
     expect(scenario.exchanges[0].response.body.code).toBe("390186");
     expect(error).toBeInstanceOf(AuthenticationError);
-    expect(error.message).toBe(
-      SNOWFLAKE_ERROR_SENTENCES.roleRefused("STUDIO_NOWH", "studio_pat", "STUDIO_NOWH", "studio_pat"),
-    );
+    expect(error.message).toBe(SNOWFLAKE_ERROR_SENTENCES.tokenRoleRefused("STUDIO_NOWH", "studio_pat"));
+    expect(error.message).not.toContain("GRANT");
     expect(statementsSent(entry)).not.toContain('SHOW TABLES IN SCHEMA "STUDIO_DEMO"."PROBE"');
     expect(entry.provider.isConnected()).toBe(false);
   });

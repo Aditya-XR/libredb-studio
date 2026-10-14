@@ -103,14 +103,15 @@ const HELD: Readonly<Partial<Record<DatabaseType, "one level" | ParentProof>>> =
         {},
         testDeps(transports, fakeClock()),
       );
-      // The connect statement's warehouse row, then the role check answering the configured role.
+      // The connect statement's warehouse row, then the role check answering the configured role and, since a token
+      // signs in only as its own user, the connection's user.
       transports.answer(
         SUBMIT,
         resultAnswer({
           columns: ["name", "state", "size", "auto_resume"].map((name) => ({ name, type: "text" })),
           rows: [["STUDIO_WH", "STARTED", "X-Small", "true"]],
         }),
-        roleAnswer("STUDIO_RO"),
+        roleAnswer("STUDIO_RO", undefined, "STUDIO_SVC"),
       );
       await provider.connect();
       transports.answer(SUBMIT, names("ANALYTICS", "OTHER", "SALES"), names("INFORMATION_SCHEMA", "PUBLIC", "RAW"));

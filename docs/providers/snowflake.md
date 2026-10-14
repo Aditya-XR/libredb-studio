@@ -13,7 +13,7 @@
 | **Query language**     | `sql` (Snowflake SQL)                                                                               |
 | **Default port**       | None: the endpoint is always the account host on 443                                                |
 | **Connection string**  | Not stored: a pasted Snowflake URL is decomposed into fields                                        |
-| **EXPLAIN**            | `snowflake-json`: `EXPLAIN USING JSON`, which compiles the statement and never runs it              |
+| **EXPLAIN**            | `snowflake-json`: `EXPLAIN USING JSON`, which compiles the statement; never sent for a `SYSTEM$` call |
 | **Writes**             | Whatever the role allows; the confirmation gate asks before Snowflake's destructive forms            |
 | **Transactions**       | None across statements; a transaction runs inside one `EXECUTE IMMEDIATE $$ ... $$` block           |
 | **Maintenance**        | None                                                                                                |
@@ -55,9 +55,9 @@ The dialog shows no port field, no SSL panel and no SSH tunnel.
 
 | Label | Field | Required | Hint |
 | --- | --- | --- | --- |
-| Account | `host` | Yes | An account identifier such as `myorg-myaccount`, or its `https://` URL; once it reads, the hint names the host Studio connects to |
+| Account | `host` | Yes | An account identifier such as myorg-myaccount, or its https:// URL. Once it reads, the hint names the host Studio connects to instead |
 | User | `user` | Yes | The user's login name (LOGIN_NAME). |
-| Sign-in | `authMethod` | Yes, Key pair by default | Key pair, or Programmatic access token |
+| Sign-in | `authMethod` | Always set, Key pair by default | Key pair, or Programmatic access token |
 | Private key | `privateKey` | For Key pair | Paste the private key's contents. Studio reads no key file. |
 | Passphrase | `privateKeyPassphrase` | No | Only for an encrypted key. |
 | Access token | `password` | For a programmatic access token | A programmatic access token for this user. |
@@ -67,6 +67,10 @@ The dialog shows no port field, no SSL panel and no SSH tunnel.
 | Role | `role` | Yes | Every statement runs as this role; Studio checks it when it connects. |
 
 The key and passphrase fields show only for Key pair and the token field only for a programmatic access token; switching the method clears the other method's secret, so a saved connection holds one credential.
+The fields marked Yes carry a required mark in the dialog; User, Warehouse, Database, Schema and Role show no example value, since a name such as `user` or `default` reads as one already typed, and each box's hint says what it takes.
+A Test connection result is withdrawn as soon as any field changes, so it never stands beside fields it was not run on.
+User, Role, Warehouse, Database and Schema are read without the whitespace around them, so a trailing space does not turn a registered key, a granted role or an existing warehouse into a missing one; a quoted name keeps the spaces inside its quotes.
+Passphrase loses only a line break at its end, as a paste from a file leaves one; a space is part of the passphrase.
 An empty or malformed field is refused in the dialog and again by `connect()`, before any socket, with these sentences:
 
 - `Enter Account: an account identifier such as myorg-myaccount, or its URL. Nothing was sent.`
@@ -76,7 +80,7 @@ An empty or malformed field is refused in the dialog and again by `connect()`, b
 - `Enter the role every statement runs as. Nothing was sent.`
 - `Paste the private key for key-pair sign-in. Nothing was sent.`
 - `Enter the programmatic access token. Nothing was sent.`
-- `Choose Key pair or Programmatic access token for Sign-in. Nothing was sent.`
+- `Choose Key pair or Programmatic access token for Sign-in. Nothing was sent.`, by `connect()` and the seed load only, since the dialog's select offers only the two methods
 
 ### 2.2 The Account field
 
@@ -86,10 +90,12 @@ Account takes:
 - a locator `locator[.region[.cloud]]` (AWS Oregon needs no region);
 - either of those with `.privatelink`, and the `.snowflakecomputing.cn` suffix for China;
 - an account URL `https://<identifier>.snowflakecomputing.com` (or `.cn`), with an optional trailing `/`;
-- a Snowsight URL `https://app.snowflake.com/<org>/<account>/...`, read as `<org>-<account>`, with no query, fragment, user part or port; Studio never sends a request to `app.snowflake.com`.
+- a Snowsight URL `https://app.snowflake.com/<org>/<account>/...`, read as `<org>-<account>`, or `https://app.snowflake.com/<region>/<locator>/...`, which Snowsight still issues, read as `<locator>.<region>` (`<locator>` alone for AWS Oregon, `us-west-2`); a first segment holding a hyphen is the region, since an organisation name has none. Either has no query, fragment, user part or port, and Studio never sends a request to `app.snowflake.com`.
 
 Studio builds the origin itself as `https://<identifier>.snowflakecomputing.com:443` and accepts a host only under `.snowflakecomputing.com` or `.snowflakecomputing.cn`, with at most five labels before the suffix, no IP literal, no other port, and no path, query or user part.
-The suffix comes off once, and an identifier whose labels still name a Snowflake domain is refused, such as a doubled suffix or `app.snowflake.com`; labels are compared whole, so `snowflake.community` reads as a locator and its region.
+Each label is at most 63 characters and neither starts nor ends with a hyphen, and spaces around the text are ignored.
+The dialog's hint ("Studio connects to `<host>`.") appears only for a text `connect()` takes, since the hint, the dialog's check and `connect()` read the text with one function; a text it refuses is named under Account when Test connection or Save refuses it, and editing Account clears that sentence.
+The suffix comes off once, and an identifier whose labels still name a Snowflake domain is refused, such as a doubled suffix or `app.snowflake.com`; a label holding `snowflakecomputing` is refused wherever it appears, while `snowflake` is compared as a whole label beside `com`, so `snowflake.community` reads as a locator and its region.
 For an account name with an underscore, prefer the hyphen form (`myorg-my-account`): Node's certificate checker accepts both, but OpenSSL-based validators on a proxy or gateway can refuse the underscore form.
 
 ### 2.3 Key pair
@@ -131,17 +137,24 @@ Either order works:
 Paste the private key's contents into Private key: Studio reads no key file, and no field is ever read as a path.
 A PKCS#8 key (`PRIVATE KEY` or `ENCRYPTED PRIVATE KEY`) and a PKCS#1 key (`RSA PRIVATE KEY`, encrypted or not) are accepted; the key must be RSA, 2048 to 4096 bits, and at most 16 KiB of text.
 An encrypted PKCS#8 key must use PBES2 with PBKDF2 or scrypt and AES-CBC, at a cost no higher than 1,000,000 PBKDF2 iterations with hmacWithSHA256, 500,000 with hmacWithSHA1 (the PRF when none is named), 200,000 with hmacWithSHA384 or hmacWithSHA512, or scrypt N 16,384, r 8, p 1; the command above uses OpenSSL's default of 2,048 iterations.
+Under the Bun runtime, whose BoringSSL decrypts neither scrypt PBES2 nor PBKDF2 with hmacWithSHA384 or hmacWithSHA512, such a key is refused with `Studio could not read this private key. Nothing was sent.` once a passphrase is entered (with Passphrase empty, the passphrase sentence comes first).
+Node, which the Docker image, the Helm chart and `npx` run Studio on, opens them, and a PBKDF2 key with hmacWithSHA256 or hmacWithSHA1, such as the command above makes, opens under both (measured on Bun 1.4.2 and Node 24 and 26).
 Whether a key is encrypted is read from its contents, not its label: an encrypted PKCS#8 body armoured as `PRIVATE KEY` meets the same bound, and an `RSA PRIVATE KEY` body that is not a PKCS#1 key is refused as unreadable.
 Each refusal is one of these sentences:
 
 - `The private key is larger than Studio accepts (16 KiB). Nothing was sent.`
 - `This is the public key. Paste the private key; the public key is what you register on the Snowflake user. Nothing was sent.`
 - `The private key is not a PEM key. Paste the key's contents, starting with -----BEGIN. Nothing was sent.`
+- `The private key field holds more than one PEM block. Paste the private key's block alone, from -----BEGIN to -----END. Nothing was sent.`
+- `The private key ends before its -----END line. Paste the whole key. Nothing was sent.`
+- `This is a certificate, not a private key. Paste the private key whose public key is registered on the Snowflake user. Nothing was sent.`
+- `This PEM block is not a private key Studio reads. Paste an RSA private key armoured as PRIVATE KEY, ENCRYPTED PRIVATE KEY or RSA PRIVATE KEY. Nothing was sent.`
 - `This key's encryption is set to cost more work than Studio allows. Re-encrypt it with openssl pkcs8 -topk8 -v2 aes-256-cbc. Nothing was sent.`
+- `This key is encrypted with a scheme Studio does not read, such as PBES1 or a PKCS#12 one; Studio reads PBES2 with PBKDF2 or scrypt and AES-CBC. Re-encrypt it with openssl pkcs8 -topk8 -v2 aes-256-cbc. Nothing was sent.`
 - `This key is encrypted; enter its passphrase. Nothing was sent.`
 - `The passphrase does not open this key. Nothing was sent.`
 - `Studio could not read this private key. Nothing was sent.`
-- `Studio signs with RSA keys only; this is an EC key. Nothing was sent.`
+- `Studio signs with RSA keys only; this is an EC key. Nothing was sent.`, with `a DSA`, `an Ed25519` or `an Ed448` in place of `an EC` for those types, the type read from the key, or from the label of an `EC PRIVATE KEY` or `DSA PRIVATE KEY` block
 - `Snowflake needs an RSA key of at least 2048 bits. Nothing was sent.`
 - `Studio accepts RSA keys up to 4096 bits; this key is <bits> bits. Nothing was sent.`
 
@@ -156,20 +169,36 @@ The durable relief is an authentication policy with `PAT_POLICY = (NETWORK_POLIC
 On the trial on 2026-10-13 that policy let a token sign in for a user with no network policy, and each policy change took up to about 45 s to show.
 Key pair avoids that requirement, though a network policy that applies to the user still refuses an address it excludes.
 Use Key pair for npx and the desktop app, and a PAT for a server with a fixed egress address.
+A token names its own user and the SQL API takes no user beside it, so Studio compares User with the `CURRENT_USER()` the role check answers and fails the connect when they differ.
+The comparison ignores case unless User is double-quoted; `CURRENT_USER()` answers the user's NAME, so for a token enter the NAME when it differs from the login name.
+Spaces, tabs and line breaks around the token and a leading `Bearer ` come off before it is sent, so a token read from a file or copied from a curl example works.
+Studio does not otherwise read a token's format, but it refuses before anything is sent a token longer than 4,096 characters or holding a character an HTTP header cannot carry, and a key-pair JWT pasted as the token, which Snowflake accepts and which signs in as its own user until it expires within the hour:
+
+- `The access token is longer than Studio accepts (4,096 characters); a programmatic access token is far shorter. Paste the token alone. Nothing was sent.`
+- `The access token holds characters a token cannot have, such as a space, a line break or a non-ASCII letter. Paste the token alone. Nothing was sent.`
+- `This is a key-pair JWT, not a programmatic access token: it signs in as the user its key belongs to and expires within the hour. Choose Key pair for Sign-in and paste the private key instead. Nothing was sent.`
 
 ### 2.5 Test connection
 
 Test connection checks the key, the account, the role Snowflake runs as and the warehouse's state, without starting the warehouse.
 Your first query starts the warehouse if it is suspended, and Snowflake bills at least one minute for that.
 
-Test connection, Save and every connect send one `SHOW WAREHOUSES LIKE '<warehouse>'`, or `SHOW DATABASES LIMIT 1` when Warehouse is empty, then the role check, `SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s`, with the same context.
+Test connection, Save and every connect send one `SHOW WAREHOUSES LIKE '<warehouse>'`, or `SHOW DATABASES LIMIT 1` when Warehouse is empty, then the role check, `SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s, CURRENT_USER() AS u, CURRENT_DATABASE() AS d, CURRENT_SCHEMA() AS c, CURRENT_WAREHOUSE() AS w`, with the same context.
 Neither needs a running warehouse: on the trial the role check answered with the warehouse suspended and left it suspended, and answered under a role holding no warehouse at all, so a connection with Warehouse empty passes it too.
+The check with `CURRENT_USER()` added answered the same way on 2026-10-14, the warehouse suspended before and after it.
 A role other than Role fails the connect with the role mismatch sentence of [section 11](#11-errors).
+Under token sign-in a user other than User fails it too, with the token user sentence of [section 11](#11-errors).
+Either statement unanswered within its bound fails the connect with the connect sentence of [section 11](#11-errors), never the query-timeout one: Test connection sends them under its own 10 s timeout, which Query Timeout does not change, so its connect sentence reads 15 s, Studio's deadline with its 5 s grace.
 They add a caution only when something is wrong:
 
 - `Snowflake shows no warehouse named <wh> to role <role>. Check the name, and that the role has USAGE on it.`
 - `Warehouse <wh> is suspended and does not resume on its own, so queries fail until someone resumes it.`
 - `Warehouse is empty, so queries use the user's default warehouse and fail if the user has none. Browsing works without one.`
+- `Snowflake resolves no database named <db> for role <role>, so statements run with no current database and unqualified names fail. Check the name, its case, and that the role has USAGE on it.`
+- `Snowflake resolves no schema named <schema> in the connection's database for role <role>, so statements run with no current schema and unqualified names fail. Check the name, its case, and that the role has USAGE on it.`
+- `Snowflake resolves no warehouse named <wh> for role <role>, so queries fail although browsing works. Check the name, its case, and that the role has USAGE on it.`
+
+The last three come from the role check's `CURRENT_DATABASE()`, `CURRENT_SCHEMA()` and `CURRENT_WAREHOUSE()` answering NULL for a name the connection sets: the schema caution is left out when the database's was given, and the warehouse caution when the `SHOW WAREHOUSES` caution above already named that warehouse.
 
 When secondary roles are active for the user, Test connection shows this caution, because the tree, every SHOW and every statement can reach what those roles can, not only Role:
 
@@ -177,11 +206,16 @@ When secondary roles are active for the user, Test connection shows this caution
 
 ### 2.6 Paste URL
 
-The paste box reads an account identifier, an account URL, a Snowsight URL, `jdbc:snowflake://<host>/?<params>` and `snowflake://<user>@<account>/<database>/<schema>?<params>` into fields.
+The paste box reads an account host (`<identifier>.snowflakecomputing.com` or `.cn`), an account URL, a Snowsight URL, `jdbc:snowflake://<host>/?<params>` and `snowflake://<user>@<account>/<database>/<schema>?<params>` into fields; the scheme and the parameter names are read in any case.
+A bare account identifier such as `myorg-myaccount` is typed into Account instead: as a paste it is one word, which would claim any text, so the box refuses it with the list of formats it reads, the same list its hint shows.
 The pasted text is read in the browser and never kept: it is not stored as a connection string, sent to a route or kept in form state after the parse.
 It applies `user`, `warehouse`, `db` or `database`, `schema`, `role`, `authenticator` (`SNOWFLAKE_JWT` or `PROGRAMMATIC_ACCESS_TOKEN`), `token`, and the key passphrase parameters.
-An inline key parameter and every file-path parameter are refused by name, a password is named as not applied, and every other parameter is counted, never named; no value is ever echoed.
+An inline key parameter and every file-path parameter are refused by name.
+A password (in the user part or as `password`), `passcode`, an OAuth client secret, `proxyPassword`, `insecureMode`, `disableOCSPChecks` and an `authenticator` of any other value are named as not applied; every other parameter is counted, never named, and no value is ever echoed.
+A `jdbc:snowflake://` URL carries the account's host, so one whose host is not under `.snowflakecomputing.com` or `.snowflakecomputing.cn` is refused, and so is a `snowflake://` URL whose account is neither such a host nor an account identifier (a name, then optionally a region, its cloud and `privatelink`), rather than read as a locator and region under Snowflake's domain: `This URL names a host outside Snowflake. A jdbc:snowflake:// URL carries the account's host, ending in .snowflakecomputing.com or .snowflakecomputing.cn, and a snowflake:// URL that host or the account identifier, such as myorg-myaccount. Nothing was applied.`
 A refused paste fills no field and clears the paste box, and the dialog switches to Snowflake, so the Private key box its sentence names is in view.
+A paste that names another account than Account holds, or that switches the dialog from another engine, first clears every credential and context field (User, Sign-in, Private key, Passphrase, Access token, Warehouse, Database, Schema, Role), so one account's token or key is never sent to another; a paste naming the account already in Account fills in over what was typed.
+Choosing another engine in the dialog clears the same fields the other way, so a Snowflake warehouse, user or secret does not follow to it; only the name, the environment, the query timeout, the read-only and no-scan choices, and the Account text, which stays in the next engine's Host box, are kept.
 `insecureMode` and `disableOCSPChecks` never lower TLS.
 
 ### 2.7 Seeding
@@ -189,6 +223,8 @@ A refused paste fills no field and clears the paste box, and the dialog switches
 A Snowflake connection is seeded like any other ([SEED_CONNECTIONS.md](../SEED_CONNECTIONS.md)); keep the key or token out of the file:
 
 ```yaml
+version: "1"
+
 connections:
   - id: "snowflake-analytics"
     name: "Snowflake analytics"
@@ -207,6 +243,8 @@ connections:
 
 For a token, set `authMethod: "pat"` and `password: "${SNOWFLAKE_PAT}"` instead of the two key fields.
 A seed that sets `connectionString` for `snowflake` is refused.
+The file load also checks, on every field that is not a reference, what `connect()` checks first: the account as `connect()` reads it, that User, Role and the key or token the method needs are not empty, and that the method is `keypair` or `pat`.
+It refuses the file with `Seed connection "<id>": <field> is refused: <sentence>`, the sentence without its closing `Nothing was sent.`, so an entry that could never open is named in the Seed sources card instead of loading and failing when it is opened; the key's and the token's contents are read only when the connection opens.
 
 ## 3. The recommended Snowflake setup
 
@@ -243,7 +281,7 @@ GRANT ROLE STUDIO_RO TO USER STUDIO_SVC;
 ALTER USER STUDIO_SVC ADD KEY PAIR libredb_studio_<fp8> PUBLIC_KEY = '<public key body>';
 ```
 
-- Assigning a key needs MODIFY PROGRAMMATIC AUTHENTICATION METHODS on the user, or OWNERSHIP, usually an administrator; a user's own self-service form was refused with 003001 by a message naming that privilege on the user.
+- Assigning a key needs MODIFY PROGRAMMATIC AUTHENTICATION METHODS on the user, or OWNERSHIP, usually an administrator ([section 2.3](#23-key-pair)).
 - A resource monitor caps warehouse credits only, not serverless features such as the Query Acceleration Service.
   On the trial on 2026-10-13 a monitor at its quota suspended the warehouse mid-statement, and the statement ended with HTTP 422, code 000629 and SQLSTATE 57014, `Warehouse ... was suspended immediate by resource monitor ..., statement aborted.`, which Studio shows with Snowflake's text and code; a statement that needs no warehouse still answered.
   A warehouse created without `GENERATION = '1'` may be Gen2, at another credit rate and with query acceleration on by default, which is why the recipe sets both.
@@ -255,15 +293,30 @@ ALTER USER STUDIO_SVC ADD KEY PAIR libredb_studio_<fp8> PUBLIC_KEY = '<public ke
 ## 4. Sessions, transactions and blocks
 
 Every request is its own Snowflake session context: Studio sends Database, Schema, Warehouse and Role on every request, and leaves a field out only when the connection leaves it empty, so Snowflake falls back to the user's default.
-Each of the four is read as a name in Snowflake SQL: an unquoted name is upper-cased, and double quotes keep its case, so `studio_ro` is sent as `STUDIO_RO` and `"Mixed Case"` as `Mixed Case`.
+Each of the four is read as a name in Snowflake SQL: an unquoted name made only of letters, digits, `_` and `$` is upper-cased, a double-quoted name keeps its case without its quotes, and any other name is sent as typed, so `studio_ro` is sent as `STUDIO_RO` and `"Mixed Case"` as `Mixed Case`.
 The SQL API reads the four fields as exact names: a role it cannot resolve is refused, while a database, schema or warehouse name Snowflake cannot resolve leaves that context unset without an error: `CURRENT_DATABASE()`, `CURRENT_SCHEMA()` or `CURRENT_WAREHOUSE()` then answers NULL.
+The role check reads all three, so Test connection cautions on a configured name that answers NULL ([section 2.5](#25-test-connection)).
+Studio sends no `TIMEZONE`, so every statement is evaluated in the user's own Snowflake `TIMEZONE` parameter (the account's, `America/Los_Angeles` by default, unless the user sets another), as Snowsight evaluates it: `CURRENT_DATE`, a `TIMESTAMP_LTZ` literal, a `TIMESTAMP_TZ` written without an offset and `DATE_TRUNC` over an LTZ value give the same rows in both.
+How a result shows a `TIMESTAMP_LTZ` is in [section 6](#6-results).
 The SQL API does not run `USE` (it answers code 391911, `Command not supported by SQL API: USE`), so a statement whose operative keyword is `USE` is refused before anything is sent:
 
 `Snowflake's SQL API does not run USE. Set Database, Schema, Warehouse or Role on the connection instead, or use fully qualified names such as database.schema.table. Nothing was sent.`
 
-`ALTER SESSION`, `SET` and `UNSET` run, and the result says the setting does not carry over:
+`ALTER SESSION SET`, `ALTER SESSION UNSET`, `SET` and `UNSET` run without the confirmation gate, since nothing they change outlives the statement, and the result says the setting does not carry over (`ALTER SESSION POLICY` alters an account object, so it asks and carries no such notice):
 
 `Each Snowflake statement runs in its own session, so a session setting or variable does not carry over to the next statement.`
+
+A `CREATE` whose modifiers include `TEMP`, `TEMPORARY` or `VOLATILE` (a temporary table, stage, file format or any other temporary object) runs, and the object belongs to that statement's session, which no later request joins.
+Measured on the trial on 2026-10-14: the next statement's `SELECT`, `INSERT`, `LIST` or `DROP` answers that the object does not exist or is not authorized, `SHOW STAGES LIKE` in the schema does not list it, yet `SHOW STAGES IN ACCOUNT` still lists a temporary stage after such a `DROP`, since the session that owns it lives on until Snowflake ends it.
+The result says so:
+
+`Each Snowflake statement runs in its own session, so this temporary object belongs to a session no later statement joins: the next statement cannot use or drop it, and Snowflake removes it only when that session ends. Create a permanent or TRANSIENT object instead, or use it inside one EXECUTE IMMEDIATE $$ ... $$ block.`
+
+A statement whose code calls `LAST_QUERY_ID()` runs, and the function answers NULL, since its session holds no earlier statement; `RESULT_SCAN(LAST_QUERY_ID())` and `BEFORE(STATEMENT => LAST_QUERY_ID())` then fail with Snowflake's `Statement null not found`. The result, or the error after Snowflake's own text, says:
+
+`Each Snowflake statement runs in its own session, so LAST_QUERY_ID() names no earlier statement here and answers NULL. Use the query ID from Query History instead, or call it inside one EXECUTE IMMEDIATE $$ ... $$ block.`
+
+Inside an `EXECUTE IMMEDIATE $$ ... $$` block both work as in any session, so neither sentence is added there.
 
 A lone transaction statement (`BEGIN [WORK | TRANSACTION] [NAME <n>]`, `START TRANSACTION [NAME <n>]`, and `COMMIT` or `ROLLBACK`, each alone or followed by `WORK`) is refused before it is sent:
 
@@ -300,8 +353,8 @@ A statement that needs a warehouse resumes a suspended one when AUTO_RESUME is T
 | --- | --- | --- | --- |
 | Editor run | the user's statement | yes, if the statement needs one | the user's click; Query Timeout; cancel |
 | Multi-statement script | one request per statement | per statement | Stop, a closed tab or a dropped request stops the remaining statements |
-| Explain button | `EXPLAIN USING JSON` | no | the user's click |
-| Background explain estimate | `EXPLAIN USING JSON` beside each run of a single `SELECT` | no | the user's run; typing sends nothing |
+| Explain button | `EXPLAIN USING JSON` of a query, never for a call, dynamic SQL, a Scripting block or a statement naming a `SYSTEM$` function | no | the user's click |
+| Background explain estimate | `EXPLAIN USING JSON` beside each run of a single `SELECT` that names no `SYSTEM$` function | no | the user's run; typing sends nothing |
 | Monitoring dashboard | `SHOW` for every panel; three Information Schema reads only on a warehouse a fresh state read shows running | no; it resumes one only if the warehouse suspends between that read and the statement | opening the dashboard, which selects a connection by itself; a 60 s cache; auto-refresh off by default |
 | Tree, object counts, describe, inventory, autocomplete | `SHOW`; one `SHOW TERSE OBJECTS` per schema expand | no | `resumesBilledCompute`; the user's open |
 | View source of a non-view | `GET_DDL` | no | the user's click; a Source tab restored on reload or sign-in reads nothing until the user presses Read definition, or otherwise uses the connection |
@@ -309,14 +362,14 @@ A statement that needs a warehouse resumes a suspended one when AUTO_RESUME is T
 | Agent operations workflow | the sessions and slow-queries reads (Information Schema); `SHOW` for table stats, index stats and health | no; Information Schema is read only on a warehouse a fresh state read shows running | the model's call; the 60 s cache |
 | MCP `inspect_schema` | `SHOW` | no | an operator seed with `mcp: true` |
 | Test connection, Save, a connect on a cache miss | one `SHOW`, then the role check | no | the user's click |
-| Role check | `SELECT CURRENT_ROLE(), CURRENT_SECONDARY_ROLES()` once per connect | no | sent by every connect, after its `SHOW`; a mismatch fails the connect |
+| Role check | the `SELECT CURRENT_ROLE() ... CURRENT_WAREHOUSE()` of [section 2.5](#25-test-connection) once per connect | no | sent by every connect, after its `SHOW`; a role or token-user mismatch fails the connect, an unresolved name adds a caution |
 | Health | `SHOW WAREHOUSES LIKE`, or `SHOW DATABASES LIMIT 1` with Warehouse empty | no | - |
 | Connection pulse, fleet health | none | - | skipped for `resumesBilledCompute` |
 | Tree refresh after DDL | `SHOW` | no | - |
 | Export | none: it writes the rows the grid holds | - | - |
 | Load More, inline edit, profiler, test data, maintenance | none: off in v1 | - | - |
 | AI panels, history, code generation | none: text only | - | - |
-| Schema diff | the inventory with columns, every container | no (`SHOW`) | the user's compare |
+| Schema diff | the inventory with columns, of the configured Database and Schema only (with no Schema, that database's schemas less `INFORMATION_SCHEMA`); with no Database the diff is refused in a sentence and shows no difference or migration for that side | no (`SHOW`) | the user's compare |
 | Object search | `SHOW` per kind | no | the user's search |
 
 A Source tab restored on a connection Studio opened by itself says, until the user acts:
@@ -325,13 +378,17 @@ A Source tab restored on a connection Studio opened by itself says, until the us
 
 ### 5.2 `query_tag`
 
-Every request carries a fixed tag for its kind of work, with no user identity, so an administrator finds Studio's statements in QUERY_HISTORY: `libredb-studio:editor` (user statements and the Explain button), `libredb-studio:connect` (connect and Test connection), `libredb-studio:role-check`, `libredb-studio:tree`, `libredb-studio:describe`, `libredb-studio:inventory`, `libredb-studio:source`, `libredb-studio:health` and `libredb-studio:monitoring`.
+Every request carries a fixed tag for its kind of work, with no user identity, so an administrator finds Studio's statements in QUERY_HISTORY: `libredb-studio:editor` (user statements, the Explain button and the background explain estimate), `libredb-studio:connect` (connect and Test connection), `libredb-studio:role-check`, `libredb-studio:tree`, `libredb-studio:describe`, `libredb-studio:inventory`, `libredb-studio:source`, `libredb-studio:health` and `libredb-studio:monitoring`.
 
 ### 5.3 Timeouts, cancel and disconnect
 
 A statement's `timeout` is the connection's Query Timeout in whole seconds, from 1 to Snowflake's maximum of 604,800; a statement Studio sends on its own takes the smaller of 30 s and that value.
 Studio polls the statement from 250 ms, doubling to 2 s, and cancels it at its deadline, 5 s past its `timeout`, so Snowflake's own timeout fires first.
-Snowflake then answers HTTP 408, and its message, which names the timeout that fired, is not read, so the sentence names every bound that can end the statement:
+Studio keeps at most 4 statements of one connection, and 8 across every Snowflake connection of the server, in flight at once; a further statement waits in a queue of at most 64, with nothing sent, and one past that is refused with the shared limiter's sentence ([section 11](#11-errors)).
+Its deadline starts only when it is sent, so a statement that waited still gets its whole `timeout` on Snowflake.
+The wait has its own bound of the same length (`timeout` plus 5 s); a statement still waiting when it passes is not sent and reads the slots sentence of [section 11](#11-errors), never the timeout sentence.
+Every request takes a slot, Studio's own included: the background explain estimate beside a `SELECT` holds one while its `EXPLAIN` compiles, which needs no warehouse and usually answers within a second, so it can delay a run by that much but no longer shortens its timeout.
+When Snowflake's own timeout fires first, it answers HTTP 408, and its message, which names the timeout that fired, is not read, so the sentence names every bound that can end the statement:
 
 `Snowflake ended this statement at a timeout and cancelled it: the connection's query timeout of <n> s, or a lower STATEMENT_TIMEOUT_IN_SECONDS on the warehouse, the user or the account. Snowflake applies the lowest of these, so raising Query Timeout (ms) on the connection cannot lengthen a statement past the others.`
 
@@ -348,7 +405,6 @@ A statement Studio sends on its own that passes its 30 s bound reads this instea
 `Snowflake did not finish this Studio read within 30 s, the bound Studio keeps for the statements it sends on its own whatever the connection's query timeout, so Studio cancelled it.`
 
 Stop cancels the statement by its handle, under a 5 s bound; if the cancel request fails, Snowflake's own `timeout` still ends the statement.
-The idle sweep leaves a connection open while one of its statements runs.
 Deleting a connection, changing its query timeout or restarting the Studio server cancels every statement still running on it, for every user of that connection; leaving it idle does not, because Studio keeps a connection open while one of its statements runs.
 Any signed-in user who sends that connection's id to Studio's disconnect route has the same effect.
 A disconnect waits at most 5 s for a statement whose submit has not answered yet, so a close never hangs on Snowflake; past that bound Studio stops waiting without a handle to cancel, and a statement Snowflake accepted in that submit runs on until its own `timeout` ends it.
@@ -362,8 +418,14 @@ One budget spans a statement's whole result: 16 MiB of decoded rows and 100,000 
 A cut keeps the rows before it, marks the result limited, and says so:
 
 - `The result reached Studio's statement budget of 16 MiB, so only the rows before it are shown. Snowflake reported <numRows> rows.`
+  Studio asks Snowflake for at most 100,001 rows (`rows_per_resultset`), so Snowflake's count stops there; a result that reaches it ends `Snowflake reported more than 100,000 rows.` instead, since its true size is not known.
+- `The first row of this result is larger than Studio's statement budget of 16 MiB, so no row is shown. Select fewer columns, or part of a large value with LEFT or SUBSTR.` The grid then reads "No row is shown: the result was cut before its first row" rather than "Query returned no data".
 - `The result reached Studio's statement budget of 100,000 rows, so only the rows before it are shown.`
 - `Snowflake returned only part of this result because it is too large (391908), so only the rows it sent are shown. Add a LIMIT, or select fewer columns.`
+
+Snowflake decides the size of the first partition itself, so a wide result can send more than 24 MiB inline even with a `LIMIT` and a chunk size of 16 (measured on the trial: 4,096 rows of 10,000 characters, about 41 MB).
+Studio then reads that answer again as a stream, cut at the budget plus 64 KiB: Snowflake writes `resultSetMetaData` before `data`, so the column list is read whole and the rows that fit are kept, with the 16 MiB cut sentence.
+Only an answer whose column list alone does not fit in that read is refused, with the first sentence below.
 
 A partition Studio cannot take is refused:
 
@@ -373,8 +435,14 @@ A partition Studio cannot take is refused:
 - `Snowflake sent a cell that is not text in column "<column>", so the result is not shown.`
 
 The shared limiter appends `LIMIT 500` to a `SELECT`; a longer result shows 500 rows with no Load More.
+A `SELECT` that ends in its own bound keeps it and gets none appended, and that includes Snowflake's unlimited forms `LIMIT NULL`, `LIMIT ''` and `LIMIT $$$$`, which return every row up to Studio's budget, and `OFFSET NULL`, `OFFSET ''` and `OFFSET $$$$`, which skip none.
+Snowflake takes an `OFFSET` only before a `FETCH` or after a `LIMIT`, so a `SELECT` that ends in a lone `OFFSET NULL`, `OFFSET ''` or `OFFSET $$$$` is sent as written and Snowflake answers with its own `unexpected '<EOF>'`, the error its SQL API gives that text (measured on the trial on 2026-10-14); `LIMIT 500 OFFSET NULL` or `OFFSET NULL FETCH 500` is the form that runs.
+A lone digit `OFFSET` still gets `LIMIT 500` appended, which Snowflake refuses as `unexpected 'LIMIT'`.
+Snowflake parses the bound with the statement, so a syntax error in the user's text can be reported at it (`unexpected 'LIMIT'`, `unexpected '501'`); such an error gets the sentence of [Where the bound is placed](../editor/query-optimization.md#an-error-that-names-the-bound) after Snowflake's message.
 Export writes the rows the grid shows, in the browser, and sends no statement; over a cut or limited result the export menu reads "Writes the <n> rows shown." with "The result was cut, so the file is not the whole result."
-In practice an unlimited run shows about 10,000 to 16,700 rows of typical widths.
+Which budget ends a large result depends on its width, measured on the trial: all 16 columns of the sample `TPCH_SF1.LINEITEM` with `LIMIT 100000` showed every one of the 100,000 rows, uncut, on 2026-10-13, while `L_ORDERKEY`, `L_LINENUMBER` and `REPEAT(L_COMMENT, 10)` with `LIMIT 200000` were cut at 16 MiB after 58,725 rows on 2026-10-14.
+The first partition arrives uncompressed, because Studio's HTTP transport asks every server for an uncompressed body; later partitions arrive gzip-compressed as Snowflake stores them.
+A large first partition is therefore bounded by the network: measured on 2026-10-14, one 8 MB text cell took 5.5 s to arrive uncompressed against 1.4 s compressed (36 KB), while Studio decoded and returned it in under half a second ([BACKLOG](../BACKLOG.md) D363).
 
 | Wire type | Cell | Column type |
 | --- | --- | --- |
@@ -388,13 +456,26 @@ In practice an unlimited run shows about 10,000 to 16,700 rows of typical widths
 | `date` | `YYYY-MM-DD` | `DATE` |
 | `time` | `HH:MM:SS[.f]` | `TIME(s)` |
 | `timestamp_ntz` | `YYYY-MM-DD HH:MM:SS[.f]` | `TIMESTAMP_NTZ(s)` |
-| `timestamp_ltz` | the UTC instant with `+00:00` (every request sends `timezone: "UTC"`) | `TIMESTAMP_LTZ(s)` |
+| `timestamp_ltz` | the instant at UTC, with `+00:00` | `TIMESTAMP_LTZ(s)` |
 | `timestamp_tz` | the wall time at its offset, with `+HH:MM` or `-HH:MM` | `TIMESTAMP_TZ(s)` |
-| `variant`, `object`, `array`, `map`, structured types | the JSON text, never parsed | the type name |
+| `variant`, `object`, `array`, `map`, structured types | the JSON text, never parsed | the type name; an `object` with `extTypeName` `GEOGRAPHY` or `GEOMETRY` is typed by that name |
 | `vector` | the JSON array text | `VECTOR`: the SQL API reports `vector` with no element type or dimension |
 | `geography`, `geometry`, `uuid`, `file` and any other | the text | the reported name |
 
-The trial capture (section 13) reports a GEOGRAPHY, GEOMETRY, MAP or FILE column as `object` and a UUID column as `text`, so a result types them `OBJECT` and `VARCHAR`; describe shows the catalog's spelling from `SHOW COLUMNS`.
+Snowflake sends every date, time and timestamp as days or seconds since the epoch, a `TIMESTAMP_TZ` with its own offset, so no cell depends on the session's `TIMEZONE`; measured on the trial on 2026-10-14, the same `SELECT` answered identical cells under UTC, `America/Los_Angeles` and `Asia/Kolkata`.
+A `TIMESTAMP_LTZ` arrives as a bare instant, and the answer does not name the session's zone, so Studio shows the exact instant at UTC with `+00:00` rather than guess the zone: `'2026-06-01 12:00:00'::TIMESTAMP_LTZ` under `America/Los_Angeles` shows `2026-06-01 19:00:00.000000000+00:00`, the instant Snowsight shows as `2026-06-01 12:00:00.000 -0700`.
+To see an LTZ value at the session's own offset, cast it: `ltz_col::TIMESTAMP_TZ` carries that offset (`2026-06-01 12:00:00.000000000-07:00`).
+
+Dates and timestamps follow the proleptic Gregorian calendar with astronomical years, as Snowflake counts its days.
+Snowflake stores years outside 1 to 9999, and Studio shows such a value with every digit of its year and a `-` at or before year 0, never refusing it: `10000-01-01`, and `-0002-06-01` for 3 BC, which `'-0002-06-01'::DATE` reads back to the same day.
+Snowflake's own text for that date, `DATE::VARCHAR`, is `0003-06-01`, with no sign.
+The SQL INSERT export writes such a cell too, never skipping its row: the `TO_*` mask reads a year of any length, so `10000-01-01` is `TO_DATE('10000-01-01', 'YYYY-MM-DD')`, but no mask or cast reads a signed timestamp year (100097, 100035), so a year before 1 is written whole 400-year eras later and moved back by their exact day count, `DATEADD(DAY, -146097, TO_DATE('0398-06-01', 'YYYY-MM-DD'))` for `-0002-06-01`; an LTZ cell is moved as a `TIMESTAMP_TZ` at `+00:00` and cast back to `TIMESTAMP_LTZ`, so the session's zone never takes part.
+`DATEADD(DAY, ...)` is used because `DATEADD(YEAR, ...)` moves a February 29 to the 28th.
+Replayed on the trial on 2026-10-14 under the session zones UTC and `America/Los_Angeles`, DATE, TIMESTAMP_NTZ, TIMESTAMP_LTZ and TIMESTAMP_TZ cells at years -2, -400 (February 29), -10000, 10000 and 252026 came back as the same day counts, instants and offsets.
+CSV and JSON write the text.
+
+The trial capture (section 13) reports a GEOGRAPHY, GEOMETRY, MAP or FILE column as `object` and a UUID column as `text`; a GEOGRAPHY or GEOMETRY entry also carries `extTypeName`, so a result types those two `GEOGRAPHY` and `GEOMETRY`, and MAP, FILE and UUID `OBJECT` and `VARCHAR`; describe shows the catalog's spelling from `SHOW COLUMNS`.
+A CHAR(n) column is reported as `text` of length n, exactly as a VARCHAR(n) is, so a result types it `VARCHAR(n)`: Snowflake stores CHAR as VARCHAR, and both hold the same values.
 
 A cell whose text does not match its type is refused with the column name, never shown as a wrong value:
 
@@ -404,8 +485,11 @@ A cell whose text does not match its type is refused with the column name, never
 The SQL INSERT export writes semi-structured, structured and vector cells as `INSERT ... SELECT` rows through `PARSE_JSON`, and dates and timestamps through `TO_DATE`, `TO_TIME` and `TO_TIMESTAMP_*` with an explicit format.
 A vector column carries no dimension in the result, so each vector cell is cast to `VECTOR(<element>, <n>)`, `<n>` being the number of elements in the cell and the element `FLOAT` when any element has a decimal point, an exponent or a non-finite word, else `INT`.
 A FLOAT NaN or infinity is written as `'NaN'::FLOAT`, `'inf'::FLOAT` or `'-inf'::FLOAT`.
+The DDL (CREATE TABLE) export declares a VECTOR column as the `VECTOR(<element>, <n>)` its first non-null cell spells, by the same rule, since `VECTOR` alone is a syntax error (001003); a VECTOR column with no such cell in the export is declared `ARRAY`, which holds the NULLs the file inserts.
+A GEOGRAPHY or GEOMETRY cell is written as its quoted text, which Snowflake casts to the column's type on insert.
+A DECFLOAT cell is written as its exact text quoted and cast, `'1.23e40'::DECFLOAT`, never as a bare number: Snowflake reads a bare numeric literal as NUMBER or FLOAT first, and a replay on 2026-10-14 changed `1.23e40` to `1.22999999999999995e40`, stored `-4.2e-5432` as 0 and refused `1e16384`, while the quoted form came back exactly.
 A structured OBJECT, ARRAY or MAP column is reported as `object` or `array`, as a semi-structured one is, so its cells are written as semi-structured values, which a structured column refuses with `incompatible types` (001010).
-Replayed on the trial on 2026-10-13, the export of the capture's every-type table came back cell for cell into a copy whose structured columns were semi-structured, vector and FLOAT infinities included.
+Replayed on the trial on 2026-10-13, the export of the capture's every-type table came back cell for cell into a copy whose structured columns were semi-structured, vector and FLOAT infinities included, except DECFLOAT, which came back exactly once it was written in the quoted form above.
 
 ## 7. The tree
 
@@ -420,7 +504,7 @@ A kind's `SHOW` is sent only when the user opens that kind:
 | Streams | `SHOW STREAMS IN SCHEMA` |
 | Tasks | `SHOW TASKS IN SCHEMA` |
 | Sequences | `SHOW SEQUENCES IN SCHEMA` |
-| Stages | `SHOW STAGES IN SCHEMA`; no stage browsing in v1 |
+| Stages | `SHOW STAGES IN SCHEMA`; no stage browsing and no definition in v1 |
 | File formats | `SHOW FILE FORMATS IN SCHEMA` |
 | Pipes | `SHOW PIPES IN SCHEMA` |
 | Functions | `SHOW USER FUNCTIONS IN SCHEMA`, so built-ins are not listed |
@@ -432,14 +516,14 @@ Studio still sends `LIMIT 10000` wherever Snowflake offers paging, so each answe
 
 - A pageable listing (databases, schemas, tables, views, streams, tasks) is read in pages of 10,000 rows, each from the previous page's last name with `FROM`, which starts after the name it is given (a page with nothing past that name ends the listing), up to five pages: `Snowflake has more than 50,000 objects of this kind here; Studio shows the first 50,000 by name.`
 - Any other listing has no paging and is sent with no `LIMIT`: `SHOW SEQUENCES` answered all 10,250 rows with and without `LIMIT` and `FROM`, since it ignores both, and the 10,000 rows Snowflake's reference gives as the most the other listings answer is not measured.
-- A count of exactly 10,000, Studio's own `LIMIT`: `Studio counts at most 10,000 objects here, so this is a floor.`
+- When the `SHOW TERSE OBJECTS` answer reaches 10,000 rows, Studio's own `LIMIT`, both the table and the view count carry: `Studio counts at most 10,000 objects here, so this is a floor.`
 
-The tree has no place for a listing's sentence, so it shows the first 50,000 objects of a pageable kind without one; the object inventory, which the agent and the inventory route read, carries that sentence.
+The tree has no place for a listing's sentence, so it shows the first 50,000 objects of a pageable kind without one; the object inventory, which the agent and the inventory route read, reads at most 5,000 objects, so it stops at its own `inventory limit reached` before that cap.
 
 The object inventory reads a schema's columns with one `SHOW COLUMNS IN SCHEMA`; when that answers a full 10,000 rows it reads them one object at a time instead, for at most the first 1,000 objects: `Snowflake answered a full 10,000-row column listing for this schema, so Studio read the columns of the first 1,000 objects one at a time`.
-Describe reads `SHOW COLUMNS IN TABLE` (or `IN VIEW`) and `SHOW PRIMARY KEYS`; a primary key column is shown as a key with no further mark, although Snowflake does not enforce primary keys on standard tables; indexes exist only on hybrid tables.
+Describe reads `SHOW COLUMNS IN TABLE` (or `IN VIEW`); a table also reads `SHOW PRIMARY KEYS` and `SHOW TABLES LIKE`, and a hybrid table `SHOW INDEXES`; a primary key column is shown as a key with no further mark, although Snowflake does not enforce primary keys on standard tables; indexes exist only on hybrid tables.
 Studio draws no foreign keys, so the ER diagram shows tables without relations.
-A view's source comes from `SHOW VIEWS`; every other kind's from `SELECT GET_DDL(...)`, which needs no running warehouse.
+A view's source comes from `SHOW VIEWS`; a stage has none; every other kind's comes from `SELECT GET_DDL(...)`, which needs no running warehouse.
 A secure view the role does not own shows `Snowflake hides a secure view's definition from roles that do not own it.`
 Every statement Studio writes quotes each name with `"`, so a lower-case catalog name always round-trips.
 
@@ -450,15 +534,23 @@ Every statement Studio writes quotes each name with `"`, so a lower-case catalog
 The Explain button sends `EXPLAIN USING JSON <statement>`, which compiles the statement without running it and needs no warehouse, and renders the plan's partition and byte totals and its operations tree.
 Snowflake has no executing `EXPLAIN`, so the button's analyze request gets the same form.
 The background estimate beside each run of a single `SELECT` sends the same `EXPLAIN USING JSON`, with the same declines, and needs no running warehouse either; typing in the editor sends nothing.
+Compiling is not inert for a `SYSTEM$` function: Snowflake evaluates it while it explains the statement, measured on the trial (Snowflake 10.37.100), where `EXPLAIN USING JSON SELECT SYSTEM$WAIT(5)` took 6.5 s and an Explain of `SELECT SYSTEM$CANCEL_QUERY('<id>')` cancelled the other statement.
+So a statement whose code names a `SYSTEM$` function (the confirmation gate's code forms, [section 9](#9-the-confirmation-gate)) is never explained: the Explain button says `Snowflake runs a SYSTEM$ function while it explains a statement, so Studio does not explain one. Run it instead; the confirmation gate asks first.`, and a run of one sends no background estimate, so a confirmed call runs once.
+A call, dynamic SQL, a Scripting block or an anonymous procedure is declined before that check: `Snowflake explains a query only; this statement calls a procedure, runs dynamic SQL or opens a Scripting block.`
 
 ### 8.2 Monitoring
 
 Overview, table stats, index stats and health send only `SHOW`.
-Performance, slow queries and running statements read Information Schema, and each first sends a fresh `SHOW WAREHOUSES LIKE` and reads only when the warehouse is running; otherwise the panel reads `Warehouse <wh> is suspended, and Studio does not start it to fill this panel. Run a query, then Refresh.`
+The Overview reads the warehouse row (`SHOW WAREHOUSES LIKE`), `SHOW DATABASES`, `SHOW TERSE TABLES` and `SHOW INDEXES`, the last two in the configured database, or in the account when Database is empty.
+Its Tables card is that table count (from 10,000, Studio's `LIMIT`, it reads `10,000+`, "counted from the first 10,000 tables Snowflake listed in database <db>"), and its index count is the hybrid-table indexes `SHOW INDEXES` lists.
+The warehouse's running and queued counts are shown only while it is `STARTED` or `RESIZING`, as `<n> running and <m> queued, Studio's own reads included`: Snowflake counts every statement that names the warehouse, Studio's own `SHOW` reads too, and measured on the trial it reported `running 3` for a `SUSPENDED` warehouse while three `SHOW COLUMNS` named it, so a suspended warehouse shows its state and size alone.
+Performance, slow queries and running statements read Information Schema, and each read that misses the cache first sends a fresh `SHOW WAREHOUSES LIKE` and reads only when the warehouse is running; otherwise the panel reads `Warehouse <wh> is suspended, and Studio does not start it to fill this panel. Run a query, then Refresh.`
 A warehouse that suspends in the moment between that state read and the Information Schema statement is resumed once by the statement.
-Information Schema reads are cached for 60 s, and auto-refresh stays off until the user starts it, since `resumesBilledCompute` is declared.
+Information Schema reads are cached for 60 s.
+Auto-refresh is off until the user starts it, as on every engine, and since `resumesBilledCompute` is declared, the toggle carries `Each refresh runs statements on this connection, which keeps its billed compute running.`
 
 - With Warehouse empty: `Set Warehouse on the connection to see its load and queries.`
+- A warehouse the role cannot see: `Snowflake shows no warehouse named <wh> to role <role>. Check the name, and that the role has USAGE on it.`
 - Performance without the grant: `Needs MONITOR on warehouse <wh> or MONITOR USAGE.`
 - Slow queries without the grant: `Without MONITOR or OPERATE on the warehouse, Snowflake shows only this user's queries.`
 - Running statements: `Snowflake exposes no live session list here; these are running statements.`
@@ -488,6 +580,8 @@ An operator-seeded connection with `mcp: true` is offered to `list_connections` 
 | Inline row edit | An apply would be several warehouse statements and as many separate commits |
 | Column profiler | Up to 20 full-column scans per click, which cannot be cancelled |
 | Object edit | DDL commits implicitly and `ALTER COLUMN` is limited, so no kind is editable |
+| Create table | The provider declares no create-table (`supportsCreateTable: false`; the Create Table form has no Snowflake dialect), so neither the explorer nor the tree offers Create Table; write the `CREATE TABLE` in the editor |
+| Data import | No kind accepts row writes and there is no create-table, so the import dialog opens on `Studio's import has no target on this connection: it offers no existing table here to write into and cannot create one.` |
 | Test data generation | It writes on the warehouse |
 | Transactions | No transaction spans two requests ([section 4](#4-sessions-transactions-and-blocks)) |
 | Maintenance | A kill would cancel other users' queries the role can see, an account-level action from a shared connection |
@@ -500,6 +594,11 @@ Snowflake commits every DDL statement implicitly, so an edit spanning several st
 Snowflake also enforces no primary key on a standard table, so a row edit would have no row identity.
 The absence is `snowflake`'s entry in `EXPECTED_EDIT_ABSTAINERS` (`tests/helpers/object-edit-expectation.ts`), and `tests/isolated/object-edit-declarations.test.ts` holds that entry and this section together.
 
+### 8.7 Editor
+
+Format uses sql-formatter's Snowflake language (the grammar's `formatterLanguage`), so `QUALIFY` stays a clause on its own line; text that language cannot read, such as a `@stage` reference, is left as written.
+Completion offers Snowflake's own clauses and functions (the grammar's `completionWords`, among them `QUALIFY`, `ARRAY_AGG`, `PARSE_JSON`, `FLATTEN`, `CURRENT_ROLE` and `CURRENT_WAREHOUSE`) beside the shared SQL lists, a function inserted as a call; no `SYSTEM$` function is offered.
+
 ## 9. The confirmation gate
 
 The gate is a browser confirmation, not a boundary: it asks before a statement runs from the editor, and the role decides what can happen.
@@ -507,13 +606,18 @@ On top of the shared destructive keywords it asks for these Snowflake forms, at 
 Forms that replace, overwrite, unload or delete: `CREATE OR REPLACE`, `CREATE OR ALTER` (which drops the columns its new definition leaves out), `INSERT OVERWRITE`, `MERGE`, `COPY`, `REMOVE` and `RM`.
 Forms that run text or work the gate cannot read: `EXECUTE IMMEDIATE`, `EXECUTE TASK`, `EXECUTE ALERT`, `EXECUTE NOTEBOOK`, `EXECUTE JOB SERVICE`, `EXECUTE DBT PROJECT` and `CALL`.
 Forms that spend credits on their own, once or on a schedule: `CREATE WAREHOUSE`, `CREATE TASK`, `CREATE ALERT`, `CREATE COMPUTE POOL`, `CREATE SERVICE`, `CREATE DYNAMIC TABLE`, `CREATE TRANSIENT DYNAMIC TABLE`, `CREATE MATERIALIZED VIEW`, `CREATE SECURE MATERIALIZED VIEW`, `CREATE PIPE`, `CREATE DYNAMIC ICEBERG TABLE` and `CREATE CORTEX SEARCH SERVICE`.
-Forms that change who gets in or what leaves the account: `CREATE USER`, `CREATE ROLE`, `CREATE NETWORK POLICY`, `CREATE NETWORK RULE`, `CREATE EXTERNAL ACCESS INTEGRATION`, `CREATE API INTEGRATION`, `CREATE REPLICATION GROUP` and `CREATE FAILOVER GROUP`.
+Forms that change who gets in or what leaves the account: `CREATE USER`, `CREATE ROLE`, `CREATE NETWORK POLICY`, `CREATE NETWORK RULE`, `CREATE EXTERNAL ACCESS INTEGRATION`, `CREATE API INTEGRATION`, `CREATE SECURITY INTEGRATION`, `CREATE NOTIFICATION INTEGRATION`, `CREATE STORAGE INTEGRATION`, `CREATE SHARE`, `CREATE REPLICATION GROUP` and `CREATE FAILOVER GROUP`.
+Forms that create a billed account: `CREATE ACCOUNT` and `CREATE MANAGED ACCOUNT`.
+An external stage, which reads and writes files outside the account, asks when its code names a `URL`: `CREATE STAGE ... URL`, `CREATE TEMPORARY STAGE ... URL` and `CREATE TEMP STAGE ... URL`; an internal stage, with no URL, keeps its files in the account and runs unconfirmed.
+The shared `ALTER` keyword asks for every Snowflake `ALTER` but `ALTER SESSION SET` and `ALTER SESSION UNSET`, whose setting cannot outlive the statement's own session ([section 4](#4-sessions-transactions-and-blocks)); `ALTER SESSION POLICY` still asks, since a session policy is an account object, and on every other engine `ALTER SESSION` still asks.
 It also asks wherever `AS PROCEDURE` (an anonymous procedure) or an identifier starting `SYSTEM$` appears in a statement's code, a quoted `"SYSTEM$..."` name included when it is called as a function.
-Still unconfirmed: every Snowflake form not named above, among them `CREATE STORAGE INTEGRATION` and `CREATE SHARE`; a statement whose effect hides behind an `IDENTIFIER()` target; and whatever a procedure created earlier does when a statement that does not name it reaches it.
+Still unconfirmed: every Snowflake form not named above, among them `CREATE CATALOG INTEGRATION`, `CREATE EXTERNAL VOLUME` and `CREATE LISTING`; a statement whose effect hides behind an `IDENTIFIER()` target; and whatever a procedure created earlier does when a statement that does not name it reaches it.
 
 ## 10. Security
 
 - Secrets of a connection a user creates are kept in browser storage, and `GET /api/storage` returns them to their owner ([STORAGE.md](../STORAGE.md)); keep an operator-seeded connection `managed: true` so its key stays on the server.
+- In browser storage the private key, its passphrase and the access token are kept in the clear in the same connection object, as every other engine's password is; the passphrase is stored beside the key it unlocks, so the key's encryption does not protect it from anyone who can read that storage. The `sqlite` and `postgres` storage providers encrypt all three at rest on the server ([STORAGE.md](../STORAGE.md#credential-encryption-at-rest)).
+- The dialog draws a key as text only while its box has focus or after Show key: a pasted key is hidden at once, a typed one when the box is left, and a saved one is not drawn when the connection is opened with Edit; Replace key empties the box for a new key.
 - Studio reads no key file; the key's text is parsed once at connect, and no field the provider owns keeps the key text or its passphrase: it keeps the key object and its fingerprint, while the connection object passed in still holds both.
 - Statement text, secrets in it included, is kept in the query history and sent to the AI safety check, as on every SQL engine.
 - A PAT created in the editor with `ALTER USER ... ADD PAT` appears once in the grid, as Snowflake returns it; Studio keeps no copy beyond that result.
@@ -527,20 +631,26 @@ Still unconfirmed: every Snowflake form not named above, among them `CREATE STOR
 
 | Case | Class | Studio's sentence |
 | --- | --- | --- |
-| Key pair refused (390144) | `AuthenticationError`, with the administrator's registration statement to copy | `Snowflake refused the key pair (JWT token is invalid, [<uuid>]). Studio signed as <ACCOUNT>.<USER> with the key whose fingerprint is SHA256:<fp>. An administrator registers it with ALTER USER <name> ADD KEY PAIR libredb_studio_<fp8> PUBLIC_KEY = '<body>' and checks it with SHOW USER KEY PAIRS FOR USER <name>, where <name> is the user's NAME, which DESC USER and SHOW USERS show and which can differ from the login name; ALTER USER <name> SET RSA_PUBLIC_KEY = '<body>' is the documented alternative. Signed in as this user, SHOW USER KEY PAIRS lists your keys; ALTER USER ADD KEY PAIR libredb_studio_<fp8> PUBLIC_KEY = '<body>' is refused with 003001 by a message that names MODIFY PROGRAMMATIC AUTHENTICATION METHODS on your own user as the privilege it needs. If the key is listed, check that the account and user are the ones the key was registered on and that this computer's clock is correct; an administrator can see the exact cause with SELECT SYSTEM$GET_LOGIN_FAILURE_DETAILS('<uuid>').` |
+| Key pair refused (390144) | `AuthenticationError`, with the administrator's registration statement to copy, `ALTER USER <name> ADD KEY PAIR libredb_studio_<fp8> PUBLIC_KEY = '<body>'`, which the dialog shows under the sentence | `Snowflake refused the key pair (JWT token is invalid, [<uuid>]) for <ACCOUNT>.<USER>: no user has this login name, or the key whose fingerprint is SHA256:<fp> is not registered on it. Check User; an administrator registers the key with ALTER USER <name> ADD KEY PAIR, where <name> is the user's NAME from SHOW USERS, and Test connection shows the full statement to copy. If the key is registered, check the account and this computer's clock; an administrator can see the exact cause with SELECT SYSTEM$GET_LOGIN_FAILURE_DETAILS('<uuid>').` |
 | Key pair refused while a statement ran | `AuthenticationError` | `Snowflake stopped accepting Studio's key-pair token while this statement ran (<code>). The statement may still be running; Studio could not read or cancel it.` |
 | A key-pair connection with no key | `DatabaseError` | `Studio has no public key to name for this key-pair connection. This is a Studio defect; please report it.` |
 | Token refused | `AuthenticationError` | `Snowflake did not accept the access token: check that it is complete and has not expired or been revoked. A token also signs in only for a user under a network policy that allows the public address Studio connects from, which on a laptop changes with the network, or under an authentication policy that sets PAT_POLICY NETWORK_POLICY_EVALUATION = ENFORCED_NOT_REQUIRED. Key-pair sign-in avoids the network-policy requirement.` |
 | Network policy refuses the address (390422 at HTTP 401, for a key pair or a token; Snowflake's message names the address and is not shown) | `AuthenticationError` | `A network policy on the Snowflake account or on this user does not allow the address Studio connects from. An administrator adds that address to the policy's allowed list.` |
 | Token for a user under no network policy (390432 at HTTP 401; on the trial the authentication policy named let the token sign in) | `AuthenticationError` | `Snowflake signs in with an access token only for a user under a network policy, and this user has none. An administrator either attaches a network policy that allows the address Studio connects from, or sets an authentication policy with PAT_POLICY = (NETWORK_POLICY_EVALUATION = ENFORCED_NOT_REQUIRED).` |
-| Role refused (390186 at HTTP 400, as Snowflake answers; 390189 and 3013, as documented) | `AuthenticationError` | `Snowflake refused role <role> for user <user>: the role does not exist, it is not granted to this user, or the key pair or access token is restricted to another role. Check the Role field; an administrator grants it with GRANT ROLE <role> TO USER <user>.` |
+| Role refused for a token (390186 under token sign-in: a token restricted to another role, or a role not granted) | `AuthenticationError` | `Snowflake refused role <role> for this access token: the token may be restricted to another role, since a token generated with a role restriction signs in only as that role, or role <role> is not granted to user <user>. Set Role to the token's role, which SHOW USER PROGRAMMATIC ACCESS TOKENS lists under role_restriction, or use a token restricted to <role>.` |
+| Role refused (390186 at HTTP 400 under key pair, as Snowflake answers; 390189 and 3013, as documented) | `AuthenticationError` | `Snowflake refused role <role> for user <user>: the role does not exist, it is not granted to this user, or the key pair or access token is restricted to another role. Check the Role field; an administrator grants it with GRANT ROLE <role> TO USER <user>.` |
+| Token of another user (token sign-in, `CURRENT_USER()` is not User) | `AuthenticationError` | `Snowflake signed this access token in as user <u>, not <user>. A token signs in only as the user it belongs to: enter <u> in User, or paste a token of user <user>.` |
 | Role mismatch | `AuthenticationError` | `Snowflake ran this connection as role <r>, not <role>. Check the Role field; a role-restricted key or token signs in only as its own role.` |
-| No warehouse (000606, as documented; 391920, as Snowflake answers a role that can use no warehouse) | `QueryError` | `No warehouse is selected for this connection. Enter one in the connection settings, or ask an administrator to set DEFAULT_WAREHOUSE on the user. Browsing works without one; queries do not.` |
+| Warehouse set but not usable (000606 or 391920 with Warehouse filled: a misspelt name, no USAGE, a name in another case) | `QueryError` | `Snowflake could not use warehouse <wh> for this statement: it does not exist, role <role> has no USAGE on it, or its name differs in case. Check Warehouse in the connection settings. Browsing works without a warehouse; queries do not.` |
+| No warehouse (000606, as documented; 391920, as Snowflake answers a role that can use no warehouse; Warehouse empty) | `QueryError` | `No warehouse is selected for this connection. Enter one in the connection settings, or ask an administrator to set DEFAULT_WAREHOUSE on the user. Browsing works without one; queries do not.` |
 | Object missing or hidden (002003) | `QueryError` | `Snowflake says this object does not exist or role <role> may not see it. Check the name, the database and schema, and the role; CALL EXPLAIN_PRIVILEGES(statement => '<statement>', missing_only => true) lists what is missing, and an administrator adds for_role => '<role>'.`, then the server text |
 | Insufficient privileges (003001) | `QueryError` | `Role <role> lacks a privilege this statement needs.`, then the server text |
 | API disabled or network policy (403) | `AuthenticationError` | `Snowflake refused the request (403): the SQL API may not be enabled for this account, or a network policy blocks the address Studio connects from.` |
 | A command the SQL API does not run (391911) | `QueryError` | `Snowflake's SQL API does not run this command.`, then the server text |
-| Statement failed (422) | `QueryError` | `Snowflake: <message> (code <code>, SQLSTATE <sqlstate>)` |
+| Any other refusal (422 among them) | `QueryError` | `Snowflake: <message> (code <code>, SQLSTATE <sqlstate>)`, without the parts Snowflake did not send |
+| A refusal with no message | `QueryError` | `Snowflake refused the request (HTTP <n>, code <code>) and sent no message.`, without the code when there is none |
+| Headers too large (431, the gateway's answer to an oversized token header) | `AuthenticationError` | `Snowflake's gateway refused the request because its headers are too large (431). The access token is the one header Studio fills from a field: paste the token alone.` |
+| Token not readable (390146, under token sign-in) | `AuthenticationError` | `Snowflake found no usable token in the request (390146). Paste the access token alone, without a Bearer prefix or anything around it.` |
 | Snowflake's 408 | `QueryError` | `Snowflake ended this statement at a timeout and cancelled it: the connection's query timeout of <n> s, or a lower STATEMENT_TIMEOUT_IN_SECONDS on the warehouse, the user or the account. Snowflake applies the lowest of these, so raising Query Timeout (ms) on the connection cannot lengthen a statement past the others.` |
 | Snowflake's 408 of a statement Studio sent on its own at its 30 s bound | `QueryError` | `Snowflake ended this Studio read at a timeout and cancelled it: the 30 s bound Studio keeps for the statements it sends on its own, or a lower STATEMENT_TIMEOUT_IN_SECONDS on the warehouse, the user or the account.` |
 | Studio's deadline | `QueryError` | `Snowflake did not finish this statement within the connection's query timeout of <n> s, so Studio cancelled it. Raise Query Timeout (ms) on the connection to allow longer statements; saving it ends statements still running on this connection.` |
@@ -549,25 +659,27 @@ Still unconfirmed: every Snowflake form not named above, among them `CREATE STOR
 | Rate limit after retries (429) | `ConnectionError` | `Snowflake is limiting requests from this account (429). Try again in a moment.` |
 | Server unavailable after retries (500, 502, 503, 504) | `ConnectionError` | `Snowflake did not answer this request (HTTP <n>) after <attempts> attempts.` |
 | Certificate refused by Snowflake (522) | `ConnectionError` | `Snowflake refused the TLS certificate of this request (522). Studio sends no client certificate, so a proxy or gateway between Studio and Snowflake may be presenting one.` |
-| Result gone (404) | `QueryError` | `Snowflake no longer holds this statement's result; run it again.` |
+| Result gone (404 on the status or partition GET of a statement Snowflake accepted) | `QueryError` | `Snowflake no longer holds this statement's result; run it again.` |
+| Account not found (404 on the first submit: `*.snowflakecomputing.com` resolves for any name, and the load balancer answers an account it does not have with a `File not Found` page) | `ConnectionError` | `Snowflake has no account at <host> (HTTP 404 on the first request). Check the account identifier: an organisation account is written orgname-account_name, with a hyphen after the organisation, and a locator outside AWS Oregon needs its region.` |
 | Invalid payload (390142) | `DatabaseError` | `Snowflake could not read the request Studio sent (390142). This is a Studio defect; please report it.` |
+| No answer to the connect statement or the role check within their bound (the statement's `timeout` plus 5 s; Test connection sends them under 10 s, so it gives up after 15 s) | `ConnectionError` | `Studio gave up connecting to <host> after <n> s with no answer. Check the account identifier and the network path to Snowflake; a locator outside AWS Oregon needs its region, and a PrivateLink name resolves only inside its private network.` |
 | Host unreachable | `ConnectionError` | `Studio could not reach <host>. Check the account identifier; a locator outside AWS Oregon needs its region.` |
 | Certificate mismatch | `ConnectionError` | `The certificate <host> presented does not match its name. Check the account identifier, including the region for a locator.` |
 | Statement slots busy | `ConnectionError` | `Studio's Snowflake statement slots stayed busy for <n> seconds, so nothing was sent. Try again when a running statement finishes.` |
-| Bare Scripting block | `QueryError` | the server message, then `A Snowflake Scripting block runs through the SQL API only inside EXECUTE IMMEDIATE $$ ... $$.` |
+| Bare Scripting block (422, code 001003, a statement opening with `BEGIN` or `DECLARE`) | `QueryError` | `Snowflake: <message> (code 001003, SQLSTATE <sqlstate>)`, then `A Snowflake Scripting block runs through the SQL API only inside EXECUTE IMMEDIATE $$ ... $$.` |
 | No usable statement handle | `DatabaseError` | `Snowflake answered without a statement handle Studio can use.` |
 | A link outside the account's statements | `DatabaseError` | `Snowflake answered with a link outside this account's statements, so Studio did not follow it.` |
 | Lone transaction, `USE`, result partitions, key and field checks | as above | the sentences of sections 2, 4 and 6 |
 
 A data movement policy refusal answers HTTP 422 with code 001003, the code a syntax error answers, and `Data movement policy triggered. Contact your administrator for details.`, so Studio shows Snowflake's text.
 
-Every request sends the User-Agent `LibreDB-Studio/<version>`, or `LibreDB-Studio` in the embedded package, whose build injects no version.
+Every request sends the User-Agent `LibreDB-Studio/<version>`, or `LibreDB-Studio` in the embedded package, whose build injects no version, unless the host sets `NEXT_PUBLIC_APP_VERSION`.
 A submit answered 429, 500, 502, 503 or 504 is resent with the same request id and `retry=true`, so Snowflake never runs it twice, after a backoff from 500 ms doubling to 8 s, at most 5 sends; 401, 403, 404, 422 and 522 are never retried.
-Studio holds 4 statements per connection, 8 per Studio process, and a queue of 64, from the submit to the last partition, which bounds the memory results take; a full queue refuses with the shared limiter's sentence.
+Studio holds 4 statements per connection, 8 across all Snowflake connections of the Studio process, and a queue of 64 shared by them, from the submit to the last partition, which bounds the memory results take; a full queue refuses with the shared limiter's sentence.
 
 ## 12. Embedded package
 
-A host that embeds Studio renders the exported `ConnectionModal`, whose `onTestConnection` adapter may return `warnings` (the Test connection cautions of [section 2.5](#25-test-connection)) and `fixStatement` (the registration statement the dialog shows with a copy button).
+A host that embeds Studio renders the exported `ConnectionModal`, whose `onTestConnection` adapter may return `fixStatement` (the registration statement the dialog shows with a copy button); a `warnings` array it adds (the Test connection cautions of [section 2.5](#25-test-connection)) is shown too, though the exported prop type does not declare it.
 `WorkspaceProps.onTestConnection` takes a fixed set of fields that has none of Snowflake's, so a host tests a Snowflake connection through `ConnectionModal`.
 The embedded package mounts no route, so a host that runs statements from its own backend must call `cancelQuery` itself when its user stops or leaves; until it does, an abandoned statement runs until its `timeout`.
 

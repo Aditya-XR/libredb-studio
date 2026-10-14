@@ -387,12 +387,21 @@ export function useTabManager({
   // One identity for the strip, whose memoized bar must not re-render on a keystroke (X5):
   // the handler reads `tabs` and `activeTabId`, both of which change with the query on
   // every keystroke, so a plain `useCallback` would mint a new function each time.
-  const closeTab = useStableCallback((id: string, e: React.MouseEvent) => {
+  //
+  // Answers whether the tab closed, so the shell can stop the run the tab started (SF-023): a closed tab leaves no
+  // Stop button behind, and its statement used to run on, billed, until the browser closed. The Undo snapshot is
+  // therefore never a running tab; Undo brings back the tab's text, not a spinner nothing would clear.
+  const closeTab = useStableCallback((id: string, e: React.MouseEvent): boolean => {
     e.stopPropagation();
-    if (tabs.length === 1) return;
+    if (tabs.length === 1) return false;
     const index = tabs.findIndex((t) => t.id === id);
-    if (index === -1) return;
-    const closed: ClosedTab = { tab: tabs[index], index, nextTabId: tabs[index + 1]?.id ?? null, workspaceKey };
+    if (index === -1) return false;
+    const closed: ClosedTab = {
+      tab: { ...tabs[index], isExecuting: false, isLoadingMore: false },
+      index,
+      nextTabId: tabs[index + 1]?.id ?? null,
+      workspaceKey,
+    };
 
     // The last-tab guard is evaluated again inside the updater, against the state actually
     // being written: two closes batched into one commit both pass the check above.
@@ -406,6 +415,7 @@ export function useTabManager({
       action: { label: "Undo", onClick: () => reopenClosedTab(closed) },
     });
     undoToastIdsRef.current.push(toastId);
+    return true;
   });
 
   /**

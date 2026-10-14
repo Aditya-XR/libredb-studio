@@ -931,6 +931,51 @@ describe("splitStatements and splitExecutionUnits: T-SQL batches", () => {
     expect(sqlsOf(splitCursorTargets("SELECT 1; SELECT 2"))).toEqual(["SELECT 1", "SELECT 2"]);
   });
 
+  // SF-046: T-SQL requires a MERGE to end with its `;` (Msg 10713, "A MERGE statement must be terminated by a
+  // semi-colon (;)"; sqlcmd gives the same error for the text without it), so the splitter keeps that one.
+  test("a MERGE keeps its terminating `;` as the statement, the unit and the cursor target", () => {
+    const merge =
+      "MERGE dbo.t1 AS t USING (SELECT 1 AS id) s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = N'merged';";
+
+    expect(sqlsOf(splitStatements(merge, MSSQL))).toEqual([merge]);
+    expect(sqlsOf(splitExecutionUnits(merge, MSSQL))).toEqual([merge]);
+    expect(sqlsOf(splitCursorTargets(merge, MSSQL))).toEqual([merge]);
+    expect(isMultiStatement(merge, MSSQL)).toBe(false);
+    expect(countCodeStatements(merge, MSSQL)).toBe(1);
+
+    const script = `SELECT 1;\n-- upsert\nWITH s AS (SELECT 1 AS id) ${merge.replace("USING (SELECT 1 AS id) s", "USING s")}\nSELECT 2;`;
+    const statements = splitStatements(script, MSSQL);
+    expect(sqlsOf(statements)[0]).toBe("SELECT 1");
+    expect(sqlsOf(statements)[1].endsWith("N'merged';")).toBe(true);
+    expect(sqlsOf(statements)[2]).toBe("SELECT 2");
+    for (const statement of statements) expect(script.slice(statement.start, statement.end)).toBe(statement.sql);
+
+    const lower = "merge into t using s on t.id = s.id when not matched then insert (id) values (s.id);\nGO";
+    expect(sqlsOf(splitExecutionUnits(lower, MSSQL))).toEqual([lower.slice(0, -3)]);
+  });
+
+  test("a MERGE batch ends with its `;`, and every other statement still drops its own", () => {
+    const units = splitExecutionUnits(
+      "DECLARE @x INT = 1; MERGE t USING s ON t.id = s.id WHEN MATCHED THEN DELETE;",
+      MSSQL,
+    );
+    expect(sqlsOf(units)).toEqual(["DECLARE @x INT = 1; MERGE t USING s ON t.id = s.id WHEN MATCHED THEN DELETE;"]);
+    expect(sqlsOf(splitStatements("UPDATE t SET a = 1; SELECT 'MERGE';", MSSQL))).toEqual([
+      "UPDATE t SET a = 1",
+      "SELECT 'MERGE'",
+    ]);
+  });
+
+  test("only T-SQL keeps a MERGE's `;`: PostgreSQL, Oracle, Snowflake and the default reading drop it", () => {
+    const merge = "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE;";
+    for (const grammar of [
+      DEFAULT_SQL_GRAMMAR,
+      ...(["postgres", "oracle", "snowflake"] as const).map(resolveSqlGrammar),
+    ]) {
+      expect(sqlsOf(splitStatements(merge, grammar))).toEqual([merge.slice(0, -1)]);
+    }
+  });
+
   test("an empty batch between two GO lines is no unit", () => {
     expect(splitExecutionUnits("GO\nGO\nSELECT 1\nGO\n\nGO", MSSQL)).toHaveLength(1);
   });

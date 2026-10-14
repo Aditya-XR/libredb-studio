@@ -1,8 +1,11 @@
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   analyzeQuery,
+  appendedBoundNote,
   applyQueryLimit,
   hasQueryLimit,
+  noteAppendedBound,
   isSelectQuery,
   type ParsedQueryInfo,
 } from "@/lib/db/utils/query-limiter";
@@ -1612,5 +1615,234 @@ describe("a comment before a trailing clause keeps the bound in code (#1398 revi
     const result = applyQueryLimit("SELECT * FROM big LIMIT 5 -- note\nALLOW FILTERING", 500, 0, {}, "cassandra");
     expect(result.wasLimited).toBe(false);
     expect(result.sql).toBe("SELECT * FROM big LIMIT 5 -- note\nALLOW FILTERING");
+  });
+});
+
+describe("a dialect's declared non-numeric LIMIT and OFFSET values are bounds (SF-021)", () => {
+  // Measured on Snowflake (2026-10-14): `LIMIT NULL`, `LIMIT ''` and `LIMIT $$$$` return every row, and `OFFSET NULL`,
+  // `OFFSET ''` and `OFFSET $$$$` skip none, any case. Appending a second LIMIT after one of them is a syntax error.
+  const read = "SELECT ID FROM E_TYPES ORDER BY ID";
+
+  for (const value of ["NULL", "null", "''", "$$$$"]) {
+    test(`Snowflake LIMIT ${value} is an existing, unlimited bound: nothing is appended`, () => {
+      const result = applyQueryLimit(`${read} LIMIT ${value}`, 501, 0, {}, "snowflake");
+      expect(result.sql).toBe(`${read} LIMIT ${value}`);
+      expect(result.wasLimited).toBe(false);
+      expect(result.appliedLimit).toBe(0);
+      const info = analyzeQuery(`${read} LIMIT ${value}`, "snowflake");
+      expect(info.hasLimit).toBe(true);
+      expect(info.existingLimit).toBeUndefined();
+    });
+
+    test(`Snowflake LIMIT 2 OFFSET ${value} keeps its count and skips nothing`, () => {
+      const result = applyQueryLimit(`${read} LIMIT 2 OFFSET ${value}`, 501, 0, {}, "snowflake");
+      expect(result.sql).toBe(`${read} LIMIT 2 OFFSET ${value}`);
+      expect(result.wasLimited).toBe(false);
+      expect(result.appliedLimit).toBe(2);
+      expect(result.appliedOffset).toBe(0);
+      expect(analyzeQuery(`${read} LIMIT 2 OFFSET ${value}`, "snowflake")).toMatchObject({
+        hasLimit: true,
+        existingLimit: 2,
+        hasOffset: true,
+        existingOffset: 0,
+      });
+    });
+  }
+
+  test("Snowflake LIMIT NULL OFFSET 1, a trailing comment and a FOR UPDATE run all read as bounded", () => {
+    for (const sql of [
+      `${read} LIMIT NULL OFFSET 1`,
+      `${read} limit null offset null`,
+      `${read} LIMIT  NULL -- every row`,
+      `${read} LIMIT NULL FOR UPDATE`,
+      `${read} OFFSET NULL ROWS FETCH NEXT NULL ROWS ONLY`,
+      `${read} FETCH FIRST $$$$ ROWS ONLY`,
+    ]) {
+      expect(applyQueryLimit(sql, 501, 0, {}, "snowflake")).toMatchObject({ sql, wasLimited: false });
+    }
+    expect(analyzeQuery(`${read} LIMIT NULL OFFSET 1`, "snowflake")).toMatchObject({ existingOffset: 1 });
+  });
+
+  for (const value of ["NULL", "null", "''", "$$$$"]) {
+    test(`Snowflake lone OFFSET ${value} is the statement's own bound: nothing is appended after it`, () => {
+      // Measured on Snowflake (2026-10-14): a lone OFFSET, with or without ROWS, is "unexpected '<EOF>'", and an
+      // OFFSET followed by LIMIT is "unexpected 'LIMIT'". Appending nothing leaves Snowflake's own error, about the
+      // text as written, instead of one that names a LIMIT Studio added.
+      const sql = `${read} OFFSET ${value}`;
+      const result = applyQueryLimit(sql, 501, 0, {}, "snowflake");
+      expect(result).toMatchObject({ sql, wasLimited: false, appliedLimit: 0, appliedOffset: 0 });
+      expect(result.originalLimit).toBeUndefined();
+      expect(analyzeQuery(sql, "snowflake")).toMatchObject({
+        hasLimit: true,
+        existingLimit: undefined,
+        hasOffset: true,
+        existingOffset: 0,
+      });
+      expect(applyQueryLimit(`${read} OFFSET ${value} -- skip none`, 501, 0, {}, "snowflake").wasLimited).toBe(false);
+    });
+  }
+
+  test("forceLimit drops a lone non-numeric OFFSET, which skips nothing, and writes its own bound", () => {
+    expect(applyQueryLimit(`${read} OFFSET NULL`, 10, 0, { forceLimit: true }, "snowflake").sql).toBe(
+      `${read} LIMIT 10`,
+    );
+    expect(applyQueryLimit(`${read} offset $$$$`, 10, 20, { forceLimit: true }, "snowflake").sql).toBe(
+      `${read} LIMIT 10 OFFSET 20`,
+    );
+  });
+
+  test("a lone OFFSET spelled inside a literal is not a bound, and a lone digit OFFSET reads as before", () => {
+    expect(analyzeQuery("SELECT $$ OFFSET $$$$", "snowflake")).toMatchObject({ hasLimit: false, hasOffset: false });
+    expect(applyQueryLimit(`${read} OFFSET 2`, 501, 0, {}, "snowflake").sql).toBe(`${read} OFFSET 2 LIMIT 501`);
+    expect(analyzeQuery(`${read} OFFSET 2`, "snowflake")).toMatchObject({
+      hasLimit: false,
+      hasOffset: true,
+      existingOffset: 2,
+    });
+    // forceLimit over a TOP leaves a digit OFFSET where it stood, as it always did.
+    expect(
+      applyQueryLimit("SELECT TOP 5 * FROM t ORDER BY a OFFSET 2", 10, 0, { forceLimit: true }, "snowflake").sql,
+    ).toBe("SELECT TOP 5 * FROM t ORDER BY a OFFSET 2 LIMIT 10");
+  });
+
+  test("forceLimit replaces a non-numeric bound instead of appending a second one", () => {
+    expect(applyQueryLimit(`${read} LIMIT NULL OFFSET ''`, 10, 0, { forceLimit: true }, "snowflake").sql).toBe(
+      `${read} LIMIT 10`,
+    );
+  });
+
+  test("a value only spelled like one, inside a literal or a comment, is not a bound", () => {
+    expect(applyQueryLimit("SELECT 'LIMIT NULL' AS x", 501, 0, {}, "snowflake").sql).toBe(
+      "SELECT 'LIMIT NULL' AS x LIMIT 501",
+    );
+    expect(applyQueryLimit("SELECT 1 /* LIMIT NULL */", 501, 0, {}, "snowflake").sql).toBe(
+      "SELECT 1 LIMIT 501 /* LIMIT NULL */",
+    );
+    expect(applyQueryLimit(`${read} LIMIT 'x'`, 501, 0, {}, "snowflake").sql).toBe(`${read} LIMIT 'x' LIMIT 501`);
+    // `LIMIT` inside a dollar string, the text ending in `$$$$`: the end-anchored pattern matches, the word is not code.
+    expect(analyzeQuery("SELECT $$ LIMIT $$$$", "snowflake").hasLimit).toBe(false);
+  });
+
+  test("every other dialect reads these forms exactly as before: a LIMIT is appended", () => {
+    for (const type of [
+      "postgres",
+      "mysql",
+      "clickhouse",
+      "duckdb",
+      "sqlite",
+      "trino",
+      "databend",
+      "bigquery",
+    ] as const) {
+      for (const tail of ["LIMIT NULL", "LIMIT ''", "LIMIT 2 OFFSET NULL", "OFFSET NULL", "OFFSET $$$$"]) {
+        const result = applyQueryLimit(`${read} ${tail}`, 501, 0, {}, type);
+        expect(result.sql).toBe(`${read} ${tail} LIMIT 501`);
+        expect(analyzeQuery(`${read} ${tail}`, type).hasLimit).toBe(false);
+      }
+    }
+  });
+});
+
+describe("an error that points into the bound Studio added says so (SF-022)", () => {
+  const written = "SELECT * FROM D_PARENT WHERE";
+  const sent = "SELECT * FROM D_PARENT WHERE LIMIT 501";
+  const noted = (message: string, w = written, x = sent) => {
+    const error = new Error(message);
+    noteAppendedBound(error, w, x);
+    return error.message;
+  };
+
+  test("Snowflake's position into the appended LIMIT gets the note, the error's class and text kept", () => {
+    const error = new SyntaxError(
+      "Snowflake: SQL compilation error: syntax error line 1 at position 35 unexpected '501'. (code 001003, SQLSTATE 42000)",
+    );
+    const original = error.message;
+    expect(noteAppendedBound(error, written, sent)).toBe(error);
+    expect(error).toBeInstanceOf(SyntaxError);
+    expect(error.message).toBe(`${original} ${appendedBoundNote("LIMIT 501")}`);
+  });
+
+  test("the note is plain text, since the results panel shows an error message as text", () => {
+    expect(appendedBoundNote("LIMIT 501")).toBe(
+      "Studio added the clause LIMIT 501 to this statement to bound its rows, so a position or token this error names may be in that clause rather than in your text.",
+    );
+    expect(appendedBoundNote("LIMIT 501")).not.toContain("`");
+  });
+
+  // Each message below is the engine's own text for a statement whose syntax error falls on the clause Studio added,
+  // taken from PostgreSQL 16, MySQL 8.4, SQLite (bun:sqlite), SQL Server 2025, ClickHouse and Snowflake.
+  test("each engine's syntax error at the clause gets the note", () => {
+    for (const message of [
+      'syntax error at or near "LIMIT"',
+      "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'LIMIT 501' at line 1",
+      'near "LIMIT": syntax error',
+      "Code: 62. DB::Exception: Syntax error: failed at position 38 (501): 501. Expected one of: token sequence, Dot, LIMIT, OFFSET, end of query. (SYNTAX_ERROR)",
+      "SQL compilation error:\nsyntax error line 1 at position 29 unexpected 'LIMIT'.",
+      "Snowflake: SQL compilation error:\nsyntax error line 1 at position 36 unexpected '501'. (code 001003, SQLSTATE 42000)",
+    ]) {
+      expect(noted(message)).toEndWith(` ${appendedBoundNote("LIMIT 501")}`);
+    }
+  });
+
+  test("an error that only contains the clause's word or number gets no note", () => {
+    for (const message of [
+      // PostgreSQL
+      'column "limit" does not exist',
+      'column "LIMIT" does not exist',
+      'invalid input syntax for type integer: "foo 501"',
+      'syntax error at or near "FROM"',
+      // PostgreSQL and SQLite echo the token as the user spelt it; Studio writes LIMIT in capitals
+      'syntax error at or near "limit"',
+      'near "limit": syntax error',
+      // MySQL: the quoted rest of the statement starts in the user's text
+      "Unknown column 'limit' in 'field list'",
+      "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'FROM t LIMIT 501' at line 1",
+      // SQLite
+      "no such column: LIMIT",
+      // SQL Server
+      "Invalid column name 'limit'.",
+      "Conversion failed when converting the varchar value 'foo 501' to data type int.",
+      "Incorrect syntax near 'WHERE'.",
+      "A TOP can not be used in the same query or sub-query as a OFFSET.",
+      // ClickHouse: the list of expected tokens, and a message that quotes the statement sent
+      "Code: 62. DB::Exception: Syntax error: failed at position 30 (WHERE): WHERE LIMIT 501. Expected one of: ORDER BY, LIMIT, OFFSET, end of query.",
+      "Code: 47. DB::Exception: Unknown expression identifier `limit`. In scope SELECT limit FROM system.one LIMIT 501. (UNKNOWN_IDENTIFIER)",
+      // Snowflake
+      "Snowflake: SQL compilation error: error line 1 at position 7\ninvalid identifier 'LIMIT' (code 000904, SQLSTATE 42000)",
+      "Snowflake: SQL compilation error: error line 1 at position 7\ninvalid identifier '\"limit\"' (code 000904, SQLSTATE 42000)",
+      "Object 'D_PARENT' does not exist or not authorized.",
+      // a number that only contains the limit's digits
+      'syntax error at or near "15012"',
+    ]) {
+      expect(noted(message)).toBe(message);
+    }
+  });
+
+  test("a bound inserted mid-statement (TOP) and a probe with an offset are named as written", () => {
+    expect(
+      noted("Incorrect syntax near the keyword 'TOP'.", "SELECT * FROM t WHERE", "SELECT TOP 501 * FROM t WHERE"),
+    ).toEndWith(appendedBoundNote("TOP 501"));
+    expect(noted("unexpected '500'", "SELECT 1 -- note\n", "SELECT 1 LIMIT 501 OFFSET 500 -- note\n")).toEndWith(
+      appendedBoundNote("LIMIT 501 OFFSET 500"),
+    );
+  });
+
+  test("nothing changes when nothing was added, or it is not an Error", () => {
+    expect(noted('syntax error at or near "LIMIT"', "SELECT 1 LIMIT", "SELECT 1 LIMIT")).toBe(
+      'syntax error at or near "LIMIT"',
+    );
+    expect(noteAppendedBound("LIMIT 501", written, sent)).toBe("LIMIT 501");
+  });
+
+  test("docs/editor/query-optimization.md quotes the note word for word", () => {
+    const doc = readFileSync("docs/editor/query-optimization.md", "utf8").replace(/\s*\n\s*/g, " ");
+    expect(doc).toContain(`\`${appendedBoundNote("LIMIT 501")}\``);
+  });
+
+  test("the note is added once, however often the error passes", () => {
+    const error = new Error("unexpected 'LIMIT'");
+    noteAppendedBound(error, written, sent);
+    noteAppendedBound(error, written, sent);
+    expect(error.message.split("Studio added").length).toBe(2);
   });
 });

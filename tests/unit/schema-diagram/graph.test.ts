@@ -6,6 +6,7 @@ import {
   TABLE_TARGET_HANDLE,
   buildGraph,
   computeFkColumnMap,
+  diagramNodeId,
   graphSignature,
   selectVisibleColumns,
 } from "@/components/schema-diagram/graph";
@@ -380,22 +381,22 @@ describe("addresses rather than labels", () => {
 
   test("a cross-container foreign key keeps its edge", () => {
     const { edges } = buildGraph(crossContainer, { compact: false });
-    const daily = edges.find((e) => e.source === pathKey(shopDaily.path));
+    const daily = edges.find((e) => e.source === diagramNodeId(shopDaily.path));
     expect(daily).toBeDefined();
-    expect(daily?.target).toBe(pathKey(appCustomers.path));
+    expect(daily?.target).toBe(diagramNodeId(appCustomers.path));
   });
 
   test("a bare foreign key resolves in the referencing object's own container", () => {
     const { edges } = buildGraph(crossContainer, { compact: false });
-    const orders = edges.find((e) => e.source === pathKey(shopOrders.path));
-    expect(orders?.target).toBe(pathKey(shopCustomers.path));
+    const orders = edges.find((e) => e.source === diagramNodeId(shopOrders.path));
+    expect(orders?.target).toBe(diagramNodeId(shopCustomers.path));
   });
 
   test("the anchor columns land on the referenced object and not on its namesake", () => {
     const { sources, targets } = computeFkColumnMap(crossContainer);
-    expect(sources.get(pathKey(shopDaily.path))).toEqual(new Set(["customer_id"]));
-    expect(targets.get(pathKey(appCustomers.path))).toEqual(new Set(["id"]));
-    expect(targets.get(pathKey(shopCustomers.path))).toEqual(new Set(["id"]));
+    expect(sources.get(diagramNodeId(shopDaily.path))).toEqual(new Set(["customer_id"]));
+    expect(targets.get(diagramNodeId(appCustomers.path))).toEqual(new Set(["id"]));
+    expect(targets.get(diagramNodeId(shopCustomers.path))).toEqual(new Set(["id"]));
   });
 
   test("a spelling two objects answer to at the same rank draws no edge", () => {
@@ -432,7 +433,7 @@ describe("addresses rather than labels", () => {
     expect(edges.length).toBe(2);
     expect(new Set(edges.map((e) => e.id)).size).toBe(2);
     expect(edges.map((e) => e.source).sort()).toEqual(
-      [pathKey(shopOrdersHere.path), pathKey(warehouseOrders.path)].sort(),
+      [diagramNodeId(shopOrdersHere.path), diagramNodeId(warehouseOrders.path)].sort(),
     );
   });
 
@@ -443,7 +444,7 @@ describe("addresses rather than labels", () => {
     const { edges, usedHeuristic } = buildGraph([bareApp, bareShop, posts], { compact: false });
     expect(usedHeuristic).toBe(true);
     expect(edges.length).toBe(1);
-    expect(edges[0].target).toBe(pathKey(bareShop.path));
+    expect(edges[0].target).toBe(diagramNodeId(bareShop.path));
   });
 
   test("expandedTables is keyed by the address, so one namesake expands alone", () => {
@@ -457,15 +458,67 @@ describe("addresses rather than labels", () => {
     );
     const { nodes } = buildGraph([wideApp, wideShop], {
       compact: false,
-      expandedTables: new Set([pathKey(wideShop.path)]),
+      expandedTables: new Set([diagramNodeId(wideShop.path)]),
     });
-    expect(nodes.find((n) => n.id === pathKey(wideShop.path))?.data.visibleColumns.length).toBe(30);
-    expect(nodes.find((n) => n.id === pathKey(wideApp.path))?.data.visibleColumns.length).toBe(MAX_VISIBLE_COLUMNS);
+    expect(nodes.find((n) => n.id === diagramNodeId(wideShop.path))?.data.visibleColumns.length).toBe(30);
+    expect(nodes.find((n) => n.id === diagramNodeId(wideApp.path))?.data.visibleColumns.length).toBe(
+      MAX_VISIBLE_COLUMNS,
+    );
   });
 
   test("the signature separates two schemas that differ only by container", () => {
     const one = buildGraph([appCustomers], { compact: false });
     const two = buildGraph([shopCustomers], { compact: false });
     expect(graphSignature(one, false)).not.toBe(graphSignature(two, false));
+  });
+});
+
+describe("node ids a CSS selector can hold (SF-010)", () => {
+  const awkward = [
+    'D_quote"d',
+    "back\\slash",
+    "line\nbreak",
+    "tab\tcr\r",
+    "per%cent",
+    "雪",
+    "\ud800lone",
+    "]x[",
+    "a'b",
+    "sp ace",
+  ];
+
+  test("an id carries no quote, backslash, line break or control character", () => {
+    for (const name of awkward) {
+      const id = diagramNodeId(["STUDIO_DEMO", "PROBE", name]);
+      expect(id).toMatch(/^[A-Za-z0-9_.%-]+$/);
+    }
+  });
+
+  test("ids stay one-to-one, the escape character itself included", () => {
+    const paths = [["a", "b"], ["a%001fb"], ["a", "%001fb"], ["a%b"], ["a%0025b"], ...awkward.map((name) => [name])];
+    const ids = paths.map((path) => diagramNodeId(path));
+    expect(new Set(ids).size).toBe(paths.length);
+  });
+
+  test("a table named with a double quote is a node, and its edges point at the same id", () => {
+    const quoted = makeAt(["db", "s", 'D_quote"d'], [{ name: "id", isPrimary: true }]);
+    const child = makeAt(
+      ["db", "s", "child"],
+      [{ name: "id", isPrimary: true }, { name: "parent_id" }],
+      [{ columnName: "parent_id", referencedTable: 'D_quote"d', referencedColumn: "id" }],
+    );
+    const { nodes, edges } = buildGraph([quoted, child], { compact: false });
+    const id = diagramNodeId(quoted.path);
+    expect(id).not.toContain('"');
+    expect(nodes.map((n) => n.id)).toContain(id);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].target).toBe(id);
+    expect(edges[0].source).toBe(diagramNodeId(child.path));
+  });
+
+  test("plain names keep a readable id", () => {
+    expect(diagramNodeId(["users"])).toBe("users");
+    expect(diagramNodeId(["public", "users"])).toBe(`public%001fusers`);
+    expect(diagramNodeId(["public", "users"])).toBe(pathKey(["public", "users"]).replace("\u001f", "%001f"));
   });
 });

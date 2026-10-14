@@ -58,6 +58,7 @@
  */
 
 import { DEFAULT_SQL_GRAMMAR, type ProceduralBlockGrammar, type SqlGrammar } from "./grammar";
+import { readOperativeKeyword } from "./operative-keyword";
 import { IDENTIFIER_PART, readSqlSpan } from "./spans";
 import { readSqlWord, type SqlWord } from "./words";
 
@@ -359,6 +360,14 @@ function scan(input: string, grammar: SqlGrammar): Scan {
   let body = new BodyReader(blocks);
   let i = 0;
 
+  // A statement the engine refuses without its own `;` keeps it (`script.terminatedStatements`, SF-046).
+  const terminated = grammar.script.terminatedStatements ?? [];
+  const keepsOwnTerminator = (text: string): boolean => {
+    if (terminated.length === 0) return false;
+    const keyword = readOperativeKeyword(text, grammar)?.keyword;
+    return keyword !== undefined && terminated.includes(keyword);
+  };
+
   const push = (end: number) => {
     const raw = input.slice(segmentStart, end);
     const sql = raw.trim();
@@ -423,7 +432,7 @@ function scan(input: string, grammar: SqlGrammar): Scan {
         i++;
         continue;
       }
-      push(body.keepsTerminator ? i + 1 : i);
+      push(body.keepsTerminator || keepsOwnTerminator(input.slice(segmentStart, i)) ? i + 1 : i);
       startNext(i + 1);
       continue;
     }

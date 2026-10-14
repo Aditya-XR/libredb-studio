@@ -220,14 +220,124 @@ function describeColumns(envelope: ClickHouseJsonEnvelope): Pick<ClickHouseQuery
 }
 
 /**
+ * ClickHouse's quoted spellings of a non-finite float under `output_format_json_quote_denormals`,
+ * and the words every other provider hands over for the same values (`src/lib/non-finite.ts`):
+ * the grid shows them, and the exports write them back as `inf`, `-inf` and `nan`.
+ */
+const NON_FINITE_FLOAT: Readonly<Record<string, string>> = { inf: "Infinity", "-inf": "-Infinity", nan: "NaN" };
+
+const FLOAT_TYPE = /^(Float(32|64)|BFloat16)$/;
+
+/**
+ * The top-level comma-separated arguments of a type's argument list, quotes and
+ * parentheses respected (`Tuple(a Enum8('x,y' = 1), b Float64)`).
+ */
+function typeArguments(text: string): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let quoted = false;
+  let start = 0;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === "'") quoted = !quoted;
+    else if (quoted) continue;
+    else if (char === "(") depth++;
+    else if (char === ")") depth--;
+    else if (char === "," && depth === 0) {
+      args.push(text.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  args.push(text.slice(start).trim());
+  return args;
+}
+
+/** `Name(args)` as its name and top-level arguments; a type with no argument list has none. */
+function splitType(declared: string): { name: string; args: string[] } {
+  const text = declared.trim();
+  const open = text.indexOf("(");
+  if (open <= 0 || !text.endsWith(")")) return { name: text, args: [] };
+  return { name: text.slice(0, open).trim(), args: typeArguments(text.slice(open + 1, -1)) };
+}
+
+/**
+ * `value` with every quoted non-finite float replaced by its word, by the declared type:
+ * a scalar `Float32`, `Float64` or `BFloat16`, and the same inside `Nullable`,
+ * `LowCardinality`, `Array`, `Tuple` (an array, or an object when its elements are named)
+ * and a `Map`'s values. The type decides, never the text, so a `String` holding "inf" stays
+ * that string. `Variant`, `Dynamic` and `JSON` declare no element type to go by and are left
+ * as sent.
+ */
+function floatWords(value: unknown, declared: string): unknown {
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  const { name, args } = splitType(declared);
+  if ((name === "Nullable" || name === "LowCardinality") && args.length === 1) return floatWords(value, args[0]);
+  if (FLOAT_TYPE.test(name)) {
+    return typeof value === "string" && Object.hasOwn(NON_FINITE_FLOAT, value) ? NON_FINITE_FLOAT[value] : value;
+  }
+  if (name === "Array" && args.length === 1 && Array.isArray(value)) {
+    return value.map((element) => floatWords(element, args[0]));
+  }
+  if (name === "Map" && args.length === 2 && isPlainRecord(value)) {
+    return mapValues(value, () => args[1]);
+  }
+  if (name === "Tuple" && args.length > 0) {
+    // `a Float64` in a named tuple, `Float64` in an unnamed one.
+    const elements = args.map((arg) => /^([A-Za-z_][A-Za-z0-9_]*)\s+(\S.*)$/.exec(arg));
+    if (Array.isArray(value)) {
+      return value.map((element, index) =>
+        index < args.length ? floatWords(element, elements[index]?.[2] ?? args[index]) : element,
+      );
+    }
+    if (isPlainRecord(value)) {
+      const typeOf = new Map(elements.flatMap((match) => (match === null ? [] : [[match[1], match[2]] as const])));
+      return mapValues(value, (key) => typeOf.get(key));
+    }
+  }
+  return value;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A copy of `record` with each value read by the type `typeOf` gives its key, or kept when it gives none. */
+function mapValues(
+  record: Record<string, unknown>,
+  typeOf: (key: string) => string | undefined,
+): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    const type = typeOf(key);
+    // Defined, not assigned: a key named `__proto__` would otherwise replace the prototype.
+    Object.defineProperty(copy, key, {
+      value: type === undefined ? entry : floatWords(entry, type),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return copy;
+}
+
+/**
  * Each JSONCompact row, an array of values in `meta` order, as an object keyed by
  * the field names. A row that is not an array, or whose value count differs from
- * the declared columns, is refused: naming its values would be a guess.
+ * the declared columns, is refused: naming its values would be a guess. A
+ * non-finite float is handed over as its word (`floatWords`).
  */
-function keyedRows(data: unknown, fieldNames: readonly string[] | null): ClickHouseRow[] {
+function keyedRows(
+  data: unknown,
+  fieldNames: readonly string[] | null,
+  columnTypes: Record<string, string> | null,
+): ClickHouseRow[] {
   if (!Array.isArray(data)) return [];
 
   const names = fieldNames ?? [];
+  const types = names.map((name) => {
+    const type = columnTypes !== null && Object.hasOwn(columnTypes, name) ? columnTypes[name] : undefined;
+    return typeof type === "string" ? type : undefined;
+  });
   return data.map((values: unknown) => {
     if (!Array.isArray(values)) {
       throw new ClickHouseTransportError("ClickHouse answered a row that is not an array of values", 0);
@@ -238,7 +348,12 @@ function keyedRows(data: unknown, fieldNames: readonly string[] | null): ClickHo
         0,
       );
     }
-    return Object.fromEntries(names.map((name, index) => [name, values[index]]));
+    return Object.fromEntries(
+      names.map((name, index) => {
+        const type = types[index];
+        return [name, type === undefined ? values[index] : floatWords(values[index], type)];
+      }),
+    );
   });
 }
 
@@ -291,7 +406,7 @@ function toQueryResult(outcome: HttpOutcome): ClickHouseQueryResult {
   const envelope = parseEnvelope(outcome.text);
   const columns = describeColumns(envelope);
   return {
-    rows: keyedRows(envelope.data, columns.fieldNames),
+    rows: keyedRows(envelope.data, columns.fieldNames, columns.columnTypes),
     ...columns,
     executionTimeMs: executionTimeMs(summary, envelope),
     mutationCount: summary.mutationCount,
@@ -446,6 +561,12 @@ export class ClickHouseHttpTransport implements ClickHouseTransport {
     // 12345678901234567000. Every Decimal is then a string, small ones included,
     // which is how the `pg` driver already hands over NUMERIC.
     params.set("output_format_json_quote_decimals", "1");
+    // JSON has no number for inf, -inf or nan, and without this ClickHouse writes them
+    // as `null`: measured on 26.9.18.11, a non-Nullable Float64 holding inf was shown
+    // as NULL, exported as NULL and replayed as 0. Quoted, they arrive as the strings
+    // "inf", "-inf" and "nan", which `keyedRows` turns into the shared words by the
+    // column's declared type (`floatWords`).
+    params.set("output_format_json_quote_denormals", "1");
 
     const database = opts.database ?? this.database;
     if (database) params.set("database", database);

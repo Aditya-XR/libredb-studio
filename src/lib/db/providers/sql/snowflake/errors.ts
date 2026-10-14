@@ -71,6 +71,8 @@ export interface SnowflakeFailureContext {
   readonly host: string;
   readonly user: string;
   readonly role: string;
+  /** The Warehouse field, absent when it is empty, so the no-warehouse sentence can name the one that failed. */
+  readonly warehouse?: string;
   readonly authMethod: "keypair" | "pat";
   readonly accountClaim: string;
   readonly userClaim: string;
@@ -89,16 +91,12 @@ export interface SnowflakeFailureContext {
 
 /**
  * The registration statement an administrator runs, `<name>` standing for the user's NAME, which can differ from the
- * login name Studio knows. It leads the refusal and is its copyable statement, because the trial refused the
- * self-service form with 003001, by a message naming MODIFY PROGRAMMATIC AUTHENTICATION METHODS on the user (M97).
+ * login name Studio knows. It is the refusal's copyable statement, and only there, so the sentence stays short: the
+ * public key body is long. The administrator's form, because the trial refused the self-service form with 003001, by a
+ * message naming MODIFY PROGRAMMATIC AUTHENTICATION METHODS on the user (M97); the provider doc names both.
  */
-function administratorStatement(fp8: string, body: string): string {
+export function administratorStatement(fp8: string, body: string): string {
   return `ALTER USER <name> ADD KEY PAIR ${keyPairName(fp8)} PUBLIC_KEY = '${body}'`;
-}
-
-/** The self-service registration statement, a user signed in as itself, which the refusal names with that 003001. */
-function selfServiceStatement(fp8: string, body: string): string {
-  return `ALTER USER ADD KEY PAIR ${keyPairName(fp8)} PUBLIC_KEY = '${body}'`;
 }
 
 /**
@@ -112,8 +110,6 @@ export const SNOWFLAKE_ERROR_SENTENCES = Object.freeze({
     readonly account: string;
     readonly user: string;
     readonly fingerprint: string;
-    readonly fp8: string;
-    readonly body: string;
   }) => {
     const id = values.uuid === null ? "" : `, [${values.uuid}]`;
     const cause =
@@ -121,11 +117,9 @@ export const SNOWFLAKE_ERROR_SENTENCES = Object.freeze({
         ? ""
         : `; an administrator can see the exact cause with SELECT SYSTEM$GET_LOGIN_FAILURE_DETAILS('${values.uuid}')`;
     return (
-      `Snowflake refused the key pair (JWT token is invalid${id}). ` +
-      `Studio signed as ${values.account}.${values.user} with the key whose fingerprint is ${values.fingerprint}. ` +
-      `An administrator registers it with ${administratorStatement(values.fp8, values.body)} and checks it with SHOW USER KEY PAIRS FOR USER <name>, where <name> is the user's NAME, which DESC USER and SHOW USERS show and which can differ from the login name; ALTER USER <name> SET RSA_PUBLIC_KEY = '${values.body}' is the documented alternative. ` +
-      `Signed in as this user, SHOW USER KEY PAIRS lists your keys; ${selfServiceStatement(values.fp8, values.body)} is refused with 003001 by a message that names MODIFY PROGRAMMATIC AUTHENTICATION METHODS on your own user as the privilege it needs. ` +
-      `If the key is listed, check that the account and user are the ones the key was registered on and that this computer's clock is correct${cause}.`
+      `Snowflake refused the key pair (JWT token is invalid${id}) for ${values.account}.${values.user}: no user has this login name, or the key whose fingerprint is ${values.fingerprint} is not registered on it. ` +
+      `Check User; an administrator registers the key with ALTER USER <name> ADD KEY PAIR, where <name> is the user's NAME from SHOW USERS, and Test connection shows the full statement to copy. ` +
+      `If the key is registered, check the account and this computer's clock${cause}.`
     );
   },
   keyPairMidRun: (code: string) =>
@@ -140,10 +134,16 @@ export const SNOWFLAKE_ERROR_SENTENCES = Object.freeze({
     "Snowflake signs in with an access token only for a user under a network policy, and this user has none. An administrator either attaches a network policy that allows the address Studio connects from, or sets an authentication policy with PAT_POLICY = (NETWORK_POLICY_EVALUATION = ENFORCED_NOT_REQUIRED).",
   roleRefused: (role: string, user: string, roleId: string, userId: string) =>
     `Snowflake refused role ${role} for user ${user}: the role does not exist, it is not granted to this user, or the key pair or access token is restricted to another role. Check the Role field; an administrator grants it with GRANT ROLE ${roleId} TO USER ${userId}.`,
+  tokenRoleRefused: (role: string, user: string) =>
+    `Snowflake refused role ${role} for this access token: the token may be restricted to another role, since a token generated with a role restriction signs in only as that role, or role ${role} is not granted to user ${user}. Set Role to the token's role, which SHOW USER PROGRAMMATIC ACCESS TOKENS lists under role_restriction, or use a token restricted to ${role}.`,
   roleMismatch: (actual: string, role: string) =>
     `Snowflake ran this connection as role ${actual}, not ${role}. Check the Role field; a role-restricted key or token signs in only as its own role.`,
+  tokenUserMismatch: (actual: string, user: string) =>
+    `Snowflake signed this access token in as user ${actual}, not ${user}. A token signs in only as the user it belongs to: enter ${actual} in User, or paste a token of user ${user}.`,
   noWarehouse:
     "No warehouse is selected for this connection. Enter one in the connection settings, or ask an administrator to set DEFAULT_WAREHOUSE on the user. Browsing works without one; queries do not.",
+  warehouseUnusable: (warehouse: string, role: string) =>
+    `Snowflake could not use warehouse ${warehouse} for this statement: it does not exist, role ${role} has no USAGE on it, or its name differs in case. Check Warehouse in the connection settings. Browsing works without a warehouse; queries do not.`,
   objectMissing: (role: string, roleLiteral: string, text: string) =>
     withText(
       `Snowflake says this object does not exist or role ${role} may not see it. Check the name, the database and schema, and the role; CALL EXPLAIN_PRIVILEGES(statement => '<statement>', missing_only => true) lists what is missing, and an administrator adds for_role => ${roleLiteral}.`,
@@ -152,6 +152,14 @@ export const SNOWFLAKE_ERROR_SENTENCES = Object.freeze({
   privileges: (role: string, text: string) => withText(`Role ${role} lacks a privilege this statement needs.`, text),
   forbidden:
     "Snowflake refused the request (403): the SQL API may not be enabled for this account, or a network policy blocks the address Studio connects from.",
+  headersTooLarge:
+    "Snowflake's gateway refused the request because its headers are too large (431). The access token is the one header Studio fills from a field: paste the token alone.",
+  tokenMissing:
+    "Snowflake found no usable token in the request (390146). Paste the access token alone, without a Bearer prefix or anything around it.",
+  noMessage: (status: number, code: string | null) =>
+    code === null
+      ? `Snowflake refused the request (HTTP ${status}) and sent no message.`
+      : `Snowflake refused the request (HTTP ${status}, code ${code}) and sent no message.`,
   statementFailed: (message: string, code: string | null, sqlState: string | null) =>
     code === null
       ? `Snowflake: ${message}`
@@ -173,8 +181,12 @@ export const SNOWFLAKE_ERROR_SENTENCES = Object.freeze({
   tlsRefused:
     "Snowflake refused the TLS certificate of this request (522). Studio sends no client certificate, so a proxy or gateway between Studio and Snowflake may be presenting one.",
   resultGone: "Snowflake no longer holds this statement's result; run it again.",
+  accountNotFound: (host: string) =>
+    `Snowflake has no account at ${host} (HTTP 404 on the first request). Check the account identifier: an organisation account is written orgname-account_name, with a hyphen after the organisation, and a locator outside AWS Oregon needs its region.`,
   invalidPayload:
     "Snowflake could not read the request Studio sent (390142). This is a Studio defect; please report it.",
+  connectDeadline: (host: string, seconds: number) =>
+    `Studio gave up connecting to ${host} after ${seconds} s with no answer. Check the account identifier and the network path to Snowflake; a locator outside AWS Oregon needs its region, and a PrivateLink name resolves only inside its private network.`,
   unreachable: (host: string) =>
     `Studio could not reach ${host}. Check the account identifier; a locator outside AWS Oregon needs its region.`,
   certMismatch: (host: string) =>
@@ -200,8 +212,14 @@ const CODE_SHAPE = /^[A-Za-z0-9_]{1,32}$/;
 /** Snowflake's syntax error code, which a bare Scripting block fails with. */
 const SYNTAX_ERROR_CODE = "001003";
 const SCRIPTING_KEYWORDS: ReadonlySet<string> = new Set(["BEGIN", "DECLARE"]);
-/** 390186 is what Snowflake answers, at HTTP 400 on the submit; 390189 and 3013 are the documented codes. */
+/**
+ * 390186 is what Snowflake answers, at HTTP 400 on the submit; 390189 and 3013 are the documented codes. 390186 also
+ * answers a role the credential may not use, which for a token is a role restriction no GRANT changes.
+ */
+const ROLE_NOT_PERMITTED_CODE = "390186";
 const ROLE_REFUSED_CODES: ReadonlySet<string> = new Set(["390186", "390189", "3013"]);
+/** Snowflake's "Bearer token is missing in the HTTP request authorization header", for a header it cannot read. */
+const TOKEN_MISSING_CODE = "390146";
 /** The code of a command the SQL API refuses to run, such as `USE`. */
 const UNSUPPORTED_COMMAND_CODE = "391911";
 /**
@@ -279,25 +297,44 @@ function signInError(failure: SnowflakeFailure, context: SnowflakeFailureContext
     account: context.accountClaim,
     user: context.userClaim,
     fingerprint,
-    fp8,
-    body,
   });
   return new SnowflakeError("auth", sentence, administratorStatement(fp8, body));
 }
 
+/** Each deadline error with the `timeout` its statement was sent with, so `connect()` can word its own. */
+const deadlines = new WeakMap<SnowflakeError, number>();
+
 /** Studio's own deadline passed, worded by the bound that set it, since only the query timeout is the user's. */
 export function deadlineError(timeoutS: number, bound: SnowflakeDeadlineBound): SnowflakeError {
   const sentences = SNOWFLAKE_ERROR_SENTENCES;
-  return new SnowflakeError(
+  const error = new SnowflakeError(
     "query",
     bound === "surface" ? sentences.surfaceDeadline(timeoutS) : sentences.deadline(timeoutS),
   );
+  deadlines.set(error, timeoutS);
+  return error;
+}
+
+/**
+ * A deadline met by a statement `connect()` sent, as a connection failure naming the host and the wait: neither the
+ * connect statement nor the role check needs a warehouse, so no answer within the bound means Snowflake was not
+ * reached, and the query sentence's advice to raise Query Timeout would point at a value the user may never have set.
+ * Any other error is returned unchanged.
+ */
+export function connectDeadlineError(error: unknown, host: string, waitedS: (timeoutS: number) => number): unknown {
+  if (!(error instanceof SnowflakeError)) return error;
+  const timeoutS = deadlines.get(error);
+  if (timeoutS === undefined) return error;
+  return new SnowflakeError("unavailable", sentences.connectDeadline(host, waitedS(timeoutS)));
 }
 
 /** A failed Snowflake answer as its category and sentence; the first matching row of the table wins. */
 export function failureError(failure: SnowflakeFailure, context: SnowflakeFailureContext): SnowflakeError {
   const text = serverMessage(failure.message ?? "", context.secretForms);
   const { status, code } = failure;
+  if (code === ROLE_NOT_PERMITTED_CODE && context.authMethod === "pat") {
+    return new SnowflakeError("auth", sentences.tokenRoleRefused(context.role, context.user));
+  }
   if (code !== null && ROLE_REFUSED_CODES.has(code)) {
     return new SnowflakeError(
       "auth",
@@ -309,6 +346,8 @@ export function failureError(failure: SnowflakeFailure, context: SnowflakeFailur
       ),
     );
   }
+  if (code === TOKEN_MISSING_CODE && context.authMethod === "pat")
+    return new SnowflakeError("auth", sentences.tokenMissing);
   if (status === 401 || code === "PAT_INVALID") return signInError(failure, context, text);
   if (status === 403) return new SnowflakeError("auth", sentences.forbidden);
   if (status === 408) {
@@ -322,13 +361,26 @@ export function failureError(failure: SnowflakeFailure, context: SnowflakeFailur
     );
   }
   if (status === 429) return new SnowflakeError("unavailable", sentences.rateLimited);
+  if (status === 431) return new SnowflakeError("auth", sentences.headersTooLarge);
   if (UNAVAILABLE_STATUSES.has(status)) {
     return new SnowflakeError("unavailable", sentences.unavailable(status, context.attempts));
   }
   if (status === 522) return new SnowflakeError("unavailable", sentences.tlsRefused);
-  if (status === 404) return new SnowflakeError("query", sentences.resultGone);
+  if (status === 404) {
+    // A submit has no handle yet: its 404 is the host's load balancer answering for an account it does not have.
+    return failure.request === "submit"
+      ? new SnowflakeError("unavailable", sentences.accountNotFound(context.host))
+      : new SnowflakeError("query", sentences.resultGone);
+  }
   if (code === "390142") return new SnowflakeError("defect", sentences.invalidPayload);
-  if (code !== null && NO_WAREHOUSE_CODES.has(code)) return new SnowflakeError("query", sentences.noWarehouse);
+  if (code !== null && NO_WAREHOUSE_CODES.has(code)) {
+    // With Warehouse set the statement did name one, so the sentence names it rather than asking for one.
+    const { warehouse } = context;
+    return new SnowflakeError(
+      "query",
+      warehouse === undefined ? sentences.noWarehouse : sentences.warehouseUnusable(warehouse, context.role),
+    );
+  }
   if (code === "002003") {
     return new SnowflakeError(
       "query",
@@ -337,11 +389,10 @@ export function failureError(failure: SnowflakeFailure, context: SnowflakeFailur
   }
   if (code === "003001") return new SnowflakeError("query", sentences.privileges(context.role, text));
   if (code === UNSUPPORTED_COMMAND_CODE) return new SnowflakeError("query", sentences.unsupportedCommand(text));
-  const failed = sentences.statementFailed(
-    text,
-    printable(code, context.secretForms),
-    printable(failure.sqlState, context.secretForms),
-  );
+  const printedCode = printable(code, context.secretForms);
+  // A sentence is never built from an empty message, which read as a bare "Snowflake:".
+  if (text.trim() === "") return new SnowflakeError("query", sentences.noMessage(status, printedCode));
+  const failed = sentences.statementFailed(text, printedCode, printable(failure.sqlState, context.secretForms));
   const scripting =
     status === 422 &&
     code === SYNTAX_ERROR_CODE &&

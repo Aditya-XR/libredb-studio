@@ -330,6 +330,47 @@ describe("useTabManager", () => {
     expect(mockToastDefault).not.toHaveBeenCalled();
   });
 
+  // SF-023: the shell cancels a closed tab's run, so it has to know whether the tab closed at all.
+  test("closeTab answers whether it closed the tab", () => {
+    const { result } = renderHook(() => useTabManager({ activeConnection: null, metadata: null, schema: [] }));
+    let closed: boolean | undefined;
+    act(() => {
+      closed = result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    expect(closed).toBe(false);
+
+    act(() => {
+      result.current.addTab();
+    });
+    act(() => {
+      closed = result.current.closeTab("missing", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    expect(closed).toBe(false);
+    act(() => {
+      closed = result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    expect(closed).toBe(true);
+  });
+
+  // SF-023: closing a running tab cancels its run, so Undo brings back its text, not a spinner nothing will clear.
+  test("Undo reopens a tab closed while running as a tab that is not running", () => {
+    const { result } = renderHook(() => useTabManager({ activeConnection: null, metadata: null, schema: [] }));
+    act(() => {
+      result.current.updateTabById("default", { query: "SELECT 1", isExecuting: true, isLoadingMore: true });
+      result.current.addTab();
+    });
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    act(() => {
+      lastToastCall().options.action.onClick();
+    });
+    const reopened = result.current.tabs.find((t) => t.id === "default");
+    expect(reopened?.query).toBe("SELECT 1");
+    expect(reopened?.isExecuting).toBe(false);
+    expect(reopened?.isLoadingMore).toBe(false);
+  });
+
   test("closeTab offers an Undo toast naming the closed tab", () => {
     const { result } = renderHook(() =>
       useTabManager({

@@ -93,7 +93,9 @@ describe("the plan-draft reader stays reachable from a browser", () => {
       these readers, whose own only reach is a TYPE-ONLY import of the shared type module. That
       is checked below, so a value import appearing anywhere in the closure fails this test rather
       than a browser. `./words` joined it with #1312: a procedural body is found by its code
-      words, and that reader reaches nothing but the other two.
+      words, and that reader reaches nothing but the other two. `./operative-keyword` and the
+      `./leading-keyword` it reads joined it with SF-046: a T-SQL MERGE keeps its `;`, and the
+      statement is a MERGE by its operative keyword; both reach only the readers above.
     */
     const read = (specifier: string) =>
       fs.readFileSync(path.join(ROOT, "src/lib/sql", `${specifier.replace("./", "")}.ts`), "utf8");
@@ -109,7 +111,14 @@ describe("the plan-draft reader stays reachable from a browser", () => {
       }
     }
 
-    expect([...closure].sort()).toEqual(["./grammar", "./spans", "./words", "@/lib/types"]);
+    expect([...closure].sort()).toEqual([
+      "./grammar",
+      "./leading-keyword",
+      "./operative-keyword",
+      "./spans",
+      "./words",
+      "@/lib/types",
+    ]);
     // The one non-relative member, and it is erased at build time: a VALUE import of the shared
     // type module would pull the whole type barrel into the browser bundle.
     expect(read("./grammar")).toContain('import type { DatabaseType } from "@/lib/types"');

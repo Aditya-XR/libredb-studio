@@ -36,7 +36,7 @@ It shows queues and exchanges as configuration: their arguments, bindings, polic
 
 | RabbitMQ | Studio |
 |---|---|
-| Virtual host | Container, one level; `/` is marked as the agent walk's default |
+| Virtual host | Container, one level; `/` is marked as the agent walk's default, and Schema Diff reads every virtual host the account lists |
 | Stream | Kind `stream`, role `relation`: nine fixed columns, readable |
 | Classic or quorum queue | Kind `queue`, role `config`: detail and counts, never read |
 | Exchange | Kind `exchange`, role `config`: detail and bindings |

@@ -1,3 +1,4 @@
+import { hasConfirmCodeForm } from "@/lib/sql/confirm-forms";
 import { resolveSqlGrammar } from "@/lib/sql/grammar";
 import { readOperativeKeyword } from "@/lib/sql/operative-keyword";
 import { findCodeWord } from "@/lib/sql/words";
@@ -13,8 +14,10 @@ const SNOWFLAKE_GRAMMAR = resolveSqlGrammar("snowflake");
 /**
  * The prefix, and the decision behind it.
  *
- * `EXPLAIN USING JSON` compiles a statement and returns its plan without running it; Snowflake has no executing
+ * `EXPLAIN USING JSON` compiles a statement and returns its plan without running its query; Snowflake has no executing
  * EXPLAIN, so the Explain button, which always asks for "analyze" and skips the confirmation gate, gets this form.
+ * Compiling is not inert, though: the compiler evaluates a `SYSTEM$` function, so a statement naming one is declined
+ * (see `SNOWFLAKE_EXPLAIN_GATED_DECLINE`).
  * The background estimate the editor sends beside each SELECT gets the same form with the same declines: on the trial
  * (Snowflake 10.37.100, 2026-10-12) it left a suspended warehouse suspended, so it bills cloud services only.
  */
@@ -26,6 +29,20 @@ const SCRIPTING_KEYWORDS: ReadonlySet<string> = new Set(["CALL", "EXECUTE", "BEG
 /** What the Explain button says for a statement `SCRIPTING_KEYWORDS` or an anonymous procedure declines. */
 export const SNOWFLAKE_EXPLAIN_DECLINE =
   "Snowflake explains a query only; this statement calls a procedure, runs dynamic SQL or opens a Scripting block.";
+
+/**
+ * What the Explain button says for a statement the confirmation gate's code forms find: a `SYSTEM$` function, or an
+ * anonymous procedure the scripting decline above already names.
+ *
+ * Measured on the trial (Snowflake 10.37.100, SF-001): `EXPLAIN USING JSON SELECT SYSTEM$WAIT(5)` took 6.5 s, and
+ * `EXPLAIN USING JSON SELECT SYSTEM$CANCEL_QUERY('<id>')` really cancelled the other statement. The Explain button and
+ * the background estimate skip the gate, so either would perform, unconfirmed, what RUN asks about. Declining here
+ * covers both and every caller of `POST /api/db/query` that asks for a plan, since the route builds the statement
+ * through this strategy. Routing Explain through the gate instead was rejected: a confirmed Explain would still
+ * perform the call, which is not what a person asking for a plan expects.
+ */
+export const SNOWFLAKE_EXPLAIN_GATED_DECLINE =
+  "Snowflake runs a SYSTEM$ function while it explains a statement, so Studio does not explain one. Run it instead; the confirmation gate asks first.";
 
 /** How deep the operation tree may go before it stops, far past any plan a compiler writes. */
 const MAX_PLAN_DEPTH = 64;
@@ -143,11 +160,12 @@ export const snowflakeJsonStrategy: ExplainStrategy = {
   format: "snowflake-json",
   // Both modes build the one form.
   buildSql(sql: string) {
-    if (isScripting(sql) || !isQuery(sql)) return null;
+    if (isScripting(sql) || !isQuery(sql) || hasConfirmCodeForm(sql, SNOWFLAKE_GRAMMAR)) return null;
     return `${EXPLAIN_PREFIX}${sql}`;
   },
   declineReason(sql: string) {
-    return isScripting(sql) ? SNOWFLAKE_EXPLAIN_DECLINE : null;
+    if (isScripting(sql)) return SNOWFLAKE_EXPLAIN_DECLINE;
+    return hasConfirmCodeForm(sql, SNOWFLAKE_GRAMMAR) ? SNOWFLAKE_EXPLAIN_GATED_DECLINE : null;
   },
   // The plan arrives as one row whose first column is the JSON text; an unreadable plan is null.
   extractPlan(result) {

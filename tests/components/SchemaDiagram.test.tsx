@@ -178,7 +178,7 @@ import {
 import { mockToastError } from "../helpers/mock-sonner";
 import { mockSchema, emptySchema } from "../fixtures/schemas";
 import type { DetailedObject } from "@/lib/db/detailed-object";
-import { pathKey } from "@/lib/db/object-path";
+import { diagramNodeId } from "@/components/schema-diagram/graph";
 import type { ProviderCapabilities } from "@/lib/db/types";
 
 // =============================================================================
@@ -1095,9 +1095,23 @@ describe("SchemaDiagram", () => {
       const props = createDefaultProps();
       const { container } = render(<SchemaDiagram {...props} />);
 
-      expect(container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)).not.toBeNull();
-      expect(container.querySelector(`[data-node-id="${pathKey(["public", "orders"])}"]`)).not.toBeNull();
-      expect(container.querySelector(`[data-node-id="${pathKey(["public", "products"])}"]`)).not.toBeNull();
+      expect(container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)).not.toBeNull();
+      expect(container.querySelector(`[data-node-id="${diagramNodeId(["public", "orders"])}"]`)).not.toBeNull();
+      expect(container.querySelector(`[data-node-id="${diagramNodeId(["public", "products"])}"]`)).not.toBeNull();
+    });
+
+    test("renders a table whose name holds a double quote or a backslash (SF-010)", () => {
+      const quoted = { ...mockSchema[0], name: 'D_quote"d', path: ["public", 'D_quote"d'] };
+      const slashed = { ...mockSchema[0], name: "back\\slash", path: ["public", "back\\slash"] };
+      const props = createDefaultProps({ schema: [quoted, slashed] });
+      const { container } = render(<SchemaDiagram {...props} />);
+
+      // The selector React Flow builds from a node id when it measures the node.
+      for (const path of [quoted.path, slashed.path]) {
+        const selector = `[data-node-id="${diagramNodeId(path)}"]`;
+        expect(() => container.querySelector(selector)).not.toThrow();
+        expect(container.querySelector(selector)).not.toBeNull();
+      }
     });
 
     test("node with empty/null data returns nothing", () => {
@@ -1128,7 +1142,7 @@ describe("SchemaDiagram", () => {
       expect(view.queryByText("Selected:")).toBeNull();
 
       // Click the users node
-      const usersNode = container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)!;
+      const usersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)!;
       fireEvent.click(usersNode);
 
       // Selection should appear with selected node name and clear button
@@ -1145,7 +1159,7 @@ describe("SchemaDiagram", () => {
       const { container } = render(<SchemaDiagram {...props} />);
       const view = within(container);
 
-      const usersNode = container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)!;
+      const usersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)!;
 
       // Select
       fireEvent.click(usersNode);
@@ -1162,7 +1176,7 @@ describe("SchemaDiagram", () => {
       const view = within(container);
 
       // Select a node
-      const usersNode = container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)!;
+      const usersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)!;
       fireEvent.click(usersNode);
       expect(view.queryByText("Selected:")).not.toBeNull();
 
@@ -1177,7 +1191,7 @@ describe("SchemaDiagram", () => {
       const { container } = render(<SchemaDiagram {...props} />);
       const view = within(container);
 
-      fireEvent.click(container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)!);
+      fireEvent.click(container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)!);
       expect(view.queryByText("Selected:")).not.toBeNull();
 
       // Filtering "users" out of the graph must clear the stale selection.
@@ -1186,13 +1200,13 @@ describe("SchemaDiagram", () => {
 
       expect(view.queryByText("Selected:")).toBeNull();
       // ...and the surviving table does not inherit any highlight.
-      const ordersNode = container.querySelector(`[data-node-id="${pathKey(["public", "orders"])}"]`)!;
+      const ordersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "orders"])}"]`)!;
       expect(ordersNode.querySelector(".border-brand-tint\\/60")).toBeNull();
 
       // The drop is permanent: clearing the filter brings the table back to
       // the canvas but must NOT resurrect a selection the user already lost.
       fireEvent.change(searchInput, { target: { value: "" } });
-      expect(container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)).not.toBeNull();
+      expect(container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)).not.toBeNull();
       expect(view.queryByText("Selected:")).toBeNull();
     });
 
@@ -1204,10 +1218,10 @@ describe("SchemaDiagram", () => {
       const view = within(container);
 
       expect(container.querySelectorAll("[data-node-id]").length).toBe(2);
-      const shopNode = container.querySelector(`[data-node-id="${pathKey(["shop", "dbo", "customers"])}"]`);
+      const shopNode = container.querySelector(`[data-node-id="${diagramNodeId(["shop", "dbo", "customers"])}"]`);
       expect(shopNode).not.toBeNull();
       expect(
-        container.querySelector(`[data-node-id="${pathKey(["libredb_objects", "app", "customers"])}"]`),
+        container.querySelector(`[data-node-id="${diagramNodeId(["libredb_objects", "app", "customers"])}"]`),
       ).not.toBeNull();
 
       fireEvent.click(shopNode!);
@@ -1223,7 +1237,7 @@ describe("SchemaDiagram", () => {
       const view = within(container);
 
       // Select a node
-      const usersNode = container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)!;
+      const usersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)!;
       fireEvent.click(usersNode);
       expect(view.queryByText("Selected:")).not.toBeNull();
 
@@ -1245,7 +1259,7 @@ describe("SchemaDiagram", () => {
       const { container } = render(<SchemaDiagram {...props} />);
 
       // Click users node
-      const usersNode = container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)!;
+      const usersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)!;
       fireEvent.click(usersNode);
 
       // The TableNode's root div inside the data-node-id div should carry the brand-tint highlight border
@@ -1258,11 +1272,11 @@ describe("SchemaDiagram", () => {
       const { container } = render(<SchemaDiagram {...props} />);
 
       // Select 'orders' which has FK to 'users'
-      const ordersNode = container.querySelector(`[data-node-id="${pathKey(["public", "orders"])}"]`)!;
+      const ordersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "orders"])}"]`)!;
       fireEvent.click(ordersNode);
 
       // The 'users' table should also be highlighted (FK target)
-      const usersNode = container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)!;
+      const usersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)!;
       const usersInner = usersNode.querySelector(".border-brand-tint\\/60");
       expect(usersInner).not.toBeNull();
     });
@@ -1272,11 +1286,11 @@ describe("SchemaDiagram", () => {
       const { container } = render(<SchemaDiagram {...props} />);
 
       // Select 'users' — orders has FK pointing to users
-      const usersNode = container.querySelector(`[data-node-id="${pathKey(["public", "users"])}"]`)!;
+      const usersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "users"])}"]`)!;
       fireEvent.click(usersNode);
 
       // The 'orders' table should be highlighted (it references users via FK)
-      const ordersNode = container.querySelector(`[data-node-id="${pathKey(["public", "orders"])}"]`)!;
+      const ordersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "orders"])}"]`)!;
       const ordersInner = ordersNode.querySelector(".border-brand-tint\\/60");
       expect(ordersInner).not.toBeNull();
     });
@@ -1286,11 +1300,11 @@ describe("SchemaDiagram", () => {
       const { container } = render(<SchemaDiagram {...props} />);
 
       // Select 'orders' (related to users via FK, not related to products)
-      const ordersNode = container.querySelector(`[data-node-id="${pathKey(["public", "orders"])}"]`)!;
+      const ordersNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "orders"])}"]`)!;
       fireEvent.click(ordersNode);
 
       // Products should NOT be highlighted
-      const productsNode = container.querySelector(`[data-node-id="${pathKey(["public", "products"])}"]`)!;
+      const productsNode = container.querySelector(`[data-node-id="${diagramNodeId(["public", "products"])}"]`)!;
       const productsInner = productsNode.querySelector(".border-brand-tint\\/60");
       expect(productsInner).toBeNull();
       // Products should have default border
@@ -2002,7 +2016,7 @@ describe("SchemaDiagram", () => {
       const view = within(container);
 
       const shopCard = container.querySelector<HTMLElement>(
-        `[data-node-id="${pathKey(["shop", "dbo", "customers"])}"]`,
+        `[data-node-id="${diagramNodeId(["shop", "dbo", "customers"])}"]`,
       )!;
       fireEvent.click(within(shopCard).getByText(/\+\d+ more/));
 

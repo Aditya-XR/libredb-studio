@@ -1389,3 +1389,53 @@ describe("Statement scope in completion", () => {
     expect(at("CREATE VIEW v AS WITH c AS (SELECT 1 AS n) SELECT * FROM ").some((s) => s.label === "c")).toBe(true);
   });
 });
+
+// SF-042: a dialect's own keywords and functions join the shared lists on that dialect only.
+describe("dialect completion words", () => {
+  function labels(line: string, dialect?: DatabaseType): string[] {
+    const monaco = createMockMonaco();
+    registerSQLCompletionProvider(monaco, { tableItems: [], columnMap: new Map(), allColumns: new Map() }, dialect);
+    return monaco
+      ._getProvider()!
+      .provideCompletionItems(createMockModel(line), createPosition(1, line.length + 1))
+      .suggestions.map((item) => String(item.label));
+  }
+
+  test.each([
+    ["SELECT * FROM D_PARENT QUAL", "QUALIFY"],
+    ["SELECT ARRAY_AG", "ARRAY_AGG"],
+    ["SELECT PARSE_J", "PARSE_JSON"],
+    ["SELECT * FROM TABLE(FLAT", "FLATTEN"],
+    ["SELECT CURRENT_", "CURRENT_ROLE"],
+    ["SELECT CURRENT_", "CURRENT_WAREHOUSE"],
+    ["SELECT IFF", "IFF"],
+  ])("Snowflake offers %s -> %s", (line, label) => {
+    expect(labels(line, "snowflake")).toContain(label);
+  });
+
+  test("a Snowflake function inserts a call and a keyword its word, each once", () => {
+    const monaco = createMockMonaco();
+    registerSQLCompletionProvider(monaco, { tableItems: [], columnMap: new Map(), allColumns: new Map() }, "snowflake");
+    const items = monaco
+      ._getProvider()!
+      .provideCompletionItems(createMockModel("SELECT "), createPosition(1, 8)).suggestions;
+    const parse = items.filter((item) => item.label === "PARSE_JSON");
+    expect(parse).toHaveLength(1);
+    expect(parse[0].insertText).toBe("PARSE_JSON($1)");
+    expect(parse[0].kind).toBe(1);
+    const qualify = items.filter((item) => item.label === "QUALIFY");
+    expect(qualify).toHaveLength(1);
+    expect(qualify[0].kind).toBe(17);
+    // A name the shared list already holds is not offered twice.
+    expect(items.filter((item) => item.label === "COUNT")).toHaveLength(1);
+  });
+
+  test("no other dialect is offered Snowflake's words", () => {
+    for (const type of [...SHIPPED_DATABASE_TYPES.filter((t) => t !== "snowflake"), undefined]) {
+      const offered = labels("SELECT ", type);
+      expect(offered, String(type)).not.toContain("QUALIFY");
+      expect(offered, String(type)).not.toContain("PARSE_JSON");
+      expect(offered.length, String(type)).toBe(labels("SELECT ").length);
+    }
+  });
+});

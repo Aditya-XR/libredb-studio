@@ -3,16 +3,19 @@
  * deadline, the engine limiter and the run registry, returned as one neutral result type.
  *
  * A statement is `POST /api/v2/statements?async=true` with the connection's context fields and fixed parameters, so
- * an account's own `MULTI_STATEMENT_COUNT`, `TIMEZONE` or result chunking never changes what Studio reads. Its answer
+ * an account's own `MULTI_STATEMENT_COUNT` or result chunking never changes what Studio reads. `TIMEZONE` is left to
+ * the user's own setting, as Snowsight leaves it, since every temporal cell arrives as epoch seconds or days (with
+ * its offset for `TIMESTAMP_TZ`) and decodes the same in any session zone. Its answer
  * carries the statement handle, which must have the UUID shape before anything else is sent; the status, partition
  * and cancel paths are built from it on the provider's origin, and a status link in an answer is checked and never
  * followed. The poll waits `SNOWFLAKE_POLL_FIRST_MS`, doubling to `SNOWFLAKE_POLL_MAX_MS`, until the 200 that carries
  * partition 0; a 429 sets the next wait to the jittered maximum.
  *
  * Every run, a user statement or one Studio sends on its own, begins in the run registry (with or without a
- * `queryId`) under its deadline, joins the lifetime signal, and holds one permit of the Snowflake engine limiter from
- * its submit until its result is built. The submit itself runs under the deadline alone: a cancel that arrives during
- * it waits for the handle the submit answers, so the statement can be cancelled by it.
+ * `queryId`), joins the lifetime signal, and holds one permit of the Snowflake engine limiter from its submit until its
+ * result is built. Its deadline starts once the permit is held; the wait for the permit has a bound of its own. The
+ * submit itself runs under the deadline alone: a cancel that arrives during it waits for the handle the submit
+ * answers, so the statement can be cancelled by it.
  *
  * The wire envelope (`statementHandle`, `resultSetMetaData`, `rowType`, `partitionInfo`) stays in this module,
  * `rows.ts` and `decode.ts`; everything above reads `SnowflakeResult`.
@@ -44,9 +47,13 @@ import {
 } from "./errors";
 import {
   partitionFailureText,
+  readOversizedFirstAnswer,
   readResultRows,
   SNOWFLAKE_FIRST_ANSWER_MAX_BYTES,
+  SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES,
   SNOWFLAKE_ROWS_SENTENCES,
+  type SnowflakeOversizedFirst,
+  type SnowflakeRowsOutcome,
 } from "./rows";
 import {
   SNOWFLAKE_CONTROL_ANSWER_MAX_BYTES,
@@ -90,16 +97,38 @@ export const SNOWFLAKE_STATEMENT_SENTENCES = Object.freeze({
     "Snowflake's SQL API does not run USE. Set Database, Schema, Warehouse or Role on the connection instead, or use fully qualified names such as database.schema.table. Nothing was sent.",
   settingNotCarried:
     "Each Snowflake statement runs in its own session, so a session setting or variable does not carry over to the next statement.",
+  temporaryNotCarried:
+    "Each Snowflake statement runs in its own session, so this temporary object belongs to a session no later statement joins: the next statement cannot use or drop it, and Snowflake removes it only when that session ends. Create a permanent or TRANSIENT object instead, or use it inside one EXECUTE IMMEDIATE $$ ... $$ block.",
+  noLastQuery:
+    "Each Snowflake statement runs in its own session, so LAST_QUERY_ID() names no earlier statement here and answers NULL. Use the query ID from Query History instead, or call it inside one EXECUTE IMMEDIATE $$ ... $$ block.",
   noTransactions:
     "Snowflake's SQL API runs each statement in its own session, so a transaction cannot span statements. Nothing was sent. Run the whole transaction inside one EXECUTE IMMEDIATE $$ ... $$ block.",
   secondaryRoles: (roles: string, role: string) =>
     `Secondary roles are active for this user (${roles}), so this connection can read and change what those roles can, not only role ${role}. An administrator can set DEFAULT_SECONDARY_ROLES = () on the user.`,
+  unresolvedDatabase: (name: string, role: string) =>
+    `Snowflake resolves no database named ${name} for role ${role}, so statements run with no current database and unqualified names fail. Check the name, its case, and that the role has USAGE on it.`,
+  unresolvedSchema: (name: string, role: string) =>
+    `Snowflake resolves no schema named ${name} in the connection's database for role ${role}, so statements run with no current schema and unqualified names fail. Check the name, its case, and that the role has USAGE on it.`,
+  unresolvedWarehouse: (name: string, role: string) =>
+    `Snowflake resolves no warehouse named ${name} for role ${role}, so queries fail although browsing works. Check the name, its case, and that the role has USAGE on it.`,
   badHandle: "Snowflake answered without a statement handle Studio can use.",
   foreignLink: "Snowflake answered with a link outside this account's statements, so Studio did not follow it.",
 });
 
-/** The role check `connect()` sends; M100 measured it to answer with the warehouse suspended, and with none at all. */
-export const SNOWFLAKE_ROLE_CHECK_SQL = "SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s";
+/**
+ * The role check `connect()` sends; M100 measured it to answer with the warehouse suspended, and with none at all.
+ * `CURRENT_USER()` and the three context names ride in the same statement, so the token sign-in's user check and the
+ * unresolved-name cautions cost no request of their own; the six-column form answered the same way on 2026-10-14.
+ */
+export const SNOWFLAKE_ROLE_CHECK_SQL =
+  "SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s, CURRENT_USER() AS u, CURRENT_DATABASE() AS d, CURRENT_SCHEMA() AS c, CURRENT_WAREHOUSE() AS w";
+
+/** The `code` of each unresolved-name caution the role check gives, so `connect()` can drop one said twice. */
+export const SNOWFLAKE_UNRESOLVED_CODES = Object.freeze({
+  database: "SNOWFLAKE_UNRESOLVED_DATABASE",
+  schema: "SNOWFLAKE_UNRESOLVED_SCHEMA",
+  warehouse: "SNOWFLAKE_UNRESOLVED_WAREHOUSE",
+} as const);
 
 /** The connection's `queryTimeoutMs` as Snowflake's `timeout`: whole seconds, rounded up, 1 to the maximum. */
 export function clampedTimeoutS(queryTimeoutMs: number): number {
@@ -290,14 +319,68 @@ function isLoneTransaction(tokens: readonly CodeToken[]): boolean {
   );
 }
 
+/** The words that may stand between `CREATE` and the object kind; three of them make the object temporary. */
+const CREATE_MODIFIERS: ReadonlySet<string> = new Set([
+  "OR",
+  "REPLACE",
+  "ALTER",
+  "LOCAL",
+  "GLOBAL",
+  "TEMP",
+  "TEMPORARY",
+  "VOLATILE",
+  "TRANSIENT",
+]);
+const TEMPORARY_WORDS: ReadonlySet<string> = new Set(["TEMP", "TEMPORARY", "VOLATILE"]);
+
+/** Whether `CREATE` is followed, among its modifiers, by `TEMP`, `TEMPORARY` or `VOLATILE`. */
+function createsTemporary(tokens: readonly CodeToken[]): boolean {
+  if (tokens[0]?.kind !== "word" || tokens[0].text !== "CREATE") return false;
+  for (const token of tokens.slice(1)) {
+    if (token.kind !== "word" || !CREATE_MODIFIERS.has(token.text)) return false;
+    if (TEMPORARY_WORDS.has(token.text)) return true;
+  }
+  return false;
+}
+
+/** Whether the statement's code calls `LAST_QUERY_ID(`; text inside a string or a `$$` block is not code. */
+function callsLastQueryId(tokens: readonly CodeToken[]): boolean {
+  return tokens.some((token, index) => {
+    const next = tokens[index + 1];
+    return token.kind === "word" && token.text === "LAST_QUERY_ID" && next?.kind === "other" && next.text === "(";
+  });
+}
+
 /** The notice of a statement whose effect a sessionless request does not keep, or null. */
 function sessionNotice(keyword: string | null, tokens: readonly CodeToken[]): QueryWarning | null {
-  const second = tokens[1];
-  const alterSession = keyword === "ALTER" && second?.kind === "word" && second.text === "SESSION";
+  const [, second, third] = tokens;
+  // `ALTER SESSION POLICY` alters an account object, which does outlive the statement.
+  const alterSession =
+    keyword === "ALTER" &&
+    second?.kind === "word" &&
+    second.text === "SESSION" &&
+    third?.kind === "word" &&
+    (third.text === "SET" || third.text === "UNSET");
   if (keyword === "SET" || keyword === "UNSET" || alterSession) {
     return { code: "SNOWFLAKE_SETTING_NOT_CARRIED", message: SNOWFLAKE_STATEMENT_SENTENCES.settingNotCarried };
   }
+  if (createsTemporary(tokens)) {
+    return { code: "SNOWFLAKE_TEMPORARY_NOT_CARRIED", message: SNOWFLAKE_STATEMENT_SENTENCES.temporaryNotCarried };
+  }
+  if (callsLastQueryId(tokens)) {
+    return { code: "SNOWFLAKE_NO_LAST_QUERY", message: SNOWFLAKE_STATEMENT_SENTENCES.noLastQuery };
+  }
   return null;
+}
+
+/**
+ * Whether the user Snowflake signed in is the one typed in User: a double-quoted name exactly, without its quotes,
+ * and anything else ignoring case, since a login name is case-insensitive and Snowflake upper-cases an unquoted name.
+ */
+function sameUser(typed: string, actual: string): boolean {
+  const name = typed.trim();
+  if (QUOTED_IDENTIFIER.test(name)) return foldIdentifier(name) === actual;
+  return name.toUpperCase() === actual.toUpperCase();
 }
 
 /** A decoded text cell as text; an absent or null cell is empty. */
@@ -383,7 +466,6 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
         query_tag: run.tag,
         client_result_chunk_size: SNOWFLAKE_CHUNK_SIZE_MB,
         rows_per_resultset: SNOWFLAKE_ROWS_PER_RESULTSET,
-        timezone: "UTC",
       },
     });
   }
@@ -448,45 +530,61 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
     throw deadline ? deadlineError(run.timeoutS, run.deadlineBound) : cancelledError();
   }
 
-  /** A transport failure as a `SnowflakeError`; one that is not the transport's is returned unchanged. */
-  function transportError(error: unknown, request: "submit" | "status" | "partition"): unknown {
+  /**
+   * A transport failure as a `SnowflakeError`; one that is not the transport's is returned unchanged. A status answer
+   * too large to read never reaches here: the poll reads it again as a stream.
+   */
+  function transportError(error: unknown): unknown {
     const mapped = transportFailureError(error, options.failure.host);
     if (!(mapped instanceof TransportError)) return mapped;
-    if (mapped.kind === "too-large" && request === "status") {
-      return new SnowflakeError("query", SNOWFLAKE_ROWS_SENTENCES.firstTooLarge);
-    }
     return new SnowflakeError("unavailable", mapped.message);
   }
 
-  async function buildResult(run: Run, handle: string, answer: Record<string, unknown>): Promise<SnowflakeResult> {
-    const meta = isRecord(answer.resultSetMetaData) ? answer.resultSetMetaData : {};
+  /** One partition's bytes (`query` empty for the status answer itself); an answer that is not 200 is thrown. */
+  async function fetchBytes(run: Run, handle: string, query: string, maxResponseBytes: number, truncateAt: number) {
+    const part = await transport.partition(statusPath(handle), query, run.signal, maxResponseBytes, truncateAt);
+    if (part.status === 200) return part;
+    if (PARTITION_GAVE_UP.has(part.status)) await cancelOwn(handle);
+    throw failureError(
+      failureOf(part.status, await partitionFailureText(part, maxResponseBytes), "partition"),
+      failureContext(run, part.attempts, true),
+    );
+  }
+
+  /**
+   * The result of a finished statement: from its status answer, or, when that answer was too large to read whole,
+   * from `first`, partition 0 read again as a stream under the budget (SF-032).
+   */
+  async function buildResult(
+    run: Run,
+    handle: string,
+    answer: Record<string, unknown>,
+    first?: SnowflakeOversizedFirst,
+  ): Promise<SnowflakeResult> {
+    const metaOf = first?.meta ?? answer.resultSetMetaData;
+    const meta = isRecord(metaOf) ? metaOf : {};
     const columns = readColumns(meta.rowType);
     const names = columns.map((column) => column.name);
     const partitionInfo = meta.partitionInfo;
-    const outcome = await readResultRows({
-      columns: names,
-      firstData: answer.data,
-      partitionCount: Array.isArray(partitionInfo) ? Math.max(partitionInfo.length, 1) : 1,
-      fetchPartition: async (index, maxResponseBytes, truncateAt) => {
-        const part = await transport.partition(
-          statusPath(handle),
-          `partition=${index}`,
-          run.signal,
-          maxResponseBytes,
-          truncateAt,
-        );
-        if (part.status === 200) return part;
-        if (PARTITION_GAVE_UP.has(part.status)) await cancelOwn(handle);
-        throw failureError(
-          failureOf(part.status, await partitionFailureText(part, maxResponseBytes), "partition"),
-          failureContext(run, part.attempts, true),
-        );
-      },
-      signal: run.signal,
-    });
+    const outcome: SnowflakeRowsOutcome =
+      first !== undefined && first.outcome.cut !== null
+        ? first.outcome
+        : await readResultRows({
+            columns: names,
+            firstData: first === undefined ? answer.data : first.outcome.rows,
+            partitionCount: Array.isArray(partitionInfo) ? Math.max(partitionInfo.length, 1) : 1,
+            fetchPartition: (index, maxResponseBytes, truncateAt) =>
+              fetchBytes(run, handle, `partition=${index}`, maxResponseBytes, truncateAt),
+            signal: run.signal,
+          });
     const numRows = typeof meta.numRows === "number" ? meta.numRows : null;
     const warnings: QueryWarning[] = [];
-    if (outcome.cut === "bytes") warnings.push({ message: SNOWFLAKE_ROWS_SENTENCES.byteCut(numRows) });
+    if (outcome.cut === "bytes") {
+      warnings.push({
+        message:
+          outcome.rows.length === 0 ? SNOWFLAKE_ROWS_SENTENCES.firstRowCut : SNOWFLAKE_ROWS_SENTENCES.byteCut(numRows),
+      });
+    }
     if (outcome.cut === "rows") warnings.push({ message: SNOWFLAKE_ROWS_SENTENCES.rowCut });
     const snowflakeCut = answer.code === SNOWFLAKE_CUT_CODE;
     if (snowflakeCut) warnings.push({ message: SNOWFLAKE_ROWS_SENTENCES.snowflakeCut });
@@ -504,7 +602,6 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
   /** Submit, poll and read one statement; the caller holds its permit. */
   async function execute(run: Run): Promise<SnowflakeResult> {
     let handle: string | null = null;
-    let request: "submit" | "status" | "partition" = "submit";
     try {
       let answer: SnowflakeTextAnswer = await transport.submit(
         STATEMENTS_PATH,
@@ -523,13 +620,22 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
       if (!lifetime.signal.aborted) handles.add(handle);
       run.signal.throwIfAborted();
 
-      request = "status";
       let interval = SNOWFLAKE_POLL_FIRST_MS;
       while (answer.status !== 200) {
         // oxlint-disable-next-line no-await-in-loop -- each poll waits its interval before the next status read.
         await deps.sleep(interval, run.signal);
-        // oxlint-disable-next-line no-await-in-loop -- each status answer decides whether there is another poll.
-        answer = await transport.status(statusPath(handle), run.signal, SNOWFLAKE_FIRST_ANSWER_MAX_BYTES);
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- each status answer decides whether there is another poll.
+          answer = await transport.status(statusPath(handle), run.signal, SNOWFLAKE_FIRST_ANSWER_MAX_BYTES);
+        } catch (error) {
+          if (!(error instanceof TransportError && error.kind === "too-large")) throw error;
+          // Partition 0 is larger than the status read holds: read it again as a stream, under the budget.
+          const bound = SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES;
+          // oxlint-disable-next-line no-await-in-loop -- the loop ends here, with this read.
+          const first = await readOversizedFirstAnswer(await fetchBytes(run, handle, "", bound, bound));
+          // oxlint-disable-next-line no-await-in-loop -- the loop ends here, with this read.
+          return await buildResult(run, handle, {}, first);
+        }
         if (answer.status === 202) {
           interval = Math.min(interval * 2, SNOWFLAKE_POLL_MAX_MS);
         } else if (answer.status === 429) {
@@ -547,17 +653,22 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
         }
       }
 
-      request = "partition";
       return await buildResult(run, handle, parsed);
     } catch (error) {
       if (run.signal.aborted) return await stopped(run, handle);
-      throw transportError(error, request);
+      throw transportError(error);
     } finally {
       if (handle !== null) handles.delete(handle);
     }
   }
 
-  /** One run: registered, joined to the lifetime, and under one permit from its submit to its result. */
+  /**
+   * One run: registered, joined to the lifetime, and under one permit from its submit to its result.
+   *
+   * Two bounds of the same length follow each other. While the run waits for a permit, the wait's own bound runs, and
+   * passing it is the slots sentence with nothing sent. The statement's deadline starts only once the permit is held,
+   * so a statement that queued behind others still gets its whole `timeout` and grace on Snowflake.
+   */
   async function runStatement(input: {
     readonly queryId: string | undefined;
     readonly sql: string;
@@ -566,18 +677,18 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
     readonly deadlineBound: SnowflakeDeadlineBound;
     readonly keyword: string | null;
   }): Promise<SnowflakeResult> {
-    const deadline = deps.deadline(deadlineMsFor(input.timeoutS));
-    const registered = runs.begin(input.queryId, deadline);
-    const signal = AbortSignal.any([registered.signal, lifetime.signal]);
-    const run: Run = {
-      sql: input.sql,
-      tag: input.tag,
-      timeoutS: input.timeoutS,
-      deadlineBound: input.deadlineBound,
-      keyword: input.keyword,
-      signal,
-      deadline,
+    const boundMs = deadlineMsFor(input.timeoutS);
+    /** The run's deadline as the registry sees it: the wait's bound until admission, then the statement's. */
+    const bound = new AbortController();
+    let admitted = false;
+    const follow = (timer: AbortSignal, whileAdmitted: boolean): void => {
+      timer.addEventListener("abort", () => {
+        if (admitted === whileAdmitted) bound.abort(timer.reason);
+      });
     };
+    follow(deps.deadline(boundMs), false);
+    const registered = runs.begin(input.queryId, bound.signal);
+    const signal = AbortSignal.any([registered.signal, lifetime.signal]);
     let finish: (cancelled: boolean) => void = () => {};
     const ended = new Promise<boolean>((resolve) => {
       finish = resolve;
@@ -592,11 +703,20 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
       } catch (error) {
         if (!signal.aborted) throw error;
         if (!isDeadline(signal.reason)) throw cancelledError();
-        throw new SnowflakeError(
-          "unavailable",
-          SNOWFLAKE_ERROR_SENTENCES.slotsBusy(deadlineMsFor(input.timeoutS) / 1000),
-        );
+        throw new SnowflakeError("unavailable", SNOWFLAKE_ERROR_SENTENCES.slotsBusy(boundMs / 1000));
       }
+      admitted = true;
+      const deadline = deps.deadline(boundMs);
+      follow(deadline, true);
+      const run: Run = {
+        sql: input.sql,
+        tag: input.tag,
+        timeoutS: input.timeoutS,
+        deadlineBound: input.deadlineBound,
+        keyword: input.keyword,
+        signal,
+        deadline,
+      };
       try {
         return await execute(run);
       } finally {
@@ -633,15 +753,24 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
       if (isLoneTransaction(tokens)) throw new SnowflakeError("query", SNOWFLAKE_STATEMENT_SENTENCES.noTransactions);
       // The SQL API answers every USE with 391911, so it is refused here, unsent.
       if (keyword === "USE") throw new SnowflakeError("query", SNOWFLAKE_STATEMENT_SENTENCES.useRefused);
-      const result = await runStatement({
-        queryId,
-        sql,
-        tag: SNOWFLAKE_QUERY_TAGS.editor,
-        timeoutS: clampedTimeoutS(options.queryTimeoutMs),
-        deadlineBound: "query-timeout",
-        keyword,
-      });
       const notice = sessionNotice(keyword, tokens);
+      let result: SnowflakeResult;
+      try {
+        result = await runStatement({
+          queryId,
+          sql,
+          tag: SNOWFLAKE_QUERY_TAGS.editor,
+          timeoutS: clampedTimeoutS(options.queryTimeoutMs),
+          deadlineBound: "query-timeout",
+          keyword,
+        });
+      } catch (error) {
+        // A statement that fails for want of an earlier one ("Statement null not found") says why, after Snowflake.
+        if (notice?.code === "SNOWFLAKE_NO_LAST_QUERY" && error instanceof SnowflakeError) {
+          error.message = `${error.message} ${notice.message}`;
+        }
+        throw error;
+      }
       return notice === null ? result : { ...result, warnings: [...result.warnings, notice] };
     },
 
@@ -649,7 +778,7 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
 
     async checkRole() {
       const result = await runSurface(SNOWFLAKE_ROLE_CHECK_SQL, SNOWFLAKE_QUERY_TAGS.roleCheck);
-      const [roleField, secondaryField] = result.fields;
+      const [roleField, secondaryField, userField, databaseField, schemaField, warehouseField] = result.fields;
       const row = result.rows[0] ?? {};
       const actual = cellText(row[roleField]);
       const forms = secretForms([...options.secrets(), ...transport.recentTokens()]);
@@ -659,10 +788,43 @@ export function createSnowflakeStatements(options: SnowflakeStatementsOptions): 
           SNOWFLAKE_ERROR_SENTENCES.roleMismatch(serverMessage(actual, forms), context.role),
         );
       }
+      // A token names its own user and the SQL API takes no user beside it, so User is checked against the session.
+      const { authMethod, user } = options.failure;
+      const signedIn = cellText(row[userField]);
+      if (authMethod === "pat" && !sameUser(user, signedIn)) {
+        throw new SnowflakeError(
+          "auth",
+          SNOWFLAKE_ERROR_SENTENCES.tokenUserMismatch(serverMessage(signedIn, forms), user),
+        );
+      }
       const roles = secondaryRoleNames(cellText(row[secondaryField]));
-      return roles === ""
-        ? []
-        : [{ message: SNOWFLAKE_STATEMENT_SENTENCES.secondaryRoles(serverMessage(roles, forms), context.role) }];
+      const cautions: QueryWarning[] =
+        roles === ""
+          ? []
+          : [{ message: SNOWFLAKE_STATEMENT_SENTENCES.secondaryRoles(serverMessage(roles, forms), context.role) }];
+      // The SQL API leaves a name it cannot resolve unset without an error (measured 2026-10-13), so a configured
+      // name answered as NULL is cautioned here; a schema is not, once its database already was.
+      const unset = (field: string | undefined, configured: string | undefined): configured is string =>
+        configured !== undefined && configured !== "" && cellText(row[field ?? ""]) === "";
+      const { database, schema, warehouse, role } = context;
+      if (unset(databaseField, database)) {
+        cautions.push({
+          code: SNOWFLAKE_UNRESOLVED_CODES.database,
+          message: SNOWFLAKE_STATEMENT_SENTENCES.unresolvedDatabase(database, role),
+        });
+      } else if (unset(schemaField, schema)) {
+        cautions.push({
+          code: SNOWFLAKE_UNRESOLVED_CODES.schema,
+          message: SNOWFLAKE_STATEMENT_SENTENCES.unresolvedSchema(schema, role),
+        });
+      }
+      if (unset(warehouseField, warehouse)) {
+        cautions.push({
+          code: SNOWFLAKE_UNRESOLVED_CODES.warehouse,
+          message: SNOWFLAKE_STATEMENT_SENTENCES.unresolvedWarehouse(warehouse, role),
+        });
+      }
+      return cautions;
     },
 
     async cancel(queryId) {

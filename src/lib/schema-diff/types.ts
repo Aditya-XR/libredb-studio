@@ -45,7 +45,27 @@ export interface ForeignKeyDiff {
 
 export interface TableDiff {
   action: DiffAction;
+  /** The object's name as the reading spelled it; the migration's generated constraint names are built from it. */
   tableName: string;
+  /**
+   * The object's identity in this diff, unique within it: its path below the compared roots when both readings carry
+   * paths, else its name (SF-047). Absent on a diff built by hand, where `tableName` is the identity.
+   */
+  key?: string;
+  /** What the panel shows for the object: the dotted path below the compared roots, or the name. */
+  label?: string;
+  /**
+   * The object's full path where the migration acts on it: the source's object for a removed or modified one, and
+   * for an added one the target's path below the roots, placed under the source's root. Absent when either reading
+   * has no paths (a snapshot taken before the object model), and then the migration names the object by `tableName`.
+   */
+  path?: readonly string[];
+  /**
+   * The kind the reading declared for the object, when it declared one: the source's for a removed object, the
+   * target's for an added one, and for a modified one whichever side is not `table`. The migration alters, creates and
+   * drops only tables, so a view is named in a comment instead.
+   */
+  kind?: string;
   columns: ColumnDiff[];
   indexes: IndexDiff[];
   foreignKeys: ForeignKeyDiff[];

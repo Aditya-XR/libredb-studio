@@ -16,6 +16,7 @@
  */
 import * as crypto from "node:crypto";
 import { SignJWT } from "jose";
+import { SNOWFLAKE_FIELD_SENTENCES } from "./account-host";
 import { SnowflakeError } from "./errors";
 
 /** The largest key field read, in UTF-8 bytes; a larger one is refused before any parse. */
@@ -41,6 +42,19 @@ export const SNOWFLAKE_JWT_LIFETIME_S = 900;
 /** How long a JWT is reused after its `iat`; the 300 s left before `exp` is the official clients' margin. */
 export const SNOWFLAKE_JWT_RENEW_AFTER_S = 600;
 
+/** The longest access token read, in characters; the trial's tokens are about 210, and a longer one is refused. */
+export const SNOWFLAKE_TOKEN_MAX_CHARS = 4_096;
+
+/** The refusals of an access token, each raised by `readAccessToken` before any socket. */
+export const SNOWFLAKE_TOKEN_SENTENCES = {
+  tooLong:
+    "The access token is longer than Studio accepts (4,096 characters); a programmatic access token is far shorter. Paste the token alone. Nothing was sent.",
+  badCharacters:
+    "The access token holds characters a token cannot have, such as a space, a line break or a non-ASCII letter. Paste the token alone. Nothing was sent.",
+  keyPairJwt:
+    "This is a key-pair JWT, not a programmatic access token: it signs in as the user its key belongs to and expires within the hour. Choose Key pair for Sign-in and paste the private key instead. Nothing was sent.",
+} as const;
+
 /** Each key type's article and name in the not-RSA sentence. */
 const KEY_TYPE_NAMES: Readonly<Record<string, string>> = {
   ec: "an EC",
@@ -55,8 +69,17 @@ export const SNOWFLAKE_KEY_SENTENCES = {
   publicKey:
     "This is the public key. Paste the private key; the public key is what you register on the Snowflake user. Nothing was sent.",
   notPem: "The private key is not a PEM key. Paste the key's contents, starting with -----BEGIN. Nothing was sent.",
+  manyBlocks:
+    "The private key field holds more than one PEM block. Paste the private key's block alone, from -----BEGIN to -----END. Nothing was sent.",
+  truncated: "The private key ends before its -----END line. Paste the whole key. Nothing was sent.",
+  certificate:
+    "This is a certificate, not a private key. Paste the private key whose public key is registered on the Snowflake user. Nothing was sent.",
+  otherBlock:
+    "This PEM block is not a private key Studio reads. Paste an RSA private key armoured as PRIVATE KEY, ENCRYPTED PRIVATE KEY or RSA PRIVATE KEY. Nothing was sent.",
   kdfCost:
     "This key's encryption is set to cost more work than Studio allows. Re-encrypt it with openssl pkcs8 -topk8 -v2 aes-256-cbc. Nothing was sent.",
+  scheme:
+    "This key is encrypted with a scheme Studio does not read, such as PBES1 or a PKCS#12 one; Studio reads PBES2 with PBKDF2 or scrypt and AES-CBC. Re-encrypt it with openssl pkcs8 -topk8 -v2 aes-256-cbc. Nothing was sent.",
   needsPassphrase: "This key is encrypted; enter its passphrase. Nothing was sent.",
   wrongPassphrase: "The passphrase does not open this key. Nothing was sent.",
   unreadable: "Studio could not read this private key. Nothing was sent.",
@@ -108,6 +131,14 @@ function refuse(sentence: string): never {
 
 const PRIVATE_LABELS = new Set(["PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "RSA PRIVATE KEY"]);
 const PUBLIC_LABELS = new Set(["PUBLIC KEY", "RSA PUBLIC KEY"]);
+/** The other labels a pasted block is known by, each with the sentence that names what it is. */
+const OTHER_LABEL_SENTENCES: ReadonlyMap<string, string> = new Map([
+  ["EC PRIVATE KEY", SNOWFLAKE_KEY_SENTENCES.notRsa("ec")],
+  ["DSA PRIVATE KEY", SNOWFLAKE_KEY_SENTENCES.notRsa("dsa")],
+  ["CERTIFICATE", SNOWFLAKE_KEY_SENTENCES.certificate],
+  ["TRUSTED CERTIFICATE", SNOWFLAKE_KEY_SENTENCES.certificate],
+  ["X509 CERTIFICATE", SNOWFLAKE_KEY_SENTENCES.certificate],
+]);
 const BEGIN = /-----BEGIN ([A-Z0-9 ]+)-----/g;
 const END = /-----END ([A-Z0-9 ]+)-----/g;
 const PROC_TYPE = /^Proc-Type:[ \t]*(\S+)\s+/;
@@ -121,17 +152,23 @@ interface Armoured {
   readonly encrypted: boolean;
 }
 
-/** The one PEM block of `text`, normalised: headers on their own lines, the body re-wrapped at 64 characters. */
+/**
+ * The one PEM block of `text`, normalised: headers on their own lines, the body re-wrapped at 64 characters. Only a
+ * text with no PEM armour at all is "not a PEM key": a second block, a block of another kind (named by its label), a
+ * missing END line and a broken block each have their own sentence.
+ */
 function readArmour(text: string): Armoured {
   const begins = [...text.matchAll(BEGIN)];
   const ends = [...text.matchAll(END)];
-  if (begins.length !== 1 || ends.length !== 1) refuse(SNOWFLAKE_KEY_SENTENCES.notPem);
+  if (begins.length === 0) refuse(SNOWFLAKE_KEY_SENTENCES.notPem);
+  if (begins.length > 1 || ends.length > 1) refuse(SNOWFLAKE_KEY_SENTENCES.manyBlocks);
   const [begin] = begins;
-  const [end] = ends;
   const label = begin[1];
-  if (end[1] !== label || end.index < begin.index) refuse(SNOWFLAKE_KEY_SENTENCES.notPem);
   if (PUBLIC_LABELS.has(label)) refuse(SNOWFLAKE_KEY_SENTENCES.publicKey);
-  if (!PRIVATE_LABELS.has(label)) refuse(SNOWFLAKE_KEY_SENTENCES.notPem);
+  if (!PRIVATE_LABELS.has(label)) refuse(OTHER_LABEL_SENTENCES.get(label) ?? SNOWFLAKE_KEY_SENTENCES.otherBlock);
+  if (ends.length === 0) refuse(SNOWFLAKE_KEY_SENTENCES.truncated);
+  const [end] = ends;
+  if (end[1] !== label || end.index < begin.index) refuse(SNOWFLAKE_KEY_SENTENCES.unreadable);
 
   let inner = `${text.slice(begin.index + begin[0].length, end.index).trim()}\n`;
   const headers: string[] = [];
@@ -148,7 +185,7 @@ function readArmour(text: string): Armoured {
     }
   }
   const body = inner.replace(/\s+/g, "");
-  if (body === "" || !BASE64.test(body)) refuse(SNOWFLAKE_KEY_SENTENCES.notPem);
+  if (body === "" || !BASE64.test(body)) refuse(SNOWFLAKE_KEY_SENTENCES.unreadable);
 
   const lines = body.match(/.{1,64}/g) as string[];
   const head = headers.length > 0 ? `${headers.join("\n")}\n\n` : "";
@@ -258,47 +295,52 @@ const PBKDF2_PRFS: ReadonlyMap<string, number> = new Map([
 /** AES-128-CBC, AES-192-CBC, AES-256-CBC. */
 const AES_CBC = new Set(["2.16.840.1.101.3.4.1.2", "2.16.840.1.101.3.4.1.22", "2.16.840.1.101.3.4.1.42"]);
 
-/** Whether the PBKDF2 parameters are under their PRF's ceiling, the PRF one of the four or absent (SHA-1). */
-function pbkdf2Allowed(der: Buffer, params: Tlv | undefined): boolean {
+/** What the encryption parameters allow: a key to decrypt, a cost over the ceiling, or a scheme Studio does not read. */
+type EncryptionVerdict = "allowed" | "cost" | "scheme";
+
+/** The PBKDF2 parameters' verdict: the PRF one of the four or absent (SHA-1), and the count under its ceiling. */
+function pbkdf2Verdict(der: Buffer, params: Tlv | undefined): EncryptionVerdict {
   const [salt, iterations, ...rest] = sequence(der, params, 2);
-  if (salt.tag !== TAG_OCTET_STRING) return false;
+  if (salt.tag !== TAG_OCTET_STRING) return "scheme";
   const optional = rest[0]?.tag === TAG_INTEGER ? rest.slice(1) : rest;
-  if (optional.length > 1) return false;
+  if (optional.length > 1) return "scheme";
   const ceiling =
     optional.length === 0
       ? SNOWFLAKE_MAX_PBKDF2_ITERATIONS.sha1
       : PBKDF2_PRFS.get(oid(der, sequence(der, optional[0], 1)[0]));
-  return ceiling !== undefined && integer(der, iterations) <= BigInt(ceiling);
+  if (ceiling === undefined) return "scheme";
+  return integer(der, iterations) <= BigInt(ceiling) ? "allowed" : "cost";
 }
 
-function scryptAllowed(der: Buffer, params: Tlv | undefined): boolean {
+function scryptVerdict(der: Buffer, params: Tlv | undefined): EncryptionVerdict {
   const [salt, n, r, p] = sequence(der, params, 4);
-  if (salt.tag !== TAG_OCTET_STRING) return false;
-  return (
-    integer(der, n) <= BigInt(SNOWFLAKE_MAX_SCRYPT_N) &&
+  if (salt.tag !== TAG_OCTET_STRING) return "scheme";
+  return integer(der, n) <= BigInt(SNOWFLAKE_MAX_SCRYPT_N) &&
     integer(der, r) <= BigInt(SNOWFLAKE_MAX_SCRYPT_R) &&
     integer(der, p) <= BigInt(SNOWFLAKE_MAX_SCRYPT_P)
-  );
+    ? "allowed"
+    : "cost";
 }
 
 /**
  * Whether an EncryptedPrivateKeyInfo is PBES2 with PBKDF2 or scrypt under the ceiling and an AES-CBC cipher. Every
- * other outer algorithm, PBES1 and the PKCS#12 schemes included, carries a cost this module does not read, so it is
- * refused like a cost over the ceiling. Throws `MalformedDer` for a DER it cannot read.
+ * other outer algorithm (PBES1 and the PKCS#12 schemes included), KDF, PRF or cipher is a scheme this module does not
+ * read, refused before anything is derived, as a cost over the ceiling is. Throws `MalformedDer` for a DER it cannot
+ * read.
  */
-function encryptionAllowed(der: Buffer): boolean {
+function encryptionVerdict(der: Buffer): EncryptionVerdict {
   const top = readTlv(der, 0, der.length);
   if (top.end !== der.length) throw new MalformedDer();
   const [algorithm, data] = sequence(der, top, 2);
   if (data.tag !== TAG_OCTET_STRING) throw new MalformedDer();
   const [algorithmId, algorithmParams] = sequence(der, algorithm, 1);
-  if (oid(der, algorithmId) !== PBES2) return false;
+  if (oid(der, algorithmId) !== PBES2) return "scheme";
   const [kdf, cipher] = sequence(der, algorithmParams, 2);
   const [kdfId, kdfParams] = sequence(der, kdf, 1);
   const kdfOid = oid(der, kdfId);
-  const kdfAllowed =
-    kdfOid === PBKDF2 ? pbkdf2Allowed(der, kdfParams) : kdfOid === SCRYPT && scryptAllowed(der, kdfParams);
-  return kdfAllowed && AES_CBC.has(oid(der, sequence(der, cipher, 1)[0]));
+  if (kdfOid !== PBKDF2 && kdfOid !== SCRYPT) return "scheme";
+  if (!AES_CBC.has(oid(der, sequence(der, cipher, 1)[0]))) return "scheme";
+  return kdfOid === PBKDF2 ? pbkdf2Verdict(der, kdfParams) : scryptVerdict(der, kdfParams);
 }
 
 /** Whether the DER is a SEQUENCE whose first child is an INTEGER, as PrivateKeyInfo's and RSAPrivateKey's version is. */
@@ -354,13 +396,14 @@ export function loadPrivateKey(pem: unknown, passphrase: unknown): LoadedKey {
 
   const armoured = asEncryptedWhereTheDerIs(readArmour(pem));
   if (armoured.label === "ENCRYPTED PRIVATE KEY") {
-    let allowed: boolean;
+    let verdict: EncryptionVerdict;
     try {
-      allowed = encryptionAllowed(armoured.der);
+      verdict = encryptionVerdict(armoured.der);
     } catch {
       refuse(SNOWFLAKE_KEY_SENTENCES.unreadable);
     }
-    if (!allowed) refuse(SNOWFLAKE_KEY_SENTENCES.kdfCost);
+    if (verdict === "scheme") refuse(SNOWFLAKE_KEY_SENTENCES.scheme);
+    if (verdict === "cost") refuse(SNOWFLAKE_KEY_SENTENCES.kdfCost);
   }
 
   const pass = typeof passphrase === "string" && passphrase !== "" ? passphrase : undefined;
@@ -447,6 +490,48 @@ export function keyPairTokenSource(
       return pending;
     },
   };
+}
+
+/** What only a key-pair JWT's `iss` claim holds: the key fingerprint after `<ACCOUNT>.<USER>`. */
+const KEY_PAIR_ISSUER = /\.SHA256:/;
+
+/**
+ * Whether the text is a key-pair JWT: three `.`-separated parts whose middle one is base64url JSON with an `iss`
+ * holding `.SHA256:`. The signature is not verified and nothing else of a token is read: a PAT's format is
+ * Snowflake's, and the trial's PATs are JWTs too, whose `iss` has no fingerprint.
+ */
+function isKeyPairJwt(token: string): boolean {
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  } catch {
+    return false;
+  }
+  const iss = typeof payload === "object" && payload !== null ? (payload as { iss?: unknown }).iss : undefined;
+  return typeof iss === "string" && KEY_PAIR_ISSUER.test(iss);
+}
+
+/** A copied `Authorization` value's scheme, which a curl example puts before the token. */
+const BEARER_PREFIX = /^Bearer(?:\s+|$)/i;
+/** What a token can hold: printable ASCII with no space, the characters an HTTP header carries unchanged. */
+const TOKEN_CHARACTERS = /^[\x21-\x7e]+$/;
+
+/**
+ * The Access token field as the bearer Studio sends, or a `config` refusal before any socket. Surrounding whitespace
+ * and line breaks (a seed's file, a paste) and a leading `Bearer ` come off; then a token longer than
+ * `SNOWFLAKE_TOKEN_MAX_CHARS` or holding a character a header cannot carry is refused, since Node refuses such a header
+ * and Snowflake's gateway answers an oversized one with a bare 431. A key-pair JWT pasted there is refused too, since
+ * Snowflake accepts it as a token and it signs in as its own user until its `exp`.
+ */
+export function readAccessToken(value: string): string {
+  const token = value.trim().replace(BEARER_PREFIX, "").trim();
+  if (token === "") refuse(SNOWFLAKE_FIELD_SENTENCES.tokenEmpty);
+  if (token.length > SNOWFLAKE_TOKEN_MAX_CHARS) refuse(SNOWFLAKE_TOKEN_SENTENCES.tooLong);
+  if (!TOKEN_CHARACTERS.test(token)) refuse(SNOWFLAKE_TOKEN_SENTENCES.badCharacters);
+  if (isKeyPairJwt(token)) refuse(SNOWFLAKE_TOKEN_SENTENCES.keyPairJwt);
+  return token;
 }
 
 /** A programmatic access token, sent as its own bearer. */

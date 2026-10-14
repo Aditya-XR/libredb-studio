@@ -59,9 +59,9 @@ const failure = (overrides: Partial<SnowflakeFailure>): SnowflakeFailure => ({
 });
 
 const KEY_PAIR_WITH_UUID =
-  "Snowflake refused the key pair (JWT token is invalid, [019c06a4-0000-df4f-0000-00100006589e]). Studio signed as MYORG-MYACCOUNT.STUDIO_SVC with the key whose fingerprint is SHA256:abc=. An administrator registers it with ALTER USER <name> ADD KEY PAIR libredb_studio_0a1b2c3d PUBLIC_KEY = 'MIIBIjANBgkq' and checks it with SHOW USER KEY PAIRS FOR USER <name>, where <name> is the user's NAME, which DESC USER and SHOW USERS show and which can differ from the login name; ALTER USER <name> SET RSA_PUBLIC_KEY = 'MIIBIjANBgkq' is the documented alternative. Signed in as this user, SHOW USER KEY PAIRS lists your keys; ALTER USER ADD KEY PAIR libredb_studio_0a1b2c3d PUBLIC_KEY = 'MIIBIjANBgkq' is refused with 003001 by a message that names MODIFY PROGRAMMATIC AUTHENTICATION METHODS on your own user as the privilege it needs. If the key is listed, check that the account and user are the ones the key was registered on and that this computer's clock is correct; an administrator can see the exact cause with SELECT SYSTEM$GET_LOGIN_FAILURE_DETAILS('019c06a4-0000-df4f-0000-00100006589e').";
+  "Snowflake refused the key pair (JWT token is invalid, [019c06a4-0000-df4f-0000-00100006589e]) for MYORG-MYACCOUNT.STUDIO_SVC: no user has this login name, or the key whose fingerprint is SHA256:abc= is not registered on it. Check User; an administrator registers the key with ALTER USER <name> ADD KEY PAIR, where <name> is the user's NAME from SHOW USERS, and Test connection shows the full statement to copy. If the key is registered, check the account and this computer's clock; an administrator can see the exact cause with SELECT SYSTEM$GET_LOGIN_FAILURE_DETAILS('019c06a4-0000-df4f-0000-00100006589e').";
 const KEY_PAIR_WITHOUT_UUID =
-  "Snowflake refused the key pair (JWT token is invalid). Studio signed as MYORG-MYACCOUNT.STUDIO_SVC with the key whose fingerprint is SHA256:abc=. An administrator registers it with ALTER USER <name> ADD KEY PAIR libredb_studio_0a1b2c3d PUBLIC_KEY = 'MIIBIjANBgkq' and checks it with SHOW USER KEY PAIRS FOR USER <name>, where <name> is the user's NAME, which DESC USER and SHOW USERS show and which can differ from the login name; ALTER USER <name> SET RSA_PUBLIC_KEY = 'MIIBIjANBgkq' is the documented alternative. Signed in as this user, SHOW USER KEY PAIRS lists your keys; ALTER USER ADD KEY PAIR libredb_studio_0a1b2c3d PUBLIC_KEY = 'MIIBIjANBgkq' is refused with 003001 by a message that names MODIFY PROGRAMMATIC AUTHENTICATION METHODS on your own user as the privilege it needs. If the key is listed, check that the account and user are the ones the key was registered on and that this computer's clock is correct.";
+  "Snowflake refused the key pair (JWT token is invalid) for MYORG-MYACCOUNT.STUDIO_SVC: no user has this login name, or the key whose fingerprint is SHA256:abc= is not registered on it. Check User; an administrator registers the key with ALTER USER <name> ADD KEY PAIR, where <name> is the user's NAME from SHOW USERS, and Test connection shows the full statement to copy. If the key is registered, check the account and this computer's clock.";
 const FIX = "ALTER USER <name> ADD KEY PAIR libredb_studio_0a1b2c3d PUBLIC_KEY = 'MIIBIjANBgkq'";
 
 /** Splits a statement on `;` outside double-quoted identifiers and single-quoted strings. */
@@ -131,6 +131,30 @@ describe("failureError: every row of the error table", () => {
       category: "auth",
       house: AuthenticationError,
       sentence: SNOWFLAKE_ERROR_SENTENCES.roleRefused("STUDIO_NOWH", "studio_svc", "STUDIO_NOWH", "studio_svc"),
+    },
+    {
+      // F's live answer to a token restricted to STUDIO_RO with Role STUDIO_RW, a role the user also holds (SF-017).
+      name: "role not permitted for the token, 390186 under token sign-in: no GRANT advice",
+      failure: failure({
+        status: 400,
+        code: "390186",
+        message:
+          "Role 'STUDIO_RW' specified in the connect string is not granted to this user, or is not permitted for the credentials being used.",
+        request: "submit",
+      }),
+      context: { role: "STUDIO_RW", user: "studio_pat", authMethod: "pat" },
+      category: "auth",
+      house: AuthenticationError,
+      sentence:
+        "Snowflake refused role STUDIO_RW for this access token: the token may be restricted to another role, since a token generated with a role restriction signs in only as that role, or role STUDIO_RW is not granted to user studio_pat. Set Role to the token's role, which SHOW USER PROGRAMMATIC ACCESS TOKENS lists under role_restriction, or use a token restricted to STUDIO_RW.",
+    },
+    {
+      name: "role refused, 390189 under token sign-in keeps the shared sentence",
+      failure: failure({ status: 401, code: "390189", message: "Role 'X' does not exist or not authorized" }),
+      context: { authMethod: "pat" },
+      category: "auth",
+      house: AuthenticationError,
+      sentence: SNOWFLAKE_ERROR_SENTENCES.roleRefused("STUDIO_RO", "studio_svc", "STUDIO_RO", "studio_svc"),
     },
     {
       name: "key pair refused, 390144",
@@ -211,12 +235,72 @@ describe("failureError: every row of the error table", () => {
       sentence:
         "Snowflake refused the TLS certificate of this request (522). Studio sends no client certificate, so a proxy or gateway between Studio and Snowflake may be presenting one.",
     },
+    ...(["000606", "391920"] as const).map((code) => ({
+      name: `a warehouse named on the connection that cannot be used, ${code} (SF-016)`,
+      failure: failure({ status: 422, code, message: "No active warehouse selected" }),
+      context: { warehouse: "D_NOWH" },
+      category: "query" as const,
+      house: QueryError,
+      sentence:
+        "Snowflake could not use warehouse D_NOWH for this statement: it does not exist, role STUDIO_RO has no USAGE on it, or its name differs in case. Check Warehouse in the connection settings. Browsing works without a warehouse; queries do not.",
+    })),
+    {
+      name: "headers too large, 431, as the gateway answers a 100,000-character token with a text/plain body",
+      failure: failure({ status: 431 }),
+      category: "auth",
+      house: AuthenticationError,
+      sentence:
+        "Snowflake's gateway refused the request because its headers are too large (431). The access token is the one header Studio fills from a field: paste the token alone.",
+    },
+    {
+      name: "a token Snowflake cannot read, 390146, under token sign-in",
+      failure: failure({
+        status: 401,
+        code: "390146",
+        message: "Bearer token is missing in the HTTP request authorization header.",
+      }),
+      context: { authMethod: "pat" },
+      category: "auth",
+      house: AuthenticationError,
+      sentence:
+        "Snowflake found no usable token in the request (390146). Paste the access token alone, without a Bearer prefix or anything around it.",
+    },
+    {
+      name: "a failure with no message and no code",
+      failure: failure({ status: 400, message: "" }),
+      category: "query",
+      house: QueryError,
+      sentence: "Snowflake refused the request (HTTP 400) and sent no message.",
+    },
+    {
+      name: "a failure with a code and a blank message",
+      failure: failure({ status: 422, code: "000123", message: "  " }),
+      category: "query",
+      house: QueryError,
+      sentence: "Snowflake refused the request (HTTP 422, code 000123) and sent no message.",
+    },
     {
       name: "result gone, 404",
       failure: failure({ status: 404, request: "status" }),
       category: "query",
       house: QueryError,
       sentence: "Snowflake no longer holds this statement's result; run it again.",
+    },
+    {
+      name: "result gone, 404 on a partition",
+      failure: failure({ status: 404, request: "partition" }),
+      category: "query",
+      house: QueryError,
+      sentence: "Snowflake no longer holds this statement's result; run it again.",
+    },
+    {
+      // Measured 2026-10-13: the load balancer of the wildcard *.snowflakecomputing.com answers a submit for an
+      // account it does not have with HTTP 404 and a text/html "File not Found" page.
+      name: "account not found, 404 on the submit",
+      failure: failure({ status: 404, request: "submit" }),
+      category: "unavailable",
+      house: ConnectionError,
+      sentence: `Snowflake has no account at myorg-myaccount.snowflakecomputing.com (HTTP 404 on the first request). Check the account identifier: an organisation account is written orgname-account_name, with a hyphen after the organisation, and a locator outside AWS Oregon needs its region.`,
     },
     {
       name: "invalid payload, 390142",
@@ -338,6 +422,17 @@ describe("failureError: the key-pair refusal", () => {
     const error = failureError(failure({ status: 401, code: "390144", message: "JWT token is invalid." }), context());
     expect(error.message).toBe(KEY_PAIR_WITHOUT_UUID);
     expect(error.fixStatement).toBe(FIX);
+  });
+
+  test("the sentence holds no public key body and stays short; the statement holds it once (SF-027)", () => {
+    const body = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA".repeat(9);
+    const error = failureError(
+      failure({ status: 401, code: "390144", message: `JWT token is invalid. [${UUID}]` }),
+      context({ publicKeyBody: body }),
+    );
+    expect(error.message).not.toContain(body.slice(0, 40));
+    expect(error.message.length).toBeLessThan(700);
+    expect(error.fixStatement?.split(body).length).toBe(2);
   });
 
   test("the fix statement is the administrator's registration, carried onto the AuthenticationError", () => {

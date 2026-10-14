@@ -228,7 +228,8 @@ message strings.
 
 > **Seam rule.** The HTTP envelope identifiers (`X-ClickHouse-Summary`,
 > `X-ClickHouse-Exception-Code`, `X-ClickHouse-Exception-Tag`, `X-ClickHouse-Format`,
-> `default_format`, `output_format_json_quote_64bit_integers`, `output_format_json_quote_decimals`, `elapsed_ns`,
+> `default_format`, `output_format_json_quote_64bit_integers`, `output_format_json_quote_decimals`,
+> `output_format_json_quote_denormals`, `elapsed_ns`,
 > `rows_before_limit_at_least`) must appear **only** in `http-transport.ts`.
 > [`seam-guard.test.ts`](../../tests/unit/db/clickhouse/seam-guard.test.ts) parses every source file
 > in the directory with the TypeScript compiler API — not a grep — and fails the build the moment
@@ -321,6 +322,19 @@ hands over `NUMERIC`; integers up to 32 bits and floats stay numbers. So a `Deci
 now behaves in the UI exactly as a PostgreSQL `NUMERIC` one does: the grid sorts it as text, and the
 pivot table's auto-detection no longer offers it as a value field. No reader in the provider or
 the introspection module reads a `Decimal` column, so nothing internal changed type.
+
+**A non-finite float needs a third setting, `output_format_json_quote_denormals=1`.** JSON has no
+number for `inf`, `-inf` or `nan`, and without it ClickHouse writes each of them as `null`: measured on
+26.9.18.11 on 2026-10-14, a non-`Nullable` `Float64` holding `inf` was shown as NULL, written as an
+empty CSV cell and as `NULL` by the SQL INSERT export, and replayed as `0`. With the setting they
+arrive as the strings `"inf"`, `"-inf"` and `"nan"`, scalar and nested alike, and the transport turns
+them into the words every provider hands over (`Infinity`, `-Infinity`, `NaN`) **by the declared
+type**: a `Float32`, `Float64` or `BFloat16`, inside `Nullable`, `LowCardinality`, `Array`, `Tuple`
+(named or not) and a `Map`'s values. A `String` holding `inf` stays that string, and a `Variant`,
+`Dynamic` or `JSON` column, which declares no single element type, keeps the text as sent. The SQL
+INSERT export writes the words back as ClickHouse's bare `inf`, `-inf` and `nan`, which a replay
+read back exactly into `Float64`, `Nullable(Float64)`, `Float32` and `Array(Float64)`; the CSV
+export writes them as `Infinity`, `-Infinity` and `NaN`.
 
 ### 3.6 Writes return an empty 200 body; the row count lives in a header
 
@@ -609,7 +623,7 @@ instance.
 The providers that implement `endOpenQueryTransaction()` ([`types.ts`](../../src/lib/db/types.ts)) let `POST /api/db/multi-query` end a transaction a failed script left open on the session the next request borrows; the set is read from the type rather than listed here, because a list repeated across provider docs goes stale the moment it grows.
 This provider does not, and the reason is the one [§3.11](#311-statelessness-no-session_id-is-pinned) already states: **the engine has no transaction to leave open** on anything this provider holds.
 
-The transport sends one HTTP request per statement and pins no `session_id` ([`http-transport.ts`](../../src/lib/db/providers/sql/clickhouse/http-transport.ts) sets `default_format`, `output_format_json_quote_64bit_integers`, `output_format_json_quote_decimals` and `database`, and nothing else identifies a session), and `close()` there has nothing to release for the same reason.
+The transport sends one HTTP request per statement and pins no `session_id` ([`http-transport.ts`](../../src/lib/db/providers/sql/clickhouse/http-transport.ts) sets `default_format`, `output_format_json_quote_64bit_integers`, `output_format_json_quote_decimals`, `output_format_json_quote_denormals` and `database`, and nothing else identifies a session), and `close()` there has nothing to release for the same reason.
 Session state is what a transaction would live in: `SET max_block_size` was verified to persist inside a pinned `session_id` and not outside one, and ClickHouse's own transaction support is experimental and setting-gated ([§11](#11-testing) and the limitations section).
 So there is no handle between two statements for a `BEGIN TRANSACTION` to survive on, and nothing for a later caller to inherit.
 
@@ -621,7 +635,7 @@ A result reaches the export through JSON, where an `Array` is a JS array, a `Map
 Written as quoted JSON those were `Code: 26 ... Cannot parse quoted string` on replay, so the SQL INSERT export reads the declared type ([§3.9](#39-column-types-are-the-declared-strings-verbatim)) and writes `[1, 2, 3]`, `map('k', 1)` and `tuple(7, ['p', 'q'])`, recursing through the element types, `Nullable` and `LowCardinality` included (#1386, [`typed-literals.ts`](../../src/lib/export/typed-literals.ts)).
 A named tuple's elements are written in the declared order, and a 64-bit integer or a decimal that `output_format_json_quote_64bit_integers` / `output_format_json_quote_decimals` turned into a string is written bare inside a container (a scalar column takes the quoted form as it is).
 
-A composite that does not have its declared shape (a tuple of the wrong length, a scalar where an `Array` belongs) is skipped with a `-- Row N skipped` comment naming the column, and a non-finite word inside a `Float` element is written as `nan`, `inf` or `-inf`.
+A composite that does not have its declared shape (a tuple of the wrong length, a scalar where an `Array` belongs) is skipped with a `-- Row N skipped` comment naming the column, and a non-finite word in a `Float` column or inside a `Float` element is written as `nan`, `inf` or `-inf`.
 
 The DDL keeps a type with a quoted argument, `DateTime64(3, 'Europe/Istanbul')`, `DateTime('UTC')` and `Enum8('a' = 1, 'b' = 2)`, instead of writing `TEXT`.
 

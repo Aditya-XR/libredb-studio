@@ -2130,6 +2130,110 @@ describe("an Oracle MODIFY states the nullability only when it changes (#1240)",
   });
 });
 
+// ============================================================================
+// Qualified names and objects that are not tables (SF-047, BACKLOG D150)
+// ============================================================================
+
+describe("generateMigrationSQL: qualified names and non-table objects", () => {
+  const col = (name: string, type: string, nullable = true) => ({ name, type, nullable, isPrimary: false });
+  const object = (
+    path: string[],
+    columns: ReturnType<typeof col>[],
+    kind = "table",
+    indexes: StoredObject["indexes"] = [],
+  ) => ({ name: path[path.length - 1], path, kind, columns, indexes, foreignKeys: [] }) as StoredObject;
+
+  test("PostgreSQL names each table by its schema, so b2a.t1 and b2b.t1 are each altered where they live", () => {
+    const source = [
+      object(["b2a", "t1"], [col("name", "varchar(50)")], "table", [
+        { name: "ix_old", columns: ["name"], unique: false },
+      ]),
+      object(["b2b", "t1"], [col("name", "varchar(50)")]),
+      object(["b2b", "gone"], [col("a", "int")]),
+    ];
+    const target = [
+      object(["b2a", "t1"], [col("name", "varchar(80)")]),
+      object(["b2b", "t1"], [col("name", "varchar(50)"), col("extra", "int")]),
+      object(["b2b", "fresh"], [col("a", "int")]),
+    ];
+
+    const sql = generateMigrationSQL(diffSchemas(source, target), "postgres");
+
+    expect(sql).toContain('ALTER TABLE "b2a"."t1" ALTER COLUMN "name" TYPE varchar(80);');
+    expect(sql).toContain('DROP INDEX IF EXISTS "b2a"."ix_old";');
+    expect(sql).toContain('ALTER TABLE "b2b"."t1" ADD COLUMN "extra" int;');
+    expect(sql).toContain('DROP TABLE IF EXISTS "b2b"."gone";');
+    expect(sql).toContain('CREATE TABLE "b2b"."fresh" (');
+    expect(sql).toContain("-- Alter table: b2a.t1");
+    expect(sql).not.toMatch(/ALTER TABLE "t1"/);
+  });
+
+  test("MySQL leaves a view out of the DDL and names it in a comment, and qualifies the table", () => {
+    const source = [
+      object(["app", "t1"], [col("name", "varchar(50)", false)]),
+      object(["app", "v1"], [col("name", "varchar(50)", false)], "view"),
+    ];
+    const target = [
+      object(["app", "t1"], [col("name", "varchar(80)")]),
+      object(["app", "v1"], [col("name", "varchar(80)")], "view"),
+      object(["app", "v2"], [col("x", "int")], "view"),
+    ];
+
+    const sql = generateMigrationSQL(diffSchemas(source, target), "mysql");
+
+    expect(sql).toContain("ALTER TABLE `app`.`t1` MODIFY COLUMN `name` varchar(80) NULL;");
+    expect(sql).not.toContain("`v1` MODIFY");
+    expect(sql).not.toContain("CREATE TABLE `app`.`v2`");
+    expect(sql).toContain(
+      "-- Skipped v1 (view): only tables are created, altered or dropped here; change it by hand. If it reads a table changed below, drop it before this script and recreate it after.",
+    );
+    expect(sql).toContain(
+      "-- Skipped v2 (view): only tables are created, altered or dropped here; change it by hand. If it reads a table changed below, drop it before this script and recreate it after.",
+    );
+  });
+
+  test("Db2 keeps APP.T and REPORTING.T apart and leaves a materialized query table out of the DDL (D150)", () => {
+    const source = [object(["APP", "T"], [col("A", "INTEGER")]), object(["REPORTING", "T"], [col("A", "INTEGER")])];
+    const target = [
+      object(["APP", "T"], [col("A", "INTEGER")]),
+      object(["REPORTING", "T"], [col("A", "INTEGER"), col("B", "INTEGER")]),
+      object(["REPORTING", "SUMMARY"], [col("A", "INTEGER")], "materialized_query_table"),
+    ];
+
+    const diff = diffSchemas(source, target);
+    const sql = generateMigrationSQL(diff, "db2");
+
+    expect(diff.tables.map((t) => [t.action, t.label])).toEqual([
+      ["added", "REPORTING.SUMMARY"],
+      ["modified", "REPORTING.T"],
+    ]);
+    expect(sql).toContain('ALTER TABLE "REPORTING"."T" ADD COLUMN "B" INTEGER;');
+    expect(sql).not.toContain("CREATE TABLE");
+    expect(sql).toContain("-- Skipped REPORTING.SUMMARY (materialized_query_table):");
+  });
+
+  test("an empty source creates each table in the session's own schema, not in the target's database", () => {
+    const sql = generateMigrationSQL(
+      diffSchemas([], [object(["DB2", "D_DIFF", "T1"], [col("A", "INTEGER")])]),
+      "snowflake",
+    );
+    expect(sql).toContain('CREATE TABLE "T1" (');
+    expect(sql).not.toContain('"DB2"');
+  });
+
+  test("a diff built without paths names its tables exactly as before", () => {
+    const sql = generateMigrationSQL(
+      diffSchemas(
+        [{ name: "t1", columns: [col("a", "int")], indexes: [{ name: "ix", columns: ["a"], unique: false }] }],
+        [{ name: "t1", columns: [col("a", "bigint")], indexes: [] }],
+      ),
+      "postgres",
+    );
+    expect(sql).toContain('ALTER TABLE "t1" ALTER COLUMN "a" TYPE bigint;');
+    expect(sql).toContain('DROP INDEX IF EXISTS "ix";');
+  });
+});
+
 /**
  * Apache Spark: a column type change, an index, a foreign key and a primary key are each declined
  * in a comment, because whether a Spark table takes them is the catalog's and the table format's answer, and no

@@ -12,6 +12,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { INVENTORY_LIMIT, INVENTORY_TRUNCATION_REASON } from "@/lib/db/inventory-bounds";
+import { IMPORT_NO_TARGET, importRefusal } from "@/components/DataImportModal";
 import { SOURCE_BILLED_COMPUTE_HOLD } from "@/components/object-source/ObjectSourceView";
 import { DB_UI_CONFIG, SNOWFLAKE_FIELD_HINTS } from "@/lib/db-ui-config";
 import { MCP_EXPOSABLE } from "@/lib/db/compatibility";
@@ -27,9 +29,12 @@ import {
   SNOWFLAKE_MAX_SCRYPT_R,
   SNOWFLAKE_RSA_MAX_BITS,
   SNOWFLAKE_RSA_MIN_BITS,
+  SNOWFLAKE_TOKEN_MAX_CHARS,
+  SNOWFLAKE_TOKEN_SENTENCES,
 } from "@/lib/db/providers/sql/snowflake/auth";
 import { decodeCell, SNOWFLAKE_DECODE_SENTENCES } from "@/lib/db/providers/sql/snowflake/decode";
 import {
+  administratorStatement,
   keyPairName,
   SNOWFLAKE_ERROR_SENTENCES,
   SNOWFLAKE_SERVER_TEXT_MAX_CHARS,
@@ -42,12 +47,14 @@ import {
   SNOWFLAKE_TREE_PAGE_LIMIT,
 } from "@/lib/db/providers/sql/snowflake/introspect";
 import {
+  createSnowflakeMonitoring,
   SNOWFLAKE_MONITORING_LABELS,
   SNOWFLAKE_MONITORING_SENTENCES,
   SNOWFLAKE_MONITORING_TTL_MS,
 } from "@/lib/db/providers/sql/snowflake/monitoring";
 import {
   SNOWFLAKE_FIRST_ANSWER_MAX_BYTES,
+  SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES,
   SNOWFLAKE_RESULT_BYTE_BUDGET,
   SNOWFLAKE_ROWS_SENTENCES,
 } from "@/lib/db/providers/sql/snowflake/rows";
@@ -75,6 +82,7 @@ import {
   SNOWFLAKE_USER_AGENT,
   snowflakeBackoffMs,
 } from "@/lib/db/providers/sql/snowflake/transport";
+import { applyQueryLimit, MAX_UNLIMITED_ROWS } from "@/lib/db/utils/query-limiter";
 import { resolveSqlGrammar } from "@/lib/sql/grammar";
 import type { DatabaseProvider } from "@/lib/db/types";
 import type { DatabaseConnection } from "@/lib/types";
@@ -150,9 +158,9 @@ const KEY_PAIR_REFUSED = SNOWFLAKE_ERROR_SENTENCES.keyPairRefused({
   account: "<ACCOUNT>",
   user: "<USER>",
   fingerprint: "SHA256:<fp>",
-  fp8: "<fp8>",
-  body: "<body>",
 });
+/** The statement the refusal carries to copy, with the doc's placeholders. */
+const KEY_PAIR_FIX = administratorStatement("<fp8>", "<body>");
 
 /** Every sentence of each exported record, each template filled with the doc's placeholders. */
 const QUOTED: Readonly<Record<string, { readonly keys: readonly string[]; readonly quotes: readonly string[] }>> = {
@@ -161,8 +169,13 @@ const QUOTED: Readonly<Record<string, { readonly keys: readonly string[]; readon
     quotes: [
       SNOWFLAKE_STATEMENT_SENTENCES.useRefused,
       SNOWFLAKE_STATEMENT_SENTENCES.settingNotCarried,
+      SNOWFLAKE_STATEMENT_SENTENCES.temporaryNotCarried,
+      SNOWFLAKE_STATEMENT_SENTENCES.noLastQuery,
       SNOWFLAKE_STATEMENT_SENTENCES.noTransactions,
       SNOWFLAKE_STATEMENT_SENTENCES.secondaryRoles("<roles>", "<role>"),
+      SNOWFLAKE_STATEMENT_SENTENCES.unresolvedDatabase("<db>", "<role>"),
+      SNOWFLAKE_STATEMENT_SENTENCES.unresolvedSchema("<schema>", "<role>"),
+      SNOWFLAKE_STATEMENT_SENTENCES.unresolvedWarehouse("<wh>", "<role>"),
       SNOWFLAKE_STATEMENT_SENTENCES.badHandle,
       SNOWFLAKE_STATEMENT_SENTENCES.foreignLink,
     ],
@@ -175,6 +188,7 @@ const QUOTED: Readonly<Record<string, { readonly keys: readonly string[]; readon
       SNOWFLAKE_ROWS_SENTENCES.encoding("<encoding>"),
       SNOWFLAKE_ROWS_SENTENCES.nonString("<column>"),
       SNOWFLAKE_ROWS_SENTENCES.byteCut(1234).replace("1,234", "<numRows>"),
+      SNOWFLAKE_ROWS_SENTENCES.firstRowCut,
       SNOWFLAKE_ROWS_SENTENCES.rowCut,
       SNOWFLAKE_ROWS_SENTENCES.snowflakeCut,
     ],
@@ -189,11 +203,17 @@ const QUOTED: Readonly<Record<string, { readonly keys: readonly string[]; readon
       SNOWFLAKE_ERROR_SENTENCES.networkPolicyRefused,
       SNOWFLAKE_ERROR_SENTENCES.networkPolicyRequired,
       SNOWFLAKE_ERROR_SENTENCES.roleRefused("<role>", "<user>", "<role>", "<user>"),
+      SNOWFLAKE_ERROR_SENTENCES.tokenRoleRefused("<role>", "<user>"),
       SNOWFLAKE_ERROR_SENTENCES.roleMismatch("<r>", "<role>"),
+      SNOWFLAKE_ERROR_SENTENCES.tokenUserMismatch("<u>", "<user>"),
       SNOWFLAKE_ERROR_SENTENCES.noWarehouse,
+      SNOWFLAKE_ERROR_SENTENCES.warehouseUnusable("<wh>", "<role>"),
       SNOWFLAKE_ERROR_SENTENCES.objectMissing("<role>", "'<role>'", ""),
       SNOWFLAKE_ERROR_SENTENCES.privileges("<role>", ""),
       SNOWFLAKE_ERROR_SENTENCES.forbidden,
+      SNOWFLAKE_ERROR_SENTENCES.headersTooLarge,
+      SNOWFLAKE_ERROR_SENTENCES.tokenMissing,
+      SNOWFLAKE_ERROR_SENTENCES.noMessage("<n>" as unknown as number, "<code>"),
       SNOWFLAKE_ERROR_SENTENCES.statementFailed("<message>", "<code>", "<sqlstate>"),
       SNOWFLAKE_ERROR_SENTENCES.deadline("<n>" as unknown as number),
       SNOWFLAKE_ERROR_SENTENCES.surfaceDeadline(30),
@@ -204,7 +224,9 @@ const QUOTED: Readonly<Record<string, { readonly keys: readonly string[]; readon
       SNOWFLAKE_ERROR_SENTENCES.unavailable("<n>" as unknown as number, "<attempts>" as unknown as number),
       SNOWFLAKE_ERROR_SENTENCES.tlsRefused,
       SNOWFLAKE_ERROR_SENTENCES.resultGone,
+      SNOWFLAKE_ERROR_SENTENCES.accountNotFound("<host>"),
       SNOWFLAKE_ERROR_SENTENCES.invalidPayload,
+      SNOWFLAKE_ERROR_SENTENCES.connectDeadline("<host>", "<n>" as unknown as number),
       SNOWFLAKE_ERROR_SENTENCES.unreachable("<host>"),
       SNOWFLAKE_ERROR_SENTENCES.certMismatch("<host>"),
       SNOWFLAKE_ERROR_SENTENCES.slotsBusy("<n>" as unknown as number),
@@ -219,7 +241,12 @@ const QUOTED: Readonly<Record<string, { readonly keys: readonly string[]; readon
       SNOWFLAKE_KEY_SENTENCES.tooLarge,
       SNOWFLAKE_KEY_SENTENCES.publicKey,
       SNOWFLAKE_KEY_SENTENCES.notPem,
+      SNOWFLAKE_KEY_SENTENCES.manyBlocks,
+      SNOWFLAKE_KEY_SENTENCES.truncated,
+      SNOWFLAKE_KEY_SENTENCES.certificate,
+      SNOWFLAKE_KEY_SENTENCES.otherBlock,
       SNOWFLAKE_KEY_SENTENCES.kdfCost,
+      SNOWFLAKE_KEY_SENTENCES.scheme,
       SNOWFLAKE_KEY_SENTENCES.needsPassphrase,
       SNOWFLAKE_KEY_SENTENCES.wrongPassphrase,
       SNOWFLAKE_KEY_SENTENCES.unreadable,
@@ -227,6 +254,10 @@ const QUOTED: Readonly<Record<string, { readonly keys: readonly string[]; readon
       SNOWFLAKE_KEY_SENTENCES.short,
       SNOWFLAKE_KEY_SENTENCES.long("<bits>" as unknown as number),
     ],
+  },
+  SNOWFLAKE_TOKEN_SENTENCES: {
+    keys: Object.keys(SNOWFLAKE_TOKEN_SENTENCES),
+    quotes: Object.values(SNOWFLAKE_TOKEN_SENTENCES),
   },
   SNOWFLAKE_FIELD_SENTENCES: {
     keys: Object.keys(SNOWFLAKE_FIELD_SENTENCES),
@@ -294,6 +325,12 @@ describe("docs/providers/snowflake.md", () => {
     }
   });
 
+  test("states the access token's bound", () => {
+    expect(flat(sectionOf(DOC, "### 2.4 Programmatic access token"))).toContain(
+      `longer than ${n(SNOWFLAKE_TOKEN_MAX_CHARS)} characters`,
+    );
+  });
+
   test("names the fields by the dialog's labels, in the dialog's order", () => {
     const ui = DB_UI_CONFIG.snowflake;
     const rows = firstCells(sectionOf(DOC, "### 2.1 Fields"));
@@ -306,12 +343,15 @@ describe("docs/providers/snowflake.md", () => {
     if (capabilities.supportsInlineRowEdit === false) off.push("Inline row edit");
     if (capabilities.supportsColumnProfiling === false) off.push("Column profiler");
     if (contract.buildObjectEdit === undefined) off.push("Object edit");
+    if (capabilities.supportsCreateTable === false) off.push("Create table");
+    if (importRefusal(capabilities) !== null) off.push("Data import");
     if (capabilities.supportsTestDataGeneration === false) off.push("Test data generation");
     if (capabilities.supportsTransactions === false) off.push("Transactions");
     if (capabilities.supportsMaintenance === false && capabilities.maintenanceOperations?.length === 0)
       off.push("Maintenance");
     if (contract.queryReadOnly === undefined) off.push("Agent execute mode, MCP `run_read_query`");
     expect(firstCells(sectionOf(DOC, "### 8.5 Off in v1"))).toEqual(off);
+    expect(flat(sectionOf(DOC, "### 8.5 Off in v1"))).toContain(`\`${IMPORT_NO_TARGET}\``);
   });
 
   test("states the capabilities the features section describes", () => {
@@ -358,6 +398,19 @@ describe("docs/providers/snowflake.md", () => {
     expect(FLAT_DOC).toContain(SNOWFLAKE_ROLE_CHECK_SQL);
   });
 
+  test("says which formatter language Format uses and which words completion adds, as the grammar declares", () => {
+    const editor = flat(sectionOf(DOC, "### 8.7 Editor"));
+    expect(resolveSqlGrammar("snowflake").formatterLanguage).toBe("snowflake");
+    expect(editor).toContain("sql-formatter's Snowflake language (the grammar's `formatterLanguage`)");
+    const words = resolveSqlGrammar("snowflake").completionWords;
+    expect(editor).toContain("(the grammar's `completionWords`");
+    for (const word of ["QUALIFY", "ARRAY_AGG", "PARSE_JSON", "FLATTEN", "CURRENT_ROLE", "CURRENT_WAREHOUSE"]) {
+      expect([...(words?.keywords ?? []), ...(words?.functions ?? [])]).toContain(word);
+      expect(editor).toContain(`\`${word}\``);
+    }
+    expect(words?.functions.some((name) => name.startsWith("SYSTEM$"))).toBe(false);
+  });
+
   test("names every confirmation form the grammar declares", () => {
     const grammar = resolveSqlGrammar("snowflake");
     const gate = flat(sectionOf(DOC, "## 9. The confirmation gate"));
@@ -375,6 +428,15 @@ describe("docs/providers/snowflake.md", () => {
     const unconfirmed = /Still unconfirmed:.*?\.(?=\s|$)/.exec(gate)?.[0] ?? "";
     expect(unconfirmed).not.toBe("");
     for (const form of forms) expect(unconfirmed).not.toContain(`\`${form.join(" ")}\``);
+    // A form that asks only with a word after it is named with that word (SF-013).
+    const whenForms = grammar.confirmFormsWhen ?? [];
+    expect(whenForms.length).toBeGreaterThan(0);
+    for (const { form, when } of whenForms) expect(gate).toContain(`\`${form.join(" ")} ... ${when}\``);
+    // The forms exempt from the shared keywords are named too, beside the session policy form that still asks (SF-030).
+    const exempt = (grammar.confirmExemptForms ?? []).map((form) => `\`${form.join(" ")}\``);
+    expect(exempt.length).toBeGreaterThan(0);
+    expect(gate).toContain(`but ${exempt.join(" and ")},`);
+    expect(gate).toContain("`ALTER SESSION POLICY` still asks");
     expect(gate).toContain("a browser confirmation, not a boundary");
     expect(gate).toContain("`IDENTIFIER()`");
   });
@@ -388,17 +450,15 @@ describe("docs/providers/snowflake.md", () => {
     expect(sessions).toContain('A backslash inside `"..."` is part of the name');
   });
 
-  test("registers the key under the name and statements Studio's refusal prints, the administrator's first", () => {
-    const admin = /registers it with (ALTER USER <name> ADD KEY PAIR \S+ PUBLIC_KEY = )'<body>'/.exec(KEY_PAIR_REFUSED);
-    const self = /; (ALTER USER ADD KEY PAIR \S+ PUBLIC_KEY = )'<body>' is refused with 003001/.exec(KEY_PAIR_REFUSED);
+  test("registers the key under the name and statement Studio's refusal carries, the self-service form in the doc", () => {
+    const admin = /^(ALTER USER <name> ADD KEY PAIR \S+ PUBLIC_KEY = )'<body>'$/.exec(KEY_PAIR_FIX);
     expect(admin).not.toBeNull();
-    expect(self).not.toBeNull();
-    expect(KEY_PAIR_REFUSED.indexOf(admin?.[1] ?? "")).toBeLessThan(KEY_PAIR_REFUSED.indexOf(self?.[1] ?? ""));
-    expect(KEY_PAIR_REFUSED).toContain("MODIFY PROGRAMMATIC AUTHENTICATION METHODS on your own user");
-    expect(KEY_PAIR_REFUSED).toContain("ALTER USER <name> SET RSA_PUBLIC_KEY = '<body>'");
+    expect(KEY_PAIR_REFUSED).not.toContain("<body>");
+    expect(KEY_PAIR_REFUSED).toContain("ALTER USER <name> ADD KEY PAIR, where <name> is the user's NAME");
+    const self = ["ALTER USER ADD KEY PAIR ", keyPairName("<fp8>"), " PUBLIC_KEY = "].join("");
     const connecting = flat(sectionOf(DOC, "## 2. Connecting"));
     expect(connecting).toContain(`${admin?.[1]}'<public key body>'`);
-    expect(connecting).toContain(`${self?.[1]}'<public key body>'`);
+    expect(connecting).toContain(`${self}'<public key body>'`);
     expect(connecting).toContain("ALTER USER <name> SET RSA_PUBLIC_KEY = '<public key body>'");
     expect(connecting).toContain("MODIFY PROGRAMMATIC AUTHENTICATION METHODS");
     // No capture shows SET RSA_PUBLIC_KEY replacing a key, or the self-service form working once granted (M97).
@@ -411,7 +471,7 @@ describe("docs/providers/snowflake.md", () => {
     const generate = connecting.indexOf("openssl genrsa 2048");
     const register = connecting.indexOf(admin?.[1] ?? "");
     const check = connecting.indexOf("SHOW USER KEY PAIRS FOR USER <name>", register);
-    const selfService = connecting.indexOf(self?.[1] ?? "");
+    const selfService = connecting.indexOf(self);
     expect(generate).toBeGreaterThan(-1);
     expect(register).toBeGreaterThan(generate);
     expect(check).toBeGreaterThan(register);
@@ -476,7 +536,7 @@ describe("docs/providers/snowflake.md", () => {
     expect(FLAT_DOC).toContain(`${SNOWFLAKE_JWT_RENEW_AFTER_S / 60} minutes`);
     const { perProvider, perEngine, queueDepth } = SNOWFLAKE_LIMITER_OPTIONS;
     expect(FLAT_DOC).toContain(
-      `${perProvider} statements per connection, ${perEngine} per Studio process, and a queue of ${queueDepth}`,
+      `${perProvider} statements per connection, ${perEngine} across all Snowflake connections of the Studio process, and a queue of ${queueDepth} shared by them`,
     );
   });
 
@@ -508,6 +568,93 @@ describe("every other number and sentence the doc states is the code's", () => {
     );
   });
 
+  test("the statement slots, and the queue wait that no longer counts against a statement's timeout (SF-007)", () => {
+    expect(FLAT_DOC).toContain(
+      `Studio keeps at most ${SNOWFLAKE_LIMITER_OPTIONS.perProvider} statements of one connection, and ${SNOWFLAKE_LIMITER_OPTIONS.perEngine} across every Snowflake connection of the server, in flight at once`,
+    );
+    expect(FLAT_DOC).toContain(
+      "Its deadline starts only when it is sent, so a statement that waited still gets its whole `timeout` on Snowflake.",
+    );
+    expect(FLAT_DOC).toContain(
+      `The wait has its own bound of the same length (\`timeout\` plus ${seconds(SNOWFLAKE_DEADLINE_GRACE_MS)})`,
+    );
+  });
+
+  test("the Overview's measured counts and its warehouse load wording are the provider's (SF-036)", async () => {
+    const answers: Record<string, string[][]> = {
+      "SHOW WAREHOUSES": [["WH", "STARTED", "X-Small", "2", "0"]],
+      "SHOW DATABASES": [["DB"]],
+      "SHOW TERSE TABLES": [["T"]],
+      "SHOW INDEXES": [],
+    };
+    const monitoring = createSnowflakeMonitoring({
+      run: async (sql) => {
+        const key = Object.keys(answers).find((prefix) => sql.startsWith(prefix)) ?? "";
+        const columns = ["name", "state", "size", "running", "queued"];
+        const rows = answers[key].map((row) => Object.fromEntries(row.map((cell, index) => [columns[index], cell])));
+        return { rows, fields: columns, columnTypes: {}, warnings: [], cut: false, numRows: rows.length };
+      },
+      warehouse: "WH",
+      database: "DB",
+      schema: undefined,
+      role: "R",
+      now: () => 0,
+    });
+    const overview = await monitoring.getOverview();
+    expect(overview.version).toEndWith("STARTED, X-Small, 2 running and 0 queued, Studio's own reads included");
+    expect(FLAT_DOC).toContain("as `<n> running and <m> queued, Studio's own reads included`");
+    for (const statement of ["SHOW WAREHOUSES LIKE", "SHOW DATABASES", "SHOW TERSE TABLES", "SHOW INDEXES"]) {
+      expect(FLAT_DOC).toContain(`\`${statement}\``);
+    }
+  });
+
+  test("an oversized first partition is reread under the budget plus the slack, not refused (SF-032)", () => {
+    expect(SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES).toBe(SNOWFLAKE_RESULT_BYTE_BUDGET + 64 * 1024);
+    expect(FLAT_DOC).toContain(
+      `Studio then reads that answer again as a stream, cut at the budget plus ${(SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES - SNOWFLAKE_RESULT_BYTE_BUDGET) / 1024} KiB`,
+    );
+    expect(FLAT_DOC).toContain(`more than ${SNOWFLAKE_FIRST_ANSWER_MAX_BYTES / MIB} MiB inline`);
+    expect(FLAT_DOC).toContain('"No row is shown: the result was cut before its first row"');
+  });
+
+  test("the byte cut's count is Snowflake's below the row request and 'more than' at it (SF-031)", () => {
+    expect(SNOWFLAKE_ROWS_PER_RESULTSET).toBe(MAX_UNLIMITED_ROWS + 1);
+    expect(FLAT_DOC).toContain(
+      `Studio asks Snowflake for at most ${n(SNOWFLAKE_ROWS_PER_RESULTSET)} rows (\`rows_per_resultset\`)`,
+    );
+    expect(FLAT_DOC).toContain(
+      `\`${SNOWFLAKE_ROWS_SENTENCES.byteCut(SNOWFLAKE_ROWS_PER_RESULTSET).split(" shown. ")[1]}\``,
+    );
+  });
+
+  test("the unlimited LIMIT and OFFSET forms the limiter keeps are the grammar's (SF-021)", () => {
+    const forms = resolveSqlGrammar("snowflake").nonNumericRowBounds ?? [];
+    expect(forms).toEqual(["NULL", "''", "$$$$"]);
+    expect(FLAT_DOC).toContain(
+      `a \`SELECT\` that ends in a lone ${forms
+        .map((form) => `\`OFFSET ${form}\``)
+        .join(", ")
+        .replace(/, (?=[^,]*$)/, " or ")} is sent as written`,
+    );
+    expect(applyQueryLimit("SELECT 1 OFFSET 2", 500, 0, {}, "snowflake").sql).toBe("SELECT 1 OFFSET 2 LIMIT 500");
+    expect(FLAT_DOC).toContain(
+      forms
+        .map((form) => `\`LIMIT ${form}\``)
+        .join(", ")
+        .replace(/, (?=[^,]*$)/, " and "),
+    );
+    expect(FLAT_DOC).toContain(
+      forms
+        .map((form) => `\`OFFSET ${form}\``)
+        .join(", ")
+        .replace(/, (?=[^,]*$)/, " and "),
+    );
+    for (const form of forms) {
+      expect(applyQueryLimit(`SELECT 1 LIMIT ${form}`, 500, 0, {}, "snowflake").sql).toBe(`SELECT 1 LIMIT ${form}`);
+      expect(applyQueryLimit(`SELECT 1 OFFSET ${form}`, 500, 0, {}, "snowflake").sql).toBe(`SELECT 1 OFFSET ${form}`);
+    }
+  });
+
   test("the resend ladder, the partition size and the User-Agent", () => {
     expect(FLAT_DOC).toContain(
       `after a backoff from ${SNOWFLAKE_RETRY_BASE_MS} ms doubling to ${seconds(SNOWFLAKE_RETRY_MAX_MS)}, at most ${SNOWFLAKE_RETRY_ATTEMPTS} sends`,
@@ -519,7 +666,7 @@ describe("every other number and sentence the doc states is the code's", () => {
     expect(FLAT_DOC).toContain(`setting \`client_result_chunk_size\` to ${SNOWFLAKE_CHUNK_SIZE_MB}`);
     expect(SNOWFLAKE_USER_AGENT).toMatch(/^LibreDB-Studio(\/.+)?$/);
     expect(FLAT_DOC).toContain(
-      "Every request sends the User-Agent `LibreDB-Studio/<version>`, or `LibreDB-Studio` in the embedded package, whose build injects no version.",
+      "Every request sends the User-Agent `LibreDB-Studio/<version>`, or `LibreDB-Studio` in the embedded package, whose build injects no version, unless the host sets `NEXT_PUBLIC_APP_VERSION`.",
     );
   });
 
@@ -545,9 +692,10 @@ describe("every other number and sentence the doc states is the code's", () => {
     expect(SNOWFLAKE_OBJECT_KINDS.map((kind) => kind.id)).toEqual([...SNOWFLAKE_KIND_IDS]);
   });
 
-  test("the tree's cut is stated as silent, since listObjects carries no truncation", () => {
+  test("the tree's cut is stated as silent, and the inventory's bound comes before it", () => {
+    expect(INVENTORY_LIMIT).toBeLessThan(SNOWFLAKE_SHOW_PAGE_ROWS);
     expect(FLAT_DOC).toContain(
-      "The tree has no place for a listing's sentence, so it shows the first 50,000 objects of a pageable kind without one; the object inventory, which the agent and the inventory route read, carries that sentence.",
+      `The tree has no place for a listing's sentence, so it shows the first 50,000 objects of a pageable kind without one; the object inventory, which the agent and the inventory route read, reads at most ${n(INVENTORY_LIMIT)} objects, so it stops at its own \`${INVENTORY_TRUNCATION_REASON}\` before that cap.`,
     );
   });
 
@@ -560,7 +708,7 @@ describe("every other number and sentence the doc states is the code's", () => {
       "Studio still sends `LIMIT 10000` wherever Snowflake offers paging, so each answer stays bounded:",
       "each from the previous page's last name with `FROM`, which starts after the name it is given (a page with nothing past that name ends the listing), up to five pages",
       "Any other listing has no paging and is sent with no `LIMIT`: `SHOW SEQUENCES` answered all 10,250 rows with and without `LIMIT` and `FROM`, since it ignores both, and the 10,000 rows Snowflake's reference gives as the most the other listings answer is not measured.",
-      "A count of exactly 10,000, Studio's own `LIMIT`: `Studio counts at most 10,000 objects here, so this is a floor.`",
+      "When the `SHOW TERSE OBJECTS` answer reaches 10,000 rows, Studio's own `LIMIT`, both the table and the view count carry: `Studio counts at most 10,000 objects here, so this is a floor.`",
     ]) {
       expect(tree).toContain(pinned);
     }
@@ -592,6 +740,15 @@ describe("every other number and sentence the doc states is the code's", () => {
     expect(decodeCell(column("boolean"), "TRUE")).toBe(true);
     expect(decodeCell(column("date"), "0")).toBe("1970-01-01");
     expect(decodeCell(column("timestamp_ltz", 0), "0")).toBe("1970-01-01 00:00:00+00:00");
+    expect(decodeCell(column("timestamp_ltz", 9), "1780340400.000000000")).toBe("2026-06-01 19:00:00.000000000+00:00");
+    expect(decodeCell(column("timestamp_tz", 9), "1780340400.000000000 1020")).toBe(
+      "2026-06-01 12:00:00.000000000-07:00",
+    );
+    expect(FLAT_DOC).toContain("`2026-06-01 19:00:00.000000000+00:00`");
+    expect(FLAT_DOC).toContain("`2026-06-01 12:00:00.000000000-07:00`");
+    // SF-009: no request sets the session zone, and the doc says so.
+    expect(FLAT_DOC).toContain("Studio sends no `TIMEZONE`");
+    expect(FLAT_DOC).not.toContain('timezone: "UTC"');
     expect(decodeCell(column("variant"), '{"a": 1}')).toBe('{"a": 1}');
     expect(FLAT_DOC).toContain(`\`${SNOWFLAKE_DECODE_SENTENCES.unreadable("<type>", "<column>")}\``);
     expect(FLAT_DOC).toContain(`\`${SNOWFLAKE_DECODE_SENTENCES.columns}\``);

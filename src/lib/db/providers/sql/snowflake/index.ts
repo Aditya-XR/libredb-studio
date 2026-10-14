@@ -58,8 +58,8 @@ import { MAX_UNLIMITED_ROWS } from "@/lib/db/utils/query-limiter";
 import { SQLBaseProvider } from "../sql-base";
 import { snowflakeEndpoint, type SnowflakeEndpoint } from "./account";
 import { SNOWFLAKE_FIELD_SENTENCES } from "./account-host";
-import { jwtClaim, keyPairTokenSource, type LoadedKey, loadPrivateKey, patTokenSource } from "./auth";
-import { SNOWFLAKE, SNOWFLAKE_ERROR_SENTENCES, SnowflakeError, toDatabaseError } from "./errors";
+import { jwtClaim, keyPairTokenSource, type LoadedKey, loadPrivateKey, patTokenSource, readAccessToken } from "./auth";
+import { connectDeadlineError, SNOWFLAKE, SNOWFLAKE_ERROR_SENTENCES, SnowflakeError, toDatabaseError } from "./errors";
 import {
   connectCautions,
   connectStatement,
@@ -77,8 +77,10 @@ import {
 import { createSnowflakeMonitoring, SNOWFLAKE_MONITORING_LABELS, type SnowflakeMonitoring } from "./monitoring";
 import {
   createSnowflakeStatements,
+  deadlineMsFor,
   foldIdentifier,
   SNOWFLAKE_QUERY_TAGS,
+  SNOWFLAKE_UNRESOLVED_CODES,
   type SnowflakeResult,
   type SnowflakeStatementRunner,
   type SnowflakeStatements,
@@ -209,6 +211,19 @@ interface SnowflakeSettings {
 
 const isBlank = (value: unknown): boolean => typeof value !== "string" || value.trim() === "";
 
+/**
+ * A name field as Snowflake should read it: without the whitespace around it, which no unquoted name holds and which
+ * Snowflake reads as part of the name, so a trailing space made a registered key, a granted role or an existing
+ * warehouse read as absent (SF-012). A quoted name keeps the spaces inside its quotes.
+ */
+const unpadded = (value: string | undefined): string | undefined => value?.trim();
+
+/**
+ * The passphrase without the line break a paste or a file read leaves at its end. Only CR and LF are removed: a space
+ * may be part of a passphrase, and removing one would open no key that the exact text does not.
+ */
+const withoutLineEnd = (value: unknown): unknown => (typeof value === "string" ? value.replace(/[\r\n]+$/, "") : value);
+
 function refuse(sentence: string): never {
   throw new SnowflakeError("config", sentence);
 }
@@ -227,8 +242,8 @@ function readSettings(config: DatabaseConnection): SnowflakeSettings {
   if (isBlank(config.role)) refuse(SNOWFLAKE_FIELD_SENTENCES.roleEmpty);
   return {
     endpoint,
-    user: config.user as string,
-    role: config.role as string,
+    user: (config.user as string).trim(),
+    role: (config.role as string).trim(),
     method: method as "keypair" | "pat",
   };
 }
@@ -345,6 +360,8 @@ export class SnowflakeProvider extends SQLBaseProvider {
         mode: "session-default",
         whenNoDefault: { walk: "parent-default-children", skip: ["INFORMATION_SCHEMA"] },
       },
+      // A schema diff compares the Database and Schema the connection names, never every database the role sees.
+      schemaDiffScope: "agent-walk",
       // Every statement that needs a warehouse can resume it and bills at least a minute: read from configuration alone.
       resumesBilledCompute: true,
     };
@@ -367,21 +384,29 @@ export class SnowflakeProvider extends SQLBaseProvider {
    */
   public async connect(): Promise<void> {
     let opened: SnowflakeSession | null = null;
+    let host = "";
     let cautions: QueryWarning[];
     try {
       const settings = readSettings(this.config);
+      host = settings.endpoint.host;
       const loaded: LoadedKey | null =
-        settings.method === "keypair" ? loadPrivateKey(this.config.privateKey, this.config.privateKeyPassphrase) : null;
+        settings.method === "keypair"
+          ? loadPrivateKey(this.config.privateKey, withoutLineEnd(this.config.privateKeyPassphrase))
+          : null;
       const deps: SnowflakeTransportDeps = { ...snowflakeProductionDeps(), ...this.deps };
       const { endpoint, user, role } = settings;
       const claim = jwtClaim(endpoint.accountClaim, user);
       const tokens =
-        loaded === null ? patTokenSource(this.config.password as string) : keyPairTokenSource(loaded, claim, deps.now);
+        loaded === null
+          ? patTokenSource(readAccessToken(this.config.password as string))
+          : keyPairTokenSource(loaded, claim, deps.now);
       const transport = createSnowflakeTransport(
         { origin: endpoint.origin, tls: { rejectUnauthorized: true, identity: endpoint.host }, tokens },
         deps,
       );
-      const { database, schema, warehouse } = this.config;
+      const [database, schema, warehouse] = [this.config.database, this.config.schema, this.config.warehouse].map(
+        unpadded,
+      );
       const statements = createSnowflakeStatements({
         transport,
         origin: endpoint.origin,
@@ -391,6 +416,7 @@ export class SnowflakeProvider extends SQLBaseProvider {
           host: endpoint.host,
           user,
           role,
+          ...(isBlank(warehouse) ? {} : { warehouse: (warehouse as string).trim() }),
           authMethod: settings.method,
           accountClaim: claim.account,
           userClaim: claim.user,
@@ -419,7 +445,14 @@ export class SnowflakeProvider extends SQLBaseProvider {
       const roleCautions = await statements.checkRole();
       // A disconnect() while either statement ran took the session and closed it: this connect ended cancelled.
       if (this.connecting !== session) throw new SnowflakeError("cancelled", SNOWFLAKE_ERROR_SENTENCES.cancelled);
-      cautions = [...connectCautions(answer, warehouse, role), ...roleCautions];
+      // A warehouse the connect SHOW already cautioned on is not cautioned twice by the role check.
+      const showCautions = connectCautions(answer, warehouse, role);
+      cautions = [
+        ...showCautions,
+        ...roleCautions.filter(
+          (caution) => showCautions.length === 0 || caution.code !== SNOWFLAKE_UNRESOLVED_CODES.warehouse,
+        ),
+      ];
     } catch (error) {
       // A second connect() displaces this one from `connecting`: its session is closed here whoever holds it, and
       // its failure leaves the state of the connect that replaced it alone.
@@ -428,7 +461,7 @@ export class SnowflakeProvider extends SQLBaseProvider {
         if (this.connecting === opened) this.connecting = null;
         await this.close(opened);
       }
-      const failure = toDatabaseError(error) as Error;
+      const failure = toDatabaseError(connectDeadlineError(error, host, (s) => deadlineMsFor(s) / 1000)) as Error;
       if (!displaced) this.setError(failure);
       throw failure;
     }
@@ -552,9 +585,10 @@ export class SnowflakeProvider extends SQLBaseProvider {
       this.ensureConnected();
       return [];
     }
-    if (parent.length === 0) return this.surface((run) => listDatabases(run, this.config.database));
-    const configured = this.config.database ? foldIdentifier(this.config.database) : null;
-    const sessionSchema = parent[0] === configured ? this.config.schema : undefined;
+    const database = unpadded(this.config.database);
+    if (parent.length === 0) return this.surface((run) => listDatabases(run, database));
+    const configured = database ? foldIdentifier(database) : null;
+    const sessionSchema = parent[0] === configured ? unpadded(this.config.schema) : undefined;
     return this.surface((run) => listSchemas(run, parent[0], sessionSchema));
   }
 
@@ -616,7 +650,7 @@ export class SnowflakeProvider extends SQLBaseProvider {
   }
 
   public async getHealth(): Promise<HealthInfo> {
-    return this.surface((run) => readHealth(run, this.config.warehouse));
+    return this.surface((run) => readHealth(run, unpadded(this.config.warehouse)));
   }
 
   /** No operation runs: a kill would reach other users' statements, and the base defaults are PostgreSQL's. */

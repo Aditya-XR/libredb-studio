@@ -42,10 +42,20 @@ export const SNOWFLAKE_ROWS_SENTENCES = Object.freeze({
     `Snowflake sent a result partition in an encoding Studio does not read (${encoding}).`,
   nonString: (column: string) =>
     `Snowflake sent a cell that is not text in column "${column}", so the result is not shown.`,
+  /**
+   * `numRows` is Snowflake's count, which Studio's `rows_per_resultset` of one past the row budget caps: a count past
+   * the budget is that request echoed back, so it is said as "more than" the budget, never as a total.
+   */
   byteCut: (numRows: number | null | undefined) =>
     `The result reached Studio's statement budget of 16 MiB, so only the rows before it are shown.${
-      typeof numRows === "number" ? ` Snowflake reported ${numRows.toLocaleString("en-US")} rows.` : ""
+      typeof numRows !== "number"
+        ? ""
+        : numRows > MAX_UNLIMITED_ROWS
+          ? ` Snowflake reported more than ${MAX_UNLIMITED_ROWS.toLocaleString("en-US")} rows.`
+          : ` Snowflake reported ${numRows.toLocaleString("en-US")} rows.`
     }`,
+  firstRowCut:
+    "The first row of this result is larger than Studio's statement budget of 16 MiB, so no row is shown. Select fewer columns, or part of a large value with LEFT or SUBSTR.",
   rowCut: "The result reached Studio's statement budget of 100,000 rows, so only the rows before it are shown.",
   snowflakeCut:
     "Snowflake returned only part of this result because it is too large (391908), so only the rows it sent are shown. Add a LIMIT, or select fewer columns.",
@@ -133,6 +143,9 @@ type ReaderState =
  * not-text refusal for its column. Each completed row goes to the budget, costing the decoded bytes consumed since the
  * previous row ended. Text held between rows is bounded: inside a row by the bytes left, outside one by the bytes left
  * and the partition slack, checked at every chunk's end, so a hostile body stops within one chunk of the budget.
+ *
+ * With a `captureKey`, the first value of that key is kept as its JSON text while it is skipped, and handed to
+ * `onCapture` once it ends, before any later key is read.
  */
 class RowReader {
   private state: ReaderState = "start";
@@ -150,11 +163,24 @@ class RowReader {
   private row: (string | null)[] = [];
   /** Decoded bytes consumed since the previous row ended. */
   private pending = 0;
+  /** The captured value's text so far, while it is being skipped; null when nothing is being captured. */
+  private capture: string[] | null = null;
+  private captured = false;
 
   constructor(
     private readonly columns: readonly string[],
     private readonly budget: Budget,
+    private readonly captureKey: string | null = null,
+    private readonly onCapture: (text: string) => void = () => {},
   ) {}
+
+  /** Ends a capture with the value's last text. */
+  private endCapture(last: string): void {
+    if (this.capture === null) return;
+    const text = this.capture.join("") + last;
+    this.capture = null;
+    this.onCapture(text);
+  }
 
   get done(): boolean {
     return this.state === "end";
@@ -178,6 +204,7 @@ class RowReader {
   feed(text: string): boolean {
     let segment = 0;
     let token = this.state === "string" ? 0 : -1;
+    let captureFrom = 0;
     for (let i = 0; i < text.length; i += 1) {
       const c = text.charCodeAt(i);
       switch (this.state) {
@@ -284,6 +311,11 @@ class RowReader {
             this.skipStarted = false;
             this.skipDepth = 0;
             this.state = "skip";
+            if (!this.captured && this.key === this.captureKey) {
+              this.captured = true;
+              this.capture = [];
+              captureFrom = i + 1;
+            }
           }
           break;
         }
@@ -319,7 +351,9 @@ class RowReader {
             // Inside a scalar: its end is the next separator, read again as the object's.
             if (c === COMMA || c === CLOSE_BRACE || c === CLOSE_BRACKET || isSpace(c)) {
               this.state = "afterValue";
+              this.endCapture(text.slice(captureFrom, i));
               i -= 1;
+              break;
             }
           } else if (c === QUOTE) {
             this.skipInString = true;
@@ -329,6 +363,7 @@ class RowReader {
             this.skipDepth -= 1;
             if (this.skipDepth === 0) this.state = "afterValue";
           }
+          if (this.state === "afterValue") this.endCapture(text.slice(captureFrom, i + 1));
           break;
         }
         case "end": {
@@ -338,6 +373,7 @@ class RowReader {
       }
     }
     if (token >= 0) this.parts.push(text.slice(token));
+    this.capture?.push(text.slice(captureFrom));
     this.pending += Buffer.byteLength(text.slice(segment));
     const bound = this.inRow ? this.budget.bytesLeft : this.budget.bytesLeft + SNOWFLAKE_PARTITION_SLACK_BYTES;
     if (this.pending > bound) {
@@ -443,7 +479,7 @@ export async function partitionFailureText(
  */
 async function readPartition(
   answer: SnowflakeByteAnswer,
-  columns: readonly string[],
+  reader: RowReader,
   budget: Budget,
   deps: SnowflakeRowsDeps,
 ): Promise<void> {
@@ -452,7 +488,6 @@ async function readPartition(
   if (named !== "" && named !== "gzip" && named !== "identity") {
     throw new SnowflakeError("query", SNOWFLAKE_ROWS_SENTENCES.encoding(encoding));
   }
-  const reader = new RowReader(columns, budget);
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const decode = (chunk?: Buffer): string => {
     try {
@@ -507,8 +542,55 @@ export async function readResultRows(input: {
     } else {
       const bound = budget.bytesLeft + SNOWFLAKE_PARTITION_SLACK_BYTES;
       // oxlint-disable-next-line no-await-in-loop -- partitions are read one at a time, under the budget the one before left.
-      await readPartition(await input.fetchPartition(index, bound, bound), input.columns, budget, deps);
+      const answer = await input.fetchPartition(index, bound, bound);
+      // oxlint-disable-next-line no-await-in-loop -- the same partition, read before the next is asked for.
+      await readPartition(answer, new RowReader(input.columns, budget), budget, deps);
     }
   }
   return { rows: budget.rows, cut: budget.cut };
+}
+
+/** The bytes a read of an oversized first answer asks for: the budget and the slack a partition request may carry. */
+export const SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES = SNOWFLAKE_RESULT_BYTE_BUDGET + SNOWFLAKE_PARTITION_SLACK_BYTES;
+
+export interface SnowflakeOversizedFirst {
+  /** The answer's `resultSetMetaData`, parsed. */
+  readonly meta: Record<string, unknown>;
+  readonly outcome: SnowflakeRowsOutcome;
+}
+
+/**
+ * Partition 0 from a status answer too large to read whole (SF-032): the answer fetched again as bytes, cut at
+ * `SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES`, and read as a stream. Snowflake writes `resultSetMetaData` before `data`
+ * (measured on the trial), so the metadata is captured whole while the reader skips it, and the rows that fit the
+ * budget are kept, the cut declared as any byte cut is. An answer whose metadata is not whole within the read, or not
+ * an object, is still the first-partition refusal.
+ */
+export async function readOversizedFirstAnswer(
+  answer: SnowflakeByteAnswer,
+  deps: SnowflakeRowsDeps = PRODUCTION_ROWS_DEPS,
+): Promise<SnowflakeOversizedFirst> {
+  const budget = new Budget();
+  const columns: string[] = [];
+  let meta: Record<string, unknown> | null = null;
+  const reader = new RowReader(columns, budget, "resultSetMetaData", (text) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw unreadable();
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw unreadable();
+    meta = parsed as Record<string, unknown>;
+    const rowType = meta.rowType;
+    if (Array.isArray(rowType)) {
+      for (const column of rowType as unknown[]) {
+        const name = (column as { name?: unknown } | null)?.name;
+        columns.push(typeof name === "string" ? name : String(columns.length + 1));
+      }
+    }
+  });
+  await readPartition(answer, reader, budget, deps);
+  if (meta === null) throw new SnowflakeError("query", SNOWFLAKE_ROWS_SENTENCES.firstTooLarge);
+  return { meta, outcome: { rows: budget.rows, cut: budget.cut } };
 }

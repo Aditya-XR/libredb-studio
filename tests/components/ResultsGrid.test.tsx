@@ -2487,6 +2487,21 @@ describe("ResultsGrid", () => {
     expect(text).not.toContain("The operation was successful");
   });
 
+  test("a result cut before its first row says it was cut, not that the query returned no data (SF-032)", () => {
+    const result: QueryResult = {
+      ...mockEmptyResult,
+      fields: ["S"],
+      warnings: [{ message: "The first row of this result is larger than Studio's statement budget of 16 MiB." }],
+      pagination: { limit: 100_000, offset: 0, hasMore: false, totalReturned: 0, wasLimited: true },
+    };
+    const { container } = render(React.createElement(ResultsGrid, { result }));
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("No row is shown: the result was cut before its first row");
+    expect(text).not.toContain("Query returned no data");
+    expect(text).toContain("larger than Studio's statement budget");
+  });
+
   test("keeps the empty state unchanged when the engine reported no warnings", () => {
     const { container } = render(React.createElement(ResultsGrid, { result: mockEmptyResult }));
 

@@ -39,8 +39,20 @@ Apache Spark declines foreign keys and primary keys in comments, because it acce
 Spark SQL's `CREATE INDEX` and `DROP INDEX` work only in a catalog whose tables support indexes, so Spark's index changes produce comments too, and so does a column modification: whether a column's type, nullability or default can change depends on the catalog and the table format.
 Spark gets no transaction wrapper, because no transaction spans two Spark SQL statements.
 
+Objects are compared by their path below the two readings' roots: the container prefix every object of a
+reading shares, with both sides dropping the same, smaller number of leading segments. So two schemas'
+`t1` are two objects, and two connections rooted in different databases or schemas compare table by
+table. A snapshot taken before objects carried paths is compared by name, as it always was. Every
+table is named by its full path (`"b2a"."t1"`, `` `app`.`t1` ``), an added table under the source's
+root, and an index dropped without `ON <table>` is named in its table's container. An empty source has
+no root, so its added tables keep only their path below the target's root, which the session running the
+migration resolves, and never name the target's own database or schema. A view, a
+materialized view or any other object that is not a table is named in a `-- Skipped` comment rather
+than altered, created or dropped (SF-047).
+
 Review each migration against its target: a diff does not carry original foreign-key constraint
-names, schema qualifiers, cross-table dependency order, or a general type-conversion strategy.
+names, a foreign key's referenced table as a path (it is written as the reading spelled it, D150),
+cross-table dependency order, or a general type-conversion strategy.
 Default expressions remain SQL expressions supplied by the diff; they are not parameter values.
 
 ## Live regression probe

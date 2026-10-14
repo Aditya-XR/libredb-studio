@@ -29,6 +29,7 @@ import { milvusRefusal } from "@/lib/db/providers/vector/milvus/guard";
 import { qdrantRefusal } from "@/lib/db/providers/vector/qdrant/guard";
 import { statementRefusal } from "@/lib/db/destructive-commands";
 import { DATABEND_EXPLAIN_DECLINES } from "@/lib/explain/databend-text";
+import { SNOWFLAKE_EXPLAIN_GATED_DECLINE } from "@/lib/explain/snowflake-json";
 import { resolveSqlGrammar } from "@/lib/sql/grammar";
 import { isMultiStatement } from "@/lib/sql/statement-splitter";
 import type { DatabaseConnection, QueryTab } from "@/lib/types";
@@ -2718,6 +2719,69 @@ describe("useQueryExecution", () => {
     expect(body.explain).toEqual({ mode: "analyze" });
   });
 
+  /**
+   * SF-001: Snowflake's compiler evaluates a SYSTEM$ function while it explains the statement, so the Explain button
+   * and the background estimate, which both skip the gate, may never send one. Measured on the trial (Snowflake
+   * 10.37.100): Explain of `SELECT SYSTEM$CANCEL_QUERY('<id>')` cancelled the other statement, and a confirmed RUN of
+   * `SELECT SYSTEM$WAIT(60)` evaluated the wait a second time in its background plan.
+   */
+  describe("Snowflake SYSTEM$ statements are never explained (SF-001)", () => {
+    const snowflakeConnection = { ...mockConnection, type: "snowflake" as const };
+    const snowflakeMetadata: ProviderMetadata = {
+      ...mockMetadata,
+      capabilities: { ...mockMetadata.capabilities, explainFormat: "snowflake-json" as const },
+    };
+    const cancelCall = "SELECT SYSTEM$CANCEL_QUERY('01b2') AS E_EXPLBTN_1";
+
+    test("the Explain button sends nothing and says why", async () => {
+      const fetchMock = mockGlobalFetch({ "/api/db/query": { ok: true, json: mockQueryResult } });
+      const params = createDefaultParams({ activeConnection: snowflakeConnection, metadata: snowflakeMetadata });
+      const { result } = renderHook(() => useQueryExecution(params));
+
+      let answer: boolean | undefined;
+      await act(async () => {
+        answer = await result.current.executeQuery(cancelCall, undefined, true);
+      });
+
+      expect(answer).toBe(false);
+      expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/api/db/query"))).toHaveLength(0);
+      expect(mockToastError).toHaveBeenCalledWith(
+        "Not Supported",
+        expect.objectContaining({ description: SNOWFLAKE_EXPLAIN_GATED_DECLINE }),
+      );
+    });
+
+    // The gate's own verdict on a SYSTEM$ call is pinned in tests/components/QuerySafetyDialog.test.tsx.
+    test("a confirmed RUN sends no background plan beside it", async () => {
+      const fetchMock = mockGlobalFetch({ "/api/db/query": { ok: true, json: mockQueryResult } });
+      const params = createDefaultParams({ activeConnection: snowflakeConnection, metadata: snowflakeMetadata });
+      const { result } = renderHook(() => useQueryExecution(params));
+
+      await act(async () => {
+        await result.current.executeQuery(cancelCall, undefined, false, { skipSafety: true });
+      });
+      const bodies = fetchMock.mock.calls
+        .filter((call) => String(call[0]).includes("/api/db/query"))
+        .map((call) => JSON.parse((call[1] as RequestInit).body as string));
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0].explain).toBeUndefined();
+    });
+
+    test("a SELECT without one keeps its background plan", async () => {
+      const fetchMock = mockGlobalFetch({ "/api/db/query": { ok: true, json: mockQueryResult } });
+      const params = createDefaultParams({ activeConnection: snowflakeConnection, metadata: snowflakeMetadata });
+      const { result } = renderHook(() => useQueryExecution(params));
+
+      await act(async () => {
+        await result.current.executeQuery("SELECT 'SYSTEM$WAIT(1)' AS s");
+      });
+      const modes = fetchMock.mock.calls
+        .filter((call) => String(call[0]).includes("/api/db/query"))
+        .map((call) => JSON.parse((call[1] as RequestInit).body as string).explain?.mode);
+      expect(modes).toEqual([undefined, "estimate"]);
+    });
+  });
+
   test("executeQuery posts the original statement and the estimate mode for the background plan", async () => {
     const fetchMock = mockGlobalFetch({
       "/api/db/query": { ok: true, json: mockQueryResult },
@@ -4179,6 +4243,86 @@ describe("useQueryExecution", () => {
       } finally {
         globalThis.fetch = originalFetch;
       }
+    });
+
+    // SF-023: closing a running tab cancels it silently, since a cancel toast raised a moment after the close's Undo
+    // toast covered it and took the click meant for Undo. The cancel itself is the one Stop sends.
+    describe("a silent cancel (closing a running tab)", () => {
+      const noToast = () => {
+        expect(mockToastLoading).not.toHaveBeenCalled();
+        expect(mockToastSuccess).not.toHaveBeenCalled();
+        expect(mockToastError).not.toHaveBeenCalled();
+        expect(mockToastDefault).not.toHaveBeenCalled();
+      };
+      const clearToasts = () => {
+        for (const m of [mockToastLoading, mockToastSuccess, mockToastError, mockToastDefault]) m.mockClear();
+      };
+
+      async function runThenSilentCancel(params: Parameters<typeof createDefaultParams>[0], sql: string) {
+        let tabs = [createTab()];
+        const setTabs = mock((updater: unknown) => {
+          if (typeof updater === "function") tabs = (updater as (prev: QueryTab[]) => QueryTab[])(tabs);
+        });
+        const { result } = renderHook(() => useQueryExecution(createDefaultParams({ setTabs, ...params })));
+        const running = act(async () => {
+          await result.current.executeQuery(sql);
+        });
+        clearToasts();
+        await act(async () => {
+          await result.current.cancelQuery("tab-1", { silent: true });
+        });
+        await running;
+        return tabs;
+      }
+
+      for (const cancelled of [true, false]) {
+        test(`posts the run's cancel and raises no toast when the server answers cancelled: ${cancelled}`, async () => {
+          const posted: string[] = [];
+          const restore = installCancelAnswers((queryId) => {
+            posted.push(queryId);
+            return json({ cancelled });
+          });
+          try {
+            const tabs = await runThenSilentCancel({}, "SELECT * FROM users");
+            expect(posted.length).toBeGreaterThan(0);
+            expect(tabs[0].isExecuting).toBe(false);
+            noToast();
+          } finally {
+            restore();
+          }
+        });
+      }
+
+      test("raises no toast for a provider without cancel or a run with no id on the server", async () => {
+        const restore = installCancelAnswers(() => json({ cancelled: false }));
+        const originalFetch = globalThis.fetch;
+        // /api/db/transaction hangs until aborted, like the run above.
+        const hanging = globalThis.fetch;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+          if (url.includes("/api/db/transaction")) {
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () =>
+                reject(new DOMException("The operation was aborted.", "AbortError")),
+              );
+            });
+          }
+          return hanging(input, init);
+        }) as typeof fetch;
+        try {
+          const metadata = {
+            ...mockMetadata,
+            capabilities: { ...mockMetadata.capabilities, supportsQueryCancel: false },
+          };
+          await runThenSilentCancel({ metadata }, "SELECT * FROM users");
+          noToast();
+          await runThenSilentCancel({ transactionActive: true }, "UPDATE users SET name = 'x' WHERE id = 1");
+          noToast();
+        } finally {
+          globalThis.fetch = originalFetch;
+          restore();
+        }
+      });
     });
 
     // A script goes to /api/db/multi-query with the run's id, which the route binds to each unit in turn, so Stop

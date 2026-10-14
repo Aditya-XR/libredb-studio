@@ -7,8 +7,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { KeyObject } from "node:crypto";
 import { enumerateContainers, scopeGroundingContainers } from "@/lib/db/container-walk";
-import { AuthenticationError, DatabaseConfigError, QueryCancelledError, QueryError } from "@/lib/db/errors";
+import {
+  AuthenticationError,
+  ConnectionError,
+  DatabaseConfigError,
+  QueryCancelledError,
+  QueryError,
+} from "@/lib/db/errors";
 import { SNOWFLAKE_FIELD_SENTENCES } from "@/lib/db/providers/sql/snowflake/account-host";
+import { SNOWFLAKE_TOKEN_SENTENCES } from "@/lib/db/providers/sql/snowflake/auth";
 import { SNOWFLAKE, SNOWFLAKE_ERROR_SENTENCES } from "@/lib/db/providers/sql/snowflake/errors";
 import {
   SNOWFLAKE_OBJECT_KINDS,
@@ -49,6 +56,11 @@ const warehouses = (...rows: (string | null)[][]): ScriptedAnswer => resultAnswe
 const RUNNING = warehouses(["STUDIO_WH", "STARTED", "X-Small", "true"]);
 /** The role check answered with the configured role and no secondary roles. */
 const ROLE_OK = roleAnswer("STUDIO_RO");
+/** An unsigned JWT in a key-pair JWT's shape: its `iss` names the key's fingerprint. */
+const KEY_PAIR_JWT = [{ alg: "RS256" }, { iss: "MYORG-MYACCT.STUDIO_SVC.SHA256:abc=", sub: "MYORG-MYACCT.STUDIO_SVC" }]
+  .map((part) => Buffer.from(JSON.stringify(part)).toString("base64url"))
+  .concat("c2ln")
+  .join(".");
 
 function connection(overrides: Record<string, unknown> = {}): DatabaseConnection {
   return {
@@ -173,6 +185,17 @@ describe("connect() validates the configuration before any socket", () => {
     ["an unknown sign-in method", { authMethod: "password" }, SNOWFLAKE_FIELD_SENTENCES.method],
     ["no key under keypair", { privateKey: "" }, SNOWFLAKE_FIELD_SENTENCES.keyEmpty],
     ["no token under pat", { authMethod: "pat", password: "" }, SNOWFLAKE_FIELD_SENTENCES.tokenEmpty],
+    [
+      "a key-pair JWT as the token",
+      { authMethod: "pat", password: KEY_PAIR_JWT },
+      SNOWFLAKE_TOKEN_SENTENCES.keyPairJwt,
+    ],
+    ["a token past the bound", { authMethod: "pat", password: "a".repeat(100_000) }, SNOWFLAKE_TOKEN_SENTENCES.tooLong],
+    [
+      "a non-Latin-1 token",
+      { authMethod: "pat", password: "abc\u00e9\u4e2d" },
+      SNOWFLAKE_TOKEN_SENTENCES.badCharacters,
+    ],
     ["an empty role", { role: "" }, SNOWFLAKE_FIELD_SENTENCES.roleEmpty],
     ["no role", { role: undefined }, SNOWFLAKE_FIELD_SENTENCES.roleEmpty],
   ];
@@ -291,11 +314,27 @@ describe("connect() sends the connect statement, then the role check", () => {
 
   test("a programmatic access token is its own bearer", async () => {
     const entry = build({ authMethod: "pat", password: "pat-value", privateKey: undefined });
-    entry.transports.answer(SUBMIT, RUNNING, ROLE_OK);
+    entry.transports.answer(SUBMIT, RUNNING, roleAnswer("STUDIO_RO", undefined, "STUDIO_SVC"));
     await entry.provider.connect();
     const [request] = entry.transports.requests;
     expect(request.headers["x-snowflake-authorization-token-type"]).toBe("PROGRAMMATIC_ACCESS_TOKEN");
     expect(request.headers.authorization).toBe("Bearer pat-value");
+  });
+
+  test("a token with line breaks around it and a Bearer prefix is sent bare (SF-015)", async () => {
+    const entry = build({ authMethod: "pat", password: "\r\nBearer pat-value\r\n", privateKey: undefined });
+    entry.transports.answer(SUBMIT, RUNNING, roleAnswer("STUDIO_RO", undefined, "STUDIO_SVC"));
+    await entry.provider.connect();
+    for (const request of entry.transports.requests) expect(request.headers.authorization).toBe("Bearer pat-value");
+  });
+
+  test("a token that signs in as another user than User fails the connect, naming both (SF-005)", async () => {
+    const entry = build({ authMethod: "pat", password: "pat-value", privateKey: undefined, user: "someone_else" });
+    entry.transports.answer(SUBMIT, RUNNING, roleAnswer("STUDIO_RO", undefined, "STUDIO_PAT"));
+    const error = await caught(entry.provider.connect());
+    expect(error).toBeInstanceOf(AuthenticationError);
+    expect((error as Error).message).toBe(SNOWFLAKE_ERROR_SENTENCES.tokenUserMismatch("STUDIO_PAT", "someone_else"));
+    expect(entry.provider.isConnected()).toBe(false);
   });
 
   test("a refused key pair maps to AuthenticationError with the statement that registers the key", async () => {
@@ -318,6 +357,114 @@ describe("connect() sends the connect statement, then the role check", () => {
     expect(entry.transports.closedLanes).toContain(0);
     expect(entry.transports.byteCloses()).toBe(1);
     expect(entry.provider.isConnected()).toBe(true);
+  });
+});
+
+describe("connect() reads the names without the whitespace around them (SF-012)", () => {
+  const claimsOf = (request: RecordedRequest): Record<string, unknown> => {
+    const token = String(request.headers.authorization).replace(/^Bearer /, "");
+    return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+  };
+
+  test("a padded User, Role, Warehouse, Database and Schema are sent unpadded, in the JWT and every body", async () => {
+    const entry = build({
+      user: "studio_svc ",
+      role: " STUDIO_RO ",
+      warehouse: " STUDIO_WH",
+      database: " SALES ",
+      schema: "PUBLIC\t",
+    });
+    entry.transports.answer(SUBMIT, RUNNING, ROLE_OK);
+    await entry.provider.connect();
+    expect(entry.provider.isConnected()).toBe(true);
+    expect(claimsOf(entry.transports.requests[0]).sub).toBe("MYORG-MYACCT.STUDIO_SVC");
+    const bodies = entry.transports.requests.map(bodyOf);
+    expect(bodies[0].statement).toBe("SHOW WAREHOUSES LIKE 'STUDIO_WH'");
+    for (const body of bodies) {
+      expect([body.role, body.warehouse, body.database, body.schema]).toEqual([
+        "STUDIO_RO",
+        "STUDIO_WH",
+        "SALES",
+        "PUBLIC",
+      ]);
+    }
+  });
+
+  test("a quoted Role keeps the spaces inside its quotes", async () => {
+    const entry = build({ role: ' "Studio RO " ' });
+    entry.transports.answer(SUBMIT, RUNNING, roleAnswer("Studio RO "));
+    await entry.provider.connect();
+    expect(bodyOf(entry.transports.requests[0]).role).toBe("Studio RO ");
+  });
+
+  test("a passphrase with a line break at its end opens the key; a space in it is the passphrase's own", async () => {
+    const pem = pbes2Pbkdf2Pem(KEY, KEY_TEST_PASSPHRASE, 2_048);
+    const entry = await connected({ privateKey: pem, privateKeyPassphrase: `${KEY_TEST_PASSPHRASE}\r\n` });
+    expect(entry.provider.isConnected()).toBe(true);
+    const padded = build({ privateKey: pem, privateKeyPassphrase: `${KEY_TEST_PASSPHRASE} ` });
+    const error = await caught(padded.provider.connect());
+    expect((error as Error).message).toBe("The passphrase does not open this key. Nothing was sent.");
+  });
+
+  test("the tree marks the configured database and schema when they were typed padded", async () => {
+    const entry = await connected({ database: "SALES ", schema: " PUBLIC" });
+    const names = (...rows: string[]) =>
+      resultAnswer({ columns: [{ name: "name", type: "text" }], rows: rows.map((name) => [name]) });
+    entry.transports.answer(SUBMIT, names("SALES"), names("PUBLIC"));
+    expect((await entry.provider.listContainers()).map((c) => c.isSessionDefault)).toEqual([true]);
+    expect((await entry.provider.listContainers(["SALES"])).map((c) => c.isSessionDefault)).toEqual([true]);
+  });
+
+  test("getHealth() reads the warehouse unpadded too", async () => {
+    const entry = await connected({ warehouse: "STUDIO_WH " });
+    entry.transports.answer(SUBMIT, RUNNING);
+    await entry.provider.getHealth();
+    expect(bodyOf(entry.transports.requests[0]).statement).toBe("SHOW WAREHOUSES LIKE 'STUDIO_WH'");
+  });
+});
+
+describe("a connect that gets no answer (SF-018)", () => {
+  /** A provider under Test Connection's 10 s query timeout, its deadlines fired by `settle`. */
+  function underTestConnection(): Built {
+    const transports = scriptedTransports();
+    const clock = fakeClock();
+    const deps = testDeps(transports, clock);
+    const entry = {
+      provider: new SnowflakeProvider(connection(), { queryTimeout: 10_000 }, deps),
+      transports,
+      deps,
+      clock,
+    };
+    built.push(entry);
+    return entry;
+  }
+
+  for (const [label, answers] of [
+    ["the connect statement", [HANG]],
+    ["the role check", [RUNNING, HANG]],
+  ] as const) {
+    test(`${label} past its bound fails the connect as a connection failure naming the host and the wait`, async () => {
+      const entry = underTestConnection();
+      entry.transports.answer(SUBMIT, ...answers);
+      const outcome = caught(entry.provider.connect());
+      await settle(entry, outcome);
+      const error = await outcome;
+      expect(error).toBeInstanceOf(ConnectionError);
+      expect((error as Error).message).toBe(SNOWFLAKE_ERROR_SENTENCES.connectDeadline(HOST, 15));
+      expect((error as Error).message).not.toContain("Query Timeout");
+      expect(entry.deps.deadlines.requested).toContain(15_000);
+      expect(entry.provider.isConnected()).toBe(false);
+    });
+  }
+
+  test("a statement after the connect keeps the query-timeout sentence", async () => {
+    const entry = underTestConnection();
+    entry.transports.answer(SUBMIT, RUNNING, ROLE_OK);
+    await entry.provider.connect();
+    entry.transports.answer(SUBMIT, HANG);
+    const outcome = caught(entry.provider.query("SELECT 1"));
+    await settle(entry, outcome);
+    expect(((await outcome) as Error).message).toBe(SNOWFLAKE_ERROR_SENTENCES.deadline(10));
   });
 });
 
@@ -366,6 +513,30 @@ describe("the connect cautions", () => {
     expect(entry.provider.connectWarnings().map((w) => w.message)).toEqual([
       SNOWFLAKE_INTROSPECT_SENTENCES.notResuming("STUDIO_WH"),
       SNOWFLAKE_STATEMENT_SENTENCES.secondaryRoles("ANALYST,LOADER", "STUDIO_RO"),
+    ]);
+  });
+
+  test("a warehouse the SHOW lists but the role check answers NULL for is cautioned once (SF-019)", async () => {
+    // SHOW WAREHOUSES lists a warehouse the role holds MONITOR on, while only USAGE lets it be the current one.
+    const entry = await connected(
+      { warehouse: "studio_wh", database: "D_NODB" },
+      warehouses(["STUDIO_WH", "STARTED", "X-Small", "true"]),
+      roleAnswer("STUDIO_RO", undefined, undefined, { database: null, schema: null, warehouse: null }),
+    );
+    expect(entry.provider.connectWarnings().map((w) => w.message)).toEqual([
+      SNOWFLAKE_STATEMENT_SENTENCES.unresolvedDatabase("D_NODB", "STUDIO_RO"),
+      SNOWFLAKE_STATEMENT_SENTENCES.unresolvedWarehouse("studio_wh", "STUDIO_RO"),
+    ]);
+  });
+
+  test("a warehouse the SHOW already cautioned on is not cautioned again by the role check", async () => {
+    const entry = await connected(
+      { warehouse: "D_NOWH" },
+      warehouses(),
+      roleAnswer("STUDIO_RO", undefined, undefined, { warehouse: null }),
+    );
+    expect(entry.provider.connectWarnings().map((w) => w.message)).toEqual([
+      SNOWFLAKE_INTROSPECT_SENTENCES.noWarehouseRow("D_NOWH", "STUDIO_RO"),
     ]);
   });
 
@@ -655,6 +826,25 @@ describe("query()", () => {
     expect(entry.transports.requests).toHaveLength(0);
   });
 
+  test("a no-warehouse refusal names the Warehouse the connection set (SF-016)", async () => {
+    const entry = await connected({ warehouse: " d_nowh " }, warehouses());
+    entry.transports.answer(
+      SUBMIT,
+      failureAnswer(422, "000606", "No active warehouse selected in the current session."),
+    );
+    const error = await caught(entry.provider.query("SELECT 1"));
+    expect(error).toBeInstanceOf(QueryError);
+    expect((error as Error).message).toBe(SNOWFLAKE_ERROR_SENTENCES.warehouseUnusable("d_nowh", "STUDIO_RO"));
+  });
+
+  test("with Warehouse empty, the refusal still asks for one", async () => {
+    const entry = await connected({ warehouse: "  " }, warehouses());
+    entry.transports.answer(SUBMIT, failureAnswer(422, "391920", "Unable to run the command."));
+    expect(((await caught(entry.provider.query("SELECT 1"))) as Error).message).toBe(
+      SNOWFLAKE_ERROR_SENTENCES.noWarehouse,
+    );
+  });
+
   test("a result maps to the grid's shape, the statement sent alone", async () => {
     const entry = await connected();
     entry.transports.answer(
@@ -810,6 +1000,7 @@ describe("the declarations", () => {
         mode: "session-default",
         whenNoDefault: { walk: "parent-default-children", skip: ["INFORMATION_SCHEMA"] },
       },
+      schemaDiffScope: "agent-walk",
     });
     expect(capabilities.containerLevels).toEqual([
       { id: "catalog", label: "Database", labelPlural: "Databases" },

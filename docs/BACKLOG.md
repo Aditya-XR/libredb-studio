@@ -28,10 +28,10 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
-- [Drivers and connections](#drivers-and-connections) — D1-D362, U17 · 262
+- [Drivers and connections](#drivers-and-connections) — D1-D363, U17 · 262
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U144 · 134
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U144 · 132
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC33 · 30
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
@@ -2072,15 +2072,15 @@ Found 2026-10-03 while packaging the Db2 provider (#786).
 
 **Done when:** a clean Windows 11 VM without the redistributable is measured on every Windows channel, each channel either installs the runtime or says what to install before the first Db2 connection, and a missing runtime reaches the user as a sentence naming it rather than a load error.
 
-### D150. The Db2 schema diff mixes schemas and writes views as tables, and nothing can turn it off
+### D150. The schema diff migration quotes a cross-schema foreign-key reference as one identifier
 
-Nothing in the provider capabilities disables schema diff or migration DDL for an engine, so a Db2 connection offers both with the shared engine's limits, measured on the Db2 provider branch.
-The diff keys objects by name only, so `APP.T` and `REPORTING.T` collide; it writes a view or a materialized query table as `CREATE TABLE`; and it quotes a cross-schema reference `SCHEMA.TABLE` as one identifier.
-The nearest lever is the migration generator's `NO_TABLE_DDL` type set in `src/lib/schema-diff/migration-generator.ts`, which declines the whole diff.
+The schema diff now keys objects by their path below the compared roots, so `APP.T` and `REPORTING.T` are two objects, names every table by its full path, and names a view, a materialized view or a Db2 materialized query table in a comment instead of writing table DDL for it (SF-047, pinned in `tests/unit/schema-diff/migration-generator.test.ts` over a two-schema Db2 diff and over PostgreSQL and MySQL).
+What remains is the foreign key: `ForeignKeyDiff.targetReferencedTable` is the reading's own spelling, which a cross-schema reference carries as `SCHEMA.TABLE`, and `generateCreateTable` and `generateAlterTable` in `src/lib/schema-diff/migration-generator.ts` quote it whole, as one identifier `"SCHEMA.TABLE"`.
+Splitting the text on the dot is not the fix, because a table name may contain a dot; the reference needs its path from the reading.
 
-Found 2026-10-03 while building the Db2 provider (#786); the schema-diff engine was left untouched.
+Found 2026-10-03 while building the Db2 provider (#786); narrowed to the foreign key by SF-047 on 2026-10-14.
 
-**Done when:** either the diff keys objects by schema and name, keeps a view or MQT a view, and quotes each part of a qualified name on its own, each pinned by a test over a two-schema Db2 fixture, or a declared capability turns schema diff and migration DDL off for an engine that cannot be served correctly, with the Db2 provider declaring it and the UI saying why.
+**Done when:** a foreign key reaches the migration with its referenced object's path and the generator quotes each segment on its own, pinned by a test over a cross-schema reference on Db2 and PostgreSQL.
 
 ### D151. MongoDB and Couchbase read their fields from a sample and do not mark them sampled
 
@@ -3482,15 +3482,6 @@ Found 2026-10-12 while building the Snowflake provider.
 
 **Done when:** a listing can carry a truncation field (a cap reached, with its sentence), Snowflake's `listObjects` fills it from its stop reason, the tree renders the sentence under the cut folder, and the provider doc's tree section says the tree names the cut, with tests on the provider answer and the rendered folder.
 
-### D341. A region and locator Snowsight URL is read as an organisation account
-
-`readUrl` in `src/lib/db/providers/sql/snowflake/account-host.ts` reads any `https://app.snowflake.com/<a>/<b>/...` as the identifier `<a>-<b>`, so a path such as `us-west-2/xy12345` becomes the host `us-west-2-xy12345.snowflakecomputing.com`, which does not exist.
-Whether Snowsight still issues that region and locator path shape is not established, and the failure is loud: the connect fails with the unreachable-host sentence.
-
-Found 2026-10-12 in the external review of the Snowflake provider (#1714).
-
-**Done when:** the path shape is confirmed on a live account, and a region and locator Snowsight URL is either read as `<locator>.<region>` or refused with the Account format sentence, with a case in `tests/unit/db/snowflake/account.test.ts` and the doc's section 2.2 updated.
-
 ### D342. A failed Snowflake monitoring panel's QueryError carries no SQL
 
 The monitoring panels are built over `statements.runSurface` in `connect()` (`src/lib/db/providers/sql/snowflake/index.ts`), not over the runner `surface()` records the statement with, so a failed panel reaches `toDatabaseError(error, undefined)` and its `QueryError.sql` is empty.
@@ -3511,15 +3502,15 @@ Found 2026-10-12 in the external review of the Snowflake provider (#1714).
 
 **Done when:** a cancel during a retried submit answers true once the run ends cancelled, the race bounded by the submit work still to come plus the cancel's 5 s, with a test in `tests/unit/db/snowflake/statements-cancel.test.ts` over a 429 then 503 submit.
 
-### D344. Test Connection passes when a database, schema or warehouse name does not resolve
+### D344. The captured connect exchanges predate the role check's added columns
 
-The SQL API reads the request's database, schema and warehouse as exact names, and one it cannot resolve leaves that context unset without an error (measured on the trial account 2026-10-13: `CURRENT_DATABASE()`, `CURRENT_SCHEMA()` or `CURRENT_WAREHOUSE()` answered NULL).
-The role check, `SNOWFLAKE_ROLE_CHECK_SQL` in `src/lib/db/providers/sql/snowflake/statements.ts`, reads only `CURRENT_ROLE()` and `CURRENT_SECONDARY_ROLES()`, so a misspelt database or schema passes Test Connection with no word and fails at the first query that needs it; a warehouse that does not resolve passes too, with only the connect caution its `SHOW WAREHOUSES` row match gives (`noWarehouseRow`).
-Reading the other three in the same statement changes the captured exchanges under `tests/fixtures/snowflake/`, so it needs a re-capture on the trial account.
+The role check, `SNOWFLAKE_ROLE_CHECK_SQL` in `src/lib/db/providers/sql/snowflake/statements.ts`, now also reads `CURRENT_USER()` (the token sign-in's user check) and `CURRENT_DATABASE()`, `CURRENT_SCHEMA()` and `CURRENT_WAREHOUSE()` (a caution for a configured name that answers NULL), in the same statement.
+The fixtures under `tests/fixtures/snowflake/trial-2026-10-12-v10.37.100/` were captured with the two-column check, so `widenRoleCheck` in `tests/integration/db/snowflake-provider.test.ts` rewrites each captured role check to the current statement and builds the four added cells from the scenario's connection: every connect the integration test replays answers its role check partly BUILT.
+The six-column statement was run by hand on the trial account on 2026-10-14 (the warehouse stayed suspended; a database, schema or warehouse that does not resolve answered NULL), but no fixture records it.
 
-Found 2026-10-13 while fixing the Snowflake request's name folding.
+Found 2026-10-14 while fixing the Snowflake E2E sweep's SF-005 and SF-019.
 
-**Done when:** the role check also reads `CURRENT_DATABASE()`, `CURRENT_SCHEMA()` and `CURRENT_WAREHOUSE()`, a configured field that answers NULL adds a connect caution naming the field, the fixtures are re-captured on the trial account, and the provider doc's sections 2.5 and 4 state the caution.
+**Done when:** the scenarios are re-captured with `tests/live/snowflake-evidence.ts` (its plan already sends the six-column check), the integration test reads the new set, and `widenRoleCheck` and its BUILT note are deleted.
 
 ### D345. SQL Server refuses plan-mode grounding and the operations workflow on a login that can write
 
@@ -3716,6 +3707,14 @@ Verified 2026-10-14 by reading `factory.ts`, `connection-options.ts` and that te
 Found 2026-10-14 in the integration review of #1759 and #1764; Spark behaved the same before #1764 added the token form.
 
 **Done when:** `SparkProvider.getCapabilities()` declares `agentCredential: "token"`, `TOKEN_ENGINES` includes `spark`, a factory test shows an `agentPassword` alone becoming the token of the agent's Spark session and an `agentUser` refused, and section 8.3 of `docs/providers/spark.md` says so in one sentence.
+
+### D363. Snowflake's first result partition is read uncompressed
+
+The status answer that carries partition 0 inline goes through the shared text transport, which asks every server for `accept-encoding: identity` and refuses a compressed body (`src/lib/db/http/node-transport.ts`), so Snowflake sends it uncompressed.
+Measured 2026-10-14 from the development host for `SELECT 2 AS ID, REPEAT('ğ', 4000000) AS S`: 8,001,156 bytes in 5.5 s uncompressed, 36,040 bytes in 1.4 s with `accept-encoding: gzip`; Studio's own processing of the same 8 MB answer over loopback took 0.36 to 0.48 s. The E2E sweep's 11 to 17 s for that cell (SF-037), against 3.3 s for a raw fetch that accepts gzip, is this transfer, not decoding.
+The identity rule is the transport's bound on what it parses, so it was not loosened for one provider.
+
+**Done when:** the Snowflake provider reads the status answer that carries partition 0 compressed, through a streaming gunzip under the same byte bound as a partition (the byte transport and `rows.ts` already decode gzip partitions that way), and an 8 MB text cell measures within a small factor of a raw gzip fetch.
 
 ## Value interpolation
 
@@ -5066,16 +5065,6 @@ Not fixed there: the flash needs a "policy unknown" state, and the import block 
 
 **Done when:** a policy-unknown state withholds the controls, the policy and managed reads run in parallel while no connection is made active before the policy is known, and the unused import is gone.
 
-### U91. A user typed for another engine rides along to libSQL
-
-The connection form keeps its `user` when the type changes (the type buttons in `src/components/ConnectionModal.tsx` call `setType` and reset only the port).
-libSQL now takes a user and sends HTTP Basic when one is set, so a name typed for another engine is saved on a libSQL connection, and a server that expects a bearer token answers `401`.
-
-Found 2026-10-05 by the final review of the platform integration branch.
-Not fixed there: it needs a form-state change outside that work.
-
-**Done when:** switching to a type that newly takes a user starts that field empty, or the form asks, with a test.
-
 ### U92. The remembered active connection outlives its connection
 
 `useConnectionManager` writes `libredb_active_connection_id` only while a connection is active, so when the last connection is closed or withdrawn the key keeps the last id.
@@ -5276,15 +5265,6 @@ Folders and objects are paged by the Keys panel, and the Keys panel's top level 
 Found 2026-10-09 while designing the S3 provider.
 
 **Done when:** a tree folder can declare that it pages, the tree loads it a page at a time with a Load more row, and an S3 connection with more buckets than one page shows the first page and the control, measured with a server that holds more buckets than one page.
-
-### U110. Databend declares a User placeholder the dialog never draws
-
-`DB_UI_CONFIG.databend.fieldPlaceholders.user` (`src/lib/db-ui-config.ts`) is declared and never drawn: only the Database and Region boxes read declared placeholders (`src/components/ConnectionModal.tsx`), so the User box shows the dialog's default `user`.
-The S3 provider declares no `fieldPlaceholders.user` for that reason, since widening the dialog would change Databend's drawn placeholder in an S3 PR.
-
-Found 2026-10-09 while designing the S3 provider.
-
-**Done when:** the User box draws a declared `fieldPlaceholders.user`, or the Databend declaration is removed, with a test that renders the dialog for Databend and asserts the User placeholder it shows.
 
 ### U111. Kubernetes objects share one common view
 

@@ -136,7 +136,12 @@ test.describe("Snowflake in the connection dialog", () => {
     await dialog.getByRole("button", { name: "Test Connection", exact: true }).click();
     await expect(result).toContainText(SNOWFLAKE_FIELD_SENTENCES.accountEmpty);
     await dialog.locator("#host").fill("myorg-myacct");
-    await dialog.locator("#privateKey").fill("");
+    // Leaving the key box hides the key (SF-014): its text is no longer on the page.
+    await expect(dialog.locator("#privateKey")).toHaveCount(0);
+    await expect(dialog).not.toContainText(PEM_LINES[1]);
+    // Replace key empties the box and hands it the focus.
+    await dialog.getByRole("button", { name: "Replace key", exact: true }).click();
+    await expect(dialog.locator("#privateKey")).toHaveValue("");
     await dialog.getByRole("button", { name: "Test Connection", exact: true }).click();
     await expect(result).toContainText(SNOWFLAKE_FIELD_SENTENCES.keyEmpty);
     expect(sent()).toBe(0);

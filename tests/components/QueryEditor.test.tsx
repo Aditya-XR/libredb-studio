@@ -643,6 +643,23 @@ describe("QueryEditor", () => {
     expect(onChange).toHaveBeenCalled();
   });
 
+  // SF-041: Format reads the connection's dialect, so a Snowflake buffer formats with sql-formatter's Snowflake
+  // language (QUALIFY is a clause there) and every other connection keeps the PostgreSQL one.
+  test.each([
+    ["snowflake", "snowflake"],
+    ["postgres", "postgresql"],
+    ["mysql", "postgresql"],
+    [undefined, "postgresql"],
+  ] as const)("FORMAT on a %s connection formats as %s", (databaseType, language) => {
+    mockSqlFormat.mockClear();
+    const { queryByText } = render(
+      React.createElement(QueryEditor, createDefaultProps({ value: "select 1", databaseType })),
+    );
+    fireEvent.click(queryByText("Format")!);
+    expect(mockSqlFormat).toHaveBeenCalledTimes(1);
+    expect((mockSqlFormat.mock.calls[0] as unknown[])[1]).toMatchObject({ language });
+  });
+
   test("FORMAT click formats JSON content", () => {
     const onChange = mock(() => {});
     const { queryByText, queryByTestId } = render(

@@ -354,6 +354,28 @@ describe("POST /api/db/multi-query", () => {
     expect(data.statements[1].error).toContain("Syntax error");
   });
 
+  test("the last statement failing at the bound Studio added says so; an earlier one is left alone (SF-022)", async () => {
+    let callCount = 0;
+    (mockProvider.query as ReturnType<typeof mock>).mockImplementation(async () => {
+      callCount++;
+      throw new Error(callCount === 1 ? "unexpected 'LIMIT' in statement" : 'near "LIMIT": syntax error');
+    });
+    const run = async (sql: string) => {
+      const req = createMockRequest("/api/db/multi-query", {
+        method: "POST",
+        body: { connection: validConnection, sql },
+      });
+      return parseResponseJSON<{ statements: Array<{ status: string; error?: string }> }>(await POST(req as never));
+    };
+
+    // The first statement of a script is sent as written, so its error is the engine's alone.
+    expect((await run("SELECT 1 LIMIT; SELECT 2")).statements[0].error).toBe("unexpected 'LIMIT' in statement");
+    callCount = 1;
+    expect((await run("SELECT * FROM t WHERE")).statements[0].error).toBe(
+      'near "LIMIT": syntax error Studio added the clause LIMIT 50 to this statement to bound its rows, so a position or token this error names may be in that clause rather than in your text.',
+    );
+  });
+
   test("missing connection returns 400", async () => {
     const req = createMockRequest("/api/db/multi-query", {
       method: "POST",

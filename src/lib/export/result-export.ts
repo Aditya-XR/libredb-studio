@@ -7,7 +7,7 @@ import { htmlTable } from "./html";
 import { binaryCellsAsHex, jsonText } from "./json";
 import { markdownTable } from "./markdown";
 import { resolveUpdateTarget } from "@/lib/sql/update-target";
-import { cqlFrozenNested, typedLiteral, UnwritableValue } from "./typed-literals";
+import { cqlFrozenNested, snowflakeVectorType, typedLiteral, UnwritableValue } from "./typed-literals";
 import { isNonFiniteWord, nonFiniteWord, type NonFiniteWord } from "@/lib/non-finite";
 
 /**
@@ -690,6 +690,26 @@ function completeDeclaredType(declared: string, dialect: DatabaseType | undefine
 }
 
 /**
+ * A Snowflake VECTOR column's declaration, from its first value.
+ *
+ * Snowflake reports a VECTOR result column as `vector` with no element type and no dimension, and
+ * `CREATE TABLE t (v VECTOR)` is a syntax error (001003), so the declaration is the one the first
+ * non-null cell spells, as the SQL INSERT export already casts each cell (`snowflakeVectorType`).
+ * Every cell of a VECTOR column has the same element type and dimension, so one cell decides. A
+ * column with no value to read is declared `ARRAY`, which holds the NULLs the file inserts and is
+ * the semi-structured type the cell's JSON text belongs to.
+ */
+function snowflakeVectorDeclaration(sample: unknown): string {
+  if (sample === undefined) return "ARRAY";
+  try {
+    return snowflakeVectorType(typeof sample === "string" ? sample : jsonText(sample));
+  } catch (error) {
+    if (!(error instanceof UnwritableValue)) throw error;
+    return "ARRAY";
+  }
+}
+
+/**
  * A column's declared type for the CREATE TABLE.
  *
  * What the engine declared, when it declared anything plausible: that is the type of
@@ -705,6 +725,9 @@ function completeDeclaredType(declared: string, dialect: DatabaseType | undefine
 function sqlTypeOf(column: string, rows: readonly Record<string, unknown>[], source: ResultExportSource): string {
   const declared = source.columnTypes;
   if (declared !== undefined && Object.hasOwn(declared, column) && isPlausibleType(declared[column])) {
+    if (source.dialect === "snowflake" && declared[column].trim().toUpperCase() === "VECTOR") {
+      return snowflakeVectorDeclaration(firstSample(rows, column));
+    }
     return completeDeclaredType(declared[column], source.dialect);
   }
   const kind = inferKind(firstSample(rows, column));
@@ -1050,8 +1073,9 @@ function oracleZonedTextLiteral(text: string): string | undefined {
  * constants into `BINARY_DOUBLE` and `BINARY_FLOAT`; Databend (M08b, on the pinned image) inserted
  * `'NaN'::FLOAT`, `'inf'::DOUBLE` and `'-inf'::FLOAT` into its `FLOAT` and `DOUBLE` columns and read back NaN,
  * Infinity and -Infinity; Snowflake's trial setup (2026-10-12) created its FLOAT infinities with `'inf'::FLOAT` and
- * `'-inf'::FLOAT`, and `'NaN'::FLOAT` is the same documented form. Spark reads the three words through a CAST to
- * DOUBLE, its documented special floating-point values. Every other dialect, which either
+ * `'-inf'::FLOAT`, and `'NaN'::FLOAT` is the same documented form; ClickHouse 26.9.18.11 read the bare `nan`, `inf`
+ * and `-inf` back into `Float64` and `Float32` (2026-10-14). Spark reads the three words through a CAST to DOUBLE, its
+ * documented special floating-point values. Every other dialect, which either
  * cannot store these values or was not replayed, keeps writing NULL.
  */
 const NON_FINITE_LITERALS: Partial<Record<DatabaseType, Readonly<Record<NonFiniteWord, string>>>> = {
@@ -1061,6 +1085,7 @@ const NON_FINITE_LITERALS: Partial<Record<DatabaseType, Readonly<Record<NonFinit
   oracle: { NaN: "BINARY_DOUBLE_NAN", Infinity: "BINARY_DOUBLE_INFINITY", "-Infinity": "-BINARY_DOUBLE_INFINITY" },
   databend: { NaN: "'NaN'::FLOAT", Infinity: "'inf'::DOUBLE", "-Infinity": "'-inf'::FLOAT" },
   snowflake: { NaN: "'NaN'::FLOAT", Infinity: "'inf'::FLOAT", "-Infinity": "'-inf'::FLOAT" },
+  clickhouse: { NaN: "nan", Infinity: "inf", "-Infinity": "-inf" },
   spark: {
     NaN: "CAST('NaN' AS DOUBLE)",
     Infinity: "CAST('Infinity' AS DOUBLE)",
@@ -1082,6 +1107,26 @@ const FLOAT_TYPE = /^(double( precision)?|real|float\d*|binary_(double|float))$/
 /** `columnTypes` is the host's data until checked, so a declared type is tested only as a string. */
 function isFloatColumn(declared: unknown): boolean {
   return typeof declared === "string" && FLOAT_TYPE.test(declared.trim());
+}
+
+/**
+ * The exact numeric types that can hold an infinity, as the providers spell them: PostgreSQL's
+ * `numeric` (14 and later), Snowflake's `DECFLOAT`, and the `decimal`/`number` spellings, with or
+ * without a precision. Used only by the CSV writer, which lets `-Infinity` through its formula
+ * guard in a numeric column (`toCsv`).
+ */
+const EXACT_NUMERIC_TYPE = /^(numeric|decimal|number|decfloat)(\s*\(\s*\d+\s*(,\s*-?\d+\s*)?\))?$/i;
+
+/** ClickHouse's wrappers, which change nothing about whether the column holds numbers. */
+const CLICKHOUSE_WRAPPER = /^\s*(?:Nullable|LowCardinality)\((.*)\)\s*$/;
+
+function isNumericColumn(declared: unknown): boolean {
+  if (typeof declared !== "string") return false;
+  let type = declared;
+  for (let match = CLICKHOUSE_WRAPPER.exec(type); match !== null; match = CLICKHOUSE_WRAPPER.exec(type)) {
+    type = match[1];
+  }
+  return isFloatColumn(type) || EXACT_NUMERIC_TYPE.test(type.trim());
 }
 
 /**
@@ -1186,7 +1231,12 @@ export function buildResultExport(format: ResultExportFormat, source: ResultExpo
   if (format === "csv") {
     // The charset is stated even though the download layer's byte order mark is what
     // Excel actually reads, because every other consumer reads the type.
-    return { content: toCsv(rows, columns, source.csvDelimiter), mimeType: "text/csv;charset=utf-8", extension: "csv" };
+    const numericColumns = new Set(columns.filter((column) => isNumericColumn(declaredTypeOf(source, column))));
+    return {
+      content: toCsv(rows, columns, source.csvDelimiter, numericColumns),
+      mimeType: "text/csv;charset=utf-8",
+      extension: "csv",
+    };
   }
 
   const sql = (content: string): ResultExportFile => ({ content, mimeType: "text/sql", extension: "sql" });

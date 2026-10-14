@@ -231,6 +231,16 @@ describe("typedLiteral: clickhouse", () => {
     expect(typedLiteral(["constructor"], "Array(Float32)", "clickhouse", scalar)).toBe("[<constructor>]");
   });
 
+  test("writes a scalar Float's non-finite word or number bare, wrappers included (SF-045)", () => {
+    expect(typedLiteral("Infinity", "Float64", "clickhouse", scalar)).toBe("inf");
+    expect(typedLiteral("-Infinity", "Nullable(Float32)", "clickhouse", scalar)).toBe("-inf");
+    expect(typedLiteral("NaN", "LowCardinality(Nullable(Float64))", "clickhouse", scalar)).toBe("nan");
+    expect(typedLiteral(Number.NEGATIVE_INFINITY, "BFloat16", "clickhouse", scalar)).toBe("-inf");
+    expect(typedLiteral(1.5, "Float64", "clickhouse", scalar)).toBeUndefined();
+    expect(typedLiteral("Infinity", "String", "clickhouse", scalar)).toBeUndefined();
+    expect(typedLiteral("inf", "Float64", "clickhouse", scalar)).toBeUndefined();
+  });
+
   test("writes a number-shaped string bare only under a numeric element type", () => {
     expect(typedLiteral(["1.5", "x"], "Array(Decimal(9, 2))", "clickhouse", scalar)).toBe("[1.5, <x>]");
     expect(typedLiteral(["1"], "Array(String)", "clickhouse", scalar)).toBe("[<1>]");
@@ -378,20 +388,68 @@ describe("typedLiteral: snowflake (provisional until a replay on an account)", (
     );
   });
 
+  // SF-008: replayed on the trial on 2026-10-14, each form below read back the day count or instant Snowflake sent.
+  test("a year past 9999 goes through the same mask, which reads every digit of the year", () => {
+    expect(typedLiteral("10000-01-01", "DATE", "snowflake", scalar)).toBe("TO_DATE('10000-01-01', 'YYYY-MM-DD')");
+    expect(typedLiteral("252026-03-04 05:06:07.5", "TIMESTAMP_NTZ(1)", "snowflake", scalar)).toBe(
+      "TO_TIMESTAMP_NTZ('252026-03-04 05:06:07.5', 'YYYY-MM-DD HH24:MI:SS.FF1')",
+    );
+    expect(typedLiteral("10000-01-01 01:02:03+00:00", "TIMESTAMP_LTZ(0)", "snowflake", scalar)).toBe(
+      "TO_TIMESTAMP_LTZ('10000-01-01 01:02:03+00:00', 'YYYY-MM-DD HH24:MI:SSTZH:TZM')",
+    );
+    expect(typedLiteral("10000-01-01 01:02:03-07:00", "TIMESTAMP_TZ(0)", "snowflake", scalar)).toBe(
+      "TO_TIMESTAMP_TZ('10000-01-01 01:02:03-07:00', 'YYYY-MM-DD HH24:MI:SSTZH:TZM')",
+    );
+  });
+
+  test("a year before 1 is written whole 400-year eras later and moved back by their exact day count", () => {
+    expect(typedLiteral("0000-02-29", "DATE", "snowflake", scalar)).toBe("TO_DATE('0000-02-29', 'YYYY-MM-DD')");
+    expect(typedLiteral("-0002-06-01", "DATE", "snowflake", scalar)).toBe(
+      "DATEADD(DAY, -146097, TO_DATE('0398-06-01', 'YYYY-MM-DD'))",
+    );
+    expect(typedLiteral("-0400-02-29", "DATE", "snowflake", scalar)).toBe(
+      "DATEADD(DAY, -146097, TO_DATE('0000-02-29', 'YYYY-MM-DD'))",
+    );
+    expect(typedLiteral("-10000-12-31", "DATE", "snowflake", scalar)).toBe(
+      "DATEADD(DAY, -3652425, TO_DATE('0000-12-31', 'YYYY-MM-DD'))",
+    );
+    expect(typedLiteral("-0002-06-01 12:34:56.876543211", "TIMESTAMP_NTZ(9)", "snowflake", scalar)).toBe(
+      "DATEADD(DAY, -146097, TO_TIMESTAMP_NTZ('0398-06-01 12:34:56.876543211', 'YYYY-MM-DD HH24:MI:SS.FF9'))",
+    );
+    expect(typedLiteral("-0401-03-01 23:59:59-07:00", "TIMESTAMP_TZ(0)", "snowflake", scalar)).toBe(
+      "DATEADD(DAY, -292194, TO_TIMESTAMP_TZ('0399-03-01 23:59:59-07:00', 'YYYY-MM-DD HH24:MI:SSTZH:TZM'))",
+    );
+    // An LTZ cell is a UTC instant, so it is moved as a TIMESTAMP_TZ at +00:00, where no session zone applies.
+    expect(typedLiteral("-0002-06-01 12:34:56.123+00:00", "TIMESTAMP_LTZ(3)", "snowflake", scalar)).toBe(
+      "DATEADD(DAY, -146097, TO_TIMESTAMP_TZ('0398-06-01 12:34:56.123+00:00', 'YYYY-MM-DD HH24:MI:SS.FF3TZH:TZM'))" +
+        "::TIMESTAMP_LTZ",
+    );
+  });
+
   test("a temporal cell not in the decoder's form, or not text, is refused", () => {
     expect(() => typedLiteral("12/10/2026", "DATE", "snowflake", scalar)).toThrow(
       "a DATE that is not in the form Studio reads",
     );
     expect(() => typedLiteral(new Date(0), "TIMESTAMP_NTZ(3)", "snowflake", scalar)).toThrow(UnwritableValue);
     expect(() => typedLiteral("2026-10-12 01:02:03", "TIMESTAMP_TZ(0)", "snowflake", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("999-01-01", "DATE", "snowflake", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("--0002-06-01", "DATE", "snowflake", scalar)).toThrow(UnwritableValue);
   });
 
-  test("a NUMBER or DECFLOAT text is written bare; anything else falls to the generic writer", () => {
+  test("a DECFLOAT text is a quoted literal cast to DECFLOAT, never a bare number (SF-003)", () => {
+    expect(typedLiteral("1.23e40", "DECFLOAT", "snowflake", scalar)).toBe("'1.23e40'::DECFLOAT");
+    expect(typedLiteral("-4.2e-5432", "DECFLOAT", "snowflake", scalar)).toBe("'-4.2e-5432'::DECFLOAT");
+    expect(typedLiteral("1e16384", "DECFLOAT", "snowflake", scalar)).toBe("'1e16384'::DECFLOAT");
+    expect(typedLiteral("0.1", "DECFLOAT", "snowflake", scalar)).toBe("'0.1'::DECFLOAT");
+    expect(typedLiteral("x", "DECFLOAT", "snowflake", scalar)).toBe("<x>");
+  });
+
+  test("a NUMBER text is written bare; anything else falls to the generic writer", () => {
     expect(typedLiteral("12.50", "NUMBER(10,2)", "snowflake", scalar)).toBe("12.50");
     expect(typedLiteral("123456789012345678901234567890", "NUMBER(38,0)", "snowflake", scalar)).toBe(
       "123456789012345678901234567890",
     );
-    expect(typedLiteral("-1.5e-300", "DECFLOAT", "snowflake", scalar)).toBe("-1.5e-300");
+    expect(typedLiteral("-1.5e-300", "DECFLOAT", "snowflake", scalar)).toBe("'-1.5e-300'::DECFLOAT");
     expect(typedLiteral("x", "NUMBER(10,2)", "snowflake", scalar)).toBe("<x>");
     expect(typedLiteral(7, "NUMBER(38,0)", "snowflake", scalar)).toBeUndefined();
     expect(typedLiteral(1.5, "FLOAT", "snowflake", scalar)).toBeUndefined();

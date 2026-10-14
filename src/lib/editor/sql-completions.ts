@@ -165,6 +165,23 @@ export const FUNCTION_ITEMS: PrecomputedItem[] = SQL_FUNCTIONS.map((f) => ({
   detail: "SQL Function",
 }));
 
+/**
+ * The dialect's own keywords and functions (`SqlGrammar.completionWords`, SF-042) as completion items, without the
+ * names the shared lists already hold, so no word is offered twice.
+ */
+function dialectItems(grammar: SqlGrammar): { keywords: PrecomputedItem[]; functions: PrecomputedItem[] } {
+  const words = grammar.completionWords;
+  if (words === undefined) return { keywords: [], functions: [] };
+  return {
+    keywords: words.keywords
+      .filter((kw) => !SQL_KEYWORDS.includes(kw))
+      .map((kw) => ({ ...KEYWORD_ITEMS[0], label: kw, labelLower: kw.toLowerCase(), insertText: kw })),
+    functions: words.functions
+      .filter((f) => !SQL_FUNCTIONS.includes(f))
+      .map((f) => ({ ...FUNCTION_ITEMS[0], label: f, labelLower: f.toLowerCase(), insertText: f + "($1)" })),
+  };
+}
+
 export const SNIPPET_ITEMS: PrecomputedItem[] = SQL_SNIPPETS.map((s) => ({
   label: s.label,
   labelLower: s.label.toLowerCase(),
@@ -405,6 +422,10 @@ export function registerSQLCompletionProvider(
   databaseType?: DatabaseType,
 ): Monaco.IDisposable {
   const grammar = resolveSqlGrammar(databaseType);
+  // The shared lists, then the dialect's own words (SF-042); the same lists on every dialect that declares none.
+  const dialect = dialectItems(grammar);
+  const keywordItems = [...KEYWORD_ITEMS, ...dialect.keywords];
+  const functionItems = [...FUNCTION_ITEMS, ...dialect.functions];
   const blanked = new WeakMap<Monaco.editor.ITextModel, { version: number; code: string }>();
   const spelling = schemaCompletionCache.containerSpelling;
   const readQualifier =
@@ -629,7 +650,7 @@ export function registerSQLCompletionProvider(
           /\b(SELECT|WHERE|AND|OR|ON|SET|HAVING|ORDER\s+BY|GROUP\s+BY|,)\s*\w*$/i.test(textBeforeCursor));
 
       // Keywords, except where only a name can stand
-      KEYWORD_ITEMS.forEach((item) => {
+      keywordItems.forEach((item) => {
         if (!atNameSlot && (!shouldFilter || item.labelLower.startsWith(prefix))) {
           suggestions.push({
             label: item.label,
@@ -643,7 +664,7 @@ export function registerSQLCompletionProvider(
       });
 
       // Functions, except where a table goes
-      FUNCTION_ITEMS.forEach((item) => {
+      functionItems.forEach((item) => {
         if (!isTableContext && (!shouldFilter || item.labelLower.startsWith(prefix))) {
           suggestions.push({
             label: item.label,

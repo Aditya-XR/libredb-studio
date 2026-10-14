@@ -25,8 +25,8 @@ import { CopyButton } from "@/components/copy-button";
 import { cn } from "@/lib/utils";
 import type { SchemaSnapshot, DatabaseType, DatabaseConnection } from "@/lib/types";
 import { detailedObjects, type DetailedObject } from "@/lib/db/detailed-object";
-import { declaresCatalogSessions, relationKindIds } from "@/lib/db/object-kinds";
-import type { ProviderCapabilities } from "@/lib/db/types";
+import { containerDepth, declaresCatalogSessions, relationKindIds } from "@/lib/db/object-kinds";
+import type { Container, ProviderCapabilities } from "@/lib/db/types";
 import { storage } from "@/lib/storage";
 import { newLocalId } from "@/lib/ids";
 import { logger } from "@/lib/logger";
@@ -91,6 +91,78 @@ function readTargetKey(conn: DatabaseConnection): string {
   return connectionResolutionKey(payload.connection);
 }
 
+/** A diffed object's identity in the list: two schemas' `t1` are two rows (SF-047). */
+function diffKey(table: TableDiff): string {
+  return table.key ?? table.tableName;
+}
+
+/** The one container of a level the session says is its own, or undefined when none or several say so. */
+function sessionDefaultOf(level: readonly Container[]): readonly string[] | undefined {
+  const defaults = level.filter((container) => container.isSessionDefault === true);
+  return defaults.length === 1 ? defaults[0].path : undefined;
+}
+
+/**
+ * A connection whose scope a schema diff refuses to read (SF-004). Not a read that failed: nothing was read, so the
+ * side it stands for is not compared at all, rather than replaced by the explorer's copy as a failed read is.
+ */
+class ScopeRefusal extends Error {}
+
+/**
+ * The containers a schema diff reads on an engine that declares `schemaDiffScope: "agent-walk"` beside its
+ * `agentWalkScope` (SF-004): the session's own,
+ * found one level at a time from the top, and never every container the account holds.
+ *
+ * Without a scope the inventory covers every container, and on Snowflake that is every database the role can see,
+ * `SNOWFLAKE` and `SNOWFLAKE_SAMPLE_DATA` included: a diff of two connections read the same whole account twice for
+ * minutes and answered "No differences found" whatever their Database and Schema said. The rule is the agent
+ * grounding walk's own (`scopeGroundingContainers` in `src/lib/db/container-walk.ts`), so the two never disagree about
+ * what a connection is: the deepest level's session default plus every path `alsoWalk` names, or, where that level
+ * marks none and the scope declares `whenNoDefault`, the children of the level above's default minus each name it
+ * skips. A level with no default above the deepest is refused in a sentence, since reading every container there is
+ * the defect; so is a scope that would read no container, which the inventory would take as "every one".
+ */
+async function sessionScopedContainers(
+  conn: DatabaseConnection,
+  capabilities: ProviderCapabilities,
+  list: (parent?: readonly string[]) => Promise<Container[]>,
+): Promise<readonly (readonly string[])[]> {
+  const walk = capabilities.agentWalkScope;
+  const depth = containerDepth(capabilities);
+  const levels = capabilities.containerLevels ?? [];
+  const alsoWalk = walk?.alsoWalk ?? [];
+  let parentDefault: readonly string[] | undefined;
+  let level = await list();
+  for (let at = 1; at < depth; at++) {
+    parentDefault = sessionDefaultOf(level);
+    if (parentDefault === undefined) {
+      const label = (levels[at - 1]?.label ?? "container").toLowerCase();
+      throw new ScopeRefusal(
+        `${conn.name} names no ${label}, so a schema diff would read every ${label} it can see; set its ${label} and compare again`,
+      );
+    }
+    // oxlint-disable-next-line no-await-in-loop -- each level is listed under the default the level above named.
+    level = await list(parentDefault);
+  }
+  const own = sessionDefaultOf(level);
+  const skipped = new Set(walk?.whenNoDefault?.skip ?? []);
+  const containers =
+    own !== undefined
+      ? [own]
+      : walk?.whenNoDefault !== undefined && parentDefault !== undefined
+        ? level.filter((container) => !skipped.has(container.name)).map((container) => container.path)
+        : [];
+  const seen = new Set(containers.map((path) => JSON.stringify(path)));
+  const scoped = [...containers, ...alsoWalk.filter((path) => !seen.has(JSON.stringify(path)))];
+  if (scoped.length === 0) {
+    const label = (levels[depth - 1]?.label ?? "container").toLowerCase();
+    throw new ScopeRefusal(
+      `${conn.name} names no ${label} a schema diff can compare; set its ${label} and compare again`,
+    );
+  }
+  return scoped;
+}
+
 async function readLiveSchema(conn: DatabaseConnection): Promise<DetailedObject[]> {
   const payload = readPayload(conn);
   const post = (path: string, body: unknown) =>
@@ -108,8 +180,9 @@ async function readLiveSchema(conn: DatabaseConnection): Promise<DetailedObject[
 
   // A server-level connection is compared one database at a time (#1530): its active one, else the
   // first it lists, since a read of every database on the server is refused.
-  let scope: { containers?: readonly string[][] } = {};
-  if (declaresCatalogSessions(meta.capabilities as ProviderCapabilities)) {
+  let scope: { containers?: readonly (readonly string[])[] } = {};
+  const capabilities = meta.capabilities as ProviderCapabilities;
+  if (declaresCatalogSessions(capabilities)) {
     const listRes = await post("/api/db/objects/containers", payload);
     const listed = await listRes.json();
     if (!listRes.ok) throw new Error(listed.error);
@@ -121,6 +194,20 @@ async function readLiveSchema(conn: DatabaseConnection): Promise<DetailedObject[
     const schemas = await schemasRes.json();
     if (!schemasRes.ok) throw new Error(schemas.error);
     scope = { containers: (schemas as { path: string[] }[]).map((schema) => schema.path) };
+  } else if (
+    capabilities.schemaDiffScope === "agent-walk" &&
+    capabilities.agentWalkScope !== undefined &&
+    containerDepth(capabilities) > 0
+  ) {
+    // An engine whose connection names its containers compares those, not the whole account (SF-004). One whose walk
+    // default is only a container the server holds (RabbitMQ's `/`) does not declare it and reads every container.
+    const containers = await sessionScopedContainers(conn, capabilities, async (parent) => {
+      const res = await post("/api/db/objects/containers", parent === undefined ? payload : { ...payload, parent });
+      const listed = await res.json();
+      if (!res.ok) throw new Error(listed.error);
+      return listed as Container[];
+    });
+    scope = { containers };
   }
 
   // `includeDefaultSql`: the SQL a migration pastes after DEFAULT, captured now, while the table
@@ -266,6 +353,8 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
     target: string;
     objects: readonly DetailedObject[] | null;
     error: string | null;
+    /** The error is a `ScopeRefusal`: nothing was read, and Current Schema is not compared at all. */
+    refused?: boolean;
   } | null>(null);
 
   /**
@@ -307,6 +396,12 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
   const readForThisConnection = liveRead?.target === readTarget ? liveRead : null;
   const liveSchema = readForThisConnection?.objects ?? null;
   const liveSchemaError = readForThisConnection?.error ?? null;
+  /**
+   * The sentence a refused read gave (SF-004), or null. Current Schema then has no content to compare: the explorer's
+   * copy stood in for it, and on a Snowflake connection with no Database that copy is empty, so a diff listed every
+   * object of the other side as added and offered a migration that recreated them there.
+   */
+  const liveRefusal = readForThisConnection?.refused === true ? liveSchemaError : null;
   const snapshotError =
     snapshotFailure !== null && snapshotFailure.connectionId === connection?.id ? snapshotFailure.reason : null;
 
@@ -353,7 +448,8 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
       })
       .catch((err) => {
         const reason = err instanceof Error ? err.message : String(err);
-        if (isCurrent()) setLiveRead({ target: readTarget, objects: null, error: reason });
+        if (isCurrent())
+          setLiveRead({ target: readTarget, objects: null, error: reason, refused: err instanceof ScopeRefusal });
         logger.warn("Failed to read the current schema for a diff; falling back to the explorer's copy", {
           route: "SchemaDiff",
           error: reason,
@@ -391,7 +487,8 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
         const reason = err instanceof Error ? err.message : String(err);
         // Falling back to the last copy rather than emptying the side, which would report
         // every object as removed; the banner says why it may be out of date.
-        if (isCurrent()) setLiveRead({ target: readTarget, objects: null, error: reason });
+        if (isCurrent())
+          setLiveRead({ target: readTarget, objects: null, error: reason, refused: err instanceof ScopeRefusal });
       });
     // On `readTarget` for the reason the effect above is, and it matters here too: a chosen
     // target is the commonest way a snapshot gets overtaken, so a rebuilt object re-running
@@ -449,7 +546,8 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
         const reason = err instanceof Error ? err.message : String(err);
         // Same fallback as the other two reads: the last copy rather than an empty side,
         // which would report every object as removed, and a banner saying why.
-        if (isCurrent()) setLiveRead({ target: readTarget, objects: null, error: reason });
+        if (isCurrent())
+          setLiveRead({ target: readTarget, objects: null, error: reason, refused: err instanceof ScopeRefusal });
         logger.warn("Failed to re-read the current schema for a diff", {
           route: "SchemaDiff",
           error: reason,
@@ -635,6 +733,8 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
     // question whose only possible answer is a fiction; the panel says what is actually
     // wrong instead, rendered from `missingSnapshotId`.
     if (missingSnapshotId) return null;
+    // A refused side is not compared at all (SF-004); the panel shows the refusal instead.
+    if (liveRefusal !== null && (sourceId === "current" || targetId === "current")) return null;
 
     const side = (id: string) => (id === "current" ? currentSchema : snapshots.find((s) => s.id === id)?.schema);
     const sourceSchema = side(sourceId);
@@ -645,7 +745,7 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
     if (!sourceSchema || !targetSchema) return null;
 
     return diffSchemas(sourceSchema, targetSchema);
-  }, [sourceId, targetId, currentSchema, snapshots, missingSnapshotId]);
+  }, [sourceId, targetId, currentSchema, snapshots, missingSnapshotId, liveRefusal]);
 
   // Generate migration SQL
   const migrationSQL = useMemo(() => {
@@ -675,7 +775,12 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
    * banner. No read clears it: a later read landing is not the fetch that failed, and
    * clearing on one is how the snapshot message used to last a single tick.
    */
-  const [remoteFailure, setRemoteFailure] = useState<{ connectionName: string; reason: string } | null>(null);
+  const [remoteFailure, setRemoteFailure] = useState<{
+    connectionName: string;
+    reason: string;
+    /** A `ScopeRefusal`: the target is cleared, so no comparison stands on screen, and the sentence says why. */
+    refused: boolean;
+  } | null>(null);
 
   // Fetch schema from a remote connection
   const fetchRemoteSchema = useCallback(
@@ -729,7 +834,12 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
         // ask before it speaks. A connection turned away from, failing afterwards, is not
         // the question being answered; and the unmount supersedes this counter too, so
         // there is no banner raised on a panel that has left the screen.
-        if (isCurrent()) setRemoteFailure({ connectionName: conn.name, reason });
+        if (isCurrent()) {
+          const refused = err instanceof ScopeRefusal;
+          setRemoteFailure({ connectionName: conn.name, reason, refused });
+          // A refused connection is not compared at all (SF-004), so no earlier comparison stays on screen either.
+          if (refused) setTargetId("");
+        }
       } finally {
         // Only the current read may say the fetching is over. A stale one clearing this is
         // the spinner disappearing while a fetch the user is waiting for is still out.
@@ -983,7 +1093,9 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
         <div className="flex items-center gap-2 px-3 py-1.5 border-b border-hairline bg-warning-tint/10 text-warning">
           <TriangleAlert strokeWidth={1.5} className="w-3.5 h-3.5 shrink-0" />
           <span className="text-xs">
-            {`Current Schema is the explorer's last copy, which may be out of date: ${liveSchemaError}`}
+            {liveRefusal !== null
+              ? liveRefusal
+              : `Current Schema is the explorer's last copy, which may be out of date: ${liveSchemaError}`}
           </span>
         </div>
       )}
@@ -1024,7 +1136,9 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
         <div className="flex items-center gap-2 px-3 py-1.5 border-b border-hairline bg-warning-tint/10 text-warning">
           <TriangleAlert strokeWidth={1.5} className="w-3.5 h-3.5 shrink-0" />
           <span className="text-xs">
-            {`Nothing was fetched from ${remoteFailure.connectionName}, so the comparison on screen is not that database: ${remoteFailure.reason}`}
+            {remoteFailure.refused
+              ? `Nothing was fetched from ${remoteFailure.connectionName}: ${remoteFailure.reason}`
+              : `Nothing was fetched from ${remoteFailure.connectionName}, so the comparison on screen is not that database: ${remoteFailure.reason}`}
           </span>
           <Button
             variant="ghost"
@@ -1072,6 +1186,15 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
               {"Only the last 50 snapshots are kept, and another tab may have deleted it. Choose a different one."}
             </span>
           </div>
+        ) : liveRefusal !== null && (sourceId === "current" || targetId === "current") ? (
+          /* Current Schema was refused, not read (SF-004): the sentence above says why, and no diff or migration is
+             computed against a side that holds nothing. */
+          <div className="flex-1 flex flex-col items-center justify-center text-fg-subtle gap-2 px-6 text-center">
+            <TriangleAlert strokeWidth={1.5} className="w-5 h-5 text-warning" />
+            <span className="text-xs" data-testid="schema-diff-refusal">
+              {"Current Schema was not read, so there is nothing to compare"}
+            </span>
+          </div>
         ) : showMigration && migrationSQL ? (
           <div className="flex-1 overflow-auto p-4">
             <div className="relative">
@@ -1104,19 +1227,19 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
               </div>
               {diff.tables.map((table) => (
                 <button
-                  key={table.tableName}
-                  onClick={() => setSelectedTable(table.tableName)}
+                  key={diffKey(table)}
+                  onClick={() => setSelectedTable(diffKey(table))}
                   className={cn(
                     "w-full text-left px-3 py-2 text-xs flex items-center gap-2 hover:bg-fill transition-colors",
-                    selectedTable === table.tableName && "bg-fill-strong",
+                    selectedTable === diffKey(table) && "bg-fill-strong",
                   )}
                 >
-                  {selectedTable === table.tableName ? (
+                  {selectedTable === diffKey(table) ? (
                     <ChevronDown strokeWidth={1.5} className="w-3 h-3 text-fg-muted" />
                   ) : (
                     <ChevronRight strokeWidth={1.5} className="w-3 h-3 text-fg-muted" />
                   )}
-                  <span className="text-fg-secondary">{table.tableName}</span>
+                  <span className="text-fg-secondary">{table.label ?? table.tableName}</span>
                   <span className="ml-auto">{getActionBadge(table.action)}</span>
                 </button>
               ))}
@@ -1125,7 +1248,7 @@ export function SchemaDiff({ schema, connection }: SchemaDiffProps) {
             {/* Table Detail */}
             <div className="flex-1 overflow-auto p-4">
               {selectedTable ? (
-                <TableDiffDetail diff={diff.tables.find((t) => t.tableName === selectedTable)!} />
+                <TableDiffDetail diff={diff.tables.find((t) => diffKey(t) === selectedTable)!} />
               ) : (
                 <div className="h-full flex items-center justify-center text-fg-subtle text-xs">
                   {"Select a table to view diff details"}
@@ -1153,7 +1276,7 @@ function TableDiffDetail({ diff }: { diff: TableDiff }) {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <Database strokeWidth={1.5} className="w-3.5 h-3.5 text-fg-tertiary" />
-        <h3 className="text-xs font-medium text-fg">{diff.tableName}</h3>
+        <h3 className="text-xs font-medium text-fg">{diff.label ?? diff.tableName}</h3>
         <Badge
           className={cn(
             "text-xs",

@@ -311,9 +311,13 @@ function clickHouseValue(value: unknown, declared: string, scalar: ScalarLiteral
  * the generic writer, which ClickHouse already reads (a quoted `UInt64` included).
  */
 const clickhouseLiteral: TypedWriter = (value, declared, scalar) => {
-  if (declared === undefined || value === null || typeof value !== "object" || asBytes(value) !== undefined) {
-    return undefined;
-  }
+  if (declared === undefined) return undefined;
+  // A scalar float's NaN or infinity, `Nullable` and `LowCardinality` included: ClickHouse reads
+  // the bare `nan`, `inf` and `-inf` back into a `Float` column (SF-045), where the generic
+  // writer's quoted word is refused and NULL replays as 0 into a non-Nullable column.
+  const word = CLICKHOUSE_FLOAT.test(unwrapClickHouseType(declared).name) ? floatWord(value) : undefined;
+  if (word !== undefined) return CLICKHOUSE_NON_FINITE[word];
+  if (value === null || typeof value !== "object" || asBytes(value) !== undefined) return undefined;
   const name = unwrapClickHouseType(declared).name;
   if (name !== "Array" && name !== "Map" && name !== "Tuple") return undefined;
   return clickHouseValue(value, declared, scalar);
@@ -677,38 +681,66 @@ const SNOWFLAKE_SEMI_STRUCTURED = /^(VARIANT|OBJECT|ARRAY|MAP)$/;
 const SNOWFLAKE_CAST_TYPE = /^[A-Z_]+\([A-Z0-9_, ()]*\)$/i;
 /** One element of a VECTOR's text: a number, or a non-finite word, which only a FLOAT vector holds. */
 const SNOWFLAKE_VECTOR_ELEMENT = /^-?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|inf|infinity|nan)$/i;
-/** A NUMBER or DECFLOAT text written bare, as the decoder hands over its exact text. */
+/** A NUMBER text written bare, and a DECFLOAT text quoted and cast, as the decoder hands over its exact text. */
 const SNOWFLAKE_NUMERIC_TEXT = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;
 
-/** The decoder's text for each temporal type, its conversion function, and its mask without the fraction. */
+/**
+ * The decoder's text for each temporal type, its conversion function, and its mask without the fraction. A year has at
+ * least four digits and a `-` before year 0 (SF-008), as the decoder writes any year Snowflake stores.
+ */
 const SNOWFLAKE_TEMPORAL: Readonly<Record<string, { shape: RegExp; convert: string; mask: string; zoned: boolean }>> = {
-  DATE: { shape: /^\d{4}-\d{2}-\d{2}$/, convert: "TO_DATE", mask: "YYYY-MM-DD", zoned: false },
+  DATE: { shape: /^-?\d{4,}-\d{2}-\d{2}$/, convert: "TO_DATE", mask: "YYYY-MM-DD", zoned: false },
   TIME: { shape: /^\d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?$/, convert: "TO_TIME", mask: "HH24:MI:SS", zoned: false },
   TIMESTAMP_NTZ: {
-    shape: /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?$/,
+    shape: /^-?\d{4,}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?$/,
     convert: "TO_TIMESTAMP_NTZ",
     mask: "YYYY-MM-DD HH24:MI:SS",
     zoned: false,
   },
   TIMESTAMP_LTZ: {
-    shape: /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?[+-]\d{2}:\d{2}$/,
+    shape: /^-?\d{4,}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?[+-]\d{2}:\d{2}$/,
     convert: "TO_TIMESTAMP_LTZ",
     mask: "YYYY-MM-DD HH24:MI:SS",
     zoned: true,
   },
   TIMESTAMP_TZ: {
-    shape: /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?[+-]\d{2}:\d{2}$/,
+    shape: /^-?\d{4,}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?[+-]\d{2}:\d{2}$/,
     convert: "TO_TIMESTAMP_TZ",
     mask: "YYYY-MM-DD HH24:MI:SS",
     zoned: true,
   },
 };
 
+/** A year before 1, as the decoder writes it: a `-` and the year's digits. */
+const SNOWFLAKE_YEAR_BEFORE_ONE = /^-(\d+)/;
+/** The years of one era of the proleptic Gregorian calendar, which repeats exactly after it, and its days. */
+const YEARS_PER_ERA = BigInt(400);
+const DAYS_PER_ERA = BigInt(146_097);
+
+/**
+ * A temporal cell through its `TO_*` function and mask. The mask reads a year of any length but not a sign (measured on
+ * the trial on 2026-10-14: `TO_DATE('252026-01-01', 'YYYY-MM-DD')` is read, `'-0002-06-01'` is refused with 100097, and
+ * a cast refuses a timestamp before year 1 with 100035), so a year before 1 is written as many whole 400-year eras
+ * later as bring it to 0 or after, and moved back by the eras' exact day count with `DATEADD(DAY, ...)`, which keeps
+ * the clock and the offset (`DATEADD(YEAR, ...)` moves a February 29 to the 28th). An LTZ cell, a UTC instant, is moved
+ * as a TIMESTAMP_TZ at `+00:00` and cast back, so the session's zone never takes part.
+ */
+function snowflakeTemporalLiteral(text: string, convert: string, mask: string): string {
+  const before = SNOWFLAKE_YEAR_BEFORE_ONE.exec(text);
+  if (before === null) return `${convert}(${quoteLiteral(text, "snowflake")}, '${mask}')`;
+  const year = BigInt(before[1]);
+  const eras = (year + YEARS_PER_ERA - BigInt(1)) / YEARS_PER_ERA;
+  const shifted = `${(eras * YEARS_PER_ERA - year).toString().padStart(4, "0")}${text.slice(before[0].length)}`;
+  const ltz = convert === "TO_TIMESTAMP_LTZ";
+  const converted = `${ltz ? "TO_TIMESTAMP_TZ" : convert}(${quoteLiteral(shifted, "snowflake")}, '${mask}')`;
+  return `DATEADD(DAY, -${eras * DAYS_PER_ERA}, ${converted})${ltz ? "::TIMESTAMP_LTZ" : ""}`;
+}
+
 /**
  * The VECTOR type a cell's own text spells, for a column whose result metadata carries no dimension, as the trial's
  * did: as many elements as the value holds, FLOAT when any is not an integer, else INT.
  */
-function snowflakeVectorType(text: string): string {
+export function snowflakeVectorType(text: string): string {
   const inner = /^\s*\[([\s\S]*)\]\s*$/.exec(text)?.[1];
   const elements = inner === undefined ? [] : inner.split(",").map((element) => element.trim());
   if (elements.length === 0 || !elements.every((element) => SNOWFLAKE_VECTOR_ELEMENT.test(element))) {
@@ -725,8 +757,9 @@ function snowflakeVectorType(text: string): string {
  * `PARSE_JSON` of its JSON text, which `INSERT ... VALUES` refuses, so the export writes Snowflake's rows as
  * `INSERT ... SELECT`; a VECTOR or a structured type is cast to its declaration, and a VECTOR without its dimension
  * to the type its value spells. A date, a time or a timestamp goes through its `TO_*` function with a mask matching the
- * decoder's text, the fraction digits as the text carries them, so no account input format moves the value; a cell
- * not in that text is refused rather than left to an input format.
+ * decoder's text, the fraction digits as the text carries them, so no account input format moves the value, and a year
+ * before 1 through `snowflakeTemporalLiteral`'s era shift; a cell not in that text is refused rather than left to an
+ * input format.
  */
 function snowflakeValue(value: unknown, declared: string, scalar: ScalarLiteral): string | undefined {
   const spelled = declared.trim().replace(/\s+/g, " ");
@@ -745,10 +778,17 @@ function snowflakeValue(value: unknown, declared: string, scalar: ScalarLiteral)
     if (match === null) throw new UnwritableValue(`a ${name} that is not in the form Studio reads`);
     const fraction = match[1] === undefined ? "" : `.FF${match[1].length}`;
     const mask = `${temporal.mask}${fraction}${temporal.zoned ? "TZH:TZM" : ""}`;
-    return `${temporal.convert}(${quoteLiteral(value as string, "snowflake")}, '${mask}')`;
+    return snowflakeTemporalLiteral(value as string, temporal.convert, mask);
   }
-  if ((name === "NUMBER" || name === "DECFLOAT") && typeof value === "string") {
+  if (name === "NUMBER" && typeof value === "string") {
     return SNOWFLAKE_NUMERIC_TEXT.test(value) ? value : scalar(value);
+  }
+  // A bare numeric literal is a NUMBER or a FLOAT before it is a DECFLOAT, which Snowflake's own
+  // numeric-types page warns about: replayed on 2026-10-14, `1.23e40` came back
+  // `1.22999999999999995e40`, `-4.2e-5432` came back 0 and `1e16384` failed as
+  // `TO_DECFLOAT(inf)`. A quoted text cast to DECFLOAT is parsed by DECFLOAT itself, exactly.
+  if (name === "DECFLOAT" && typeof value === "string") {
+    return SNOWFLAKE_NUMERIC_TEXT.test(value) ? `${quoteLiteral(value, "snowflake")}::DECFLOAT` : scalar(value);
   }
   return undefined;
 }

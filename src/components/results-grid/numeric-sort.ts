@@ -13,8 +13,14 @@
 /**
  * A value ranked the way PostgreSQL orders floats: -Infinity, then every finite number,
  * then Infinity, then NaN. Whatever is not a number at all ranks after NaN.
+ *
+ * A finite value is held as sign, significant digits and exponent: it is `0.<digits>` times
+ * ten to `exponent`, with no leading or trailing zero in `digits`, and zero is the empty
+ * string. Nothing is expanded into places, so an exponent of any size (Snowflake's DECFLOAT
+ * reaches 1e16384 and 1e-16383) costs no more than one of 2, and the exponent is a `bigint`
+ * so its width does not matter either.
  */
-type Parsed = { rank: 0 | 2 | 3 | 4 } | { rank: 1; negative: boolean; int: string; frac: string };
+type Parsed = { rank: 0 | 2 | 3 | 4 } | { rank: 1; negative: boolean; digits: string; exponent: bigint };
 
 const NOT_A_NUMBER: Parsed = { rank: 3 };
 const NEGATIVE_INFINITY: Parsed = { rank: 0 };
@@ -22,8 +28,6 @@ const POSITIVE_INFINITY: Parsed = { rank: 2 };
 const NOT_NUMERIC: Parsed = { rank: 4 };
 
 const DECIMAL_STRING = /^([+-]?)(\d+|(?=\.\d))(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/;
-/** An exponent past this is read as not a number rather than expanded into hundreds of places. */
-const MAX_EXPONENT = 400;
 
 /**
  * The declared types that hold a number. A word match on the lower-cased type, so the
@@ -48,18 +52,16 @@ export function isNumericType(declared: string): boolean {
 function parseDecimalText(text: string): Parsed {
   const match = DECIMAL_STRING.exec(text.trim());
   if (match === null) return NOT_NUMERIC;
-  const exponent = match[4] === undefined ? 0 : Number(match[4]);
-  if (Math.abs(exponent) > MAX_EXPONENT) return NOT_NUMERIC;
-  const places = match[2] + (match[3] ?? "");
-  // Where the decimal point falls once the exponent has moved it.
-  const point = match[2].length + exponent;
-  const padded = point > places.length ? places + "0".repeat(point - places.length) : places;
-  const lead = point < 0 ? "0".repeat(-point) + padded : padded;
-  const split = Math.max(point, 0);
-  const int = lead.slice(0, split).replace(/^0+(?=\d)/, "") || "0";
-  const frac = lead.slice(split).replace(/0+$/, "");
-  // -0 and -0.00 are zero: no sign, so they tie with 0 instead of sorting before it.
-  return { rank: 1, negative: match[1] === "-" && (int !== "0" || frac !== ""), int, frac };
+  const int = match[2];
+  const places = int + (match[3] ?? "");
+  const leadingZeros = places.length - places.replace(/^0+/, "").length;
+  const digits = places.slice(leadingZeros).replace(/0+$/, "");
+  // Zero, -0 and -0.00 included: no sign, so they tie with 0 instead of sorting before it.
+  if (digits === "") return { rank: 1, negative: false, digits, exponent: BigInt(0) };
+  // `0.<digits>` times ten to this: the point sits after the integer part, moved by the
+  // written exponent and back by every leading zero skipped.
+  const exponent = BigInt(int.length - leadingZeros) + BigInt(match[4] ?? "0");
+  return { rank: 1, negative: match[1] === "-", digits, exponent };
 }
 
 function parseValue(value: unknown): Parsed {
@@ -100,11 +102,13 @@ export function isNumericColumn(
   return seen;
 }
 
-function compareMagnitude(a: { int: string; frac: string }, b: { int: string; frac: string }): number {
-  if (a.int.length !== b.int.length) return a.int.length < b.int.length ? -1 : 1;
-  if (a.int !== b.int) return a.int < b.int ? -1 : 1;
-  if (a.frac === b.frac) return 0;
-  return a.frac < b.frac ? -1 : 1;
+function compareMagnitude(a: { digits: string; exponent: bigint }, b: { digits: string; exponent: bigint }): number {
+  if (a.digits === "" || b.digits === "") return a.digits === b.digits ? 0 : a.digits === "" ? -1 : 1;
+  if (a.exponent !== b.exponent) return a.exponent < b.exponent ? -1 : 1;
+  // Same exponent: digit strings with no trailing zero compare as text exactly as the
+  // fractions `0.<digits>` compare as numbers.
+  if (a.digits === b.digits) return 0;
+  return a.digits < b.digits ? -1 : 1;
 }
 
 /** Remembers what a string parsed to, so a sort of N rows parses each value once, not once per comparison. */

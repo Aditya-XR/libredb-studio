@@ -67,6 +67,10 @@ describe("declarations", () => {
     expect(capabilities.agentWalkScope).toEqual({ mode: "session-default" });
   });
 
+  test("a schema diff reads every virtual host: the form names none, so the walk's default does not scope it", () => {
+    expect(capabilities.schemaDiffScope).toBeUndefined();
+  });
+
   test("the schema refresh pattern matches no request", () => {
     const pattern = new RegExp(capabilities.schemaRefreshPattern ?? "", "i");
     expect(pattern.test('{"vhost": "/", "stream": "drop-table", "from": "last"}')).toBe(false);

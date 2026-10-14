@@ -5,6 +5,7 @@ import { MILVUS_CONSOLE, MILVUS_ROUTES } from "@/lib/db/providers/vector/milvus/
 import { QDRANT_CONSOLE, QDRANT_ROUTES } from "@/lib/db/providers/vector/qdrant/routes";
 import { type ConsoleLanguage, registerConsoleLanguage } from "@/lib/editor/console-language";
 import type { EditorLanguage } from "@/lib/editor/tab-language";
+import type { SqlGrammar } from "@/lib/sql/grammar";
 import type { QueryTab } from "@/lib/types";
 
 /**
@@ -17,8 +18,11 @@ import type { QueryTab } from "@/lib/types";
 export interface DialectEditor {
   /** The Monaco language id a tab of this type renders in. */
   readonly monacoId: EditorLanguage;
-  /** What Format writes for the editor's text; absent, the tab has no Format button and the shortcut does nothing. */
-  readonly format?: (text: string) => string;
+  /**
+   * What Format writes for the editor's text; absent, the tab has no Format button and the shortcut does nothing.
+   * `grammar` is the connection's SQL grammar, which the SQL formatter reads its language from; the others ignore it.
+   */
+  readonly format?: (text: string, grammar?: SqlGrammar) => string;
   /**
    * The console language a console dialect's tab renders in: its grammar facts and its route table, which
    * `registerDialectConsoles` registers under the dialect's id before the editor mounts. Absent for every tab type
@@ -27,10 +31,13 @@ export interface DialectEditor {
   readonly console?: ConsoleLanguage;
 }
 
-/** The SQL formatter's options, unchanged since `QueryEditor` called it directly. */
-const formatSql = (text: string): string =>
+/**
+ * The SQL formatter's options, unchanged since `QueryEditor` called it directly, except the language: the
+ * grammar's `formatterLanguage`, else `postgresql`, which every dialect used before one declared its own (SF-041).
+ */
+const formatSql = (text: string, grammar?: SqlGrammar): string =>
   format(text, {
-    language: "postgresql",
+    language: grammar?.formatterLanguage ?? "postgresql",
     keywordCase: "upper",
     dataTypeCase: "upper",
     indentStyle: "tabularLeft",
@@ -121,7 +128,7 @@ export const DIALECT_EDITORS: Readonly<Record<QueryTab["type"], DialectEditor>> 
  * Tab types that share a Monaco id share its formatter (MongoDB and Kafka both format as JSON), and a test holds
  * every record to that, so the answer does not depend on which of them is asked about.
  */
-export function formatterForLanguage(language: EditorLanguage): ((text: string) => string) | undefined {
+export function formatterForLanguage(language: EditorLanguage): DialectEditor["format"] {
   return Object.values(DIALECT_EDITORS).find((editor) => editor.monacoId === language && editor.format)?.format;
 }
 

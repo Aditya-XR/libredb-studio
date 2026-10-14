@@ -210,9 +210,54 @@ describe("buildResultExport — sql-insert", () => {
     expect(JSON.parse(buildResultExport("json", source({ rows, fields })).content)).toEqual([
       { a: "NaN", b: "Infinity", c: "-Infinity" },
     ]);
-    // `-Infinity` opens with a formula lead and is not a plain number, so the CSV formula
-    // guard prefixes it the way it does PostgreSQL's `numeric` text `-Infinity`.
-    expect(buildResultExport("csv", source({ rows, fields })).content).toBe('a,b,c\nNaN,Infinity,"\'-Infinity"');
+    // A number is never text, so `-Infinity` passes the formula guard as the number it is.
+    expect(buildResultExport("csv", source({ rows, fields })).content).toBe("a,b,c\nNaN,Infinity,-Infinity");
+  });
+
+  test("writes a ClickHouse Float's NaN and infinities as its bare words, and plain in CSV (SF-045)", () => {
+    const rows = [
+      { id: 1, f: "Infinity", n: "-Infinity", g: "NaN" },
+      { id: 2, f: "-Infinity", n: null, g: 1.5 },
+    ];
+    const fields = ["id", "f", "n", "g"];
+    const columnTypes = { id: "Int32", f: "Float64", n: "Nullable(Float64)", g: "LowCardinality(Float32)" };
+    const insert = buildResultExport(
+      "sql-insert",
+      source({ rows, fields, columnTypes, dialect: "clickhouse", tabName: "t" }),
+    );
+    expect(insert.content).toBe(
+      [
+        `INSERT INTO t ("id", "f", "n", "g") VALUES (1, inf, -inf, nan);`,
+        `INSERT INTO t ("id", "f", "n", "g") VALUES (2, -inf, NULL, 1.5);`,
+      ].join("\n"),
+    );
+    // With no declared type, a number the host built itself still gets ClickHouse's spelling.
+    const undeclared = buildResultExport(
+      "sql-insert",
+      source({ rows: [{ f: Number.NEGATIVE_INFINITY }], fields: ["f"], dialect: "clickhouse", tabName: "t" }),
+    );
+    expect(undeclared.content).toBe(`INSERT INTO t ("f") VALUES (-inf);`);
+    const csv = buildResultExport("csv", source({ rows, fields, columnTypes, dialect: "clickhouse" }));
+    expect(csv.content).toBe("id,f,n,g\n1,Infinity,-Infinity,NaN\n2,-Infinity,,1.5");
+  });
+
+  test("writes a -Infinity that crossed JSON as text plain in a numeric column, guarded in a text one", () => {
+    const rows = [{ f: "-Infinity", n: "-Infinity", d: "-Infinity", t: "-Infinity", u: "-Infinity" }];
+    const fields = ["f", "n", "d", "t", "u"];
+    const columnTypes = { f: "FLOAT", n: "numeric", d: "NUMBER(38, 2)", t: "text" };
+
+    for (const csvDelimiter of [",", ";", "\t"] as const) {
+      const file = buildResultExport("csv", source({ rows, fields, columnTypes, csvDelimiter }));
+      expect(file.content.split("\n")[1]).toBe(
+        ["-Infinity", "-Infinity", "-Infinity", `"'-Infinity"`, `"'-Infinity"`].join(csvDelimiter),
+      );
+    }
+    // Only the word itself: a formula in a numeric column is still neutralised.
+    const formula = buildResultExport(
+      "csv",
+      source({ rows: [{ f: "-1+1" }], fields: ["f"], columnTypes: { f: "double precision" } }),
+    );
+    expect(formula.content).toBe(`f\n"'-1+1"`);
   });
 
   test("writes a date as an ISO literal rather than as a locale string", () => {
@@ -2006,6 +2051,23 @@ describe("buildResultExport: Snowflake's rows and types", () => {
     );
   });
 
+  test("a year outside 1 to 9999 is written, never skipped (SF-008)", () => {
+    const file = buildResultExport(
+      "sql-insert",
+      source({
+        rows: [{ d: "-0002-06-01" }, { d: "10000-01-01" }],
+        fields: ["d"],
+        tabName: "t",
+        dialect: "snowflake",
+        columnTypes: { d: "DATE" },
+      }),
+    );
+    expect(file.content).toBe(
+      `INSERT INTO t ("d") SELECT DATEADD(DAY, -146097, TO_DATE('0398-06-01', 'YYYY-MM-DD'));\n` +
+        `INSERT INTO t ("d") SELECT TO_DATE('10000-01-01', 'YYYY-MM-DD');`,
+    );
+  });
+
   test("a VECTOR column, as the SQL API reports it, is cast to the dimension its value spells", () => {
     const file = buildResultExport(
       "sql-insert",
@@ -2057,6 +2119,55 @@ describe("buildResultExport: Snowflake's rows and types", () => {
       source({ rows: [{ d: "12/10/2026" }], fields: ["d"], dialect: "snowflake", columnTypes: { d: "DATE" } }),
     );
     expect(file.content).toContain('-- Row 1 skipped: column "d" holds a DATE that is not in the form');
+  });
+
+  test("the DDL declares a VECTOR by its first value, and GEOGRAPHY, GEOMETRY and VARCHAR as reported (SF-033)", () => {
+    const ddl = buildResultExport(
+      "sql-ddl",
+      source({
+        rows: [
+          { vf: null, vi: "[1,2,3]", g: "POINT(1 2)", gm: "POINT(1 2)", c: "ab" },
+          { vf: "[1.5,2,3]", vi: "[4,5,6]", g: null, gm: null, c: null },
+        ],
+        fields: ["vf", "vi", "g", "gm", "c"],
+        tabName: "t",
+        dialect: "snowflake",
+        columnTypes: { vf: "VECTOR", vi: "vector", g: "GEOGRAPHY", gm: "GEOMETRY", c: "VARCHAR(5)" },
+      }),
+    ).content;
+    expect(ddl).toBe(
+      'CREATE TABLE t (\n  "vf" VECTOR(FLOAT, 3),\n  "vi" VECTOR(INT, 3),\n  "g" GEOGRAPHY,\n  "gm" GEOMETRY,\n  "c" VARCHAR(5)\n);',
+    );
+    const insert = buildResultExport(
+      "sql-insert",
+      source({
+        rows: [{ g: "POINT(1 2)" }],
+        fields: ["g"],
+        tabName: "t",
+        dialect: "snowflake",
+        columnTypes: { g: "GEOGRAPHY" },
+      }),
+    ).content;
+    // Snowflake casts the quoted text to GEOGRAPHY on insert (replayed 2026-10-14), so the cell stays text.
+    expect(insert).toBe(`INSERT INTO t ("g") SELECT 'POINT(1 2)';`);
+  });
+
+  test("a VECTOR column with no readable value is declared ARRAY, which holds its NULLs", () => {
+    const declare = (rows: Record<string, unknown>[]) =>
+      buildResultExport(
+        "sql-ddl",
+        source({ rows, fields: ["v"], tabName: "t", dialect: "snowflake", columnTypes: { v: "VECTOR" } }),
+      ).content;
+    expect(declare([{ v: null }])).toContain('"v" ARRAY');
+    expect(declare([{ v: "not a vector" }])).toContain('"v" ARRAY');
+    expect(declare([{ v: [1, 2.5] }])).toContain('"v" VECTOR(FLOAT, 2)');
+    // Only Snowflake reads its VECTOR this way; another dialect keeps the declared spelling.
+    expect(
+      buildResultExport(
+        "sql-ddl",
+        source({ rows: [{ v: null }], fields: ["v"], tabName: "t", dialect: "duckdb", columnTypes: { v: "VECTOR" } }),
+      ).content,
+    ).toContain('"v" VECTOR');
   });
 
   test("the DDL offers FLOAT for a float column and BINARY, never BLOB, for bytes", () => {

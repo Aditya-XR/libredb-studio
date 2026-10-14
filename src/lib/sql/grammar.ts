@@ -131,6 +131,13 @@ export interface ScriptGrammar {
    *   Server 2025). A `CREATE PROCEDURE` body likewise runs to the end of its batch.
    */
   readonly unit: "statement" | "batch";
+  /**
+   * The operative keywords whose statement the engine refuses without its own terminating `;`, so the splitter keeps
+   * that `;` on the statement instead of dropping it. T-SQL's `MERGE` (Msg 10713, "A MERGE statement must be
+   * terminated by a semi-colon (;)", measured on SQL Server 2025 and through sqlcmd, SF-046). Absent means none: every
+   * statement drops its `;`.
+   */
+  readonly terminatedStatements?: readonly string[];
 }
 
 /** The grammar facts that differ between the engines this product supports. */
@@ -297,6 +304,14 @@ export interface SqlGrammar {
    */
   readonly trailingLimitClauses: readonly RegExp[];
   /**
+   * The values other than a digit run this dialect accepts as a `LIMIT` or `FETCH` count and as an `OFFSET`, each
+   * spelled as the statement writes it (a word is matched in any case). A count among them means no limit and an
+   * offset among them skips nothing, so the shared limiter reads `LIMIT <value>` as the statement's own bound and
+   * appends none. Absent means none: every other dialect keeps reading only digits, and a second `LIMIT` after such
+   * a value is that engine's own refusal, as it was before.
+   */
+  readonly nonNumericRowBounds?: readonly string[];
+  /**
    * Keyword sequences that ask for a confirmation when they OPERATE a statement, read where the shared
    * dangerous-keyword set is read: at the operative keyword, after leading comments, labels and a `WITH` clause, and
    * anywhere in the code of a control-flow block. Words are compared case-insensitively and may be separated by
@@ -315,6 +330,30 @@ export interface SqlGrammar {
    */
   readonly confirmCodeForms?: readonly ConfirmCodeForm[];
   /**
+   * Keyword sequences that ask only when the code word `when` also appears in the statement's code after them, read
+   * where `confirmForms` is read. For a form harmless in one variant and not in the other, which a word of the
+   * statement tells apart: Snowflake's `CREATE STAGE` keeps files in the account unless it names a `URL`. Absent means
+   * none.
+   */
+  readonly confirmFormsWhen?: readonly ConfirmFormWhen[];
+  /**
+   * Keyword sequences led by a shared dangerous keyword that do NOT ask on this dialect, read where that keyword is
+   * read: at the operative keyword and inside a control-flow block. For a form whose effect cannot outlive the
+   * statement on this engine: Snowflake runs each statement in its own session, so `ALTER SESSION SET` changes nothing
+   * a later statement sees. Absent means none, and every shared keyword asks.
+   */
+  readonly confirmExemptForms?: readonly (readonly string[])[];
+  /**
+   * The sql-formatter language the editor's Format uses for this dialect. Absent means `postgresql`, the language
+   * every dialect formatted with before a dialect declared one (SF-041).
+   */
+  readonly formatterLanguage?: "snowflake";
+  /**
+   * Keywords and functions the editor's completion offers on this dialect beside the shared lists (SF-042). A function
+   * is inserted as a call. Absent means the shared lists alone.
+   */
+  readonly completionWords?: { readonly keywords: readonly string[]; readonly functions: readonly string[] };
+  /**
    * Session configuration keys whose SET or RESET asks for a confirmation, compared without case; an entry ending in
    * `.` matches every key under it. Read where the operative keyword is SET or RESET, past white space and comments,
    * which Spark's lexer hides; white space is every character JavaScript's `\s` matches and every character at or
@@ -328,6 +367,12 @@ export interface SqlGrammar {
    * key. Absent means none.
    */
   readonly confirmConfigKeys?: readonly string[];
+}
+
+/** A form `SqlGrammar.confirmFormsWhen` looks for: a keyword sequence and the code word that makes it ask. */
+export interface ConfirmFormWhen {
+  readonly form: readonly string[];
+  readonly when: string;
 }
 
 /**
@@ -523,7 +568,8 @@ const MSSQL_GRAMMAR: SqlGrammar = {
   // already holds every body it contains: `CREATE PROCEDURE` runs to the end of its batch.
   // Measured on 2025 RTM-CU9: `DECLARE @x INT = 5; SELECT @x * 2` sent as two requests is
   // `Must declare the scalar variable "@x"`, and as one batch answers 10.
-  script: { blocks: "none", separatorLine: "GO", unit: "batch" },
+  // A MERGE keeps its `;`: the server refuses one without it (Msg 10713, SF-046).
+  script: { blocks: "none", separatorLine: "GO", unit: "batch", terminatedStatements: ["MERGE"] },
   trailingLimitClauses: DEFAULT_SQL_GRAMMAR.trailingLimitClauses,
 };
 const SQLITE_GRAMMAR: SqlGrammar = {
@@ -882,6 +928,9 @@ const SNOWFLAKE_GRAMMAR: SqlGrammar = {
   // `SELECT ... FOR UPDATE [NOWAIT | WAIT <n>]` ends the statement, after any LIMIT. The wait is a number, so a `)`
   // after it ends the match.
   trailingLimitClauses: [/\s+FOR\s+UPDATE(?:\s+NOWAIT|\s+WAIT\s+\d+)?\s*$/i],
+  // The reference gives NULL, '' and $$$$ as an unlimited LIMIT (and FETCH) count and a zero OFFSET; measured on the
+  // trial on 2026-10-14, each returned every row, any case, and a LIMIT appended after one is a syntax error (SF-021).
+  nonNumericRowBounds: ["NULL", "''", "$$$$"],
   // The forms that replace, overwrite, unload, delete stage files, run text the gate cannot read, spend credits or
   // open a path out of the account, none of which the shared set names: every COPY asks, whichever way it moves data,
   // and so does every CALL and every pipe. `CREATE OR ALTER` drops whatever columns its new definition leaves out. A
@@ -922,6 +971,102 @@ const SNOWFLAKE_GRAMMAR: SqlGrammar = {
     ["CREATE", "FAILOVER", "GROUP"],
     ["CREATE", "CORTEX", "SEARCH", "SERVICE"],
     ["CREATE", "DYNAMIC", "ICEBERG", "TABLE"],
+    // SF-013: a security integration changes who can sign in; a notification or storage integration and a share open
+    // a path out of the account; an account and a managed (reader) account are billed accounts of their own.
+    ["CREATE", "SECURITY", "INTEGRATION"],
+    ["CREATE", "NOTIFICATION", "INTEGRATION"],
+    ["CREATE", "STORAGE", "INTEGRATION"],
+    ["CREATE", "ACCOUNT"],
+    ["CREATE", "MANAGED", "ACCOUNT"],
+    ["CREATE", "SHARE"],
+  ],
+  // An external stage reads and writes files outside the account; an internal one, with no URL, keeps them inside, so
+  // only a stage that names a URL asks (SF-013). `CREATE OR REPLACE STAGE` already asks above.
+  confirmFormsWhen: [
+    { form: ["CREATE", "STAGE"], when: "URL" },
+    { form: ["CREATE", "TEMPORARY", "STAGE"], when: "URL" },
+    { form: ["CREATE", "TEMP", "STAGE"], when: "URL" },
+  ],
+  // Formatted as PostgreSQL, `QUALIFY` was lower-cased and joined to the GROUP BY list, and `@stage` became `@ stage`
+  // (SF-041); sql-formatter's Snowflake language keeps the clause and refuses the stage reference, which leaves the
+  // text as written.
+  formatterLanguage: "snowflake",
+  // Snowflake's own clauses and the functions a session reaches for first (SF-042), from Snowflake's SQL reference.
+  completionWords: {
+    keywords: [
+      "QUALIFY",
+      "ILIKE",
+      "RLIKE",
+      "LATERAL",
+      "PIVOT",
+      "UNPIVOT",
+      "MATCH_RECOGNIZE",
+      "SAMPLE",
+      "TABLESAMPLE",
+      "EXCLUDE",
+      "MINUS",
+      "TOP",
+      "ASOF JOIN",
+      "CONNECT BY",
+      "START WITH",
+      "CHANGES",
+    ],
+    functions: [
+      "ARRAY_AGG",
+      "ARRAY_CONSTRUCT",
+      "ARRAY_CONTAINS",
+      "ARRAY_SIZE",
+      "OBJECT_CONSTRUCT",
+      "OBJECT_KEYS",
+      "PARSE_JSON",
+      "TRY_PARSE_JSON",
+      "TO_VARIANT",
+      "TO_JSON",
+      "FLATTEN",
+      "GET_PATH",
+      "TYPEOF",
+      "IFF",
+      "NVL",
+      "NVL2",
+      "ZEROIFNULL",
+      "DIV0",
+      "LISTAGG",
+      "TRY_CAST",
+      "TRY_TO_NUMBER",
+      "TRY_TO_DATE",
+      "TO_TIMESTAMP",
+      "DATEADD",
+      "DATEDIFF",
+      "CONVERT_TIMEZONE",
+      "SPLIT_PART",
+      "REGEXP_SUBSTR",
+      "REGEXP_REPLACE",
+      "APPROX_COUNT_DISTINCT",
+      "MEDIAN",
+      "CURRENT_ROLE",
+      "CURRENT_WAREHOUSE",
+      "CURRENT_DATABASE",
+      "CURRENT_SCHEMA",
+      "CURRENT_USER",
+      "CURRENT_ACCOUNT",
+      "CURRENT_REGION",
+      "CURRENT_DATE",
+      "LAST_QUERY_ID",
+      "RESULT_SCAN",
+      "GENERATOR",
+      "SEQ4",
+      "UNIFORM",
+      "RANDOM",
+      "HASH",
+      "SHA2",
+    ],
+  },
+  // Each statement runs in its own session (see `snowflake/statements.ts`), so `ALTER SESSION SET | UNSET` cannot
+  // outlive it, and the result already says the setting does not carry over (SF-030). `ALTER SESSION POLICY` alters an
+  // account object that does outlive it, so only the SET and UNSET forms are exempt.
+  confirmExemptForms: [
+    ["ALTER", "SESSION", "SET"],
+    ["ALTER", "SESSION", "UNSET"],
   ],
   // An anonymous procedure (`WITH p AS PROCEDURE … CALL p()`) and any `SYSTEM$` function, wherever they are written.
   confirmCodeForms: [["AS", "PROCEDURE"], { prefix: "SYSTEM$" }],

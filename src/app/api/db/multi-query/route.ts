@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateProvider } from "@/lib/db";
 import { splitExecutionUnits, unitIsModuleBody, type ExecutionUnit } from "@/lib/sql/statement-splitter";
 import { resolveSqlGrammar } from "@/lib/sql/grammar";
-import { isSelectQuery } from "@/lib/db/utils/query-limiter";
+import { isSelectQuery, noteAppendedBound } from "@/lib/db/utils/query-limiter";
 import { createErrorResponse } from "@/lib/api/errors";
 import { bridgeAbortToCancel } from "@/lib/api/abort-cancel";
 import { supportsQueryCancel } from "@/lib/db/query-cancel";
@@ -119,6 +119,7 @@ async function runStatement(
 ): Promise<StatementResult> {
   const startTime = performance.now();
   const identity = { index, sql: stmt.sql, startLine: stmt.startLine };
+  let sent = stmt.sql;
 
   try {
     // For the last statement that is a SELECT, apply limit. "Last statement
@@ -131,6 +132,7 @@ async function runStatement(
     // types a `WITH` by the keyword its CTE list operates (#287), so a
     // read-only CTE is bounded here and a data-modifying one is not.
     const query = isLast ? boundedText(provider, stmt, dialect, options) : stmt.sql;
+    sent = query;
 
     // Every statement of the script runs under the SAME scope, which is what lets the
     // `finally` below end a transaction any of them left open — including one opened by a
@@ -151,6 +153,8 @@ async function runStatement(
       ...carriedChannels({ warnings: result.warnings, columnTypes }),
     };
   } catch (error) {
+    // The last statement's bound, when an error names it, is said to be Studio's (`noteAppendedBound`).
+    noteAppendedBound(error, stmt.sql, sent);
     return {
       ...identity,
       status: "error",

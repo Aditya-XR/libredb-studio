@@ -77,6 +77,15 @@ function affectedRowsLabel(result: QueryResult | undefined): string | undefined 
   const noun = result.rowCount === 1 ? "row" : "rows";
   return `${result.rowCount} ${noun} affected${result.rolledBack === true ? ", rolled back" : ""}`;
 }
+/**
+ * The empty state's headline. A result Studio or the provider bounded (`pagination.wasLimited`) that kept no row was
+ * cut before its first one - a Snowflake row past the 16 MiB budget - so "no data" would call held-back rows absent.
+ */
+function emptyHeadline(result: QueryResult | undefined): string {
+  return result?.pagination?.wasLimited === true
+    ? "No row is shown: the result was cut before its first row"
+    : "Query returned no data";
+}
 const ENGINE_WARNINGS_LABEL = "The engine reported:";
 const ROW_DETAIL_COLUMN_ID = "__libredb_row_detail__";
 const ROW_DETAIL_HEADER_TITLE = "Show a row field by field";
@@ -984,7 +993,7 @@ export function ResultsGrid({
         <div className="w-16 h-16 rounded-2xl bg-panel flex items-center justify-center mb-6 border border-hairline shadow-2xl">
           <span className="text-2xl text-fg-muted">&#x2205;</span>
         </div>
-        <p className="text-xs font-medium text-fg-tertiary">{affected ?? "Query returned no data"}</p>
+        <p className="text-xs font-medium text-fg-tertiary">{affected ?? emptyHeadline(result)}</p>
         {emptyWarnings.length > 0 && (
           <div className="mt-3 max-w-[280px] text-xs text-warning leading-relaxed">
             <p className="font-medium">{ENGINE_WARNINGS_LABEL}</p>

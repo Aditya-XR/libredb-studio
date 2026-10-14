@@ -1,5 +1,6 @@
 import { databendCloudHostWarehouse } from "@/lib/db/providers/sql/databend/cloud-host";
 import {
+  isAccountIdentifier,
   isSnowflakeHost,
   readSnowflakeAccount,
   SNOWFLAKE_FIELD_SENTENCES,
@@ -240,6 +241,8 @@ export const SNOWFLAKE_PASTE_SENTENCES = Object.freeze({
   path: (name: string) =>
     `Studio does not take ${name} from a pasted URL. Studio reads no file: paste the key's contents into Private key.`,
   tls: "Studio checks TLS whatever insecureMode or disableOCSPChecks say.",
+  foreignHost:
+    "This URL names a host outside Snowflake. A jdbc:snowflake:// URL carries the account's host, ending in .snowflakecomputing.com or .snowflakecomputing.cn, and a snowflake:// URL that host or the account identifier, such as myorg-myaccount. Nothing was applied.",
 });
 
 /**
@@ -976,6 +979,12 @@ export function detectConnectionStringType(input: string): DatabaseType | null {
 const SNOWFLAKE_SCHEMES = ["jdbc:snowflake://", "snowflake://"] as const;
 const SNOWSIGHT_HOST = "app.snowflake.com";
 
+/** The Snowflake scheme `text` starts with, in any case (`JDBC:SNOWFLAKE://` too, SF-024), or undefined. */
+function snowflakeScheme(text: string): (typeof SNOWFLAKE_SCHEMES)[number] | undefined {
+  const lower = text.toLowerCase();
+  return SNOWFLAKE_SCHEMES.find((scheme) => lower.startsWith(scheme));
+}
+
 /** The host of an `https://` text, lower-cased, or undefined when it is not a URL. */
 function httpsHost(text: string): string | undefined {
   if (!text.toLowerCase().startsWith("https://")) return undefined;
@@ -992,7 +1001,7 @@ function httpsHost(text: string): string | undefined {
  * any word, so it is typed in Account instead.
  */
 function isSnowflakePaste(text: string): boolean {
-  if (SNOWFLAKE_SCHEMES.some((scheme) => text.startsWith(scheme))) return true;
+  if (snowflakeScheme(text) !== undefined) return true;
   const host = httpsHost(text);
   if (host !== undefined) return host === SNOWSIGHT_HOST || isSnowflakeHost(host);
   return !/[\s/:?#@]/.test(text) && isSnowflakeHost(text);
@@ -1065,15 +1074,16 @@ function snowflakeNotice(names: readonly string[], others: number): string | und
 
 /** The address, userinfo and query of a Snowflake paste, split by hand so no URL parser reinterprets the account. */
 function splitSnowflakePaste(text: string): {
+  scheme: (typeof SNOWFLAKE_SCHEMES)[number] | undefined;
   account: string;
   user?: string;
   hasPassword: boolean;
   segments: string[];
   query: string;
 } {
-  const scheme = SNOWFLAKE_SCHEMES.find((prefix) => text.startsWith(prefix));
+  const scheme = snowflakeScheme(text);
   if (scheme === undefined && !text.toLowerCase().startsWith("https://")) {
-    return { account: text, hasPassword: false, segments: [], query: "" };
+    return { scheme, account: text, hasPassword: false, segments: [], query: "" };
   }
   const rest = text.slice(scheme === undefined ? "https://".length : scheme.length).split("#")[0];
   const queryAt = rest.indexOf("?");
@@ -1097,6 +1107,7 @@ function splitSnowflakePaste(text: string): {
     // first two segments, and every other segment of either is the page's own.
     const snowsight = host.toLowerCase() === SNOWSIGHT_HOST;
     return {
+      scheme,
       account: snowsight ? `https://${host}/${segments.slice(0, 2).join("/")}` : `https://${host}`,
       user,
       hasPassword,
@@ -1104,7 +1115,7 @@ function splitSnowflakePaste(text: string): {
       query,
     };
   }
-  return { account: safeDecodeURIComponent(host), user, hasPassword, segments, query };
+  return { scheme, account: safeDecodeURIComponent(host), user, hasPassword, segments, query };
 }
 
 /**
@@ -1120,6 +1131,13 @@ function parseSnowflakeURL(text: string): ParsedConnection {
   if (reading.url !== null && reading.url.port !== "") {
     return { type: "snowflake", refusal: SNOWFLAKE_FIELD_SENTENCES.accountFormat, discardPaste: true };
   }
+  // A JDBC URL carries the whole host, so one outside Snowflake's domains is refused, never read as a locator and a
+  // region under it; a snowflake:// URL may carry the host or the bare account identifier.
+  const foreign =
+    parts.scheme === "jdbc:snowflake://"
+      ? !isSnowflakeHost(parts.account)
+      : parts.scheme === "snowflake://" && !isSnowflakeHost(parts.account) && !isAccountIdentifier(parts.account);
+  if (foreign) return { type: "snowflake", refusal: SNOWFLAKE_PASTE_SENTENCES.foreignHost, discardPaste: true };
 
   const fields: Partial<Record<"user" | "warehouse" | "database" | "schema" | "role", string>> = {};
   if (parts.user) fields.user = parts.user;

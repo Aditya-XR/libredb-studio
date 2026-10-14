@@ -7,7 +7,7 @@ import { createContext, useContext } from "react";
  * context (not node data) so node data objects stay referentially stable.
  */
 export interface DiagramActions {
-  /** Keyed by the NODE ID, which is the object's `pathKey` and never its label (#789). */
+  /** Keyed by the NODE ID, which is the object's `diagramNodeId` and never its label (#789). */
   toggleExpand(nodeId: string): void;
 }
 

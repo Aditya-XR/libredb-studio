@@ -444,7 +444,7 @@ A cell holding NaN, Infinity or -Infinity as a number is answered as the string 
 `POST /api/db/multi-query`, `POST /api/db/transaction`, `GET /api/agent/runs/{runId}/artifacts/{correlationId}`, the agent's row rendering and the MCP serializer write them the same way.
 In the rows a word cell cannot be told from a text cell that holds the same word; only `columnTypes`, where the provider declares it, says which one it is.
 The JSON export writes the words.
-The CSV export writes `NaN` and `Infinity` as they are, and `-Infinity` as `'-Infinity`, because the formula guard prefixes a cell that opens with `-` and is not a plain number.
+The CSV export writes `NaN`, `Infinity` and `-Infinity` as they are when the cell is a number or its column is declared numeric (a float, `numeric`, `decimal`, `NUMBER` or `DECFLOAT` type); a text column holding the word `-Infinity` gets the formula guard's apostrophe like any other text that opens with `-`.
 The SQL INSERT export writes a non-finite JavaScript number, or a word in a column whose `columnTypes` entry is a float type, in the form the dialect reads back, each replayed into the engine on 2026-10-04: PostgreSQL and DuckDB the quoted word (`'NaN'`); SQLite `9e999` and `-9e999`, and NULL for NaN, which SQLite cannot store; Oracle `BINARY_DOUBLE_NAN`, `BINARY_DOUBLE_INFINITY` and `-BINARY_DOUBLE_INFINITY`.
 Databend writes `'NaN'::FLOAT`, `'inf'::DOUBLE` and `'-inf'::FLOAT`, and Snowflake `'NaN'::FLOAT`, `'inf'::FLOAT` and `'-inf'::FLOAT`; every other dialect writes NULL, as before.
 A word in a column with no declared float type is written as the quoted text it is.

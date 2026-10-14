@@ -440,6 +440,13 @@ export default function Studio() {
   const { executeQuery, cancelQuery } = queryExec;
   const runEditorQuery = useCallback(() => executeQuery(), [executeQuery]);
   const cancelEditorQuery = useCallback(() => cancelQuery(), [cancelQuery]);
+  // Closing a tab stops its run as Stop does (SF-023): the tab's Stop button goes with it, and the statement used to
+  // run on, billed on Snowflake, until the browser closed. `cancelQuery` does nothing for a tab with no run in flight,
+  // and a tab the manager keeps open (the last one) keeps its run. Stable, so a keystroke leaves the bar's props alone.
+  // Silent: the close's Undo toast is the one to click, and a cancel toast raised a moment later covered it.
+  const closeTabAndCancel = useStableCallback((id: string, e: React.MouseEvent) => {
+    if (tabMgr.closeTab(id, e)) void cancelQuery(id, { silent: true });
+  });
 
   // The mobile header is drawn OUTSIDE the query/source branch below, so its RUN, EXPLAIN and
   // clear gate on the active tab themselves; the toolbar's counterparts are inside the branch
@@ -1439,7 +1446,7 @@ export default function Studio() {
               onSetEditingTabId={tabMgr.setEditingTabId}
               onSetEditingTabName={tabMgr.setEditingTabName}
               onSetTabs={tabMgr.setTabs}
-              onCloseTab={tabMgr.closeTab}
+              onCloseTab={closeTabAndCancel}
               onAddTab={handleAddTab}
             />
 

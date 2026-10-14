@@ -93,7 +93,8 @@ describe("useConnectionForm: an address in the Host box", () => {
     for (let end = 1; end <= text.length; end++) {
       act(() => result.current.setHost(text.slice(0, end), "insertText"));
     }
-    expect([result.current.host, result.current.port, result.current.testResult]).toEqual([text, "5432", null]);
+    // The port is etcd's default: choosing an engine opens its port, not the previous engine's (SF-002).
+    expect([result.current.host, result.current.port, result.current.testResult]).toEqual([text, "2379", null]);
     await act(async () => {
       await result.current.handleTestConnection();
     });

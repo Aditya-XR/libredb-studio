@@ -2414,6 +2414,43 @@ describe("SchemaDiff", () => {
     });
   });
 
+  describe("two objects that share a name in two schemas (SF-047)", () => {
+    test("are two rows, each labelled with its schema, selected one at a time", () => {
+      const twin = (schema: string, column: string) => ({
+        action: "modified",
+        tableName: "t1",
+        key: `${schema}\u001ft1`,
+        label: `${schema}.t1`,
+        path: [schema, "t1"],
+        kind: "table",
+        columns: [
+          { action: "added", columnName: column, targetType: "int", changes: [`Added column "${column}" (int)`] },
+        ],
+        indexes: [],
+        foreignKeys: [],
+      });
+      mockDiffSchemas.mockImplementation(() => ({
+        tables: [twin("b2a", "only_in_a"), twin("b2b", "only_in_b")],
+        summary: { added: 0, removed: 0, modified: 2 },
+        hasChanges: true,
+      }));
+      const { container, getByText } = renderDiff();
+      changeTarget("snap-1");
+
+      fireEvent.click(getByText("b2b.t1"));
+      const rows = Array.from(container.querySelectorAll("button")).filter((b) =>
+        /b2[ab]\.t1/.test(b.textContent ?? ""),
+      );
+      expect(rows.map((row) => row.textContent?.includes("b2b") && row.className.includes("bg-fill-strong"))).toEqual([
+        false,
+        true,
+      ]);
+      expect(container.textContent).toContain("only_in_b");
+      expect(container.textContent).not.toContain("only_in_a");
+      mockDiffSchemas.mockImplementation(() => structuredClone(mockDiffWithChanges));
+    });
+  });
+
   // ═══════════════════════════════════════════════════════════════════════════
   // No Changes State
   // ═══════════════════════════════════════════════════════════════════════════
@@ -4154,5 +4191,295 @@ describe("SchemaDiff on a server-level connection", () => {
     const refused = await snapshot({ ok: false, body: { error: "permission denied to list databases" } });
     expect(snapshotBanner(refused.view)).toContain("permission denied to list databases");
     expect(mockSaveSchemaSnapshot).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * An engine that declares `agentWalkScope` reads the session's own containers, never the whole account (SF-004):
+ * on Snowflake a diff used to read every database the role sees, `SNOWFLAKE` included, and found no differences.
+ */
+describe("SchemaDiff on a session-scoped engine", () => {
+  type Listing = Record<string, { ok: boolean; body: unknown }>;
+  const levels = [
+    { id: "catalog", label: "Database", labelPlural: "Databases" },
+    { id: "schema", label: "Schema", labelPlural: "Schemas" },
+  ];
+  const scope = {
+    mode: "session-default",
+    whenNoDefault: { walk: "parent-default-children", skip: ["INFORMATION_SCHEMA"] },
+  };
+
+  function scopedReads(listing: Listing, capabilities: Record<string, unknown>) {
+    const orig = globalThis.fetch;
+    const inventoryBodies: Record<string, unknown>[] = [];
+    const listedParents: unknown[] = [];
+    globalThis.fetch = mock((url: string, init?: RequestInit) => {
+      const answer = (ok: boolean, body: unknown) => Promise.resolve({ ok, json: () => Promise.resolve(body) });
+      if (url.includes("provider-meta")) {
+        return answer(true, {
+          capabilities: {
+            objectKinds: [{ id: "table", role: "relation", label: "Table", labelPlural: "Tables" }],
+            ...capabilities,
+          },
+        });
+      }
+      if (url.includes("objects/containers")) {
+        const parent = (JSON.parse(String(init?.body)) as { parent?: string[] }).parent;
+        listedParents.push(parent);
+        const reply = listing[JSON.stringify(parent ?? [])] ?? { ok: true, body: [] };
+        return answer(reply.ok, reply.body);
+      }
+      inventoryBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return answer(true, { objects: [], details: [] });
+    }) as unknown as typeof fetch;
+    return { inventoryBodies, listedParents, restore: () => void (globalThis.fetch = orig) };
+  }
+
+  async function snapshot(
+    listing: Listing,
+    capabilities: Record<string, unknown> = {
+      containerLevels: levels,
+      agentWalkScope: scope,
+      schemaDiffScope: "agent-walk",
+    },
+  ) {
+    const reads = scopedReads(listing, capabilities);
+    const view = renderDiff();
+    fireEvent.click(view.getByText("Snapshot"));
+    await act(async () => {
+      fireEvent.click(view.getByText("Save"));
+    });
+    reads.restore();
+    return { view, inventoryBodies: reads.inventoryBodies, listedParents: reads.listedParents };
+  }
+
+  const databases = {
+    ok: true,
+    body: [
+      { path: ["SNOWFLAKE"], name: "SNOWFLAKE", level: 0 },
+      { path: ["STUDIO_DEMO"], name: "STUDIO_DEMO", level: 0, isSessionDefault: true },
+    ],
+  };
+  const schema = (name: string, isSessionDefault = false) => ({
+    path: ["STUDIO_DEMO", name],
+    name,
+    level: 1,
+    isSessionDefault,
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  test("reads the configured database and schema only", async () => {
+    const { inventoryBodies, listedParents } = await snapshot({
+      "[]": databases,
+      '["STUDIO_DEMO"]': { ok: true, body: [schema("INFORMATION_SCHEMA"), schema("PROBE", true), schema("PUBLIC")] },
+    });
+    // The panel's own read when it opens and the snapshot's, each listing the top level and the database alone.
+    expect(listedParents.map((parent) => JSON.stringify(parent ?? null)).sort()).toEqual([
+      '["STUDIO_DEMO"]',
+      '["STUDIO_DEMO"]',
+      "null",
+      "null",
+    ]);
+    expect(inventoryBodies[0].containers).toEqual([["STUDIO_DEMO", "PROBE"]]);
+  });
+
+  test("with a database and no schema, reads that database's schemas less the skipped ones", async () => {
+    const { inventoryBodies } = await snapshot({
+      "[]": databases,
+      '["STUDIO_DEMO"]': { ok: true, body: [schema("INFORMATION_SCHEMA"), schema("PROBE"), schema("PUBLIC")] },
+    });
+    expect(inventoryBodies[0].containers).toEqual([
+      ["STUDIO_DEMO", "PROBE"],
+      ["STUDIO_DEMO", "PUBLIC"],
+    ]);
+  });
+
+  test("refuses in a sentence when the connection names no database, and reads no inventory", async () => {
+    mockSaveSchemaSnapshot.mockClear();
+    const noDatabase = { ok: true, body: [{ path: ["SNOWFLAKE"], name: "SNOWFLAKE", level: 0 }] };
+    const { view, inventoryBodies } = await snapshot({ "[]": noDatabase });
+    expect(snapshotBanner(view)).toContain("names no database, so a schema diff would read every database it can see");
+    expect(inventoryBodies).toEqual([]);
+    expect(mockSaveSchemaSnapshot).not.toHaveBeenCalled();
+  });
+
+  test("refuses a scope that would read no container, which the inventory would take as every one", async () => {
+    const { view, inventoryBodies } = await snapshot({
+      "[]": databases,
+      '["STUDIO_DEMO"]': { ok: true, body: [schema("INFORMATION_SCHEMA")] },
+    });
+    expect(snapshotBanner(view)).toContain("names no schema a schema diff can compare");
+    expect(inventoryBodies).toEqual([]);
+  });
+
+  test("a listing the engine refuses is the reason shown", async () => {
+    const { view } = await snapshot({ "[]": { ok: false, body: { error: "role cannot list databases" } } });
+    expect(snapshotBanner(view)).toContain("role cannot list databases");
+  });
+
+  test("one level: the session's container plus every path alsoWalk names, once each", async () => {
+    const namespaces = {
+      ok: true,
+      body: [
+        { path: ["default"], name: "default", level: 0, isSessionDefault: true },
+        { path: ["kube-system"], name: "kube-system", level: 0 },
+      ],
+    };
+    const capabilities = {
+      containerLevels: [{ id: "namespace", label: "Namespace", labelPlural: "Namespaces" }],
+      agentWalkScope: { mode: "session-default", alsoWalk: [["cluster"], ["default"]] },
+      schemaDiffScope: "agent-walk",
+    };
+    const { inventoryBodies } = await snapshot({ "[]": namespaces }, capabilities);
+    expect(inventoryBodies[0].containers).toEqual([["default"], ["cluster"]]);
+    cleanup();
+
+    // No default on the only level and no fallback: alsoWalk alone, and nothing at all is refused.
+    const none = { ok: true, body: [{ path: ["kube-system"], name: "kube-system", level: 0 }] };
+    expect((await snapshot({ "[]": none }, capabilities)).inventoryBodies[0].containers).toEqual([
+      ["cluster"],
+      ["default"],
+    ]);
+    cleanup();
+    const bare = {
+      containerLevels: [{ id: "namespace" }],
+      agentWalkScope: { mode: "session-default" },
+      schemaDiffScope: "agent-walk",
+    };
+    expect(snapshotBanner((await snapshot({ "[]": none }, bare)).view)).toContain("names no container a schema diff");
+  });
+
+  // R2-01: a refused side is not compared at all. The explorer's copy used to stand in for it, so a connection with no
+  // Database listed the other side's objects as added and offered a migration that recreated them there.
+  const noDatabase = { ok: true, body: [{ path: ["SNOWFLAKE"], name: "SNOWFLAKE", level: 0 }] };
+  const refusal = "names no database, so a schema diff would read every database it can see";
+  const freshPanel = () => {
+    // This describe has no beforeEach of its own, and these two tests drive the Selects and the diff.
+    selectCallbacks.clear();
+    savedSnapshots.length = 0;
+    mockDiffSchemas.mockImplementation(() => structuredClone(mockDiffWithChanges));
+    mockGetSchemaSnapshots.mockImplementation(() => [...mockSnapshots]);
+  };
+
+  test("a refused Current Schema shows the refusal alone: no diff, no migration, no explorer's copy", async () => {
+    freshPanel();
+    const reads = scopedReads(
+      { "[]": noDatabase },
+      { containerLevels: levels, agentWalkScope: scope, schemaDiffScope: "agent-walk" },
+    );
+    try {
+      const view = renderDiff();
+      await act(async () => {});
+      mockDiffSchemas.mockClear();
+      mockGenerateMigrationSQL.mockClear();
+      await act(async () => {
+        changeTarget("snap-1");
+      });
+      await waitFor(() => expect(view.queryByTestId("schema-diff-refusal")).not.toBeNull());
+      expect(view.getByTestId("schema-diff-refusal").textContent).toBe(
+        "Current Schema was not read, so there is nothing to compare",
+      );
+      expect(view.container.textContent).toContain(`${mockPostgresConnection.name} ${refusal}`);
+      expect(view.queryByText(/explorer's last copy/)).toBeNull();
+      expect(view.queryByText("SQL Migration")).toBeNull();
+      expect(view.queryByText(/added, .* removed/)).toBeNull();
+      expect(mockDiffSchemas).not.toHaveBeenCalled();
+      expect(mockGenerateMigrationSQL).not.toHaveBeenCalled();
+      expect(reads.inventoryBodies).toEqual([]);
+
+      // Two stored snapshots involve no refused side, so they still compare.
+      changeSource("snap-1");
+      changeTarget("current");
+    } finally {
+      reads.restore();
+    }
+  });
+
+  test("a refused remote connection clears the target, so no earlier comparison stays on screen", async () => {
+    freshPanel();
+    const orig = globalThis.fetch;
+    globalThis.fetch = mock((url: string, init?: RequestInit) => {
+      const answer = (ok: boolean, body: unknown) => Promise.resolve({ ok, json: () => Promise.resolve(body) });
+      const body = JSON.parse(String(init?.body)) as { connection?: { id?: string }; id?: string; parent?: string[] };
+      const remote = JSON.stringify(body).includes('"remote-1"');
+      if (url.includes("provider-meta")) {
+        return answer(true, {
+          capabilities: {
+            objectKinds: [{ id: "table", role: "relation", label: "Table", labelPlural: "Tables" }],
+            ...(remote ? { containerLevels: levels, agentWalkScope: scope, schemaDiffScope: "agent-walk" } : {}),
+          },
+        });
+      }
+      if (url.includes("objects/containers")) return answer(noDatabase.ok, noDatabase.body);
+      return answer(true, { objects: [], details: [] });
+    }) as unknown as typeof fetch;
+    try {
+      const view = renderDiff();
+      await act(async () => {
+        changeTarget("snap-1");
+      });
+      await waitFor(() => expect(view.queryByText(/added, .* removed/)).not.toBeNull());
+      await act(async () => {
+        selectCallbacks.get("snap-1")?.("conn:remote-1");
+      });
+      await waitFor(() => expect(view.queryByText(/Nothing was fetched from Remote PG/)).not.toBeNull());
+      expect(view.container.textContent).toContain(`Nothing was fetched from Remote PG: Remote PG ${refusal}`);
+      expect(view.queryByText(/so the comparison on screen is not that database/)).toBeNull();
+      expect(view.queryByText(/added, .* removed/)).toBeNull();
+      expect(view.queryByText("SQL Migration")).toBeNull();
+      expect(view.getByText("Select source and target to compare schemas")).toBeTruthy();
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  test("an engine with no scope still reads every container, as before", async () => {
+    const { inventoryBodies, listedParents } = await snapshot({}, { containerLevels: levels });
+    expect(listedParents).toEqual([]);
+    expect(inventoryBodies[0].containers).toBeUndefined();
+  });
+
+  // R4-1: the agent walk's scope alone does not narrow a diff. RabbitMQ marks `/` as its walk's default only because
+  // the broker holds it, and its form names no virtual host; Kubernetes walks its namespace plus Cluster. Both diffs
+  // read every container, exactly as before SF-004, with no container listing and no refusal.
+  test("an engine whose walk is scoped but whose diff is not reads every container, as before", async () => {
+    const vhosts = {
+      ok: true,
+      body: [
+        { path: ["r4vh"], name: "r4vh", level: 0 },
+        { path: ["r4vh2"], name: "r4vh2", level: 0 },
+      ],
+    };
+    const rabbit = {
+      containerLevels: [{ id: "schema", label: "Virtual host", labelPlural: "Virtual hosts" }],
+      agentWalkScope: { mode: "session-default" },
+    };
+    const noRoot = await snapshot({ "[]": vhosts }, rabbit);
+    expect(noRoot.listedParents).toEqual([]);
+    expect(noRoot.inventoryBodies.length).toBeGreaterThan(0);
+    for (const body of noRoot.inventoryBodies) expect(body.containers).toBeUndefined();
+    expect(snapshotBanner(noRoot.view)).toBe("");
+    cleanup();
+
+    const withRoot = { ok: true, body: [{ path: ["/"], name: "/", level: 0, isSessionDefault: true }, ...vhosts.body] };
+    const rooted = await snapshot({ "[]": withRoot }, rabbit);
+    expect(rooted.listedParents).toEqual([]);
+    for (const body of rooted.inventoryBodies) expect(body.containers).toBeUndefined();
+    cleanup();
+
+    const kubernetes = {
+      containerLevels: [{ id: "schema", label: "Namespace", labelPlural: "Namespaces" }],
+      containersNameKinds: true,
+      agentWalkScope: { mode: "session-default", alsoWalk: [["Cluster"]] },
+    };
+    const cluster = await snapshot(
+      { "[]": { ok: true, body: [{ path: ["default"], name: "default", level: 0, isSessionDefault: true }] } },
+      kubernetes,
+    );
+    expect(cluster.listedParents).toEqual([]);
+    for (const body of cluster.inventoryBodies) expect(body.containers).toBeUndefined();
   });
 });

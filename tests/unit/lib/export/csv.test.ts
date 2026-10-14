@@ -60,6 +60,15 @@ describe("csvRow", () => {
     expect(csvRow(["-12.5", "-1e3", "+7", "-.5", "-1E+03"])).toBe("-12.5,-1e3,+7,-.5,-1E+03");
   });
 
+  test("writes negative infinity plain when the cell is a number or sits in a numeric column", () => {
+    expect(csvRow([Number.NEGATIVE_INFINITY, "-Infinity", "-Infinity"], ",", [false, true, false])).toBe(
+      `-Infinity,-Infinity,"'-Infinity"`,
+    );
+    expect(toCsv([{ f: "-Infinity", t: "-Infinity" }], ["f", "t"], ",", new Set(["f"]))).toBe(
+      `f,t\n-Infinity,"'-Infinity"`,
+    );
+  });
+
   test("neutralises a value that only starts out numeric", () => {
     expect(csvRow(["-1-2-3"])).toBe(`"'-1-2-3"`);
     expect(csvRow(["-12.5.6"])).toBe(`"'-12.5.6"`);

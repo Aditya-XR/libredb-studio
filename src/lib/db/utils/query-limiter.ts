@@ -203,6 +203,35 @@ function stripTrailingClauses(
   return { code: body.slice(0, end.end), midTrivia: body.slice(end.end), clauseRun };
 }
 
+/**
+ * A row-bound value as a pattern: a digit run, or one of the dialect's declared non-numeric values (SF-021). With no
+ * declaration this is `\d+`, the exact pattern every probe below used before, so no other dialect reads differently.
+ */
+function rowBoundValue(grammar: SqlGrammar): string {
+  const declared = grammar.nonNumericRowBounds ?? [];
+  return ["\\d+", ...declared.map((value) => value.replace(/[$^.*+?()[\]{}|\\]/g, "\\$&"))].join("|");
+}
+
+/** A count as a number, or undefined for a declared non-numeric value, which means no limit. */
+function boundCount(text: string): number | undefined {
+  return /^\d+$/.test(text) ? parseInt(text) : undefined;
+}
+
+/** An offset as a number; a declared non-numeric value skips nothing. */
+function boundOffset(text: string): number {
+  return /^\d+$/.test(text) ? parseInt(text) : 0;
+}
+
+/**
+ * Whether the bound word the end-anchored probe matched at `index` is code. Asked only when the match carries a
+ * non-numeric value, whose quotes and `$` could otherwise be the tail of a literal or a comment.
+ */
+function isCodeWordAt(code: string, word: string, index: number, grammar: SqlGrammar): boolean {
+  let found = findCodeWord(code, word, 0, grammar);
+  while (found !== null && found.start < index) found = findCodeWord(code, word, found.end, grammar);
+  return found !== null && found.start === index;
+}
+
 /** The type this module reports for a statement operated by `keyword`. */
 function classifyKeyword(keyword: string | undefined): ParsedQueryInfo["type"] {
   if (keyword === "SELECT") return "SELECT";
@@ -299,7 +328,20 @@ function analyzeUnderGrammar(sql: string, grammar: SqlGrammar): ParsedQueryInfo 
 
   // LIMIT/OFFSET detection - en dıştaki sorgunun LIMIT'ini bul
   // Regex: Sorgunun sonundaki LIMIT [sayı] [OFFSET sayı] pattern'i
-  const limitMatch = clauseStripped.match(/\bLIMIT\s+(\d+)(?:\s*,\s*(\d+)|\s+OFFSET\s+(\d+))?\s*$/i);
+  // A count or an offset is a digit run, or one of the values the dialect declares (Snowflake's `NULL`, `''` and
+  // `$$$$`, SF-021); the MySQL `LIMIT x, y` form stays digits only.
+  const value = rowBoundValue(grammar);
+  const declaredValue = (text: string | undefined): boolean => text !== undefined && boundCount(text) === undefined;
+  let limitMatch = clauseStripped.match(
+    new RegExp(`\\bLIMIT\\s+(${value})(?:\\s*,\\s*(\\d+)|\\s+OFFSET\\s+(${value}))?\\s*$`, "i"),
+  );
+  if (
+    limitMatch !== null &&
+    (declaredValue(limitMatch[1]) || declaredValue(limitMatch[3])) &&
+    !isCodeWordAt(clauseStripped, "LIMIT", limitMatch.index ?? 0, grammar)
+  ) {
+    limitMatch = null;
+  }
 
   let hasLimit = false;
   let existingLimit: number | undefined;
@@ -313,17 +355,22 @@ function analyzeUnderGrammar(sql: string, grammar: SqlGrammar): ParsedQueryInfo 
       existingOffset = parseInt(limitMatch[1]);
       existingLimit = parseInt(limitMatch[2]);
     } else {
-      existingLimit = parseInt(limitMatch[1]);
-      existingOffset = limitMatch[3] ? parseInt(limitMatch[3]) : undefined;
+      existingLimit = boundCount(limitMatch[1]);
+      existingOffset = limitMatch[3] ? boundOffset(limitMatch[3]) : undefined;
     }
   }
 
   // Oracle/MSSQL: FETCH FIRST N ROWS ONLY / FETCH NEXT N ROWS ONLY
   if (!hasLimit) {
-    const fetchMatch = clauseStripped.match(/\bFETCH\s+(?:FIRST|NEXT)\s+(\d+)\s+ROWS?\s+ONLY\s*$/i);
-    if (fetchMatch) {
+    const fetchMatch = clauseStripped.match(
+      new RegExp(`\\bFETCH\\s+(?:FIRST|NEXT)\\s+(${value})\\s+ROWS?\\s+ONLY\\s*$`, "i"),
+    );
+    if (
+      fetchMatch &&
+      (!declaredValue(fetchMatch[1]) || isCodeWordAt(clauseStripped, "FETCH", fetchMatch.index ?? 0, grammar))
+    ) {
       hasLimit = true;
-      existingLimit = parseInt(fetchMatch[1]);
+      existingLimit = boundCount(fetchMatch[1]);
     }
   }
 
@@ -349,12 +396,22 @@ function analyzeUnderGrammar(sql: string, grammar: SqlGrammar): ParsedQueryInfo 
     hasLimit = true;
   }
 
-  // OFFSET without LIMIT (rare but possible in PostgreSQL)
-  const offsetOnlyMatch = !hasLimit && clauseStripped.match(/\bOFFSET\s+(\d+)\s*$/i);
-  const hasOffset = hasLimit ? existingOffset !== undefined : !!offsetOnlyMatch;
+  // OFFSET without LIMIT (rare but possible in PostgreSQL). The value may also be one the dialect declares, read as
+  // code only, as for LIMIT above.
+  const offsetOnlyMatch = hasLimit ? null : clauseStripped.match(new RegExp(`\\bOFFSET\\s+(${value})\\s*$`, "i"));
+  const offsetOnly =
+    offsetOnlyMatch !== null &&
+    (!declaredValue(offsetOnlyMatch[1]) || isCodeWordAt(clauseStripped, "OFFSET", offsetOnlyMatch.index ?? 0, grammar))
+      ? offsetOnlyMatch
+      : null;
+  const hasOffset = hasLimit ? existingOffset !== undefined : offsetOnly !== null;
 
-  if (offsetOnlyMatch && !hasLimit) {
-    existingOffset = parseInt(offsetOnlyMatch[1]);
+  if (offsetOnly !== null) {
+    existingOffset = boundOffset(offsetOnly[1]);
+    // A lone declared OFFSET (Snowflake's `OFFSET NULL`, SF-021) is the statement's own bound: Snowflake takes no
+    // LIMIT after an OFFSET, so appending one only turned its own "unexpected '<EOF>'" into an error about Studio's
+    // LIMIT. Nothing is appended and the engine answers the text as written.
+    if (declaredValue(offsetOnly[1])) hasLimit = true;
   }
 
   // UNION detection - the code word, for the same reason: a comment reading
@@ -468,10 +525,20 @@ export function applyQueryLimit(
   // at the end of the STATEMENT, so a trailing comment neither hides the bound
   // from them nor gets torn apart by them.
   if (info.hasLimit && forceLimit) {
+    const value = rowBoundValue(grammar);
     // MySQL style: LIMIT offset, count
     statement = statement.replace(/\bLIMIT\s+\d+\s*,\s*\d+\s*$/i, "").trim();
-    // Standard style: LIMIT count OFFSET offset
-    statement = statement.replace(/\bLIMIT\s+\d+(?:\s+OFFSET\s+\d+)?\s*$/i, "").trim();
+    // Standard style: LIMIT count OFFSET offset, either value one the dialect declares (SF-021)
+    statement = statement
+      .replace(new RegExp(`\\bLIMIT\\s+(?:${value})(?:\\s+OFFSET\\s+(?:${value}))?\\s*$`, "i"), "")
+      .trim();
+    // A lone declared OFFSET skips nothing, so it goes too and the bound written below is the whole bound; a digit
+    // OFFSET stays where it stood, as it always did.
+    statement = statement
+      .replace(new RegExp(`\\bOFFSET\\s+(${value})\\s*$`, "i"), (match, bound: string, index: number) =>
+        boundCount(bound) === undefined && isCodeWordAt(statement, "OFFSET", index, grammar) ? "" : match,
+      )
+      .trim();
   }
 
   // LIMIT OFFSET clause'u ekle
@@ -504,4 +571,70 @@ export function hasQueryLimit(sql: string): boolean {
 export function isSelectQuery(sql: string, type?: DatabaseType): boolean {
   const info = analyzeQuery(sql, type);
   return info.type === "SELECT";
+}
+
+// ============================================================================
+// An error about the bound Studio added
+// ============================================================================
+
+/**
+ * The note an engine error gets when it points into the row bound Studio added (SF-022). Plain words, no backticks:
+ * the results panel, the toast and History show an error message as text, so a code span would show its backticks.
+ */
+export function appendedBoundNote(addition: string): string {
+  return `Studio added the clause ${addition} to this statement to bound its rows, so a position or token this error names may be in that clause rather than in your text.`;
+}
+
+/**
+ * The text `sent` carries that `written` does not: what lies between their longest common prefix and suffix,
+ * trimmed. The limiter only ever inserts one clause (`LIMIT n [OFFSET m]` at the end, or `TOP n` where a dialect
+ * writes it), so this is that clause; empty when nothing was added.
+ */
+function addedText(written: string, sent: string): string {
+  let prefix = 0;
+  while (prefix < written.length && prefix < sent.length && written[prefix] === sent[prefix]) prefix++;
+  let suffix = 0;
+  const room = Math.min(written.length, sent.length) - prefix;
+  while (suffix < room && written[written.length - 1 - suffix] === sent[sent.length - 1 - suffix]) suffix++;
+  return sent.slice(prefix, sent.length - suffix).trim();
+}
+
+/**
+ * Whether an engine message is a syntax error that points at `token`, one word or number of the clause Studio added,
+ * in a shape an engine uses to name the token it stopped at. The token must be the quoted token itself (or the first
+ * word of a quoted rest of the statement), spelt as Studio wrote it, so a message that only contains the word or the
+ * number is not taken: PostgreSQL's `column "limit" does not exist` or `invalid input syntax for type integer:
+ * "foo 501"`, MySQL's `Unknown column 'limit'`, ClickHouse's "Expected one of: ... LIMIT, OFFSET" list, and a message
+ * that quotes the whole statement sent. A message that points at the clause in another shape gets no note: a missing
+ * note leaves the engine's own message as it was, a wrong one blames a clause that is not at fault.
+ */
+function pointsAt(message: string, token: string): boolean {
+  const end = "(?![A-Za-z0-9_])";
+  return [
+    // PostgreSQL `syntax error at or near "LIMIT"`, MySQL `... to use near 'LIMIT 501' at line 1`, SQLite
+    // `near "LIMIT": syntax error`, SQL Server `Incorrect syntax near 'TOP'.` or `near the keyword 'TOP'.`
+    new RegExp(`\\bnear (?:the keyword )?['"]${token}${end}`),
+    // Snowflake `syntax error line 1 at position 35 unexpected '501'.`
+    new RegExp(`\\bunexpected '${token}'`),
+    // ClickHouse `Syntax error: failed at position 38 (501): 501.`
+    new RegExp(`\\bfailed at position \\d+ \\('?${token}'?\\)`),
+  ].some((shape) => shape.test(message));
+}
+
+/**
+ * Adds `appendedBoundNote` to an engine error that points into the bound Studio added to the user's statement, so a
+ * syntax error "at position 35 unexpected '501'" or "near LIMIT" is not read as a fault in text the user never
+ * wrote. The error is the same object, its class and category kept, with the note after its message, once. It is
+ * left alone when nothing was added, when it is not an `Error`, or when its message is not a syntax error that
+ * points at one of the addition's words or numbers (`pointsAt`).
+ */
+export function noteAppendedBound(error: unknown, written: string, sent: string): unknown {
+  if (!(error instanceof Error)) return error;
+  const addition = addedText(written, sent);
+  if (addition === "") return error;
+  const note = appendedBoundNote(addition);
+  if (error.message.includes(note)) return error;
+  const tokens = addition.match(/[A-Za-z_]+|\d+/g) ?? [];
+  if (tokens.some((token) => pointsAt(error.message, token))) error.message = `${error.message} ${note}`;
+  return error;
 }

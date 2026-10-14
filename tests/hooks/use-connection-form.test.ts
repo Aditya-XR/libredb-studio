@@ -4600,10 +4600,17 @@ describe("a databend:// paste (Databend design 6.2)", () => {
     });
     expect(databend.current.type).toBe("databend");
     expect(databend.current.allowInsecureAuth).toBe(false);
-    // Db2's form shares the box: its own paste is unchanged and keeps what the user ticked.
-    const db2 = paste("db2://db2inst1:pw@db2.example:50000/TESTDB", (form) => form.setAllowInsecureAuth(true));
+    // Db2's form shares the box: a paste naming the server the form already holds keeps what the user ticked for it.
+    const db2 = paste("db2://db2inst1:pw@db2.example:50000/TESTDB", (form) => {
+      form.setType("db2");
+      form.setHost("db2.example");
+      form.setAllowInsecureAuth(true);
+    });
     expect(db2.current.type).toBe("db2");
     expect(db2.current.allowInsecureAuth).toBe(true);
+    // A consent given for another engine is that engine's, so a db2:// paste over it does not inherit it (SF-002).
+    const fromPostgres = paste("db2://db2inst1:pw@db2.example:50000/TESTDB", (form) => form.setAllowInsecureAuth(true));
+    expect(fromPostgres.current.allowInsecureAuth).toBe(false);
   });
 
   test("a paste of another engine's string clears a leftover warehouse too, which that engine never sends", () => {

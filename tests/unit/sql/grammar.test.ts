@@ -596,7 +596,13 @@ describe("script", () => {
   test("SQL Server sends the batch between GO lines as one request", () => {
     // `DECLARE @x INT = 5; SELECT @x * 2` as two requests was `Must declare the scalar
     // variable "@x"` on 2025 RTM-CU9.
-    expect(resolveSqlGrammar("mssql").script).toEqual({ blocks: "none", separatorLine: "GO", unit: "batch" });
+    // A MERGE keeps its `;`, which the server requires (Msg 10713, SF-046).
+    expect(resolveSqlGrammar("mssql").script).toEqual({
+      blocks: "none",
+      separatorLine: "GO",
+      unit: "batch",
+      terminatedStatements: ["MERGE"],
+    });
   });
 
   test.each<DatabaseType>(["sqlite", "libsql"])("%s reads a trigger body", (type) => {

@@ -1041,10 +1041,11 @@ export interface SchemaSnapshot {
    * array as the live shape would be the same drift this field has already had once, where
    * the declaration said `TableSchema` and the stored JSON carried two more fields.
    *
-   * `diffSchemas` therefore keeps comparing BY NAME, as Task 25c measured: an old snapshot
-   * carries no kind, so keying on kind would report every object in it as removed and
-   * re-added the first time it was opened against a current reading. Nothing migrates these
-   * records and nothing needs to.
+   * `diffSchemas` therefore compares such a snapshot BY NAME, as Task 25c measured: an old
+   * snapshot carries no kind and no path, so keying on either would report every object in it
+   * as removed and re-added the first time it was opened against a current reading. Two
+   * readings that both carry paths are compared by path below their roots (SF-047). Nothing
+   * migrates these records and nothing needs to.
    */
   schema: StoredObject[];
   createdAt: Date;

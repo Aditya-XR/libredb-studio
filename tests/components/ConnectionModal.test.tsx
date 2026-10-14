@@ -212,6 +212,7 @@ function getDefaultForm() {
     isTesting: false,
     testResult: null,
     setTestResult: mockSetTestResult,
+    withdrawResult: mock(() => {}),
     pasteInput: "",
     setPasteInput: mockSetPasteInput,
     showPasteInput: false,
@@ -290,6 +291,8 @@ function getDefaultForm() {
 mock.module("@/hooks/use-connection-form", () => ({
   useConnectionForm: mock(() => getDefaultForm()),
 }));
+
+import { PASTE_FORMATS_TEXT } from "@/lib/connection-paste-formats";
 
 // The account module is pure and not mocked: the Snowflake entry's derived-host hint is the real one.
 import { snowflakeHostHint } from "@/lib/db/providers/sql/snowflake/account-host";
@@ -477,7 +480,7 @@ const MOCK_FIELD_COPY: Record<string, MockFieldCopy> = {
   // Mirrored from the real entry (Databend design 6.1); tests/unit/lib/db-ui-config.test.ts pins the real one.
   databend: {
     fieldLabels: { warehouse: "Warehouse" },
-    fieldPlaceholders: { user: "root", database: "default" },
+    fieldPlaceholders: { database: "default" },
     fieldHints: {
       host: "A host name or address, or a pasted https:// address, which is split into Host and Port. Databend Cloud: the host from Connect in the Cloud console, on port 443 with SSL mode verify-system. Self-hosted: the query node, port 8000 unless http_handler_port was changed.",
       user: "A SQL user. On Databend Cloud: cloudapp, or a user created with CREATE USER; the email you sign in to the Cloud console with is not a SQL user.",
@@ -2632,6 +2635,10 @@ describe("ConnectionModal: the Snowflake fields, the account-only host row and t
   test("takes the key in a textarea with spell check, autocorrect and autocapitalise off, and hands it on unchanged", () => {
     mockFormOverrides = { type: "snowflake", authMethod: "keypair", privateKey: "stored" };
     const { container } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    // A key the form holds is not drawn until Show key (SF-014).
+    expect(container.querySelector("#privateKey")).toBeNull();
+    const show = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Show key");
+    fireEvent.click(show as HTMLButtonElement);
     const key = container.querySelector("#privateKey") as HTMLTextAreaElement;
     expect(key.tagName).toBe("TEXTAREA");
     expect(key.value).toBe("stored");
@@ -2715,11 +2722,8 @@ describe("ConnectionModal: the Snowflake fields, the account-only host row and t
     const paste = container.querySelector('input[placeholder^="postgres://"]') as HTMLInputElement;
     expect(paste.getAttribute("autocomplete")).toBe("off");
     expect(paste.getAttribute("spellcheck")).toBe("false");
-    expect(
-      getByText(
-        "Supports: postgres://, mysql://, mongodb://, redis://, oracle://, mssql://, db2://, databend://, jdbc:snowflake://, snowflake://, a Snowflake account URL",
-      ),
-    ).toBeDefined();
+    expect(getByText(`Supports: ${PASTE_FORMATS_TEXT}`)).toBeDefined();
+    expect(PASTE_FORMATS_TEXT).toContain("jdbc:snowflake://, snowflake://, a Snowflake account URL or host");
   });
 
   describe("a refusal with a statement that fixes it", () => {

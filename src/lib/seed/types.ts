@@ -3,6 +3,7 @@ import { CONNECTION_STRING_ACCEPTED, MCP_EXPOSABLE, READ_ONLY_ENFORCED } from "@
 import type { DatabaseConnection, DatabaseType } from "@/lib/types";
 import { readOnlySeedRefusal } from "@/lib/db/credential-warnings";
 import { isCredentialReference } from "./credential-resolver";
+import { checkSnowflakeAccount, SNOWFLAKE_FIELD_SENTENCES } from "@/lib/db/providers/sql/snowflake/account-host";
 
 // SSLMode matches the union in src/lib/types.ts — NO 'prefer'. Kept in step BY HAND: a zod
 // enum is a value, so a mode missing here is not a compile error, it is a seed file the
@@ -42,6 +43,61 @@ export function refuseMcpWhereNotOffered(exposable: Readonly<Record<DatabaseType
     });
   };
 }
+
+/** One field a type's load check refuses, and the sentence it is refused with. */
+interface SeedFieldRefusal {
+  readonly field: string;
+  readonly sentence: string;
+}
+
+/** The fields a load check reads, as the file writes them: every one may be absent or a `${...}` reference. */
+type SeedCheckedFields = Readonly<
+  Partial<Record<"host" | "user" | "authMethod" | "privateKey" | "password" | "role", string>>
+>;
+
+/** Whether a value cannot be judged at load: a reference, resolved only after the file is validated. */
+const judgeable = (value: string | undefined): boolean => !isCredentialReference(value);
+const blank = (value: string | undefined): boolean => value === undefined || value.trim() === "";
+
+/**
+ * Snowflake's checks before any socket, as `connect()` makes them (the account by `checkSnowflakeAccount`, then the
+ * user, the sign-in method, the credential that method needs and the role), each skipped for a field holding a
+ * reference. Every refusal is the provider's own sentence.
+ */
+function snowflakeLoadRefusals(conn: SeedCheckedFields): SeedFieldRefusal[] {
+  const found: SeedFieldRefusal[] = [];
+  if (judgeable(conn.host)) {
+    const reading = checkSnowflakeAccount(conn.host ?? "");
+    if (!reading.ok) found.push({ field: "host", sentence: reading.refusal });
+  }
+  if (judgeable(conn.user) && blank(conn.user))
+    found.push({ field: "user", sentence: SNOWFLAKE_FIELD_SENTENCES.userEmpty });
+  const method = conn.authMethod ?? "keypair";
+  if (judgeable(method)) {
+    if (method !== "keypair" && method !== "pat") {
+      found.push({ field: "authMethod", sentence: SNOWFLAKE_FIELD_SENTENCES.method });
+    } else if (method === "keypair" && blank(conn.privateKey)) {
+      found.push({ field: "privateKey", sentence: SNOWFLAKE_FIELD_SENTENCES.keyEmpty });
+    } else if (method === "pat" && blank(conn.password)) {
+      found.push({ field: "password", sentence: SNOWFLAKE_FIELD_SENTENCES.tokenEmpty });
+    }
+  }
+  if (judgeable(conn.role) && blank(conn.role))
+    found.push({ field: "role", sentence: SNOWFLAKE_FIELD_SENTENCES.roleEmpty });
+  return found;
+}
+
+/**
+ * The checks a type's provider makes before any socket, run at load on the fields the file writes (SF-038), so an
+ * entry that can never open is refused with the file, by name, instead of loading and failing only when it is
+ * opened. Keyed by type and read as a record, never a type-id branch; a type without an entry is not checked here.
+ */
+const SEED_LOAD_CHECKS: Readonly<Partial<Record<DatabaseType, (conn: SeedCheckedFields) => SeedFieldRefusal[]>>> = {
+  snowflake: snowflakeLoadRefusals,
+};
+
+/** A provider sentence as a load refusal: the "Nothing was sent." ending is a connect's, not a file's. */
+const atLoad = (sentence: string): string => sentence.replace(/ Nothing was sent\.$/, "");
 
 // Kept in step with DatabaseType in src/lib/types.ts BY HAND: a zod enum is a value,
 // so a type-id missing here is not a compile error - it is a seed file the server
@@ -279,6 +335,17 @@ export const SeedConnectionSchema = z
         "apiKeyId and apiKeySecret are Elasticsearch-only. OpenSearch (and every other engine) refuses the pair: nothing here has measured whether OpenSearch's security plugin accepts Authorization: ApiKey, so a seed that carries it is rejected rather than listed as a connection that silently falls back to user/password.",
       path: conn.apiKeyId !== undefined ? ["apiKeyId"] : ["apiKeySecret"],
     });
+  })
+  // The type's own checks before any socket (SF-038), from SEED_LOAD_CHECKS. The message names the connection and the
+  // field, never the value, since a refused account URL may carry a token.
+  .superRefine((conn, ctx) => {
+    for (const { field, sentence } of SEED_LOAD_CHECKS[conn.type]?.(conn) ?? []) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Seed connection "${conn.id}": ${field} is refused: ${atLoad(sentence)}`,
+        path: [field],
+      });
+    }
   })
   // An MCP opt-in on an engine MCP is not offered for (#1089), read from MCP_EXPOSABLE.
   .superRefine(refuseMcpWhereNotOffered(MCP_EXPOSABLE))

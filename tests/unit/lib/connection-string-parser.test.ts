@@ -1660,6 +1660,22 @@ describe("parseConnectionString: Snowflake URLs, decomposed into fields and neve
     expect(parseConnectionString("myorg-myacct")).toBeNull();
   });
 
+  test("the scheme is read without regard to case, as the parameter names are (SF-024)", () => {
+    expect(parseConnectionString("JDBC:SNOWFLAKE://myorg-myacct.snowflakecomputing.com/?USER=x&ROLE=r")).toEqual({
+      type: "snowflake",
+      host: "myorg-myacct.snowflakecomputing.com",
+      user: "x",
+      role: "r",
+    });
+    expect(parseConnectionString("Snowflake://u@myorg-myacct/D")).toEqual({
+      type: "snowflake",
+      host: "myorg-myacct.snowflakecomputing.com",
+      user: "u",
+      database: "D",
+    });
+    expect(detectConnectionStringType("JDBC:Snowflake://myorg-myacct.snowflakecomputing.com/")).toBe("snowflake");
+  });
+
   test("a Snowsight URL reads the account from its path", () => {
     expect(parseConnectionString("https://app.snowflake.com/myorg/myacct/x")).toEqual({
       type: "snowflake",
@@ -1803,6 +1819,30 @@ describe("parseConnectionString: Snowflake URLs, decomposed into fields and neve
     expect(SNOWFLAKE_PASTE_SENTENCES.path("private_key_file")).toBe(
       "Studio does not take private_key_file from a pasted URL. Studio reads no file: paste the key's contents into Private key.",
     );
+  });
+
+  test.each([
+    "jdbc:snowflake://attacker.com/?user=x",
+    "JDBC:SNOWFLAKE://attacker.com/",
+    "jdbc:snowflake://myorg-myacct/?user=x",
+    "jdbc:snowflake://xy12345.eu-central-1/",
+    "snowflake://x@attacker.com/z",
+    "snowflake://x@evil.example.org/z",
+  ])("%s names a host outside Snowflake and is refused, not rewritten under its domain (SF-028)", (text) => {
+    expect(parseConnectionString(text)).toEqual({
+      type: "snowflake",
+      refusal: SNOWFLAKE_PASTE_SENTENCES.foreignHost,
+      discardPaste: true,
+    });
+  });
+
+  test.each([
+    ["snowflake://u@xy12345.eu-central-1/d", "xy12345.eu-central-1.snowflakecomputing.com"],
+    ["snowflake://u@xy12345.us-east-2.aws.privatelink/d", "xy12345.us-east-2.aws.privatelink.snowflakecomputing.com"],
+    ["snowflake://u@myorg-myacct.snowflakecomputing.com/d", "myorg-myacct.snowflakecomputing.com"],
+    ["jdbc:snowflake://xy12345.eu-central-1.snowflakecomputing.com/", "xy12345.eu-central-1.snowflakecomputing.com"],
+  ])("%s keeps its account", (text, host) => {
+    expect(parseConnectionString(text)!.host).toBe(host);
   });
 
   test("an account the field would refuse refuses the paste with the account sentence", () => {

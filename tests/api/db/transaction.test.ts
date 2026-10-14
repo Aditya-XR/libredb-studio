@@ -401,6 +401,23 @@ describe("POST /api/db/transaction", () => {
       expect(data.statements[0].error).toContain("Duplicate entry");
     });
 
+    test("a script's last statement failing at the bound Studio added says so (SF-022)", async () => {
+      mockTxProvider.queryInTransaction.mockImplementationOnce(async () => ({
+        rows: [],
+        fields: [],
+        rowCount: 1,
+        executionTime: 1,
+      }));
+      mockTxProvider.queryInTransaction.mockImplementationOnce(async () => {
+        throw new Error('syntax error at or near "LIMIT"');
+      });
+      const { data } = await run("UPDATE t SET a = 1; SELECT * FROM t WHERE");
+
+      expect(data.statements[1].error).toBe(
+        'syntax error at or near "LIMIT" Studio added the clause LIMIT 50 to this statement to bound its rows, so a position or token this error names may be in that clause rather than in your text.',
+      );
+    });
+
     test("a statement and a trailing comment stay one statement", async () => {
       const { data } = await run("SELECT * FROM t; -- note");
 
@@ -440,6 +457,24 @@ describe("POST /api/db/transaction", () => {
 
       expect(data.inTransaction).toBe(false);
     });
+  });
+
+  test("a lone statement failing at the bound Studio added says so; another failure is left alone (SF-022)", async () => {
+    const send = async (message: string) => {
+      (mockTxProvider.queryInTransaction as ReturnType<typeof mock>).mockImplementationOnce(async () => {
+        throw new QueryError(message);
+      });
+      const req = createMockRequest("/api/db/transaction", {
+        method: "POST",
+        body: { connection: validConnection, action: "query", sql: "SELECT * FROM users WHERE" },
+      });
+      return parseResponseJSON<{ error: string }>(await POST(req as never));
+    };
+
+    expect((await send("syntax error line 1 at position 26 unexpected '50'")).error).toBe(
+      "syntax error line 1 at position 26 unexpected '50' Studio added the clause LIMIT 50 to this statement to bound its rows, so a position or token this error names may be in that clause rather than in your text.",
+    );
+    expect((await send("relation users does not exist")).error).toBe("relation users does not exist");
   });
 
   test("query action with sql returns result with pagination", async () => {

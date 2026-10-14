@@ -390,6 +390,13 @@ Measured before this on SQL
 Server 2025 RTM-CU9: each `;`-fragment was its own request, so the same script answered `Must declare
 the scalar variable "@x"`, `Invalid object name '#t'` and `Incorrect syntax near 'GO'`.
 
+**A `MERGE` keeps its `;`.** The editor drops the `;` that ends a statement it sends, except after a
+`MERGE`, which T-SQL refuses without one: measured on SQL Server 2025 (17.0.5015.4), a MERGE sent
+without its `;`, from the editor or through sqlcmd, answers Msg 10713, `A MERGE statement must be
+terminated by a semi-colon (;).` The grammar's `script.terminatedStatements` names it, so the statement
+at the cursor, the confirmation dialog and a batch ending in a MERGE all carry the `;` the server needs.
+A MERGE written without a `;` is sent as written and refused the same way.
+
 Native `mssql` errors are normalised through `mapDatabaseError()` (see [§11](#11-error-handling)).
 
 ### 5.2 Query cancellation

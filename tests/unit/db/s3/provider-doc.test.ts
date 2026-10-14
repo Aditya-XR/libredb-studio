@@ -1159,7 +1159,7 @@ const S3_ENTRIES: Readonly<Record<string, string>> = {
   D273: "Wide Parquet schemas are refused above 1,024 elements",
   D274: "Large Parquet row groups preview fewer columns or none",
   U109: "The object tree is not paged, so an account with thousands of buckets lists them in one folder",
-  U110: "Databend declares a User placeholder the dialog never draws",
+  // U110 ("Databend declares a User placeholder the dialog never draws") was settled by SF-039 and deleted.
   B104: "S3-compatible object storage has no agent execution and no MCP surface",
 };
 

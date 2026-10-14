@@ -21,6 +21,7 @@ import { endsOpenQueryTransactions, newQueryCallScope } from "@/lib/db/types";
 import { supportsQueryCancel } from "@/lib/db/query-cancel";
 import type { ExplainFormat, OpenQueryTransactionOutcome } from "@/lib/db/types";
 import { rowsWithNonFiniteWords } from "@/lib/non-finite";
+import { noteAppendedBound } from "@/lib/db/utils/query-limiter";
 
 /**
  * The error an unreadable `explain` field gets. It names the whole allowed shape
@@ -280,6 +281,9 @@ export async function POST(req: NextRequest) {
     let result: Awaited<ReturnType<typeof provider.query>>;
     try {
       result = await provider.query(probe.query, bound.params, cancelId, scope);
+    } catch (error) {
+      // An error that names the bound the limiter added says so, rather than pointing into text the user never wrote.
+      throw noteAppendedBound(error, statement, probe.query);
     } finally {
       release();
       if (endsOpenQueryTransactions(provider)) {

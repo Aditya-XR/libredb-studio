@@ -48,9 +48,10 @@ export interface DetailedObject {
  *
  * `SchemaSnapshot.schema` is written to the user's own storage and read back months later,
  * and a record written before the object model landed carries neither `kind` nor `path`.
- * Those records are not migrated and do not need to be: `diffSchemas` compares BY NAME, so
- * an old snapshot diffs against a current reading with nothing reported as removed and
- * re-added, which is the measured reason Task 25c kept the comparison on the name.
+ * Those records are not migrated and do not need to be: `diffSchemas` compares a reading
+ * without paths BY NAME, so an old snapshot diffs against a current reading with nothing
+ * reported as removed and re-added, which is the measured reason Task 25c kept the comparison
+ * on the name for them; two readings with paths are compared by path (SF-047).
  *
  * Declaring the stored array as `DetailedObject` would be the drift that field has already
  * had once, where the declaration said `TableSchema` while the stored JSON carried two more

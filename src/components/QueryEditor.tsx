@@ -404,7 +404,8 @@ export const QueryEditor = forwardRef<QueryEditorRef, QueryEditorProps>(
       if (formatter === undefined) return;
 
       try {
-        const formatted = formatter(currentValue);
+        // The connection's grammar names the SQL formatter's language (Snowflake's keeps QUALIFY a clause, SF-041).
+        const formatted = formatter(currentValue, resolveSqlGrammar(databaseType));
         editorRef.current.setValue(formatted);
         onChange?.(formatted);
       } catch (e) {

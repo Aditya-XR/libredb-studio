@@ -874,6 +874,47 @@ describe("ClickHouseProvider query", () => {
     expect(result.rows).toEqual([{ id: 1, amount: "12345678901234567890.1234567891", small: "12.34", f: 1.5 }]);
   });
 
+  test("shows a Float's inf, -inf and nan as their words, by the declared type, nested ones included (SF-045)", async () => {
+    // Measured on 26.9.18.11: without `output_format_json_quote_denormals` the server
+    // writes each of them as `null`, so a non-Nullable Float64 holding inf showed NULL and
+    // replayed as 0. The fake answers the way the server does, quoting only when asked.
+    const provider = await connectProvider();
+    replyFor = () => {
+      const quoted =
+        new URL(sentUrls[sentUrls.length - 1]).searchParams.get("output_format_json_quote_denormals") === "1";
+      const word = (text: string) => (quoted ? `"${text}"` : "null");
+      return {
+        body:
+          '{"meta":[{"name":"f","type":"Float64"},{"name":"n","type":"Nullable(Float32)"},' +
+          '{"name":"b","type":"BFloat16"},{"name":"a","type":"Array(Array(Nullable(Float64)))"},' +
+          '{"name":"t","type":"Tuple(x Float32, y Float64, z String)"},{"name":"u","type":"Tuple(Float64, String)"},' +
+          '{"name":"m","type":"Map(String, Float64)"},{"name":"lc","type":"LowCardinality(Nullable(Float64))"},' +
+          '{"name":"s","type":"String"},{"name":"v","type":"Variant(Float64, String)"}],' +
+          `"data":[[${word("inf")},${word("-inf")},${word("nan")},[[${word("inf")},1.5,null]],` +
+          `{"x":${word("-inf")},"y":2.5,"z":"inf"},[${word("nan")},"nan"],{"k":${word("inf")},"__proto__":${word("nan")}},` +
+          `null,"inf","inf"]],"rows":1,"statistics":{"elapsed":0.001}}`,
+      };
+    };
+
+    const result = await provider.query("SELECT * FROM t1");
+
+    expect(result.rows).toHaveLength(1);
+    const [row] = result.rows;
+    expect(row.f).toBe("Infinity");
+    expect(row.n).toBe("-Infinity");
+    expect(row.b).toBe("NaN");
+    expect(row.a).toEqual([["Infinity", 1.5, null]]);
+    expect(row.t).toEqual({ x: "-Infinity", y: 2.5, z: "inf" });
+    expect(row.u).toEqual(["NaN", "nan"]);
+    expect(Object.keys(row.m as object)).toEqual(["k", "__proto__"]);
+    expect((row.m as Record<string, unknown>).k).toBe("Infinity");
+    expect(Object.getOwnPropertyDescriptor(row.m, "__proto__")?.value).toBe("NaN");
+    expect(row.lc).toBeNull();
+    // A String, and a Variant that declares no single element type, keep the text as sent.
+    expect(row.s).toBe("inf");
+    expect(row.v).toBe("inf");
+  });
+
   test("leaves the type channel absent when the envelope described no columns at all", async () => {
     const provider = await connectProvider();
     replyFor = () => ({ body: JSON.stringify({ meta: [], data: [] }) });

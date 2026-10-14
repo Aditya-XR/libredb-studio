@@ -88,6 +88,8 @@ describe("declarations", () => {
       containersNameKinds: true,
       agentWalkScope: { mode: "session-default", alsoWalk: [["Cluster"]] },
     });
+    // A schema diff is not narrowed to the walk's namespace and Cluster: it reads as it always has.
+    expect(capabilities.schemaDiffScope).toBeUndefined();
     expect(capabilities.objectKinds).toBe(KUBERNETES_OBJECT_KINDS);
     expect(capabilities.rowActions).toBe(KUBERNETES_ROW_ACTIONS);
   });

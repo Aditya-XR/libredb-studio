@@ -62,7 +62,7 @@ import {
   SparkIcon,
 } from "@/components/icons/db-icons";
 import {
-  SNOWFLAKE_ACCOUNT_PATTERN,
+  snowflakeAccountRefusal,
   SNOWFLAKE_FIELD_SENTENCES,
   snowflakeHostHint,
 } from "@/lib/db/providers/sql/snowflake/account-host";
@@ -841,7 +841,9 @@ describe("declared connection-field copy (#1085)", () => {
     expect(takesConnectionField("databend", "warehouse")).toBe(true);
     expect(takesConnectionField("postgres", "warehouse")).toBe(false);
     expect(databend.fieldLabels).toEqual({ warehouse: "Warehouse" });
-    expect(databend.fieldPlaceholders).toEqual({ user: "root", database: "default" });
+    // No User example: the dialog warns against root, so its placeholder may not suggest it (SF-039).
+    expect(databend.fieldPlaceholders).toEqual({ database: "default" });
+    expect(connectionFieldPlaceholder(databend, "user", "user")).toBe("user");
     expect(connectionFieldPlaceholder(databend, "database", "db")).toBe("default");
     expect(databend.fieldHints).toBe(DATABEND_FIELD_HINTS);
     expect(DATABEND_FIELD_HINTS).toEqual({
@@ -1689,7 +1691,12 @@ describe("the Snowflake entry", () => {
 
   test("checks the account, the user and the role in the provider's own sentences", () => {
     expect(snowflake.fieldRules).toBe(SNOWFLAKE_FIELD_RULES);
-    expect(SNOWFLAKE_FIELD_RULES.host?.format?.pattern).toBe(SNOWFLAKE_ACCOUNT_PATTERN);
+    expect(SNOWFLAKE_FIELD_RULES.host?.check).toBe(snowflakeAccountRefusal);
+    // connect()'s reading, so a padded account passes and an account URL with a path is refused (SF-025).
+    expect(connectionFieldRefusal(snowflake, connection({ host: "  myorg-myaccount " }))).toBeUndefined();
+    expect(
+      connectionFieldRefusal(snowflake, connection({ host: "https://myorg-myaccount.snowflakecomputing.com/console" })),
+    ).toBe(SNOWFLAKE_FIELD_SENTENCES.accountFormat);
     expect(connectionFieldRefusal(snowflake, connection({}))).toBeUndefined();
     expect(connectionFieldRefusal(snowflake, connection({ host: "" }))).toBe(SNOWFLAKE_FIELD_SENTENCES.accountEmpty);
     expect(connectionFieldRefusal(snowflake, connection({ host: "jdbc:snowflake://myorg-myaccount" }))).toBe(
@@ -1776,9 +1783,8 @@ describe("the Snowflake entry", () => {
     expect(snowflake.hostHint).toBe(snowflakeHostHint);
     expect(snowflake.hostHint?.("myorg-myacct")).toBe("Studio connects to myorg-myacct.snowflakecomputing.com.");
     expect(snowflake.hostHint?.("")).toBeUndefined();
-    expect(connectionFieldPlaceholder(snowflake, "host", "localhost")).toBe(
-      "myorg-myaccount or https://myorg-myaccount.snowflakecomputing.com",
-    );
+    // The identifier alone, which fits the box; the hint says the URL form (SF-043).
+    expect(connectionFieldPlaceholder(snowflake, "host", "localhost")).toBe("myorg-myaccount");
   });
 
   test("only snowflake and opcua take a host without a port, so every other host row keeps its Port box", () => {

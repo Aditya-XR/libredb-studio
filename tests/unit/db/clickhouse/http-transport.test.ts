@@ -173,6 +173,59 @@ describe("ClickHouseHttpTransport request", () => {
     expect(lastParam("output_format_json_quote_decimals")).toBe("1");
   });
 
+  // Without this a Float's inf, -inf and nan arrive as `null` (measured on 26.9.18.11).
+  test("always quotes non-finite floats so they do not arrive as null", async () => {
+    await makeTransport().query("SELECT inf");
+
+    expect(lastParam("output_format_json_quote_denormals")).toBe("1");
+  });
+
+  test("reads a quoted non-finite float as its word only where the declared type is a float", async () => {
+    handler = () =>
+      respond(
+        JSON.stringify({
+          meta: [
+            { name: "f", type: "Float64" },
+            { name: "s", type: "String" },
+            { name: "a", type: "Array(Float32)" },
+            { name: "e", type: "Tuple(Enum8('a,b' = 1), Float64)" },
+            { name: "x", type: "Array(Float64)" },
+            { name: "p", type: "Tuple(Float64)" },
+            { name: "q", type: "Tuple(a Float64)" },
+            { name: "m", type: "Map(String, Float64)" },
+          ],
+          data: [
+            [
+              "-inf",
+              "-inf",
+              ["nan", 2],
+              ["a,b", "inf"],
+              "not an array",
+              ["inf", "extra"],
+              { a: "nan", b: "inf" },
+              ["inf"],
+            ],
+          ],
+        }),
+        { headers: jsonHeaders() },
+      );
+
+    const result = await makeTransport().query("SELECT 1");
+
+    expect(result.rows).toEqual([
+      {
+        f: "-Infinity",
+        s: "-inf",
+        a: ["NaN", 2],
+        e: ["a,b", "Infinity"],
+        x: "not an array",
+        p: ["Infinity", "extra"],
+        q: { a: "NaN", b: "inf" },
+        m: ["inf"],
+      },
+    ]);
+  });
+
   test("sends the connection's database as a URL parameter", async () => {
     await makeTransport().query("SELECT 1");
 
@@ -253,6 +306,7 @@ describe("ClickHouseHttpTransport request", () => {
         default_format: "TSV",
         output_format_json_quote_64bit_integers: 0,
         output_format_json_quote_decimals: 0,
+        output_format_json_quote_denormals: 0,
         database: "other",
       },
     });
@@ -260,6 +314,7 @@ describe("ClickHouseHttpTransport request", () => {
     expect(lastParam("default_format")).toBe("JSONCompact");
     expect(lastParam("output_format_json_quote_64bit_integers")).toBe("1");
     expect(lastParam("output_format_json_quote_decimals")).toBe("1");
+    expect(lastParam("output_format_json_quote_denormals")).toBe("1");
     expect(lastParam("database")).toBe("demo");
   });
 

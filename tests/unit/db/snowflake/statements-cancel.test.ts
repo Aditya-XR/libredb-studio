@@ -66,6 +66,9 @@ async function started(
 const userRun = (harness: Harness, queryId: string | undefined) => harness.statements.runUser("SHOW TABLES", queryId);
 const surfaceRun = (harness: Harness) => harness.statements.runSurface("SHOW TABLES", SURFACE);
 
+/** The first run's own deadline: its permit wait's bound is requested first, the statement's once it is sent. */
+const STATEMENT_DEADLINE = 1;
+
 const isCancelled = (error: unknown): boolean => error instanceof SnowflakeError && error.category === "cancelled";
 
 describe("runs in flight drop to 0 on every exit", () => {
@@ -103,7 +106,7 @@ describe("runs in flight drop to 0 on every exit", () => {
       harness.transports.answer(CANCEL, CONFIRMED);
       const { outcome } = await started(harness, start(harness), 2);
       expect(harness.statements.runsInFlight()).toBe(1);
-      harness.deps.deadlines.fire(0);
+      harness.deps.deadlines.fire(STATEMENT_DEADLINE);
       const error = await outcome;
       expect((error as SnowflakeError).category).toBe("query");
       expect((error as SnowflakeError).message).toBe(
@@ -280,8 +283,8 @@ describe("the deadline", () => {
     hanging(harness);
     harness.transports.answer(CANCEL, CONFIRMED);
     const { outcome } = await started(harness, userRun(harness, "q-1"), 2);
-    expect(harness.deps.deadlines.requested[0]).toBe(7_000);
-    harness.deps.deadlines.fire(0);
+    expect(harness.deps.deadlines.requested.slice(0, 2)).toEqual([7_000, 7_000]);
+    harness.deps.deadlines.fire(STATEMENT_DEADLINE);
     const error = await outcome;
     expect(error).toBeInstanceOf(SnowflakeError);
     expect((error as SnowflakeError).category).toBe("query");
@@ -293,7 +296,7 @@ describe("the deadline", () => {
     const harness = setup();
     harness.transports.answer(SUBMIT, HANG);
     const { outcome } = await started(harness, surfaceRun(harness), 1);
-    harness.deps.deadlines.fire(0);
+    harness.deps.deadlines.fire(STATEMENT_DEADLINE);
     expect(((await outcome) as SnowflakeError).message).toBe(SNOWFLAKE_ERROR_SENTENCES.surfaceDeadline(30));
     expect(harness.transports.requests).toHaveLength(1);
   });
@@ -313,7 +316,7 @@ describe("the deadline", () => {
     hanging(harness);
     harness.transports.answer(CANCEL, CONFIRMED);
     const { outcome } = await started(harness, surfaceRun(harness), 2);
-    harness.deps.deadlines.fire(0);
+    harness.deps.deadlines.fire(STATEMENT_DEADLINE);
     const message = ((await outcome) as SnowflakeError).message;
     expect(message).toBe(SNOWFLAKE_ERROR_SENTENCES.surfaceDeadline(30));
     expect(message).not.toContain("Raise Query Timeout");
@@ -324,7 +327,7 @@ describe("the deadline", () => {
     hanging(harness);
     harness.transports.answer(CANCEL, CONFIRMED);
     const { outcome } = await started(harness, surfaceRun(harness), 2);
-    harness.deps.deadlines.fire(0);
+    harness.deps.deadlines.fire(STATEMENT_DEADLINE);
     expect(((await outcome) as SnowflakeError).message).toBe(SNOWFLAKE_ERROR_SENTENCES.deadline(2));
   });
 
@@ -428,6 +431,37 @@ describe("the engine limiter", () => {
     expect((error as SnowflakeError).category).toBe("unavailable");
     expect((error as SnowflakeError).message).toBe(SNOWFLAKE_ERROR_SENTENCES.slotsBusy(35));
     expect(harness.transports.requests).toHaveLength(sent);
+  });
+
+  test("a run that waited for a permit gets its whole timeout from the moment it is sent (SF-007)", async () => {
+    const harness = setup({ queryTimeoutMs: 10_000 });
+    hanging(harness, 4);
+    harness.transports.answer(CANCEL, CONFIRMED);
+    const outcomes = await Promise.all([1, 2, 3, 4].map((n) => started(harness, userRun(harness, `q-${n}`), n * 2)));
+    const queueBound = harness.deps.deadlines.requested.length;
+    const status = deferredAnswer();
+    harness.transports.answer(SUBMIT, handleAnswer(nextHandle()));
+    harness.transports.answer(STATUS, status.answer);
+    const fifth = userRun(harness, "q-5").then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+    await tick();
+    // Waiting: only the wait's own bound is running.
+    expect(harness.deps.deadlines.requested.slice(queueBound)).toEqual([15_000]);
+    expect(await harness.statements.cancel("q-1")).toBe(true);
+    await outcomes[0].outcome;
+    await harness.transports.received(11);
+    await tick();
+    // Admitted: the statement's own deadline starts now, with the full timeout plus the grace.
+    const statementBound = harness.deps.deadlines.requested.lastIndexOf(15_000);
+    expect(statementBound).toBeGreaterThan(queueBound);
+    // The wait's bound passing after admission no longer ends the statement.
+    harness.deps.deadlines.fire(queueBound);
+    await tick();
+    status.resolve(one());
+    expect(await fifth).toMatchObject({ rows: [{ N: 1 }] });
+    expect(cancels(harness)).toHaveLength(1);
   });
 
   test("a run after close() is cancelled before it is sent", async () => {

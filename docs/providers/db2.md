@@ -416,7 +416,7 @@ A column modification is written as a comment, not as DDL: Db2 changes a column 
 Added and dropped columns use `ADD COLUMN` and `DROP COLUMN`, which Db2 LUW accepts; a dropped column can leave the table REORG-pending, measured, and Reorganize Table clears it.
 The migration is not wrapped in `BEGIN;` and `COMMIT;`, because in Db2 `BEGIN` opens a compound block.
 Db2 refuses `DROP CONSTRAINT IF EXISTS` and `DROP INDEX IF EXISTS`, so those statements are written without `IF EXISTS`.
-The shared diff keys objects by name only, so a table in one schema collides with a table of the same name in another, writes a view or a materialized query table as `CREATE TABLE`, and quotes a cross-schema reference as one identifier; read a Db2 migration before you run it (D150 in `docs/BACKLOG.md`).
+The shared diff keys objects by their schema and name, so `APP.T` and `REPORTING.T` are two tables, names each table as `"SCHEMA"."TABLE"`, and names a differing view or materialized query table in a comment instead of writing table DDL for it. A foreign key's cross-schema reference is still quoted as one identifier; read a Db2 migration before you run it (D150 in `docs/BACKLOG.md`).
 
 ## 12. Packaging and platforms
 

@@ -11,6 +11,13 @@ import {
 import { CREDENTIAL_WARNINGS } from "@/lib/db/credential-warnings";
 import { refuseMcpWhereNotOffered, SeedConnectionSchema, SeedConfigSchema, SeedDefaultsSchema } from "@/lib/seed/types";
 
+/**
+ * The fields a type's own load checks need beyond a generic entry (SF-038): a Snowflake entry is refused without a
+ * user, a role and a key, so a loop over every engine gives it these and judges only what the loop is about.
+ */
+const completeFor = (type: string): Record<string, unknown> =>
+  type === "snowflake" ? { user: "u", role: "r", privateKey: "${SNOWFLAKE_PRIVATE_KEY}" } : {};
+
 describe("SeedConnectionSchema", () => {
   const validConn = {
     id: "test-pg",
@@ -144,7 +151,7 @@ describe("SeedConnectionSchema", () => {
    */
   it("accepts every type-id the product ships", () => {
     const refused = SHIPPED_DATABASE_TYPES.filter(
-      (type) => !SeedConnectionSchema.safeParse({ ...validConn, type }).success,
+      (type) => !SeedConnectionSchema.safeParse({ ...validConn, type, ...completeFor(type) }).success,
     );
     // Vacuity, by name: an empty registry would refuse nothing and pass.
     expect(SHIPPED_DATABASE_TYPES.length).toBeGreaterThan(0);
@@ -405,7 +412,8 @@ describe("SeedConnectionSchema: the MCP opt-in where MCP is not offered (#1089)"
     // Vacuity, by name: an empty population would refuse nothing and pass.
     expect(offered).toContain("postgres");
     const refused = offered.filter(
-      (type) => SeedConnectionSchema.safeParse({ ...connection, type, mcp: true }).data?.mcp !== true,
+      (type) =>
+        SeedConnectionSchema.safeParse({ ...connection, type, ...completeFor(type), mcp: true }).data?.mcp !== true,
     );
     expect(refused).toEqual([]);
   });
@@ -731,7 +739,7 @@ describe("SeedConnectionSchema: the read-only mode (#1089)", () => {
     // Vacuity, by name: an empty population would refuse nothing and pass.
     expect(refusing).toContain("postgres");
     for (const type of refusing) {
-      const result = SeedConnectionSchema.safeParse({ ...validConn, type, readOnly: true });
+      const result = SeedConnectionSchema.safeParse({ ...validConn, type, ...completeFor(type), readOnly: true });
       expect({ type, issues: result.error?.issues.map((issue) => [issue.path.join("."), issue.message]) }).toEqual({
         type,
         issues: [["readOnly", unenforced(type)]],
@@ -1040,6 +1048,8 @@ describe("SeedConnectionSchema: a connectionString the provider does not read (S
     host: "db.internal",
     connectionString,
     roles: ["admin"],
+    // What a Snowflake entry needs to pass its own load checks (SF-038), so only the connection string is judged.
+    ...(type === "snowflake" ? { user: "u", role: "r", privateKey: "${SNOWFLAKE_PRIVATE_KEY}" } : {}),
   });
 
   const refusal = (type: string) =>
@@ -1137,4 +1147,84 @@ describe("SeedConnectionSchema: a connectionString the provider does not read (S
       expect(result.success).toBe(true);
     },
   );
+});
+
+/**
+ * SF-038: a Snowflake seed entry is held at load to the checks `connect()` makes before any socket (account, user,
+ * sign-in method, the credential that method needs, role), so a seed that can never open is refused by name in the
+ * Seed sources card instead of loading and failing only when it is opened. A `${ENV}` or `${vault:...}` reference is
+ * resolved after the file is validated, so a field holding one is not judged here.
+ */
+describe("SeedConnectionSchema: Snowflake's static checks (SF-038)", () => {
+  const valid = {
+    id: "sf",
+    name: "Snowflake",
+    type: "snowflake",
+    host: "myorg-myaccount",
+    user: "STUDIO_SVC",
+    authMethod: "keypair",
+    privateKey: "${SNOWFLAKE_PRIVATE_KEY}",
+    role: "STUDIO_RO",
+    roles: ["admin"],
+  };
+  const issues = (overrides: Record<string, unknown>) =>
+    SeedConnectionSchema.safeParse({ ...valid, ...overrides }).error?.issues.map((issue) => [
+      issue.path.join("."),
+      issue.message,
+    ]) ?? [];
+
+  it("accepts a complete entry, with references in every field that takes one", () => {
+    expect(issues({})).toEqual([]);
+    expect(issues({ authMethod: "pat", privateKey: undefined, password: "${SNOWFLAKE_PAT}" })).toEqual([]);
+    expect(issues({ host: "${SNOWFLAKE_ACCOUNT}", user: "${U}", role: "${R}" })).toEqual([]);
+    // A referenced method may be either, so neither credential is required of it.
+    expect(issues({ authMethod: "${SNOWFLAKE_METHOD}", privateKey: undefined })).toEqual([]);
+    // An absent method reads as a key pair, as connect() reads it.
+    expect(issues({ authMethod: undefined })).toEqual([]);
+  });
+
+  it("refuses an account connect() refuses, naming the entry and the field and never the value", () => {
+    const found = issues({ host: "https://attacker.example.com/x" });
+    expect(found).toEqual([
+      [
+        "host",
+        'Seed connection "sf": host is refused: Enter an account identifier such as myorg-myaccount, or its https URL; a jdbc: or snowflake:// URL goes into Paste URL instead.',
+      ],
+    ]);
+    expect(JSON.stringify(found)).not.toContain("attacker");
+    expect(issues({ host: undefined })[0]).toEqual([
+      "host",
+      'Seed connection "sf": host is refused: Enter Account: an account identifier such as myorg-myaccount, or its URL.',
+    ]);
+  });
+
+  it("refuses an entry without a role, a user, or the credential its method needs", () => {
+    expect(issues({ role: undefined })).toEqual([
+      ["role", 'Seed connection "sf": role is refused: Enter the role every statement runs as.'],
+    ]);
+    expect(issues({ user: " " })).toEqual([
+      ["user", 'Seed connection "sf": user is refused: Enter the user\'s login name.'],
+    ]);
+    expect(issues({ privateKey: undefined })).toEqual([
+      ["privateKey", 'Seed connection "sf": privateKey is refused: Paste the private key for key-pair sign-in.'],
+    ]);
+    expect(issues({ authMethod: "pat", privateKey: undefined })).toEqual([
+      ["password", 'Seed connection "sf": password is refused: Enter the programmatic access token.'],
+    ]);
+  });
+
+  it("refuses a sign-in method other than keypair and pat", () => {
+    expect(issues({ authMethod: "password" })).toEqual([
+      [
+        "authMethod",
+        'Seed connection "sf": authMethod is refused: Choose Key pair or Programmatic access token for Sign-in.',
+      ],
+    ]);
+  });
+
+  it("is refused with the file, so the Seed sources card names the entry", () => {
+    const result = SeedConfigSchema.safeParse({ version: "1", connections: [{ ...valid, role: undefined }] });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0].path.join(".")).toBe("connections.0.role");
+  });
 });

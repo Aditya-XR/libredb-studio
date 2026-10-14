@@ -291,6 +291,31 @@ Appending after the trivia instead put the bound **inside** a trailing line comm
 the statement unbounded while the badge reported it as capped, and the re-appended `;` ended up
 inside the comment as well.
 
+#### An error that names the bound
+
+The engine parses the statement Studio sends, bound included, so a syntax error in the user's text can be
+reported at the bound: `SELECT * FROM D_PARENT WHERE` is sent as `SELECT * FROM D_PARENT WHERE LIMIT 501`, and
+Snowflake reads `LIMIT` as a column and answers `syntax error line 1 at position 35 unexpected '501'`.
+When an engine's syntax error points at a word or number of the clause Studio added (`LIMIT`, `TOP`,
+`OFFSET` or the count, spelt as Studio wrote it), `POST /api/db/query`, `POST /api/db/multi-query` (the
+script's bounded last statement) and `POST /api/db/transaction` add one sentence after the engine's
+message, once, keeping its class and status:
+
+`Studio added the clause LIMIT 501 to this statement to bound its rows, so a position or token this error names may be in that clause rather than in your text.`
+
+The sentence is plain text, since the results panel shows an error message as written. Only the shapes in
+which an engine names the token it stopped at count: `at or near "LIMIT"` (PostgreSQL), `near 'LIMIT 501'`
+(MySQL, the quoted rest of the statement must start with the clause), `near "LIMIT"` (SQLite),
+`near 'TOP'` and `near the keyword 'TOP'` (SQL Server), `unexpected '501'` (Snowflake) and
+`failed at position 38 (501)` (ClickHouse). An error that merely contains the word or the number gets no
+sentence: PostgreSQL's `column "limit" does not exist` or `invalid input syntax for type integer: "foo 501"`,
+MySQL's `Unknown column 'limit'`, ClickHouse's list of expected tokens or a message quoting the statement
+sent. An engine that reports the clause in another shape (Oracle's `ORA-00933`, for one) gets none either; a
+missing sentence leaves the engine's message as it was, while a wrong one would blame the clause for an
+error in the user's text.
+
+The engine's own message is never rewritten, and its positions are not remapped: they count the text that was sent.
+
 #### Clauses that must follow the bound
 
 Some dialects have a clause that is written **after** the row bound and refused before it
@@ -849,7 +874,10 @@ statements of their own (measured on Materialize, AlloyDB Omni and Cloudberry: t
 twice).
 
 The plan request carries a `queryId` of its own, and **Cancel** cancels it on the server together
-with the run.
+with the run. Closing an editor tab whose statement is still running cancels it the same way, run and
+plan, since the tab's Cancel button goes with it. That cancel raises no toast of its own, so the close's
+**Undo** toast stays the one on top to click; Undo brings back the tab's text, not the run (standalone
+app; the embedded package's host owns its runs).
 
 ### Supported Databases
 

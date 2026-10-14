@@ -503,7 +503,7 @@ describe("diffSchemas: the object model", () => {
     expect(diff.tables[0].columns.map((column) => [column.action, column.columnName])).toEqual([["added", "email"]]);
   });
 
-  test("the comparison is by NAME, so a snapshot taken before kinds existed still diffs", () => {
+  test("a snapshot taken before kinds and paths existed is still compared by NAME", () => {
     // Deliberately NOT keyed on kind or path. A stored snapshot carries neither, so keying
     // on them would report every object in a pre-#789 snapshot as removed and re-added,
     // which is the one thing a schema diff must never invent. The consequence, stated so it
@@ -566,5 +566,82 @@ describe("diffSchemas: a column's default carries both readings", () => {
 
     expect(diff.tables[0].columns[0].targetDefaultSql).toBeUndefined();
     expect(diff.tables[0].columns[0].targetDefault).toBe("abc");
+  });
+});
+
+// ============================================================================
+// Identity by path below the roots (SF-047, BACKLOG D150)
+// ============================================================================
+
+describe("diffSchemas: objects keyed by their path below the compared roots", () => {
+  const col = (name: string): ColumnSchema => ({ name, type: "int", nullable: true, isPrimary: false });
+  const at = (path: string[], columns: string[], kind = "table"): StoredObject =>
+    makeTable({ name: path[path.length - 1], path, kind, columns: columns.map(col) });
+
+  test("two schemas' same-named tables are two objects, each with its own schema", () => {
+    const source = [at(["b2a", "t1"], ["a"]), at(["b2b", "t1"], ["a"])];
+    const target = [at(["b2a", "t1"], ["a"]), at(["b2b", "t1"], ["a", "b"])];
+
+    const diff = diffSchemas(source, target);
+
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1 });
+    expect(diff.tables[0]).toMatchObject({ tableName: "t1", label: "b2b.t1", path: ["b2b", "t1"], kind: "table" });
+    expect(diff.tables[0].columns.map((c) => c.columnName)).toEqual(["b"]);
+  });
+
+  test("two connections rooted in different containers compare object by object", () => {
+    const source = [
+      at(["STUDIO_DEMO", "PROBE", "D_PARENT"], ["PID", "NAME"]),
+      at(["STUDIO_DEMO", "PROBE", "ONLY_1"], ["X"]),
+    ];
+    const target = [
+      at(["STUDIO_DEMO2", "D_DIFF", "D_PARENT"], ["PID", "NAME", "EXTRA"]),
+      at(["STUDIO_DEMO2", "D_DIFF", "D_ONLY_IN_2"], ["X"]),
+    ];
+
+    const diff = diffSchemas(source, target);
+    const byLabel = Object.fromEntries(diff.tables.map((t) => [t.label, t]));
+
+    expect(diff.summary).toEqual({ added: 1, removed: 1, modified: 1 });
+    expect(byLabel.D_PARENT.path).toEqual(["STUDIO_DEMO", "PROBE", "D_PARENT"]);
+    // An added object is placed under the SOURCE's root, which is where the migration runs.
+    expect(byLabel.D_ONLY_IN_2.path).toEqual(["STUDIO_DEMO", "PROBE", "D_ONLY_IN_2"]);
+    expect(byLabel.ONLY_1.path).toEqual(["STUDIO_DEMO", "PROBE", "ONLY_1"]);
+  });
+
+  test("a side spanning more schemas than the other keeps the schema in every key", () => {
+    const source = [at(["s1", "t"], ["a"]), at(["s2", "u"], ["a"])];
+    const target = [at(["s1", "t"], ["a"])];
+
+    const diff = diffSchemas(source, target);
+
+    expect(diff.tables.map((t) => [t.action, t.label])).toEqual([["removed", "s2.u"]]);
+  });
+
+  test("an empty source places an added object at its path below the target's root, never at the target's own", () => {
+    // The migration runs on the source, so the target's database and schema are not where it creates anything.
+    const diff = diffSchemas([], [at(["DB2", "D_DIFF", "T1"], ["a"]), at(["DB2", "D_DIFF", "T2"], ["a"])]);
+    expect(diff.tables.map((table) => table.path)).toEqual([["T1"], ["T2"]]);
+    expect(diffSchemas([], [at(["s1", "t"], ["a"]), at(["s2", "t"], ["a"])]).tables.map((t) => t.path)).toEqual([
+      ["s1", "t"],
+      ["s2", "t"],
+    ]);
+    expect(diffSchemas([], []).hasChanges).toBe(false);
+  });
+
+  test("a pair whose either side is not a table is judged by that kind", () => {
+    const diff = diffSchemas([at(["db", "v1"], ["name"], "view")], [at(["db", "v1"], ["name", "x"], "table")]);
+    expect(diff.tables[0].kind).toBe("view");
+    const unkinded = diffSchemas(
+      [makeTable({ name: "t", path: ["db", "t"], columns: [col("a")] })],
+      [makeTable({ name: "t", path: ["db", "t"], columns: [col("b")] })],
+    );
+    expect(unkinded.tables[0].kind).toBeUndefined();
+  });
+
+  test("a reading without paths keys every object by name and places none", () => {
+    const diff = diffSchemas([makeTable({ name: "t", columns: [col("a")] })], [at(["db", "t"], ["b"])]);
+    expect(diff.tables[0]).toMatchObject({ tableName: "t", key: "t", label: "t" });
+    expect(diff.tables[0].path).toBeUndefined();
   });
 });

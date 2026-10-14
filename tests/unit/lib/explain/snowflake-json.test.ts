@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getExplainStrategy, resolveExplainPlan } from "@/lib/explain";
-import { SNOWFLAKE_EXPLAIN_DECLINE, snowflakeJsonStrategy } from "@/lib/explain/snowflake-json";
+import {
+  SNOWFLAKE_EXPLAIN_DECLINE,
+  SNOWFLAKE_EXPLAIN_GATED_DECLINE,
+  snowflakeJsonStrategy,
+} from "@/lib/explain/snowflake-json";
 
 const MODES = ["estimate", "analyze"] as const;
 
@@ -70,6 +74,43 @@ describe("the snowflake-json strategy", () => {
       expect(snowflakeJsonStrategy.buildSql(sql, mode)).toBeNull();
       expect(snowflakeJsonStrategy.declineReason?.(sql, mode)).toBe(SNOWFLAKE_EXPLAIN_DECLINE);
     }
+  });
+
+  // SF-001: Snowflake's compiler evaluates a SYSTEM$ function while it explains the statement. Measured on the trial
+  // (Snowflake 10.37.100): `EXPLAIN USING JSON SELECT SYSTEM$WAIT(5)` took 6.5 s, and the Explain button's
+  // `EXPLAIN USING JSON SELECT SYSTEM$CANCEL_QUERY('<id>')` really cancelled the other statement. RUN asks first for any
+  // statement naming one, so neither the button nor the background estimate may send it.
+  test.each([
+    ["SELECT SYSTEM$CANCEL_QUERY('01b2') AS E_EXPLBTN_1"],
+    ["select system$cancel_query('01b2')"],
+    ["SELECT SYSTEM$WAIT(5)"],
+    ['SELECT "SYSTEM$WAIT"(5)'],
+    ["WITH a AS (SELECT SYSTEM$WAIT(1) AS w) SELECT * FROM a"],
+    ["SELECT a FROM t WHERE b = SYSTEM$TYPEOF(a)"],
+  ])("declines %s in both modes, because Snowflake evaluates it while explaining", (sql) => {
+    for (const mode of MODES) {
+      expect(snowflakeJsonStrategy.buildSql(sql, mode)).toBeNull();
+      expect(snowflakeJsonStrategy.declineReason?.(sql, mode)).toBe(SNOWFLAKE_EXPLAIN_GATED_DECLINE);
+    }
+  });
+
+  test.each([
+    ["SELECT 'SYSTEM$WAIT(5)' AS s"],
+    ["SELECT 1 -- SYSTEM$WAIT(5)"],
+    ["SELECT 1 // SYSTEM$WAIT(5)"],
+    ['SELECT "system$wait"(5)'],
+    ["SELECT MY_SYSTEM$X FROM t"],
+  ])("still explains %s, which names no SYSTEM$ function in its code", (sql) => {
+    for (const mode of MODES) {
+      expect(snowflakeJsonStrategy.buildSql(sql, mode)).toBe(`EXPLAIN USING JSON ${sql}`);
+      expect(snowflakeJsonStrategy.declineReason?.(sql, mode)).toBeNull();
+    }
+  });
+
+  test("the SYSTEM$ decline sentence", () => {
+    expect(SNOWFLAKE_EXPLAIN_GATED_DECLINE).toBe(
+      "Snowflake runs a SYSTEM$ function while it explains a statement, so Studio does not explain one. Run it instead; the confirmation gate asks first.",
+    );
   });
 
   test("the decline sentence", () => {

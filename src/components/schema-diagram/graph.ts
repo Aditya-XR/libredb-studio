@@ -24,6 +24,27 @@ export interface TableNodeData extends Record<string, unknown> {
 
 export type TableFlowNode = Node<TableNodeData, "table">;
 
+/** Every UTF-16 code unit a node id carries as itself; anything else is escaped. */
+const NODE_ID_UNESCAPED = /[^A-Za-z0-9_.-]/g;
+
+/**
+ * The React Flow node id of the object at `path`: its `pathKey`, with every code unit outside
+ * `A-Z a-z 0-9 _ . -` written as `%` and four hex digits.
+ *
+ * React Flow writes a node id unescaped into a CSS selector
+ * (`.react-flow__node[data-id="<id>"]`) when it measures the node, and the raw `pathKey` of a
+ * table named `D_quote"d` closed that selector's string early: `querySelector` threw a
+ * SyntaxError and the whole diagram fell back to "The diagram could not be displayed". The
+ * escaped id holds no `"`, `\`, line break or control character (the unit separator `pathKey`
+ * joins with included). The escape is fixed-width and escapes `%` itself, so it is one-to-one
+ * and two addresses still never share an id. Code units rather than code points, and not
+ * `encodeURIComponent`, because that throws on a lone surrogate, which a name read from a
+ * database can hold. Every map in this file and in the diagram is keyed by this id.
+ */
+export function diagramNodeId(path: readonly string[]): string {
+  return pathKey(path).replace(NODE_ID_UNESCAPED, (unit) => `%${unit.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 export interface FkEdgeData extends Record<string, unknown> {
   heuristic: boolean;
 }
@@ -84,7 +105,7 @@ function containerOf(object: DetailedObject): readonly string[] {
  * a table's own FK columns, `targets` are its columns referenced by other tables. Only FKs
  * whose referenced object is in the schema and resolves to exactly one object count.
  *
- * The key is `pathKey` and never the label, which is the same key the node ids carry, so a
+ * The key is `diagramNodeId` and never the label, which is the same key the node ids carry, so a
  * card's anchors cannot land on its namesake in another container.
  */
 export function computeFkColumnMap(schema: readonly DetailedObject[]): FkColumnMap {
@@ -95,14 +116,14 @@ export function computeFkColumnMap(schema: readonly DetailedObject[]): FkColumnM
     for (const fk of table.foreignKeys || []) {
       const referenced = referencedObject(schema, table, fk);
       if (referenced === null) continue;
-      const sourceKey = pathKey(table.path);
+      const sourceKey = diagramNodeId(table.path);
       let sourceSet = sources.get(sourceKey);
       if (!sourceSet) {
         sourceSet = new Set();
         sources.set(sourceKey, sourceSet);
       }
       sourceSet.add(fk.columnName);
-      const targetKey = pathKey(referenced.path);
+      const targetKey = diagramNodeId(referenced.path);
       let targetSet = targets.get(targetKey);
       if (!targetSet) {
         targetSet = new Set();
@@ -165,8 +186,8 @@ function collectFkEdgeSpecs(schema: readonly DetailedObject[]): EdgeSpec[] {
     for (const fk of table.foreignKeys || []) {
       const referenced = referencedObject(schema, table, fk);
       if (referenced === null) continue;
-      const source = pathKey(table.path);
-      const target = pathKey(referenced.path);
+      const source = diagramNodeId(table.path);
+      const target = diagramNodeId(referenced.path);
       const id = `${source}.${fk.columnName}->${target}.${fk.referencedColumn}`;
       if (seen.has(id)) continue;
       seen.add(id);
@@ -204,9 +225,9 @@ function collectHeuristicEdgeSpecs(schema: readonly DetailedObject[]): EdgeSpec[
       // in one container must find the `customers` of ITS container rather than whichever
       // namesake a name map happened to keep last.
       const target = heuristicTarget(schema, table, `${base}s`) || heuristicTarget(schema, table, base);
-      const source = pathKey(table.path);
-      if (!target || pathKey(target.path) === source) continue;
-      const targetKey = pathKey(target.path);
+      const source = diagramNodeId(table.path);
+      if (!target || diagramNodeId(target.path) === source) continue;
+      const targetKey = diagramNodeId(target.path);
       const id = `heuristic-${source}-${targetKey}-${col.name}`;
       if (seen.has(id)) continue;
       seen.add(id);
@@ -290,7 +311,7 @@ export function buildGraph(schema: readonly DetailedObject[], options: BuildGrap
   const nodes: TableFlowNode[] = schema.map((table, index) => {
     // The ADDRESS is the node id, so two objects sharing a label in two containers are two
     // nodes. `table.name` gave them one id, which React Flow answers by dropping a node.
-    const key = pathKey(table.path);
+    const key = diagramNodeId(table.path);
     const anchors = new Set([...(sources.get(key) || []), ...(targets.get(key) || [])]);
     const { visible, hiddenCount } = selectVisibleColumns(table, anchors, expandedTables?.has(key) ?? false);
     return {

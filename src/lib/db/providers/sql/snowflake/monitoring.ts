@@ -172,24 +172,40 @@ export function createSnowflakeMonitoring(input: {
       if (warehouse !== undefined) {
         const sql = connectStatement(warehouse);
         const row = warehouseRow(await (cached(sql) ?? store(sql)), warehouse);
+        const state = row === null ? "" : cellText(row.state);
+        // Snowflake counts every statement on the warehouse, Studio's own SHOW reads included, and it counts them even
+        // on a suspended warehouse (measured: "2 running" while SUSPENDED), so the counts are named only while it runs.
+        const load =
+          row !== null && RUNNING_STATES.has(state)
+            ? `, ${count(row.running)} running and ${count(row.queued)} queued, Studio's own reads included`
+            : "";
         warehousePart =
           row === null
             ? `; no warehouse named ${warehouse} is visible to this role`
-            : `; warehouse ${warehouse} ${cellText(row.state)}, ${cellText(row.size)}, ${count(row.running)} running, ${count(row.queued)} queued`;
+            : `; warehouse ${warehouse} ${state}, ${cellText(row.size)}${load}`;
       }
-      const databases = await run(`SHOW DATABASES LIMIT ${SNOWFLAKE_SHOW_PAGE_ROWS}`, tag);
+      // The scope the Tables and indexes counts measure: the configured database, else the whole account.
+      const scope = input.database ? `DATABASE ${quoteIdent(foldIdentifier(input.database))}` : "ACCOUNT";
+      const scopeName = input.database ? `database ${foldIdentifier(input.database)}` : "the account";
+      const [databases, tables, indexes] = await Promise.all([
+        run(`SHOW DATABASES LIMIT ${SNOWFLAKE_SHOW_PAGE_ROWS}`, tag),
+        run(`SHOW TERSE TABLES IN ${scope} LIMIT ${SNOWFLAKE_SHOW_PAGE_ROWS}`, tag),
+        run(`SHOW INDEXES IN ${scope}`, tag),
+      ]);
       const total = databases.rows.length;
-      const counted =
-        total >= SNOWFLAKE_SHOW_PAGE_ROWS
-          ? `at least ${SNOWFLAKE_SHOW_PAGE_ROWS.toLocaleString("en-US")}`
-          : total.toLocaleString("en-US");
+      const page = SNOWFLAKE_SHOW_PAGE_ROWS.toLocaleString("en-US");
+      const counted = total >= SNOWFLAKE_SHOW_PAGE_ROWS ? `at least ${page}` : total.toLocaleString("en-US");
+      const tableCount = tables.rows.length;
       return {
         version: `Snowflake: ${counted} databases visible to role ${role}${warehousePart}`,
         uptime: "N/A",
         maxConnections: 0,
         databaseSize: "N/A",
-        tableCount: 0,
-        indexCount: 0,
+        tableCount,
+        ...(tableCount >= SNOWFLAKE_SHOW_PAGE_ROWS
+          ? { tableCountSampledFrom: `the first ${page} tables Snowflake listed in ${scopeName}` }
+          : {}),
+        indexCount: indexes.rows.length,
       };
     },
 

@@ -170,7 +170,6 @@ describe("a statement over the wire", () => {
         query_tag: SNOWFLAKE_QUERY_TAGS.connect,
         client_result_chunk_size: 16,
         rows_per_resultset: 100_001,
-        timezone: "UTC",
       },
     });
     expect(listener.seen[1].body).toBe("");

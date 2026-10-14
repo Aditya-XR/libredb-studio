@@ -12,6 +12,7 @@ import { readBoundParams } from "@/lib/api/bound-params";
 import { rowsWithNonFiniteWords } from "@/lib/non-finite";
 import { countCodeStatements, splitExecutionUnits, type ExecutionUnit } from "@/lib/sql/statement-splitter";
 import { resolveSqlGrammar } from "@/lib/sql/grammar";
+import { noteAppendedBound } from "@/lib/db/utils/query-limiter";
 import {
   claimTransaction,
   OWNERSHIP_IDLE_MS,
@@ -81,6 +82,7 @@ async function runScriptInTransaction(
         executionTime,
       });
     } catch (error) {
+      noteAppendedBound(error, unit.sql, sql);
       const executionTime = Math.round(performance.now() - startTime);
       totalExecutionTime += executionTime;
       statements.push({
@@ -248,7 +250,10 @@ export async function POST(req: NextRequest) {
         const prepared = provider.prepareQuery(statementSql, options);
         // One row past the page, so a full last page is not taken for a full page (#1440).
         const probe = probePastPage(provider, statementSql, options, prepared);
-        const result = await provider.queryInTransaction(probe.query, bound.params);
+        const result = await provider.queryInTransaction(probe.query, bound.params).catch((error: unknown) => {
+          // An error that names the bound the limiter added says so (`noteAppendedBound`).
+          throw noteAppendedBound(error, statementSql, probe.query);
+        });
 
         // The provider ends its session when the SERVER says the statement ended the
         // transaction: a typed COMMIT or ROLLBACK, or a statement the engine commits implicitly (MySQL

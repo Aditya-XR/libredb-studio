@@ -2,7 +2,9 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import * as zlib from "node:zlib";
 import { SnowflakeError } from "@/lib/db/providers/sql/snowflake/errors";
 import {
+  readOversizedFirstAnswer,
   readResultRows,
+  SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES,
   SNOWFLAKE_FIRST_ANSWER_MAX_BYTES,
   SNOWFLAKE_RESULT_BYTE_BUDGET,
   SNOWFLAKE_ROWS_SENTENCES,
@@ -60,9 +62,17 @@ describe("constants and sentences", () => {
     expect(SNOWFLAKE_ROWS_SENTENCES.nonString("NAME")).toBe(
       'Snowflake sent a cell that is not text in column "NAME", so the result is not shown.',
     );
-    expect(SNOWFLAKE_ROWS_SENTENCES.byteCut(1234567)).toBe(
-      "The result reached Studio's statement budget of 16 MiB, so only the rows before it are shown. Snowflake reported 1,234,567 rows.",
+    expect(SNOWFLAKE_ROWS_SENTENCES.byteCut(58_726)).toBe(
+      "The result reached Studio's statement budget of 16 MiB, so only the rows before it are shown. Snowflake reported 58,726 rows.",
     );
+    // SF-031: Studio asks for at most 100,001 rows (rows_per_resultset), so Snowflake's numRows stops there: a count
+    // that reached it is Studio's own request echoed, and the sentence says "more than 100,000" instead.
+    for (const numRows of [100_001, 1_234_567]) {
+      expect(SNOWFLAKE_ROWS_SENTENCES.byteCut(numRows)).toBe(
+        "The result reached Studio's statement budget of 16 MiB, so only the rows before it are shown. Snowflake reported more than 100,000 rows.",
+      );
+    }
+    expect(SNOWFLAKE_ROWS_SENTENCES.byteCut(100_000)).toEndWith("Snowflake reported 100,000 rows.");
     expect(SNOWFLAKE_ROWS_SENTENCES.byteCut(null)).toBe(
       "The result reached Studio's statement budget of 16 MiB, so only the rows before it are shown.",
     );
@@ -494,5 +504,100 @@ describe("the budget across streamed partitions", () => {
       expect(outcome.rows.length).toBe(Math.floor(SNOWFLAKE_RESULT_BYTE_BUDGET / 1_005));
       expect(outcome.rows[0]).toEqual(["0".repeat(1_000)]);
     }, 30_000);
+  });
+});
+
+describe("an oversized first answer read as a stream (SF-032)", () => {
+  const meta = {
+    numRows: 5000,
+    format: "jsonv2",
+    partitionInfo: [{ rowCount: 4096, uncompressedSize: 41_000_000 }],
+    rowType: [
+      { name: "N", type: "fixed", precision: 38, scale: 0, length: null },
+      { name: 'P"A{D}', type: "text", precision: null, scale: null, length: 10000 },
+    ],
+  };
+  const answerOf = (text: string, truncated: boolean, gzip = false): SnowflakeByteAnswer => ({
+    status: 200,
+    bytes: gzip ? zlib.gzipSync(Buffer.from(text)) : Buffer.from(text),
+    contentEncoding: gzip ? "gzip" : null,
+    truncated,
+    attempts: 1,
+  });
+  // Snowflake's key order, as the trial answered it: the metadata, then the rows, then the status fields.
+  const head = `{"resultSetMetaData" : ${JSON.stringify(meta, null, 1)},"data":[`;
+
+  test("a cut body keeps the metadata whole and the rows before the cut, declared as the byte cut", async () => {
+    const text = `${head}["0","${"x".repeat(100)}"],["1","yy"],["2","zz`;
+    const { meta: read, outcome } = await readOversizedFirstAnswer(answerOf(text, true));
+    expect(read).toEqual(meta);
+    expect(outcome).toEqual({
+      rows: [
+        ["0", "x".repeat(100)],
+        ["1", "yy"],
+      ],
+      cut: "bytes",
+    });
+  });
+
+  test("a whole gzip body reads every row, skipping the fields after them", async () => {
+    const text = `${head}["0","a"],["1",null]],"code":"090001","statementHandle":"h","message":"ok"}`;
+    const { meta: read, outcome } = await readOversizedFirstAnswer(answerOf(text, false, true));
+    expect(read).toEqual(meta);
+    expect(outcome).toEqual({
+      rows: [
+        ["0", "a"],
+        ["1", null],
+      ],
+      cut: null,
+    });
+  });
+
+  test("metadata longer than one read slice is captured across the slices", async () => {
+    const wide = {
+      ...meta,
+      rowType: Array.from({ length: 2000 }, (_, i) => ({ name: `C${i}`, type: "text", length: 1 })),
+    };
+    const row = JSON.stringify(Array.from({ length: 2000 }, () => "v"));
+    const text = `{"resultSetMetaData":${JSON.stringify(wide)},"data":[${row}]}`;
+    expect(text.length).toBeGreaterThan(65_536);
+    const { meta: read, outcome } = await readOversizedFirstAnswer(answerOf(text, false));
+    expect(read).toEqual(wide);
+    expect(outcome.rows).toHaveLength(1);
+  });
+
+  test("a non-text cell names its column from the captured metadata", async () => {
+    const refused = readOversizedFirstAnswer(answerOf(`${head}["0",7]]}`, false));
+    await expect(refused).rejects.toThrow(SNOWFLAKE_ROWS_SENTENCES.nonString('P"A{D}'));
+  });
+
+  test("a body cut inside the metadata, one with none, or metadata that is not an object is still refused", async () => {
+    for (const text of [
+      '{"resultSetMetaData":{"numRows":1,"rowType":[{"name":"N"',
+      '{"data":[["1"]]}',
+      '{"resultSetMetaData":"text","data":[["1"]]}',
+      '{"resultSetMetaData":[1],"data":[["1"]]}',
+    ]) {
+      const refused = readOversizedFirstAnswer(answerOf(text, text.endsWith('"N"')));
+      await expect(refused).rejects.toThrow(SnowflakeError);
+    }
+    await expect(readOversizedFirstAnswer(answerOf('{"data":[["1"]]}', false))).rejects.toThrow(
+      SNOWFLAKE_ROWS_SENTENCES.firstTooLarge,
+    );
+  });
+
+  test("a scalar or string value before the metadata is skipped, and unnamed columns are numbered", async () => {
+    const text = `{"code" : 1 ,"message":"a}b","resultSetMetaData":{"rowType":[{"type":"text"},null]},"data":[["a","b"]]}`;
+    const { meta: read, outcome } = await readOversizedFirstAnswer(answerOf(text, false));
+    expect(read).toEqual({ rowType: [{ type: "text" }, null] });
+    expect(outcome.rows).toEqual([["a", "b"]]);
+    const refused = readOversizedFirstAnswer(
+      answerOf(`{"resultSetMetaData":{"rowType":[{"type":"text"},null]},"data":[["a",1]]}`, false),
+    );
+    await expect(refused).rejects.toThrow(SNOWFLAKE_ROWS_SENTENCES.nonString("2"));
+  });
+
+  test("the read asks for the budget plus the partition slack", () => {
+    expect(SNOWFLAKE_OVERSIZED_FIRST_READ_BYTES).toBe(SNOWFLAKE_RESULT_BYTE_BUDGET + SNOWFLAKE_PARTITION_SLACK_BYTES);
   });
 });

@@ -464,13 +464,16 @@ nothing to switch on and nothing to configure.
 
 ### What is encrypted
 
-Seven fields, all on a saved connection:
+Eleven fields, all on a saved connection (`src/lib/storage/connection-secrets.ts` is the authority):
 
 | Field | What it is |
 |-------|------------|
-| `password` | The database password |
+| `password` | The database password, or the token an engine takes in its place (a Snowflake programmatic access token among them) |
 | `connectionString` | A URL that can embed `user:password@` |
 | `agentPassword` | The optional least-privilege agent-profile password (#328) |
+| `apiKeyId`, `apiKeySecret` | Elasticsearch's API key pair |
+| `privateKey` | Snowflake's key-pair private key, as pasted |
+| `privateKeyPassphrase` | The passphrase that unlocks the key above |
 | `ssl.clientKey` | The TLS client private key |
 | `sshTunnel.password` | The SSH password |
 | `sshTunnel.privateKey` | The SSH private key |
@@ -534,7 +537,12 @@ version column. A row that is never written again stays plaintext — which is w
 - **Browser `localStorage` is not encrypted.** It is the rendering source and it holds the same
   credentials in the clear. That is a deliberate product decision — it is what lets Studio work
   without a master password — and it is why cross-site scripting is treated as a top-severity
-  issue in this project rather than a session-theft issue.
+  issue in this project rather than a session-theft issue. It applies to every field above alike:
+  a Snowflake private key and its passphrase sit in the same connection object, so for anyone who
+  can read this browser's storage an encrypted key is no better protected than an unencrypted one,
+  exactly as an SSH key and its passphrase are. The connection dialog does not draw a saved key
+  again (it shows that one is entered, with Show key and Replace key), which keeps it off a screen
+  share; it does not change what the browser stores.
 - **Anyone who can read the server's environment can read the credentials.** The key lives there.
   This protects a stolen database file or dump on its own; it is not a vault.
 - **For `STORAGE_PROVIDER=sqlite` with no `STORAGE_ENCRYPTION_KEY` set, a backup or volume snapshot

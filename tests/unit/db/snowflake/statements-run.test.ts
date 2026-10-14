@@ -40,6 +40,7 @@ import {
   caught,
   cancels,
   closeOpened,
+  type Harness,
   HOST,
   ONE_COLUMN,
   one,
@@ -63,7 +64,9 @@ describe("constants", () => {
     expect(SNOWFLAKE_CHUNK_SIZE_MB).toBe(16);
     expect(SNOWFLAKE_ROWS_PER_RESULTSET).toBe(100_001);
     expect(SNOWFLAKE_LIMITER_OPTIONS).toEqual({ perProvider: 4, perEngine: 8, queueDepth: 64 });
-    expect(SNOWFLAKE_ROLE_CHECK_SQL).toBe("SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s");
+    expect(SNOWFLAKE_ROLE_CHECK_SQL).toBe(
+      "SELECT CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s, CURRENT_USER() AS u, CURRENT_DATABASE() AS d, CURRENT_SCHEMA() AS c, CURRENT_WAREHOUSE() AS w",
+    );
   });
 
   test("the query_tag set, in order", () => {
@@ -123,10 +126,11 @@ describe("the request body", () => {
         query_tag: "libredb-studio:editor",
         client_result_chunk_size: 16,
         rows_per_resultset: 100_001,
-        timezone: "UTC",
       },
     });
     expect(sent[0].body).toContain('"role":"Mixed Role"');
+    // No timezone: every statement runs in the user's own TIMEZONE, as in Snowsight (SF-009).
+    expect((sent[0].body ?? "").toLowerCase()).not.toContain("timezone");
     expect(bodyOf(sent[1])).toMatchObject({
       statement: "SHOW DATABASES",
       timeout: 30,
@@ -175,12 +179,13 @@ describe("the request body", () => {
       const harness = setup({ queryTimeoutMs });
       harness.transports.answer(SUBMIT, one(), one());
       await harness.statements.runUser("SHOW TABLES", undefined);
-      expect(harness.deps.deadlines.requested[0]).toBe(deadline);
+      // Each run asks for its permit wait's bound, then its own deadline: the same length.
+      expect(harness.deps.deadlines.requested.slice(0, 2)).toEqual([deadline, deadline]);
       await harness.statements.runSurface("SHOW TABLES", SNOWFLAKE_QUERY_TAGS.health);
       const [user, read] = submits(harness).map(bodyOf);
       expect(user.timeout).toBe(userTimeout);
       expect(read.timeout).toBe(surface);
-      expect(harness.deps.deadlines.requested[1]).toBe(surface * 1000 + 5_000);
+      expect(harness.deps.deadlines.requested.slice(2)).toEqual([surface * 1000 + 5_000, surface * 1000 + 5_000]);
     });
   }
 });
@@ -487,7 +492,7 @@ describe("failures", () => {
       { status: 422, bytes: gzipSync(huge), contentEncoding: "gzip" },
     );
     const error = await caught(harness.statements.runSurface("SELECT 1", SNOWFLAKE_QUERY_TAGS.tree));
-    expect((error as SnowflakeError).message).toBe(SNOWFLAKE_ERROR_SENTENCES.statementFailed("", null, null));
+    expect((error as SnowflakeError).message).toBe(SNOWFLAKE_ERROR_SENTENCES.noMessage(422, null));
   });
 
   test("a statement that fails during the poll throws its sentence without a cancel", async () => {
@@ -532,13 +537,67 @@ describe("failures", () => {
     expect(harness.transports.requests).toHaveLength(1);
   });
 
-  test("a status answer past 24 MiB throws the first-too-large sentence", async () => {
+  describe("a status answer past 24 MiB is read again as a stream, under the budget (SF-032)", () => {
+    const TOO_LARGE = { fail: new TransportError("too-large", "The response exceeded the limit") };
+    const metaText = (numRows: number, partitions = 1) =>
+      JSON.stringify({
+        numRows,
+        format: "jsonv2",
+        partitionInfo: Array.from({ length: partitions }, () => ({ rowCount: 1 })),
+        rowType: ONE_COLUMN,
+      });
+    const reread = (harness: Harness, text: string, truncated: boolean) => {
+      harness.transports.answer(SUBMIT, handleAnswer());
+      harness.transports.answer(STATUS, TOO_LARGE, { status: 200, bytes: Buffer.from(text), truncated });
+    };
+
+    test("the rows that fit are shown, cut, with the byte-cut sentence", async () => {
+      const harness = setup();
+      reread(harness, `{"resultSetMetaData":${metaText(5000, 3)},"data":[["1"],["2"],["3`, true);
+      const result = await harness.statements.runSurface("SELECT n FROM t LIMIT 5000", SNOWFLAKE_QUERY_TAGS.tree);
+      expect(result.rows).toEqual([{ N: 1 }, { N: 2 }]);
+      expect(result.cut).toBe(true);
+      expect(result.numRows).toBe(5000);
+      expect(result.warnings).toEqual([{ message: SNOWFLAKE_ROWS_SENTENCES.byteCut(5000) }]);
+      const reads = harness.transports.requests.filter((request) => request.method === "GET");
+      expect(reads.map((request) => new URL(request.url).pathname)).toEqual([STATUS_PATH, STATUS_PATH]);
+      expect(new URL(reads[1].url).search).toBe("");
+    });
+
+    test("a first row larger than the budget says so instead of showing an empty result", async () => {
+      const harness = setup();
+      reread(harness, `{"resultSetMetaData":${metaText(3)},"data":[["aaaa`, true);
+      const result = await harness.statements.runSurface("SELECT s FROM t", SNOWFLAKE_QUERY_TAGS.tree);
+      expect(result.rows).toEqual([]);
+      expect(result.cut).toBe(true);
+      expect(result.warnings).toEqual([{ message: SNOWFLAKE_ROWS_SENTENCES.firstRowCut }]);
+    });
+
+    test("a reread that came back whole continues with the later partitions", async () => {
+      const harness = setup();
+      reread(harness, `{"resultSetMetaData":${metaText(2, 2)},"data":[["1"]],"code":"090001"}`, false);
+      harness.transports.answer({ method: "GET", path: /./ }, { status: 200, bytes: Buffer.from('[["2"]]') });
+      const result = await harness.statements.runSurface("SELECT n FROM t", SNOWFLAKE_QUERY_TAGS.tree);
+      expect(result.rows).toEqual([{ N: 1 }, { N: 2 }]);
+      expect(result.cut).toBe(false);
+    });
+
+    test("a reread whose metadata did not fit is still the first-too-large sentence", async () => {
+      const harness = setup();
+      reread(harness, '{"resultSetMetaData":{"numRows":1,"rowType":[{"name":"N"', true);
+      const error = await caught(harness.statements.runSurface("SELECT 1", SNOWFLAKE_QUERY_TAGS.tree));
+      expect((error as SnowflakeError).category).toBe("query");
+      expect((error as SnowflakeError).message).toBe(SNOWFLAKE_ROWS_SENTENCES.firstTooLarge);
+    });
+  });
+
+  test("a status read that fails otherwise is not reread", async () => {
     const harness = setup();
     harness.transports.answer(SUBMIT, handleAnswer());
-    harness.transports.answer(STATUS, { fail: new TransportError("too-large", "The response exceeded the limit") });
+    harness.transports.answer(STATUS, { fail: new TransportError("network", "socket hang up") });
     const error = await caught(harness.statements.runSurface("SELECT 1", SNOWFLAKE_QUERY_TAGS.tree));
-    expect((error as SnowflakeError).category).toBe("query");
-    expect((error as SnowflakeError).message).toBe(SNOWFLAKE_ROWS_SENTENCES.firstTooLarge);
+    expect((error as SnowflakeError).category).toBe("unavailable");
+    expect(harness.transports.requests.filter((request) => request.method === "GET")).toHaveLength(1);
   });
 
   test("an answer that is not a JSON object is the unreadable sentence", async () => {
@@ -592,6 +651,90 @@ describe("session notices, USE and the lone transaction", () => {
       const result = await harness.statements.runUser(sql, undefined);
       expect(result.warnings).toContainEqual(notice);
       expect(bodyOf(submits(harness).at(-1) as RecordedRequest).statement).toBe(sql);
+    });
+  }
+
+  test("ALTER SESSION POLICY alters an account object, so it carries no session notice", async () => {
+    const harness = setup();
+    harness.transports.answer(SUBMIT, one());
+    const result = await harness.statements.runUser(
+      "ALTER SESSION POLICY p SET SESSION_IDLE_TIMEOUT_MINS = 600",
+      undefined,
+    );
+    expect(result.warnings).not.toContainEqual(SETTING_NOTICE);
+  });
+
+  // SF-029: a temporary object lives only as long as its session, which is the one statement.
+  const TEMPORARY_NOTICE = {
+    code: "SNOWFLAKE_TEMPORARY_NOT_CARRIED",
+    message: SNOWFLAKE_STATEMENT_SENTENCES.temporaryNotCarried,
+  };
+  const LAST_QUERY_NOTICE = {
+    code: "SNOWFLAKE_NO_LAST_QUERY",
+    message: SNOWFLAKE_STATEMENT_SENTENCES.noLastQuery,
+  };
+  for (const sql of [
+    "CREATE TEMPORARY TABLE D_TEMP2 (a INT)",
+    "create temp table t (a int)",
+    "CREATE OR REPLACE LOCAL TEMPORARY TABLE t AS SELECT 1 AS a",
+    "CREATE GLOBAL TEMP TABLE t (a INT)",
+    "CREATE VOLATILE TABLE t (a INT)",
+    "CREATE /* c */ TEMPORARY STAGE s",
+    "CREATE OR REPLACE TEMPORARY FILE FORMAT f TYPE = CSV",
+  ]) {
+    test(`${JSON.stringify(sql)} runs and says the object is gone after it`, async () => {
+      const harness = setup();
+      harness.transports.answer(SUBMIT, one());
+      const result = await harness.statements.runUser(sql, undefined);
+      expect(result.warnings).toEqual([TEMPORARY_NOTICE]);
+    });
+  }
+
+  for (const sql of [
+    "SELECT LAST_QUERY_ID()",
+    "SELECT * FROM t BEFORE(STATEMENT => last_query_id(-1))",
+    "SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))",
+  ]) {
+    test(`${JSON.stringify(sql)} runs and says LAST_QUERY_ID() names no earlier statement here`, async () => {
+      const harness = setup();
+      harness.transports.answer(SUBMIT, one());
+      const result = await harness.statements.runUser(sql, undefined);
+      expect(result.warnings).toEqual([LAST_QUERY_NOTICE]);
+    });
+  }
+
+  test("a LAST_QUERY_ID() statement Snowflake refuses carries the same sentence after Snowflake's", async () => {
+    const harness = setup();
+    harness.transports.answer(SUBMIT, failureAnswer(422, "000709", "Statement null not found", "02000"));
+    const error = await caught(
+      harness.statements.runUser("SELECT * FROM t BEFORE(STATEMENT => LAST_QUERY_ID())", undefined),
+    );
+    expect(error).toBeInstanceOf(SnowflakeError);
+    expect((error as SnowflakeError).message).toEndWith(` ${SNOWFLAKE_STATEMENT_SENTENCES.noLastQuery}`);
+    expect((error as SnowflakeError).message).toContain("Statement null not found");
+  });
+
+  test("a refused statement without LAST_QUERY_ID() keeps Snowflake's sentence alone", async () => {
+    const harness = setup();
+    harness.transports.answer(SUBMIT, failureAnswer(422, "000709", "Statement null not found", "02000"));
+    const error = await caught(harness.statements.runUser("SELECT 1", undefined));
+    expect((error as SnowflakeError).message).not.toContain(SNOWFLAKE_STATEMENT_SENTENCES.noLastQuery);
+  });
+
+  for (const sql of [
+    "CREATE TABLE temp (a INT)",
+    "CREATE TRANSIENT TABLE t (a INT)",
+    "CREATE OR REPLACE",
+    "SELECT 'CREATE TEMPORARY TABLE' AS x",
+    "SELECT 'LAST_QUERY_ID()' AS x, last_query_id_col FROM t",
+    "EXECUTE IMMEDIATE $$ BEGIN CREATE TEMPORARY TABLE t (a INT); INSERT INTO t VALUES (1); END; $$",
+    "EXECUTE IMMEDIATE $$ BEGIN SELECT 1; SELECT LAST_QUERY_ID(); END; $$",
+  ]) {
+    test(`${JSON.stringify(sql)} carries no session notice`, async () => {
+      const harness = setup();
+      harness.transports.answer(SUBMIT, one());
+      const result = await harness.statements.runUser(sql, undefined);
+      expect(result.warnings).toEqual([]);
     });
   }
 

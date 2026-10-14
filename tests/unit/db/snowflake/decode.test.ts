@@ -104,6 +104,38 @@ describe("decodeCell", () => {
     expect(decodeCell(col("timestamp_ltz", { scale: 3 }), "0.123")).toBe("1970-01-01 00:00:00.123+00:00");
   });
 
+  // Captured on the trial (2026-10-14) for one SELECT of an NTZ, a TZ, an LTZ, a TIME and a DATE literal under the
+  // session zones UTC, America/Los_Angeles (the user's default) and Asia/Kolkata: the cells are identical, so no
+  // decoded value depends on the session TIMEZONE Studio now leaves to the user (SF-009). Only `ltz::TIMESTAMP_TZ`
+  // moves, to the session's offset, which is how a user sees an LTZ instant at their own zone.
+  test("the temporal cells are the same in every session zone, and an LTZ cast to TZ carries the session offset", () => {
+    const decoded = (cells: readonly string[]) =>
+      ["timestamp_ntz", "timestamp_tz", "timestamp_ltz", "time", "date"].map((type, index) =>
+        decodeCell(col(type, { scale: 9 }), cells[index]),
+      );
+    const cells = [
+      "1780315200.500000000",
+      "1780308000.000000000 1560",
+      "1780308000.000000000",
+      "47655.000000000",
+      "20605",
+    ];
+    expect(decoded(cells)).toEqual([
+      "2026-06-01 12:00:00.500000000",
+      "2026-06-01 12:00:00.000000000+02:00",
+      "2026-06-01 10:00:00.000000000+00:00",
+      "13:14:15.000000000",
+      "2026-06-01",
+    ]);
+    const asTz = (offsetCell: string) =>
+      decodeCell(col("timestamp_tz", { scale: 9 }), `1780308000.000000000 ${offsetCell}`);
+    expect([asTz("1440"), asTz("1020"), asTz("1770")]).toEqual([
+      "2026-06-01 10:00:00.000000000+00:00",
+      "2026-06-01 03:00:00.000000000-07:00",
+      "2026-06-01 15:30:00.000000000+05:30",
+    ]);
+  });
+
   test("tz offsets beyond 720 to 2160 shift by 1440", () => {
     expect(decodeCell(col("timestamp_tz", { scale: 0 }), "0 2400")).toBe("1970-01-01 16:00:00+16:00");
     expect(decodeCell(col("timestamp_tz", { scale: 0 }), "0 0")).toBe("1969-12-31 00:00:00-24:00");
@@ -138,6 +170,56 @@ describe("decodeCell", () => {
     expect(decodeCell(col("date"), "18705")).toBe("2021-03-19");
   });
 
+  // The cells the trial answered (2026-10-14) for '10000-01-01'::DATE, DATEADD(year, -2028, '2026-06-01'::DATE),
+  // DATEADD(year, -2026, ...), DATEADD(year, -12026, ...), TO_TIMESTAMP_NTZ('10000-01-01 00:00:00.5') and
+  // DATEADD(year, -2028, '2026-06-01 10:11:12.123'::TIMESTAMP_NTZ): Snowflake stores years outside 1 to 9999, and one
+  // such cell must not fail the result (SF-008). The year is astronomical: 0 is 1 BC, -2 is 3 BC.
+  test.each([
+    ["date", "2932897", "10000-01-01"],
+    ["date", "-720107", "-0002-06-01"],
+    ["date", "-719376", "0000-06-01"],
+    ["date", "-719163", "0000-12-31"],
+    ["date", "-4371801", "-10000-06-01"],
+    ["date", "91331230", "252026-06-01"],
+    ["timestamp_ntz", "253402300800.500000000", "10000-01-01 00:00:00.500000000"],
+    ["timestamp_ntz", "-62217208127.877000000", "-0002-06-01 10:11:12.123000000"],
+    ["timestamp_ntz", "-62135596801", "0000-12-31 23:59:59"],
+    ["timestamp_ltz", "317349853872.000000000", "12026-06-01 17:11:12.000000000+00:00"],
+    ["timestamp_tz", "-62217182928.000000000 1020", "-0002-06-01 10:11:12.000000000-07:00"],
+    ["timestamp_tz", "253402300799 1500", "10000-01-01 00:59:59+01:00"],
+  ])("a %s cell outside years 1 to 9999 (%s) is shown with its signed year", (type, cell, expected) => {
+    expect(decodeCell(col(type, { scale: 9 }), cell)).toBe(expected);
+  });
+
+  test("inside years 1 to 9999 every date and timestamp matches the platform's own UTC calendar", () => {
+    for (let days = -719_162; days <= 2_932_896; days += 997) {
+      const iso = new Date(days * 86_400_000).toISOString();
+      expect(decodeCell(col("date"), String(days))).toBe(iso.slice(0, 10));
+      const seconds = days * 86_400 + 45_296;
+      expect(decodeCell(col("timestamp_ntz", { scale: 0 }), String(seconds))).toBe(
+        new Date(seconds * 1000).toISOString().slice(0, 19).replace("T", " "),
+      );
+    }
+  });
+
+  test("leap years follow the proleptic Gregorian calendar on both sides of year 1", () => {
+    // Year 0 and year -4 are leap years, year -100 is not, year -400 is.
+    expect(decodeCell(col("date"), String(-719162 - 366 + 59))).toBe("0000-02-29");
+    expect(decodeCell(col("date"), String(-719162 - 366 + 60))).toBe("0000-03-01");
+    const daysBefore = (years: number) => {
+      let days = 0;
+      for (let year = 0; year > -years; year -= 1) {
+        const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+        days += leap ? 366 : 365;
+      }
+      return days;
+    };
+    // The first day of year -99, less one day, is the last day of year -100.
+    expect(decodeCell(col("date"), String(-719162 - daysBefore(100) - 1))).toBe("-0100-12-31");
+    expect(decodeCell(col("date"), String(-719162 - daysBefore(101) + 59))).toBe("-0100-03-01");
+    expect(decodeCell(col("date"), String(-719162 - daysBefore(401) + 59))).toBe("-0400-02-29");
+  });
+
   test("the refusals name the column", () => {
     for (const [column, cell] of [
       [col("binary", { name: "blob" }), "ZZ"],
@@ -148,16 +230,11 @@ describe("decodeCell", () => {
       [col("decfloat", { name: "df" }), "x"],
       [col("real", { name: "r" }), "1e999"],
       [col("real", { name: "r2" }), "nan"],
-      [col("timestamp_ntz", { name: "ts", scale: 9 }), "1611871777123456789"],
       [col("timestamp_ntz", { name: "ts2", scale: 9 }), "1.1234567890"],
-      [col("timestamp_ntz", { name: "ts3", scale: 0 }), "-62135596801"],
       [col("timestamp_ltz", { name: "lt", scale: 0 }), "2021-03-19"],
       [col("timestamp_tz", { name: "tz", scale: 0 }), "0"],
-      [col("timestamp_tz", { name: "tz2", scale: 0 }), "253402300799 1500"],
       [col("time", { name: "t", scale: 0 }), "86400"],
       [col("time", { name: "t2", scale: 0 }), "-1"],
-      [col("date", { name: "d" }), "99999999"],
-      [col("date", { name: "d2" }), "-719163"],
       [col("date", { name: "d3" }), "1.5"],
     ] as const) {
       expect(() => decodeCell(column, cell)).toThrow(SnowflakeError);
@@ -257,6 +334,13 @@ describe("columnTypeOf", () => {
     expect(columnTypeOf(col("vector"))).toBe("VECTOR");
     expect(columnTypeOf(col("geography"))).toBe("GEOGRAPHY");
   });
+
+  test("an object column is GEOGRAPHY or GEOMETRY when its extTypeName says so, else OBJECT (SF-033)", () => {
+    expect(columnTypeOf({ ...col("object"), extTypeName: "GEOGRAPHY" })).toBe("GEOGRAPHY");
+    expect(columnTypeOf({ ...col("object"), extTypeName: "geometry" })).toBe("GEOMETRY");
+    expect(columnTypeOf({ ...col("object"), extTypeName: "FILE" })).toBe("OBJECT");
+    expect(columnTypeOf(col("object"))).toBe("OBJECT");
+  });
 });
 
 describe("parseCellJson and readColumns", () => {
@@ -305,6 +389,12 @@ describe("parseCellJson and readColumns", () => {
     );
     expect(readColumns([{ name: "N", type: "fixed", precision: 38, scale: 0 }])).toEqual([
       { name: "N", type: "fixed", precision: 38, scale: 0, length: null },
+    ]);
+    expect(
+      readColumns([{ name: "G", type: "object", extTypeName: "GEOGRAPHY", precision: null, scale: null }]),
+    ).toEqual([{ name: "G", type: "object", precision: null, scale: null, length: null, extTypeName: "GEOGRAPHY" }]);
+    expect(readColumns([{ name: "O", type: "object", extTypeName: 7 }])).toEqual([
+      { name: "O", type: "object", precision: null, scale: null, length: null },
     ]);
     expect(readColumns([])).toEqual([]);
   });

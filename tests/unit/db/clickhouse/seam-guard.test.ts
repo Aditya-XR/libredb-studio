@@ -57,6 +57,7 @@ const WIRE_TOKENS = [
   "default_format",
   "output_format_json_quote_64bit_integers",
   "output_format_json_quote_decimals",
+  "output_format_json_quote_denormals",
   "elapsed_ns",
   "rows_before_limit_at_least",
 ];

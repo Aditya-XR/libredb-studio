@@ -2991,6 +2991,24 @@ describe("Studio", () => {
     expect(mockCancelQuery.mock.calls.at(-1)).toEqual([]);
   });
 
+  // SF-023: closing a tab stops its run as Stop does; a tab the manager keeps open (the last one) is not cancelled.
+  test("closing a tab cancels that tab's run, and only when the tab closed", () => {
+    const closeTab = mock((_id: string, _e: unknown) => true);
+    tabMgrOverride = { closeTab };
+    render(<Studio />);
+    const event = { stopPropagation: () => {} };
+
+    act(() => (capturedTabBarProps.onCloseTab as (id: string, e: unknown) => void)("tab-1", event));
+    expect(closeTab).toHaveBeenCalledWith("tab-1", event);
+    // Silently: the close's own Undo toast must stay the one on top.
+    expect(mockCancelQuery.mock.calls.at(-1) as unknown[]).toEqual(["tab-1", { silent: true }]);
+
+    mockCancelQuery.mockClear();
+    closeTab.mockImplementation(() => false);
+    act(() => (capturedTabBarProps.onCloseTab as (id: string, e: unknown) => void)("tab-1", event));
+    expect(mockCancelQuery).not.toHaveBeenCalled();
+  });
+
   test("QueryToolbar transaction callbacks delegate to handleTransaction", () => {
     render(<Studio />);
     act(() => (capturedQueryToolbarProps.onBeginTransaction as () => void)());

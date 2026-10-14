@@ -5,6 +5,8 @@ import { formatConsole } from "@/lib/db/console/format";
 import { MILVUS_CONSOLE, MILVUS_ROUTES } from "@/lib/db/providers/vector/milvus/routes";
 import { QDRANT_CONSOLE, QDRANT_ROUTES as QDRANT_ROUTES_REAL } from "@/lib/db/providers/vector/qdrant/routes";
 import { DIALECT_EDITORS, formatterForLanguage, registerDialectConsoles } from "@/lib/editor/dialect-editors";
+import { SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
+import { resolveSqlGrammar } from "@/lib/sql/grammar";
 import type { EditorLanguage } from "@/lib/editor/tab-language";
 import { QDRANT_ROUTES, QDRANT_STAND_IN } from "../../helpers/console-stand-ins";
 
@@ -112,6 +114,25 @@ describe("the formatters", () => {
     expect(DIALECT_EDITORS.sql.format?.("select id, name from users where id = 1 and name = 'a'")).toBe(
       "SELECT    id,\n          name\nFROM      users\nWHERE     id = 1\nAND       name = 'a'",
     );
+  });
+
+  // SF-041: formatted as PostgreSQL, QUALIFY was lower-cased and joined to the GROUP BY list.
+  test("SQL on Snowflake's grammar formats QUALIFY as a clause of its own", () => {
+    const typed =
+      "select p.pid,p.name,count(*) from d_parent p join d_child c on c.pid=p.pid where p.pid>1 group by 1,2 qualify row_number() over (order by p.pid)<=5 order by 1";
+    const formatted = DIALECT_EDITORS.sql.format?.(typed, resolveSqlGrammar("snowflake")) ?? "";
+    expect(formatted).toContain("GROUP BY  1,\n          2\nQUALIFY   row_number()");
+    expect(formatted).not.toContain(" qualify ");
+    // A stage reference the PostgreSQL language broke into `@ stage` is refused instead, so the text stays as written.
+    expect(() => DIALECT_EDITORS.sql.format?.("SELECT $1 FROM @stage t", resolveSqlGrammar("snowflake"))).toThrow();
+  });
+
+  test("every dialect but Snowflake formats SQL exactly as before", () => {
+    const typed = "select a, b from t where a = 1 group by 1 qualify x = 1 order by 2";
+    const before = DIALECT_EDITORS.sql.format?.(typed);
+    for (const type of SHIPPED_DATABASE_TYPES.filter((t) => t !== "snowflake")) {
+      expect(DIALECT_EDITORS.sql.format?.(typed, resolveSqlGrammar(type)), type).toBe(before);
+    }
   });
 
   test("a MongoDB query and a Kafka read request format as two-space JSON", () => {

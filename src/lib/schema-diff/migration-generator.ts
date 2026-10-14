@@ -6,9 +6,12 @@
  * no wrapper. Oracle drops omit version-dependent IF EXISTS clauses. The live
  * regression probe is tests/live/schema-diff-dialects.ts.
  *
- * A diff is not a complete migration plan: source constraint names, schema
- * qualifiers and cross-table dependency order are not recorded here. Review
- * the generated SQL before executing it against the target database.
+ * A diff is not a complete migration plan: source constraint names and
+ * cross-table dependency order are not recorded here, and a foreign key's
+ * referenced table is written as the reading spelled it. Tables are named by
+ * their full path when the diff carries one, and an object that is not a table
+ * (a view, a materialized view) is named in a comment rather than altered.
+ * Review the generated SQL before executing it against the target database.
  */
 import type { DatabaseType } from "@/lib/types";
 // The shared quoter, which also escapes an embedded closing quote character — this
@@ -498,6 +501,49 @@ function commentName(name: string): string {
 }
 
 /**
+ * The table as the statement names it: every segment of its path quoted on its own, container first, so
+ * `b2a.t1` is `"b2a"."t1"` and never the `"t1"` that a search path resolves to another schema's table (SF-047,
+ * BACKLOG D150). A diff with no paths, a snapshot taken before the object model, names it by `tableName` as before.
+ */
+function tableId(table: TableDiff, dialect: DatabaseType): string {
+  if (table.path === undefined || table.path.length < 2) return escapeIdentifier(table.tableName, dialect);
+  return table.path.map((segment) => escapeIdentifier(segment, dialect)).join(".");
+}
+
+/**
+ * An index named in a `DROP INDEX` with no `ON <table>`: in the table's container, which is where the engine created
+ * it, rather than wherever the session's search path points.
+ */
+function indexId(table: TableDiff, indexName: string, dialect: DatabaseType): string {
+  if (table.path === undefined || table.path.length < 2) return escapeIdentifier(indexName, dialect);
+  return [...table.path.slice(0, -1), indexName].map((segment) => escapeIdentifier(segment, dialect)).join(".");
+}
+
+/** What a comment calls the object: its label in the diff, else its name. */
+function tableLabel(table: TableDiff): string {
+  return commentName(table.label ?? table.tableName);
+}
+
+/**
+ * Whether the migration may write table DDL for this object. Only a table: a view, a materialized view or a stream
+ * that differs is named in a comment, because `ALTER TABLE` on a view alters nothing it should (MySQL measured: the
+ * migration wrote `ALTER TABLE \`v1\` MODIFY COLUMN ...` for a view). An object whose reading declared no kind, a
+ * snapshot from before the object model, is treated as a table, as it always was.
+ */
+function isTableDdlTarget(table: TableDiff): boolean {
+  return table.kind === undefined || table.kind === "table";
+}
+
+/**
+ * The comment that stands where a non-table object's DDL would be. It also says that a view left in place can stop an
+ * ALTER or DROP below: PostgreSQL refuses to change the type of a column a view reads ("cannot alter type of a column
+ * used by a view or rule"), so the script rolls back until that view is dropped first and recreated after.
+ */
+function skippedObject(table: TableDiff): string {
+  return `-- Skipped ${tableLabel(table)} (${commentName(table.kind ?? "")}): only tables are created, altered or dropped here; change it by hand. If it reads a table changed below, drop it before this script and recreate it after.`;
+}
+
+/**
  * The text that goes after DEFAULT: the engine's own SQL where the provider measured it, and
  * the raw field otherwise.
  *
@@ -602,7 +648,7 @@ const FOREIGN_KEY_ONLY_IN_CREATE_TABLE: Partial<Record<DatabaseType, { label: st
 
 function generateCreateTable(table: TableDiff, dialect: DatabaseType): string {
   const lines: string[] = [];
-  const id = escapeIdentifier(table.tableName, dialect);
+  const id = tableId(table, dialect);
 
   // Declined whole, indexes and foreign keys included: there would be no table for them to attach to.
   if (dialect === "cassandra") {
@@ -702,14 +748,14 @@ function generateCreateTable(table: TableDiff, dialect: DatabaseType): string {
 
 function generateDropTable(table: TableDiff, dialect: DatabaseType): string {
   const conditional = dialect === "oracle" ? "" : " IF EXISTS";
-  return `DROP TABLE${conditional} ${escapeIdentifier(table.tableName, dialect)};`;
+  return `DROP TABLE${conditional} ${tableId(table, dialect)};`;
 }
 
 function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
   const lines: string[] = [];
-  const id = escapeIdentifier(table.tableName, dialect);
+  const id = tableId(table, dialect);
 
-  lines.push(`-- Alter table: ${commentName(table.tableName)}`);
+  lines.push(`-- Alter table: ${tableLabel(table)}`);
 
   // Drop recorded dependencies before altering their columns or reusing their names.
   // Removed foreign keys
@@ -764,9 +810,9 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
       } else if (dialect === "mssql") {
         lines.push(`DROP INDEX IF EXISTS ${escapeIdentifier(idx.indexName, dialect)} ON ${id};`);
       } else if (NO_DROP_IF_EXISTS.has(dialect)) {
-        lines.push(`DROP INDEX ${escapeIdentifier(idx.indexName, dialect)};`);
+        lines.push(`DROP INDEX ${indexId(table, idx.indexName, dialect)};`);
       } else {
-        lines.push(`DROP INDEX IF EXISTS ${escapeIdentifier(idx.indexName, dialect)};`);
+        lines.push(`DROP INDEX IF EXISTS ${indexId(table, idx.indexName, dialect)};`);
       }
     });
 
@@ -999,8 +1045,16 @@ export function generateMigrationSQL(diff: SchemaDiff, dialect: DatabaseType): s
     sections.push("");
   }
 
+  // A view, a materialized view or a stream that differs: named, never written as a table (SF-047).
+  const skipped = diff.tables.filter((t) => !isTableDdlTarget(t));
+  if (skipped.length > 0) {
+    sections.push("-- Objects that are not tables");
+    skipped.forEach((t) => sections.push(skippedObject(t)));
+    sections.push("");
+  }
+
   // Drop tables first (reverse dependency order)
-  const droppedTables = diff.tables.filter((t) => t.action === "removed");
+  const droppedTables = diff.tables.filter((t) => t.action === "removed" && isTableDdlTarget(t));
   if (droppedTables.length > 0) {
     sections.push("-- Drop removed tables");
     droppedTables.forEach((t) => sections.push(generateDropTable(t, dialect)));
@@ -1008,7 +1062,7 @@ export function generateMigrationSQL(diff: SchemaDiff, dialect: DatabaseType): s
   }
 
   // Create new tables
-  const addedTables = diff.tables.filter((t) => t.action === "added");
+  const addedTables = diff.tables.filter((t) => t.action === "added" && isTableDdlTarget(t));
   if (addedTables.length > 0) {
     sections.push("-- Create new tables");
     addedTables.forEach((t) => {
@@ -1018,7 +1072,7 @@ export function generateMigrationSQL(diff: SchemaDiff, dialect: DatabaseType): s
   }
 
   // Alter existing tables
-  const modifiedTables = diff.tables.filter((t) => t.action === "modified");
+  const modifiedTables = diff.tables.filter((t) => t.action === "modified" && isTableDdlTarget(t));
   if (modifiedTables.length > 0) {
     sections.push("-- Modify existing tables");
     modifiedTables.forEach((t) => {

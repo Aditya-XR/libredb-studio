@@ -302,7 +302,7 @@ function SchemaDiagramInner({ schema, onClose, capabilities }: SchemaDiagramProp
 
   const diagramActions = useMemo<DiagramActions>(
     () => ({
-      // The NODE ID, which `buildGraph` writes as the object's `pathKey`: a label is shared
+      // The NODE ID, which `buildGraph` writes as the object's `diagramNodeId`: a label is shared
       // by two objects in two containers and expanded whichever the set answered for (#789).
       toggleExpand: (nodeId: string) => {
         setExpandedTables((current) => {
@@ -515,8 +515,8 @@ function SchemaDiagramInner({ schema, onClose, capabilities }: SchemaDiagramProp
                 {/* Selected node info */}
                 {selectedTable && (
                   <div className="text-xs text-brand border-t border-hairline pt-2">
-                    {/* The dotted ADDRESS and never the node id: the id is `pathKey`, whose
-                        separator is a control character, and never the bare label, which two
+                    {/* The dotted ADDRESS and never the node id: the id is `diagramNodeId`, an
+                        escaped address nobody reads, and never the bare label, which two
                         objects in two containers share (#789). */}
                     Selected: <span className="font-mono font-medium">{objectPathLabel(selectedTable.path)}</span>
                     <button onClick={() => selectTable(null)} className="ml-2 text-fg-subtle hover:text-fg-tertiary">

@@ -10,6 +10,7 @@ import {
   SNOWFLAKE_QUERY_TAGS,
   SNOWFLAKE_ROLE_CHECK_SQL,
   SNOWFLAKE_STATEMENT_SENTENCES,
+  SNOWFLAKE_UNRESOLVED_CODES,
 } from "@/lib/db/providers/sql/snowflake/statements";
 import { logger } from "@/lib/logger";
 import { failureAnswer } from "../../../helpers/snowflake-answers";
@@ -50,7 +51,8 @@ describe("what the check sends", () => {
       schema: "PUBLIC",
       parameters: { query_tag: SNOWFLAKE_QUERY_TAGS.roleCheck },
     });
-    expect(harness.deps.deadlines.requested).toEqual([35_000]);
+    // The permit wait's bound, then the statement's own deadline once it is sent.
+    expect(harness.deps.deadlines.requested).toEqual([35_000, 35_000]);
   });
 
   test("with no Warehouse, the check carries no warehouse field", async () => {
@@ -130,6 +132,99 @@ describe("the effective role", () => {
     });
     const error = await caught(harness.statements.checkRole());
     expect((error as SnowflakeError).message).toBe(SNOWFLAKE_ERROR_SENTENCES.roleMismatch("", CONTEXT.role));
+  });
+});
+
+describe("the signed-in user under token sign-in (SF-005)", () => {
+  test("a token of another user is an auth failure naming both users, before any caution", async () => {
+    const harness = setup({ failure: { authMethod: "pat", user: "SOMEONE_ELSE" } });
+    harness.transports.answer(SUBMIT, roleAnswer("STUDIO_RO", '{"roles":"STUDIO_RW","value":""}', "STUDIO_PAT"));
+    const error = await caught(harness.statements.checkRole());
+    expect(error).toBeInstanceOf(SnowflakeError);
+    expect((error as SnowflakeError).category).toBe("auth");
+    expect((error as SnowflakeError).message).toBe(
+      SNOWFLAKE_ERROR_SENTENCES.tokenUserMismatch("STUDIO_PAT", "SOMEONE_ELSE"),
+    );
+    expect(toDatabaseError(error)).toBeInstanceOf(AuthenticationError);
+  });
+
+  test("the user rides in the role check: one statement, no request of its own", async () => {
+    const harness = setup({ failure: { authMethod: "pat", user: "studio_pat" } });
+    harness.transports.answer(SUBMIT, roleAnswer("STUDIO_RO", undefined, "STUDIO_PAT"));
+    expect(await harness.statements.checkRole()).toEqual([]);
+    expect(statementsSent(harness)).toEqual([SNOWFLAKE_ROLE_CHECK_SQL]);
+    expect(SNOWFLAKE_ROLE_CHECK_SQL).toContain("CURRENT_USER()");
+  });
+
+  for (const [typed, answered, same] of [
+    ["studio_pat", "STUDIO_PAT", true],
+    [" Studio_Pat ", "STUDIO_PAT", true],
+    ["john.doe@example.com", "JOHN.DOE@EXAMPLE.COM", true],
+    ['"Mixed User"', "Mixed User", true],
+    ['"Mixed User"', "MIXED USER", false],
+    ["studio_svc", "STUDIO_PAT", false],
+  ] as const) {
+    test(`User ${JSON.stringify(typed)} and ${answered} answered ${same ? "match" : "do not match"}`, async () => {
+      const harness = setup({ failure: { authMethod: "pat", user: typed } });
+      harness.transports.answer(SUBMIT, roleAnswer("STUDIO_RO", undefined, answered));
+      const outcome = harness.statements.checkRole();
+      if (same) expect(await outcome).toEqual([]);
+      else expect(((await caught(outcome)) as SnowflakeError).category).toBe("auth");
+    });
+  }
+
+  test("a key pair signs in as the user it names, so the user cell is not compared", async () => {
+    const harness = setup({ failure: { authMethod: "keypair", user: "STUDIO_SVC" } });
+    harness.transports.answer(SUBMIT, roleAnswer("STUDIO_RO", undefined, "SOMEONE_ELSE"));
+    expect(await harness.statements.checkRole()).toEqual([]);
+  });
+
+  test("the user mismatch sentence never echoes a secret the answer holds", async () => {
+    const harness = setup({ failure: { authMethod: "pat", user: "STUDIO" }, secrets: ["pat-secret"] });
+    harness.transports.answer(SUBMIT, roleAnswer("STUDIO_RO", undefined, "pat-secret"));
+    const error = await caught(harness.statements.checkRole());
+    expect((error as SnowflakeError).message).not.toContain("pat-secret");
+  });
+});
+
+describe("a configured name Snowflake does not resolve (SF-019, D344)", () => {
+  const S = SNOWFLAKE_STATEMENT_SENTENCES;
+  const code = SNOWFLAKE_UNRESOLVED_CODES;
+
+  test("each configured name answered NULL is cautioned, in field order, after the secondary roles", async () => {
+    const harness = setup();
+    harness.transports.answer(
+      SUBMIT,
+      roleAnswer("STUDIO_RO", '{"roles":"ANALYST","value":""}', undefined, { database: null, warehouse: null }),
+    );
+    expect(await harness.statements.checkRole()).toEqual([
+      CAUTION("ANALYST"),
+      { code: code.database, message: S.unresolvedDatabase("SALES", "STUDIO_RO") },
+      { code: code.warehouse, message: S.unresolvedWarehouse("STUDIO_WH", "STUDIO_RO") },
+    ]);
+  });
+
+  test("a schema answered NULL under a database that resolved is cautioned", async () => {
+    const harness = setup();
+    harness.transports.answer(SUBMIT, roleAnswer("STUDIO_RO", undefined, undefined, { schema: null }));
+    expect(await harness.statements.checkRole()).toEqual([
+      { code: code.schema, message: S.unresolvedSchema("PUBLIC", "STUDIO_RO") },
+    ]);
+  });
+
+  test("a field the connection leaves empty is not cautioned, whatever the check answers for it", async () => {
+    const harness = setup({ context: { role: "STUDIO_RO", database: "", schema: undefined } });
+    harness.transports.answer(
+      SUBMIT,
+      roleAnswer("STUDIO_RO", undefined, undefined, { database: null, schema: null, warehouse: null }),
+    );
+    expect(await harness.statements.checkRole()).toEqual([]);
+  });
+
+  test("names that resolved give no caution", async () => {
+    const harness = setup();
+    harness.transports.answer(SUBMIT, roleAnswer("STUDIO_RO"));
+    expect(await harness.statements.checkRole()).toEqual([]);
   });
 });
 
