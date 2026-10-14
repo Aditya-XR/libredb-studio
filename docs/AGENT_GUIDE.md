@@ -227,10 +227,10 @@ workflow including **Operate**.
 **Do not read that as "the agent runs everywhere now."** Two limits used to be one sentence and are
 now two different sentences, and the difference is the whole of what changed:
 
-- **Grounding — every engine.** What a Plan run is TOLD about your database. It needs no read-only
+- **Grounding: every engine.** What a Plan run is TOLD about your database. It needs no read-only
   statement path, because the provider reading sends no statement, so it reaches all thirty-seven engines.
-- **Agent mode — PostgreSQL, SQLite, DuckDB, SQL Server and MySQL.** What a run may DO by itself. Its tools
-  execute statements and need a database-native read-only path, which only those five providers implement, so a
+- **Agent mode: PostgreSQL, SQLite, DuckDB, SQL Server, MySQL and Kubernetes.** What a run may DO by itself. Its tools
+  execute statements and need a read-only path the provider implements, which only those six providers do, so a
   schema-workflow Agent run on any other engine still ends *"The agent cannot run on this database
   engine: it offers no read-only execution profile."* — after grounding has succeeded, which is
   slightly odd to watch and entirely honest: the run knows your schema and still may not read a row.
@@ -342,19 +342,16 @@ and the bar its verdict is judged against.
 ### Investigate
 
 The default. The objective is a question about the database and the model answers it from what it
-establishes (`WORKFLOW_OBJECTIVES.investigation` in `src/lib/agent/investigation.ts:1466`). Tools:
-`inspect_schema`, `run_read_query`, `inspect_plan`, `compose_report`
-(`AGENT_MODE_TOOLS`, `src/lib/agent/tools.ts:900-905`).
+establishes (the investigation variant's `objective` in `AGENT_WORKFLOW_VARIANTS`, `src/lib/agent/agent-manifest.ts`).
+Tools: `inspect_schema`, `run_read_query`, `inspect_plan`, `compose_report` (the same variant's `tools`).
 
 **Answered when** the run composed at least one claim and the claims do not rest entirely on empty
 results (`verifyInvestigationGoal`, `src/lib/agent/goal-verifier.ts:349-355`).
 
 ### Optimize
 
-For a statement that is too slow. The model is told that what matters is *how the engine reaches its
-rows* (`investigation.ts:1467-1468`), and it is offered two further tools: `compare_plans`, which
-takes the ids of two plans the run already inspected, and `recommend_change`, which records one
-index or rewrite (`tools.ts:870,876`).
+For a statement that is too slow.
+The model is told that what matters is *how the engine reaches its rows* (the query-optimization variant's `objective` in `AGENT_WORKFLOW_VARIANTS`, `src/lib/agent/agent-manifest.ts`), and it is offered two further tools: `compare_plans`, which takes the ids of two plans the run already inspected, and `recommend_change`, which records one index or rewrite (the same variant's `tools`).
 
 Two things this workflow will not do, and it says so rather than implying otherwise:
 
@@ -374,9 +371,8 @@ to already exist — the recommendation citing the plan it diagnosed (`verifyQue
 
 ### Assess
 
-For the state of the data itself — where it is incomplete, inconsistent or surprising
-(`investigation.ts:1469-1470`). It adds one tool, `profile_table`, and the rule that matters is worth
-reading before you point it at a table of personal data:
+For the state of the data itself: where it is incomplete, inconsistent or surprising (the database-assessment variant's `objective` in `AGENT_WORKFLOW_VARIANTS`, `src/lib/agent/agent-manifest.ts`).
+It adds one tool, `profile_table` (the same variant's `tools`), and the rule that matters is worth reading before you point it at a table of personal data:
 
 **A profile records counts, never values.** Row counts, present counts, distinct counts, and how
 many values match a shape — computed inside the database with `count(CASE WHEN <predicate> …)`, so no
@@ -949,19 +945,21 @@ Stated plainly, because a surface that hides its edges is the one that surprises
   it. `/api/db/query` calls the provider directly (`src/app/api/db/query/route.ts:44`), so an editor
   query is neither policy-checked nor written to the agent audit trail. The controls above describe
   what the agent is held to, not a guarantee the whole product enforces.
-- **Agent mode runs on PostgreSQL, SQLite, DuckDB, SQL Server and MySQL only.** The read-only profile has to
-  be implemented by the provider, and only five do: `queryReadOnly` exists on `postgres.ts`,
-  `sqlite.ts`, `duckdb/index.ts`, `mssql.ts` and `mysql.ts`. The five do not draw the boundary the same way, and
-  SQL Server is the one that could not: it has no read-only transaction and no session-level
+- **Agent mode runs on PostgreSQL, SQLite, DuckDB, SQL Server, MySQL and Kubernetes only.** The read-only profile has to
+  be implemented by the provider, and only six do: `queryReadOnly` exists on `postgres.ts`,
+  `sqlite.ts`, `duckdb/index.ts`, `mssql.ts`, `mysql.ts` and `kubernetes/index.ts`. The six do not draw the boundary the same way.
+  Kubernetes has no read-only session at all, so there the boundary is Studio's request allowlist, checked on the
+  final method and path of every request before it is sent, together with the RBAC of the identity the agent runs as.
+  SQL Server is the SQL engine that could not: it has no read-only transaction and no session-level
   read-only switch, so there the boundary is a session principal verified at open to be unable to
   write, an admission step that asks the optimizer to compile each statement without running it, a
   server-side row bound, and a transaction that is always rolled back.
   Acquiring a profiled provider for any other engine raises `PROFILE_UNSUPPORTED_BY_PROVIDER`
   (`src/lib/db/factory.ts`), which the runtime reports as `engine-unsupported`
   (`src/lib/agent/runtime.ts`) — the rail says so in as many words
-  (`src/components/agent/timeline.ts`). So on the other thirty-two ids in the `DatabaseType` union
+  (`src/components/agent/timeline.ts`). So on the other thirty-one ids in the `DatabaseType` union
   (`src/lib/types.ts`), an Agent-mode run cannot read anything: Oracle, Db2 LUW, libSQL, MongoDB, Redis,
-  ClickHouse, Druid, Elasticsearch, OpenSearch, Trino, BigQuery, Snowflake, Apache Spark, Cassandra, Couchbase, Firestore, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, MQTT, RabbitMQ, OPC UA, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend, S3-compatible object storage, Kubernetes and LibreDB. That
+  ClickHouse, Druid, Elasticsearch, OpenSearch, Trino, BigQuery, Snowflake, Apache Spark, Cassandra, Couchbase, Firestore, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, MQTT, RabbitMQ, OPC UA, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend, S3-compatible object storage and LibreDB. That
   last id is the bundled **LibreDB sample** connection, whose provider implements no `queryReadOnly`
   (`src/lib/db/providers/embedded/libredb.ts`) — the bundled **SQLite sample** is the seeded
   connection to try a run against (`src/lib/seed/sqlite-sample.ts:131`). **Plan** mode still opens on

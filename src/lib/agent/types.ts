@@ -49,6 +49,7 @@ import type { AgentStatementViolation } from "@/lib/db/operations/statement-guar
 import type { AgentChartSpec, ColumnSchema, DatabaseType, ForeignKeySchema, IndexSchema } from "@/lib/types";
 import type { ObjectRole } from "@/lib/db/types";
 import type { editorLanguageForTabType } from "@/lib/editor/tab-language";
+import type { AgentStatementLanguageId } from "./agent-manifest";
 import type { AgentContextCharge, AgentContextRowBudget, AgentContextUnavailableCode } from "./context-snapshot";
 import type { AgentGoalShortfall, AgentGoalVerifierId } from "./goal-verifier";
 import type { AgentToolName } from "./tools";
@@ -240,7 +241,7 @@ export const AGENT_WORKFLOW_PRESENTS_ANSWER: Readonly<Record<AgentRunWorkflowTyp
  * A property of the workflow, stated here beside `AGENT_WORKFLOW_PRESENTS_ANSWER`
  * rather than a list inside the route that refuses, and for the same reason: the set is
  * then explicit, total over the union, and pinned to the tool sets by a test instead of
- * being a claim a reader has to re-derive from `WORKFLOW_TOOLS`. A new workflow stops
+ * being a claim a reader has to re-derive from each variant's `tools` in `agent-manifest.ts`. A new workflow stops
  * this file compiling until somebody decides whether it drafts SQL, which is the
  * question that decides where it may run.
  *
@@ -334,8 +335,8 @@ export type AgentRunFailureReason =
   /** The provider rejected the credentials. An operator fixes this; retrying does not. */
   | "model-unauthorized"
   /**
-   * The connection's engine has no database-native read-only execution profile, so
-   * this run could never have been permitted on it. A property of the connection the
+   * The connection's engine has no read-only statement path under a declared boundary,
+   * so this run could never have been permitted on it. A property of the connection the
    * user chose, not a fault of the server — which is why it is not `internal`.
    *
    * NARROWER for the `operations` workflow (#325), and narrower is all it is. That
@@ -455,6 +456,18 @@ export interface AgentArtifactReference {
 export type AgentEvidenceReference =
   | { readonly source: "artifact"; readonly correlationId: string; readonly locator?: string }
   | { readonly source: "context-snapshot"; readonly fingerprint: string; readonly locator?: string };
+
+/** CPU and memory as Kubernetes quantities, as the user would write them into a manifest. Either may be unset. */
+export interface AgentResourceQuantities {
+  readonly cpu?: string;
+  readonly memory?: string;
+}
+
+/** One container's requests and limits, the two halves a resources recommendation states before and after. */
+export interface AgentResourceSettings {
+  readonly requests: AgentResourceQuantities;
+  readonly limits: AgentResourceQuantities;
+}
 
 /**
  * One side of a before/after plan comparison (#330 T3).
@@ -717,20 +730,24 @@ export interface AgentContextSnapshot extends AgentInventory {
 }
 
 /**
- * Why a curated reading that sends no statement was refused. Both are decided INSIDE
+ * Why a curated reading that sends no statement was refused. Each is decided INSIDE
  * the call, after the pipeline allowed it and the provider was acquired, which is
  * exactly why they are refusals rather than "the run decided not to ask": a statement
  * of the run's budget was charged and the execution was audited, so a settlement that
  * said nothing happened would contradict the ledger.
  *
- * The grounding schema read (#414) adds no third code. A provider that cannot describe
+ * The grounding schema read (#414) adds no code of its own. A provider that cannot describe
  * itself is not a state that exists — the four object-surface methods are required on
  * `DatabaseProvider` (#789) — and the reachable failure, one of them rejecting, is a
  * database error the reading path already reports as one. The declaration-shaped
  * absence, an engine with no `objectKinds`, is answered before anything is charged, so
  * it never reaches a settlement either.
+ *
+ * `METRICS_UNAVAILABLE` is the cluster usage reading's own: the cluster serves no metrics.k8s.io, or serves one whose
+ * backend does not answer. It is the cluster's fact rather than a failure of the read, so no rewording of the call
+ * could change it and it costs no repair attempt.
  */
-export type AgentReadingDenyCode = "KIND_UNSUPPORTED_BY_PROVIDER" | "READING_OVER_BUDGET";
+export type AgentReadingDenyCode = "KIND_UNSUPPORTED_BY_PROVIDER" | "READING_OVER_BUDGET" | "METRICS_UNAVAILABLE";
 
 /**
  * Why a tool call produced no result. The four variants are distinct in TYPE,
@@ -868,6 +885,12 @@ export type AgentGuidanceNotice =
    * nothing about what one was for.
    */
   | "plan-bar"
+  /**
+   * A resource-efficiency run that has just READ usage, told what its report will be judged on. The `plan-bar`
+   * pattern for the cluster's optimization: delivered as a `user` message riding on the turn about to be taken, once
+   * per run, and bounded across a resume by the ledger.
+   */
+  | "usage-bar"
   /**
    * A run that stopped having read nothing, on a set holding both reading tools.
    * Delivered as a `user` message; once per run, and only where the model's profile
@@ -1382,6 +1405,27 @@ export type AgentRunEvent =
     })
   | (AgentRunEventBase & {
       /**
+       * A change to one container's CPU and memory requests and limits, proposed and NOT made.
+       *
+       * The same event kind as an index or a rewrite, because it is the same act: the run proposes, the user decides.
+       * It carries no `statement`, since there is nothing to hand an editor: the change is to a workload's manifest,
+       * which this runtime never writes. `current` and `proposed` are Kubernetes quantities the schema validated as
+       * such, and the owner is named so the user knows which manifest to edit. Its kind is whatever owns the pod, a
+       * database operator's custom resource included, so it is any non-empty kind and not a closed list.
+       */
+      readonly kind: "recommendation";
+      readonly change: "resources";
+      readonly namespace: string;
+      readonly ownerKind: string;
+      readonly ownerName: string;
+      readonly container: string;
+      readonly current: AgentResourceSettings;
+      readonly proposed: AgentResourceSettings;
+      readonly rationale: string;
+      readonly evidence: readonly [AgentEvidenceReference, ...AgentEvidenceReference[]];
+    })
+  | (AgentRunEventBase & {
+      /**
        * One table profiled, as COUNTS and the findings derived from them.
        *
        * The database-assessment template's own artifact. Nothing here is a value
@@ -1404,6 +1448,44 @@ export type AgentRunEvent =
        */
       readonly artifact: AgentArtifactReference;
       readonly profile: AgentTableProfile;
+    })
+  | (AgentRunEventBase & {
+      /**
+       * Container usage in one namespace was read against requests and limits, so a report or a resources
+       * recommendation can CITE it.
+       *
+       * Its own kind for the reason `table-profiled` has one: the artifact is this reading's evidence, and the
+       * resource-efficiency verdict asks for a usage reading by kind rather than for any read. The namespace and the
+       * selector are what the reading covered, recorded so a resumed run is told what it already measured.
+       */
+      readonly kind: "usage-read";
+      readonly artifact: AgentArtifactReference;
+      readonly namespace: string;
+      readonly selector?: string;
+    })
+  | (AgentRunEventBase & {
+      /**
+       * The cluster serves no usage metrics for this namespace: metrics.k8s.io is absent, or its backend
+       * (metrics-server) does not answer.
+       *
+       * A fact about the cluster, recorded as one, rather than only a refused step: the verdict reads it to say the
+       * run could not measure usage and why, which a refusal code alone cannot tell apart from a reading the run
+       * chose not to keep.
+       */
+      readonly kind: "usage-unavailable";
+      readonly namespace: string;
+    })
+  | (AgentRunEventBase & {
+      /**
+       * One namespace's workloads were profiled, so a report can CITE the profile.
+       *
+       * Its own kind for the reason `usage-read` has one: the cluster-health verdict asks for a workload profile by
+       * kind rather than for any read. The namespace is what the profile covered, recorded so a resumed run is told
+       * what it already profiled.
+       */
+      readonly kind: "workloads-profiled";
+      readonly artifact: AgentArtifactReference;
+      readonly namespace: string;
     })
   | (AgentRunEventBase & {
       /**
@@ -1677,6 +1759,27 @@ export interface AgentRunRecord {
    * the prose path existed, and of every model that can call a tool.
    */
   readonly toolProtocol?: AgentToolProtocol;
+  /**
+   * The statement language this run writes in, which picks its workflow variant in `agent-manifest.ts`.
+   *
+   * Decided once at open from the manifest and carried here for the reason `toolProtocol` is: tool
+   * selection, narrowing, the prompt, the verifier and a resumed drive all read it from the record, never
+   * from the live connection, so a run is the same run in a process that cannot reach its database.
+   *
+   * Optional, and absent reads as `sql`: every ledger written before this field was an SQL run.
+   */
+  readonly statementLanguage?: AgentStatementLanguageId;
+  /**
+   * The rule this run is judged against, decided once at open from its workflow variant.
+   *
+   * On the record for the same reason as `statementLanguage`: the verdict a resumed drive records must be
+   * measured against the bar the run was opened under, read from the ledger rather than re-derived from a
+   * manifest that may have changed since.
+   *
+   * Optional, and absent reads as the verifier of the run's variant (for a ledger written before this field,
+   * the SQL workflow's verifier), which is what judged every run written then.
+   */
+  readonly verifier?: AgentGoalVerifierId;
   /**
    * The conversation this run belongs to.
    *

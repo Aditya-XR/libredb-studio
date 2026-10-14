@@ -46,7 +46,8 @@ import { randomUUID } from "node:crypto";
 import { releaseExecutionRun } from "@/lib/db/operations/execution";
 import { logger } from "@/lib/logger";
 import { AGENT_WORKFLOW_BUDGETS } from "./execution-policy";
-import { verifyRunGoal } from "./goal-verifier";
+import type { AgentStatementLanguageId } from "./agent-manifest";
+import { type AgentGoalVerifierId, verifyRunGoal } from "./goal-verifier";
 import type { AgentHistoryCursor, AgentHistoryPage } from "./history";
 import type { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import type { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
@@ -128,6 +129,12 @@ export type AgentRunNarrativeEvent = Extract<
       | "plan-comparison"
       | "recommendation"
       | "table-profiled"
+      // A usage reading's evidence, and the cluster's own fact that it serves no usage metrics: both written by the
+      // drive beside a step that settles on its own, so neither settles one.
+      | "usage-read"
+      | "usage-unavailable"
+      // A workload profile's evidence, written beside its settled step for the same reason.
+      | "workloads-profiled"
       // Which result IS the answer: a decision about a read already on the ledger,
       // reaching nothing and settling no step, like the three above it.
       | "answer-composed"
@@ -176,6 +183,10 @@ export interface AgentRunStartInput {
   readonly autoExecute?: boolean;
   /** Defaults to `native`; see `AgentRunRecord.toolProtocol`. */
   readonly toolProtocol?: AgentToolProtocol;
+  /** Defaults to `sql`; see `AgentRunRecord.statementLanguage`. */
+  readonly statementLanguage?: AgentStatementLanguageId;
+  /** Defaults to the variant's verifier; see `AgentRunRecord.verifier`. */
+  readonly verifier?: AgentGoalVerifierId;
   /** The conversation this run continues; the route derives it, the store persists it. */
   readonly thread?: AgentThreadHeader;
   readonly actor: AgentRunActor;

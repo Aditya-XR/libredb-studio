@@ -28,14 +28,17 @@ Three properties frame everything below, and each of them is load-bearing rather
   ([`tools.ts`](../src/lib/agent/tools.ts)) is its only production call site, and the editor's
   `/api/db/query` reaches the provider directly in `POST()`
   ([`query/route.ts`](../src/app/api/db/query/route.ts)).
-- **Agent mode requires PostgreSQL, SQLite, DuckDB, SQL Server or MySQL — except the `operations` workflow,
-  which runs anywhere.** They are the only providers implementing `queryReadOnly`:
+- **Agent mode requires PostgreSQL, SQLite, DuckDB, SQL Server, MySQL or Kubernetes, except the `operations` workflow, which runs anywhere.**
+  They are the only providers implementing `queryReadOnly`:
   [`postgres.ts`](../src/lib/db/providers/sql/postgres.ts),
   [`sqlite.ts`](../src/lib/db/providers/sql/sqlite.ts),
   [`duckdb/index.ts`](../src/lib/db/providers/sql/duckdb/index.ts),
-  [`mssql.ts`](../src/lib/db/providers/sql/mssql.ts) and
-  [`mysql.ts`](../src/lib/db/providers/sql/mysql.ts), so on any other engine an
-  agent-mode run whose workflow sends a statement is
+  [`mssql.ts`](../src/lib/db/providers/sql/mssql.ts),
+  [`mysql.ts`](../src/lib/db/providers/sql/mysql.ts) and
+  [`kubernetes/index.ts`](../src/lib/db/providers/platform/kubernetes/index.ts).
+  On the five SQL engines the database's own read-only session bounds an agent statement.
+  Kubernetes has no read-only transaction, so there the boundary is Studio's request allowlist, checked on the final method and path of every request before it is sent, together with the RBAC of the identity the agent runs as; the kubectl reader in front of it explains a refusal to the model and is never the boundary ([On a Kubernetes connection](#on-a-kubernetes-connection)).
+  On any other engine an agent-mode run whose workflow sends a statement is
   **refused when it is started**: `POST /api/agent/runs` answers `400` with the posture's own
   paragraph before a run id exists or a model turn is spent (#512). The provider factory's gate sits
   behind that one and is what refuses a run reaching the drive some other way - profiled acquisition
@@ -59,15 +62,14 @@ Three properties frame everything below, and each of them is load-bearing rather
   exactly as every other workflow does — and since #414 **which profile that capture acquires depends
   on which of its two readings it takes**: `agent-read-only` on the dialects `CATALOG_PLANS` serves,
   because it composes catalog statements, and `agent-operations` everywhere else, because asking a
-  provider to describe its own schema sends nothing an engine has to plan. That is what lets grounding
-  reach the thirty-two the read-only profile refuses, and it still cannot narrow any workflow's
-  reach: the profile whose acquisition would be refused is never the profile that capture asks for. Everything else about
+  provider to describe its own schema sends nothing an engine has to plan.
+  That is what lets grounding reach the thirty-one the read-only profile refuses, and it still cannot narrow any workflow's reach: the profile whose acquisition would be refused is never the profile that capture asks for.
+  Everything else about
   the three acquisitions is identical: the same `readOnly: true` open, the same optional
   least-privilege `agentUser`, and the same profiled cache, so neither an operations run nor an
-  editor replay is ever handed the editor's writable pool. **Plan mode grounds itself the same way**
-  — the server reads the schema, and on PostgreSQL and SQLite the engine's estimated statistics
-  beside it, before the model's first turn — so a plan run is now ordinarily grounded on every engine,
-  including the thirty-two where an agent run cannot read anything at all. What is left of the old engine
+  editor replay is ever handed the editor's writable pool.
+  **Plan mode grounds itself the same way**: the server reads the schema, and on PostgreSQL and SQLite the engine's estimated statistics beside it, before the model's first turn, so a plan run is now ordinarily grounded on every engine, including the thirty-one where an agent run cannot read anything at all.
+  What is left of the old engine
   rule is narrower and still worth stating: the engine no longer decides WHETHER a plan run is
   grounded, only whether it is grounded through a composed statement or through its provider, and
   whether it gets statistics. A run whose reading fails — a provider that cannot describe itself, a
@@ -103,6 +105,7 @@ Two companion pages carry what this one deliberately does not:
   - [Durability and resume](#durability-and-resume)
     - [A drive that dies before the loop](#a-drive-that-dies-before-the-loop)
   - [The tool set](#the-tool-set)
+    - [On a Kubernetes connection](#on-a-kubernetes-connection)
     - [The query-optimization template](#the-query-optimization-template)
     - [The database-assessment template](#the-database-assessment-template)
     - [The operations template](#the-operations-template)
@@ -239,8 +242,8 @@ Two properties are worth stating, because both are easy to assume the other way 
   system prompt states the workflow's objective in **both** modes and its tool rules only where there
   are tools, so a planning run of a query optimization — "how would you make this faster?" — is an
   ordinary thing to ask for. The rail offers the workflow control in both modes for the same reason.
-  What the workflow does decide in planning is the **deliverable**: `PLAN_DELIVERABLES` in
-  `investigation.ts` is a total record over the workflow types, naming the statement each plan is
+  What the workflow does decide in planning is the **deliverable**: each SQL variant's `planDeliverable` in
+  `agent-manifest.ts`, total over the workflow types, names the statement each plan is
   asked for — the rewritten statement for a query optimization, the statement that measures the
   concern for an assessment — with `operations` the one member whose deliverable is prose, because no
   reading of that workflow can be REQUIRED to be a statement: it deliberately runs on engines where
@@ -463,7 +466,7 @@ that every statement it sends arrives inside `BEGIN READ ONLY`, down to the prov
 EXPLAIN-format probe at connect to keep that true, and an object read taken there acquired a second
 provider under `agent-operations` and sent the walk's catalog SQL outside that envelope.
 
-Those two dialects do not lose the kind for it. They are two of the five engines agent mode executes on, and
+Those two dialects do not lose the kind for it. They are two of the six engines agent mode executes on, and
 an inventory that hands a model a view under the word table is the defect #414 measured, so the kind is
 composed on the catalog path the same way every other fact that path carries is: the composed statement
 selects the ENGINE's own word for the relation, and `context-snapshot.ts` maps it onto the kind id the
@@ -520,10 +523,12 @@ named, so no command can be addressed to one.
 An object whose listing carried `readRanges`, an etcd group the user's grants read only in part, is marked partly readable beside its name, naming none of those ranges, and a note tells the model that a read of the whole object is refused and is not to be drafted or run (#1089 4.7).
 A kind a provider declares with `machineNames: "withheld"` is counted and never listed, so no object name of that kind enters the capture: the run is told how many the walk counted (`withheldCount`) and that their names are withheld, or the provider's sentence where the count was refused, or, where a container read gave no count for it (`withheldUncounted`), that its names are withheld and were not counted.
 The count is said as "at least" whenever some container sampled it, refused it or gave none, so a total never leaves a container out unsaid.
-The object tree and the editor still list those names to the user; only the agent's walk loses them.
-The walk is the only machine surface this declaration reaches, so it holds only where no other one lists the kind.
+The object tree and the editor still list those names to the user; only the agent loses them: its walk counts them, and its reads mask them.
+The declaration holds only where no other machine surface lists the kind unmasked.
 MCP's `inspect_schema` and the app's schema read take relation kinds, so only a kind whose role is not `relation` declares it, and `relationKindIds` refuses one that does.
-The engine is not offered to MCP (`MCP_EXPOSABLE`) and its provider has no `queryReadOnly`, the path the agent's read tool runs a statement through; the fleet declarations guard in `tests/isolated/object-source-declarations.test.ts` holds all three.
+The engine is not offered to MCP (`MCP_EXPOSABLE`).
+Where the provider implements `queryReadOnly`, the path the agent's read tool runs a statement through, the kind's names are withheld from grounding and masked in that path's output, and the provider says so by listing the kind in `machineRedaction.maskedNameKinds`.
+The fleet declarations guard in `tests/isolated/object-source-declarations.test.ts` holds all three statically and refuses a withheld kind on a provider with `queryReadOnly` that does not list it; the masking itself is proved by the provider's own redaction test.
 A provider that declares `agentWalkScope` is walked in its session-default container and the containers it names, rather than in every container, and the inventory carries `unreadContainers`, which the packing says as "Not read: N other" followed by the provider's own word for its containers, and names the containers it did read, since a read that lists no object names none of them through its entries.
 It exists for an engine whose containers are too many to walk within one statement's deadline; with no session default, only the named containers are read.
 A scope that also declares `whenNoDefault: { walk: "parent-default-children" }` reads, when the deepest level has no session default, the children of the one container the level above marks as the session's, minus the names its `skip` holds, under the same pair and object limits and timer.
@@ -532,7 +537,7 @@ When a container the scope reads nothing below, neither one marked as the sessio
 The first five such containers the walk meets (`UNLISTED_PARENTS_NAMED_MAX`) are named in the inventory as not read, each with the provider's sentence on one line and cut at 200 code points, each run of whitespace and control characters in it read as one space and a lone surrogate as U+FFFD, and the rest are only counted, in the levels' own words, as "N more Catalogs were not read: listing their Namespaces failed as well, and they are not named here." on Apache Spark, or "1 more Catalog was not read: listing its Namespaces failed as well, and it is not named here." for one, so however many fail, the notes leave the packing room for its rows.
 Snowflake declares it, skipping `INFORMATION_SCHEMA`, so a connection with a Database and no Schema is walked in that database's schemas ([`docs/providers/snowflake.md`](./providers/snowflake.md#83-plan-mode-and-agent-operations) section 8.3).
 Apache Spark declares it with `whenNoDefault`, so a connection is walked in its current namespace or, when the current catalog holds no such namespace, in that catalog's namespaces ([`docs/providers/spark.md`](./providers/spark.md#83-plan-mode-and-agent-operations) section 8.3).
-Kubernetes declares both: its Secrets kind is withheld, and its walk reads the session's Default namespace and `Cluster`, so the inventory says how many other namespaces it did not read, and a kind past its 1,000-object listing cap is counted as a floor ([`docs/providers/kubernetes.md`](./providers/kubernetes.md) section 9).
+Kubernetes declares both: its Secrets kind is withheld from grounding and, listed in `machineRedaction.maskedNameKinds`, masked in its agent reads, while namespace names pass, in the inventory and in agent reads alike, because a namespace is what a statement has to name; and its walk reads the session's Default namespace and `Cluster`, so the inventory says how many other namespaces it did not read, and a kind past its 1,000-object listing cap is counted as a floor ([`docs/providers/kubernetes.md`](./providers/kubernetes.md) section 9).
 RabbitMQ declares a scope with no named containers: its walk reads the virtual host `/` alone when the account lists it, at most 7 management GETs whatever the broker holds, and the inventory says how many other virtual hosts it did not read; when `/` is not listed, the walk reads no virtual host and the model sees only that count ([`docs/providers/rabbitmq.md`](./providers/rabbitmq.md#8-ai-agent-and-mcp)).
 An absence the model was not told about is read as an absence in the database, which is #414 in one sentence.
 
@@ -656,7 +661,7 @@ plan is better for it; where it is not, say the reading in the engine's own term
 block, *"a plan with no block in it is a complete answer here"*. Three properties of that rule are
 deliberate:
 
-- **It is a permission, never a contract.** `PLAN_DELIVERABLES.operations` is still `{ kind: "prose" }`,
+- **It is a permission, never a contract.** The operations variant's `planDeliverable` is still `{ kind: "prose" }`,
   the plan is still judged as prose, and the [planning statement rule](#whether-the-run-answered) still
   exempts it. There is no `noun`, no `NO STATEMENT:` marker and no ledger fact —
   `recordPlanStatement` still records nothing for this workflow, because what is welcome is not what
@@ -890,7 +895,7 @@ reason**:
 | `model-unavailable` | No usable model: unconfigured, or the provider could not be reached | Check the `LLM_*` settings |
 | `model-rate-limited` | The provider answered, and refused on volume | Wait — this one clears itself |
 | `model-unauthorized` | The provider rejected the credentials | Fix the key; retrying will not help |
-| `engine-unsupported` | The connection's engine has no database-native read-only profile | Investigate a different connection |
+| `engine-unsupported` | The connection's engine has no read-only statement path under a declared boundary | Investigate a different connection |
 | `connection-unresolvable` | The run's persisted connection no longer resolves server-side | Restore the seed, or start on another connection |
 | `internal` | Anything else | Read the server log |
 
@@ -952,11 +957,9 @@ Two consequences worth stating:
   (`sql.query.read`) whose statement the server writes, and the asymmetry inside that is real and
   documented on the tool: PostgreSQL yields a structured column inventory, while SQLite's
   `pragma_table_info()` is refused by the statement guard, so SQLite yields each object's own DDL text
-  from `sqlite_master` instead. On every other dialect the read is the **sixth** descriptor,
-  `db.schema.read` (#414) — the canonical set is six — and it is a different kind of thing rather than
-  a variant: it sends no statement for a read-only transaction to bound, so what bounds it is the
-  SHAPE of the call — `z.strictObject({})`, no input at all, the server choosing the method, and no
-  model-authored text reaching an engine. It is R0 for that reason and `resourceCost: "heavy"` for the
+  from `sqlite_master` instead.
+  On every other dialect the read is the **sixth** descriptor, `db.schema.read` (#414), and it is a different kind of thing rather than a variant: it sends no statement for a read-only transaction to bound, so what bounds it is the SHAPE of the call: `z.strictObject({})`, no input at all, the server choosing the method, and no model-authored text reaching an engine.
+  It is R0 for that reason and `resourceCost: "heavy"` for the
   opposite one, since a provider schema read is N+1 round trips on most engines and samples documents
   on two.
 
@@ -972,6 +975,60 @@ Two consequences worth stating:
 - **The executing form of `EXPLAIN` is never offered.** The analyzing variant requires approval
   because it runs the statement; the tool exposed to a model is the estimating variant, and nothing
   in the run loop may convert a require-approval outcome into an allow.
+
+**Every database reach is one of nine operation descriptors, and its id is the audit action.**
+`executeAuditedOperation` records the descriptor's own id as the action of each audit event, so an operator can see one kind of reach in the audit stream, and deny it, without denying another.
+The table is the registry `createCanonicalOperationRegistry()` builds (`src/lib/db/operations/descriptors.ts`), and `tests/unit/agent-documentation.test.ts` holds each row to it.
+
+| Descriptor | Risk class | Access level | Cost | Audit action | Reached by |
+| --- | --- | --- | --- | --- | --- |
+| `sql.query.read` | R1 | `data-read` | `heavy` | `sql.query.read` | `run_read_query` and `inspect_schema` on a SQL engine, and the composed catalog capture |
+| `sql.explain.estimate` | R0 | `metadata-read` | `light` | `sql.explain.estimate` | `inspect_plan` |
+| `sql.explain.analyze` | R1 | `data-read` | `heavy` | `sql.explain.analyze` | No tool: it requires approval, so the pipeline never answers it with a plain allow |
+| `sql.table.profile` | R1 | `data-read` | `heavy` | `sql.table.profile` | `profile_table` |
+| `db.operations.read` | R0 | `metadata-read` | `light` | `db.operations.read` | `inspect_operations` |
+| `db.schema.read` | R0 | `metadata-read` | `heavy` | `db.schema.read` | The provider path of the grounding capture |
+| `kubectl.query.read` | R1 | `data-read` | `heavy` | `kubectl.query.read` | `run_read_query` on Kubernetes |
+| `cluster.usage.read` | R1 | `data-read` | `heavy` | `cluster.usage.read` | `inspect_usage` on Kubernetes |
+| `cluster.workloads.read` | R1 | `data-read` | `heavy` | `cluster.workloads.read` | `profile_workloads` on Kubernetes |
+
+The three Kubernetes descriptors are R1 under one boundary, Studio's request allowlist on the final method and path plus the identity's RBAC (the R1 contract is stated under [The operations template](#the-operations-template)).
+`cluster.usage.read` and `cluster.workloads.read` are R1 `data-read` and not metadata, although the server chooses their requests: a namespace or a selector the model wrote reaches the API server, and the answer is the cluster's own state.
+
+### On a Kubernetes connection
+
+A Kubernetes connection runs kubectl reads rather than SQL, and every workflow there is its own variant of the template, offered its own tools (`AGENT_WORKFLOW_VARIANTS.kubectl` in `src/lib/agent/agent-manifest.ts`).
+`operations` is the one variant every engine shares, so it is not repeated here.
+A narrowed run is one told to report now; it keeps `compose_report` and the extras below, which are the instruments its own verdict accepts.
+
+| Workflow | Tools on kubectl | Narrowed extras |
+| --- | --- | --- |
+| `investigation` | `run_read_query`, `compose_report` | none |
+| `data-analysis` | `run_read_query`, `present_answer`, `compose_report` | `present_answer` |
+| `query-optimization` (resource efficiency) | `run_read_query`, `inspect_usage`, `recommend_change`, `compose_report` | `inspect_usage`, `recommend_change` |
+| `database-assessment` (cluster health) | `run_read_query`, `profile_workloads`, `compose_report` | `profile_workloads` |
+
+`inspect_schema` is not offered: a cluster has no catalog to compose a statement over, and the grounding inventory the server captures before the first turn replaces it, the same walk a plan run is grounded by ([What a plan run knows](#what-a-plan-run-knows)).
+`inspect_plan`, `compare_plans` and `profile_table` are not offered either, because a cluster has no plan to estimate and no table to count, and a tool that can only refuse is a tool a run spends turns on.
+Resource efficiency needs the provider's usage reading and cluster health its workload reading (`agentReadings: ["usage", "workloads"]`), so a variant whose reading the engine does not declare is not offered.
+
+**`run_read_query` takes one kubectl read, under `kubectl.query.read`.**
+The model passes it as `statement`, where a SQL engine's tool takes `sql`; the ledger's own fields, `statement-drafted.sql` and `answer-composed.sql`, keep their names on every engine.
+A statement is at most 4,096 characters, deliberately narrower than the console's 65,536-byte limit.
+The reader refuses anything but a read, and also a watch and the paging clause `# libredb:page`, and says why in its own sentence, so a model narrows a read instead of paging past the row cap.
+A read past the row cap is refused, never cut, with advice that names only the flags that command takes: `-n`, `-l` and `--field-selector` for `get`, `-n` and `-l` for `top`, `--tail` and `-c` for `logs`, and `-n`, `--for` and `--types` for `events`.
+The repair ledger fingerprints a kubectl read by its command, its flags with their values as written and its positional arguments, so the same read written with its flags in another order is still the read that already failed.
+
+**What the agent reads is masked as it is written.**
+The agent's reads go through `queryReadOnly` under machine redaction, which masks values and keeps keys: env values, HTTP header values, container commands and arguments, annotation values, ConfigMap data, and Secret data, Secret names wherever a field holds one, and the names a Role grants on Secrets.
+Machine output carries only `<redacted>`; the editor keeps its own `(removed by Studio)` marker, and its output is unchanged.
+What machine redaction leaves unmasked is the residue under [Known limitations](#known-limitations), and the rules themselves are [`docs/providers/kubernetes.md`](./providers/kubernetes.md) section 9.
+
+**The agent runs as its own token when the connection carries one.**
+Kubernetes declares `agentCredential: "token"`, so the connection's `agentPassword` alone is the bearer token every agent acquisition sends; without one, the agent uses the connection's own token.
+That identity's RBAC decides what the agent can see, which is why a token bound to the `view` ClusterRole is the one to give it.
+
+No kubectl variant can auto-execute: a kubectl answer is never run in the editor, so the run route refuses `autoExecute` on Kubernetes, the rail hides the setting, and the run's rules never mention it.
 
 ### The query-optimization template
 
@@ -1031,6 +1088,21 @@ at the end of the run. The exemption is one artifact **kind** and nothing more -
 cited by an optimization report still ends the run `empty-evidence`, because zero rows from a read is
 the answer that read gave - and it is this rule's alone: `agent-investigation.1` and the two verifiers
 composing on it are untouched, so the id bump is `agent-query-optimization.2` -> `.3`.
+
+**On a Kubernetes connection this template is resource efficiency** ([On a Kubernetes connection](#on-a-kubernetes-connection)).
+A cluster's optimization is not a slow statement but a container sized for what it does not use, so the run reads usage against requests and limits and may recommend new ones, and it is offered `inspect_usage` where a SQL run is offered `inspect_plan` and `compare_plans`.
+`inspect_usage` takes a namespace and an optional label selector, never a statement, and reaches the cluster through `cluster.usage.read`.
+The provider reads the metrics.k8s.io PodMetrics and the pods' container resources and joins them into one row per container: its namespace, pod and owning workload, CPU in millicores and memory in bytes as numbers, its requests and limits, usage divided by request, and the metrics window.
+One call is one statement charge, carries at most 500 containers, and is refused rather than truncated past that ceiling or past the run's byte budget, with advice to narrow by namespace or selector.
+A reading lands on the ledger as `usage-read`; a cluster that serves no usage metrics, because metrics-server is not installed or not answering, records `usage-unavailable` naming metrics-server instead, and the run is told usage cannot be read there.
+`recommend_change` takes a `resources` arm on this variant alone: the namespace, the owning workload's kind and name, the container, its current and proposed requests and limits as Kubernetes quantities, a rationale and the evidence.
+There is no statement in it, nothing to apply and nothing handed to the editor, and the rail shows it as *Resources recommended* with no apply control.
+Once a usage reading is in hand, the run is told what its verdict asks before it reports.
+
+Its goal verifier is `agent-query-optimization-kubectl.1`: the investigation baseline over the run's own artifacts, with a usage reading counted as meaningful even when it holds no row, and then either a `resources` recommendation citing a usage reading of this run, or a report citing one and recommending nothing.
+**"Nothing to change" answers.**
+A namespace whose containers fit their requests must not force an invented change, so a report that cites the reading and says so is answered.
+Its shortfalls are `no-usage-reading` for a run that never read usage, `no-usage-evidence` for a run whose answer does not rest on the reading it took, and `no-usage-metrics` for a run whose only reading was `usage-unavailable`, which stays unanswered under its own name so the rail says metrics-server is missing rather than that the model failed.
 
 ### The database-assessment template
 
@@ -1118,6 +1190,20 @@ now reads those out of the table's own `CREATE TABLE` and lists them as `(unique
 words rather than a name that could be mistaken for a user's `CREATE INDEX`. `fk_unindexed` remains a
 prefix test: an index serves the column it LEADS on, so `UNIQUE (note, parent_id)` does not cover
 `parent_id`.
+
+**On a Kubernetes connection this template is cluster health** ([On a Kubernetes connection](#on-a-kubernetes-connection)).
+A cluster's assessment is not the state of its data but the state of its workloads, so the run is offered `profile_workloads` where a SQL run is offered `profile_table`.
+`profile_workloads` takes one namespace and nothing else, and reaches the cluster through `cluster.workloads.read`.
+The provider lists the namespace's controllers independently of its pods (Deployments, StatefulSets, DaemonSets, Jobs and CronJobs), then its pods and its Warning events, and walks ownership from a pod through its ReplicaSet to a Deployment and from a Job to its CronJob.
+It answers one row per workload: its kind and name, desired and ready counts in the kind's own terms, pods not ready, the cumulative restart count with the last termination's time and reason, the containers missing requests, limits, readiness or liveness probes, and the Warning events by reason.
+A controller that wants replicas and has no pod is a row, because that is the finding.
+A pod whose controller is none of those kinds, such as a database operator's custom resource, an Argo Rollout or an orphan ReplicaSet, counts under a row for that controller, with no desired count, so an operator-managed database's failing pods are never left out.
+Such a controller with no pod in the namespace has no row.
+One call is one statement charge, carries at most 500 workloads, and is refused rather than truncated past that ceiling or past the run's byte budget; a profile lands on the ledger as `workloads-profiled`.
+
+Its goal verifier is `agent-database-assessment-kubectl.1`: the investigation baseline over the run's own artifacts, with a workload profile counted as meaningful even when it holds no row, and then at least one profile.
+**"Nothing to change" answers here too:** an empty namespace, or one whose workloads are all healthy, is an answer, not empty evidence.
+Its shortfall is `no-workload-profile`, for a run that reported without profiling a namespace.
 
 ### The operations template
 
@@ -1279,9 +1365,11 @@ Two limits stated rather than glossed:
   state those as claims in the report rather than file them as recommendations.
 
 **The curated read is a fifth operation descriptor** (`db.operations.read`, R0 `metadata-read`) — the
-shape the backlog's monitor-snapshot deferral asked for, "a descriptor shape for non-SQL reads". R0 rather than R1 is a
-claim about what bounds it: an R1 descriptor must NAME the database-native mechanism bounding it, and
-a curated provider call has none, because there is no statement for a read-only transaction to bound.
+shape the backlog's monitor-snapshot deferral asked for, "a descriptor shape for non-SQL reads".
+R0 rather than R1 is a claim about what bounds it: an R1 descriptor must name the mechanism that bounds it, and that mechanism is never a parser.
+Where the engine has a read-only mechanism, that mechanism is the boundary: a read-only transaction or session.
+Where it has none, as on Kubernetes, the boundary is an allowlist Studio enforces on the final method and path of every request before it is sent, together with the authorization of the identity the request runs as, which on a cluster is its RBAC; that is what `kubectl.query.read`, `cluster.usage.read` and `cluster.workloads.read` name.
+A curated provider call is not held to either, because it carries no statement for one to bound.
 What bounds it instead is the input contract, which carries a kind out of a closed enum and two
 scalars — no `sql` key exists on it at all. The honest edge: `SlowQueryStats.query` and
 `ActiveSessionDetails.query` are statements somebody wrote, and a statement can carry literal values;
@@ -1333,8 +1421,8 @@ answer, and how it should be shown.** The read itself is already on the ledger �
 before it, `tool-completed` after — but "this result is the answer, and it should be drawn as a bar
 chart of region against net_total" is a decision, and it gets its own event, `answer-composed`.
 
-**One workflow is offered it: `data-analysis`.** `DATA_ANALYSIS_TOOLS` names it and no other
-`WORKFLOW_TOOLS` set does, so an investigation or an assessment that calls it is told there is no
+**One workflow is offered it: `data-analysis`.** That variant's `tools` in `agent-manifest.ts` names it and no other
+variant's does, so an investigation or an assessment that calls it is told there is no
 such tool. That is the axis made load-bearing rather than an omission: `data-analysis` is the only
 workflow whose verdict (`agent-data-analysis.1`) requires an answer, so it is the only one that can
 produce one, and offering the tool to a run whose bar never asks for it would only distract it.
@@ -1962,9 +2050,8 @@ said a run has to answer, so nothing looked.
 the other half: a **pure fold over the ledger** that returns an outcome, the id of the rule
 that produced it, and what the run was required to produce and did not.
 
-The rule is chosen by the run's mode first and its workflow type second, from total records —
-`AGENT_WORKFLOW_VERIFIERS` names one rule per workflow, so a workflow added to the contract stops the
-build until somebody decides what "answered" means for it.
+The rule is chosen by the run's mode first, then by its workflow on its statement language: every workflow variant in `AGENT_WORKFLOW_VARIANTS` (`src/lib/agent/agent-manifest.ts`) names one verifier, and the SQL record is total over the workflows, so a workflow added to the contract stops the build until somebody decides what "answered" means for it.
+An agent run persists its verifier's id when it opens, so a run reopened later, in a fresh process with no connection reachable, is judged by the rule it was opened under, and an id the code holds no rule for is an error rather than a verdict.
 
 | Mode | Rule (`agent-planning.1` / `agent-investigation.1`) | Unmet when it fails |
 | --- | --- | --- |
@@ -1972,8 +2059,13 @@ build until somebody decides what "answered" means for it.
 | `agent` (investigation) | The run composed at least one claim, **and** the claims do not rest entirely on empty results. | `no-report`, `empty-evidence` |
 | `agent` (query-optimization) | The baseline above with **plans exempt from its emptiness clause** (a plan's row count measures nothing), **and** either a plan comparison on the ledger or an index recommendation citing a plan this run read. `agent-query-optimization.3`. | the above, plus `no-plan-comparison`, `no-plan-evidence` |
 | `agent` (database-assessment) | The baseline above, **and** a table profiled. `agent-database-assessment.1`. | the above, plus `no-table-profile` |
+| `agent` (query-optimization on Kubernetes) | The baseline above, with a usage reading counted as meaningful even when empty, **and** either a `resources` recommendation citing a usage reading of this run or a report citing one and recommending nothing. `agent-query-optimization-kubectl.1`. | the above, plus `no-usage-reading`, `no-usage-evidence`, `no-usage-metrics` |
+| `agent` (database-assessment on Kubernetes) | The baseline above, with a workload profile counted as meaningful even when empty, **and** a namespace's workloads profiled. `agent-database-assessment-kubectl.1`. | the above, plus `no-workload-profile` |
 | `agent` (operations) | A composed report, **and** at least one claim in it citing an artifact this run read. `agent-operations.2`. **Not** composed on the baseline: an empty reading is an answer, so the emptiness clause is dropped — and an empty reading still satisfies the citation arm, because the artifact exists. The arm was added by #411: the run gained a citable schema inventory, so "cite a reading" stopped being enforced by composition alone. See [The operations template](#the-operations-template). | `no-report`, `no-reading`, `cancelled` |
 | `agent` (data-analysis) | The baseline above, **and** an `answer-composed` entry: which result IS the answer, and how to show it — **and at least one claim citing that same artifact**, so the report is about the result it presented. `agent-data-analysis.1`. | the above, plus `no-answer`, `answer-uncited` |
+
+On Kubernetes, `investigation`, `data-analysis` and `operations` are judged by the same rules as on a SQL engine, under the same ids; only resource efficiency and cluster health have rules of their own, because only their artifacts differ ([The query-optimization template](#the-query-optimization-template) and [The database-assessment template](#the-database-assessment-template) say what each asks).
+`no-usage-metrics` is kept apart from `no-usage-reading` because its cause is the cluster and not the run: metrics.k8s.io is absent or metrics-server does not answer, and the reader is owed that sentence rather than one about the model.
 
 **Why `agent-data-analysis.1` asks for an artifact rather than for a picture.** Every valid answer
 this workflow can give produces an `answer-composed` entry: a chart of an aggregate, a table for a
@@ -2117,7 +2209,7 @@ model passed the capability probe**; for anybody else the answer is that there i
 | **Any AI at all, for an EMBEDDED user** — one working panel and one exported component, which is less than "both tabs worked". The embedded shell rendered both TABS regardless of `features.ai`, and only Autopilot was behind them: `AIAutopilotPanel` had no feature gate, so a libredb-platform user had a fully working Autopilot panel posting to `/api/db/monitoring` and `/api/ai/autopilot` on the HOST's origin. The NL2SQL tab rendered an EMPTY PANE under the default `features.ai: false` — the shell passed `isOpen={features.ai ? isNL2SQLOpen : false}` and the panel returns `null` when it is not open — so what an embedded host lost there is `NL2SQLPanel` itself, exported from `@libredb/studio/components` for a host to mount on its own, plus the tab for a host that had switched `features.ai` on. | Nothing. The rail lives in the standalone shell only; the package carries no agent surface, `WorkspaceFeatures` deliberately gained no agent field, and no package entry point transitively imports `src/lib/agent`. For an embedded user every "what a run does instead" cell below is false, because there is no run. | The removal itself (`5bbea51`, which deletes the export, both render arms and the flag), read against the code it deleted: `git show 5bbea51^:src/workspace/StudioWorkspace.tsx` (the two `features.ai ?` props), `git show 5bbea51^:src/components/NL2SQLPanel.tsx` (`if (!isOpen) return null`), `git show 5bbea51^:src/workspace/types.ts` (`DEFAULT_WORKSPACE_FEATURES.ai: false`); `tests/unit/agent-package-boundary.test.ts`; [The surface in the app](#the-surface-in-the-app). |
 | **A TOOLLESS model drove both panels.** Each posted a prompt and rendered what came back, so any configured model produced an answer — including one that cannot call a tool, which is what a small local `ollama` model usually is. | An agent run is refused before it opens: the start path probes the model, and an established incapability is a `422` naming what could not be established. What such a model can still drive is planning mode, which is toolless by contract: the model there is handed no tool, runs no statement of the user's, writes nothing, and drafts a statement for the user to run themselves. | `src/lib/agent/capability-gate.ts`; `tests/isolated/agent-capability-gate.test.ts`; [What a refused model looks like in the app](#what-a-refused-model-looks-like-in-the-app). |
 | **One click that RAN the model's SQL.** NL2SQL's Run and Autopilot's Execute pushed model-authored SQL — including DDL — straight into the studio's execution path. | The rail hands a statement to the **editor** and never runs it: an explicit "Apply to editor" on a drafted statement, a recommendation, or a plan run's drafted statement. Nothing in the runtime executes a proposed statement. A plan run's statement is offered through the answer card rather than the shared control, because that card is also what marks a statement the guard did not classify as read-only and names what the inventory does not hold, in the engine's own noun — the marking and the offer have to arrive together, and since the 2026-08-21 redesign that offer exists in exactly one place. | `src/components/agent/timeline.ts` — the `statement-drafted` and `recommendation` entries carry `applySql`, and `plan-statement-drafted` deliberately does not; `src/components/agent/AnswerCard.tsx` — the marked hand-off, and `AgentRail.tsx` withholding every other one; `tests/evals/query-optimization.test.ts` — the recommendation is recorded and no `CREATE INDEX` reaches the database. |
-| **Proposed a statement the run never sent.** NL2SQL's product was a statement, whatever the model wrote. | Only `recommend_change` proposes an unexecuted statement; it accepts `index` or `rewrite`, the statement must match the card it is filed under, and it belongs to the `query-optimization` workflow. An investigation — what a plain-English question opens — cannot propose anything. | `src/lib/agent/tools.ts` (`recommendationSchema`, `matchesCard`, `QUERY_OPTIMIZATION_TOOLS`); `tests/evals/legacy-surface-coverage.test.ts`. |
+| **Proposed a statement the run never sent.** NL2SQL's product was a statement, whatever the model wrote. | Only `recommend_change` proposes an unexecuted statement; it accepts `index` or `rewrite`, the statement must match the card it is filed under, and it belongs to the `query-optimization` workflow. An investigation, what a plain-English question opens, cannot propose anything. | `src/lib/agent/tools.ts` (`recommendationSchema`, `matchesCard`), `src/lib/agent/agent-manifest.ts` (the query-optimization variant's `tools`); `tests/evals/legacy-surface-coverage.test.ts`. |
 | **Read live monitoring.** Autopilot's whole input came from `/api/db/monitoring`: slow queries, index usage, table statistics, cache and connection metrics. | **Restored, and bounded.** `inspect_operations` reads the same provider methods under the `db.operations.read` descriptor, and it reaches ONE workflow: a run opened to Operate. An investigation or an assessment is still offered nothing that reads monitoring, so "the agent can read monitoring" is only true of that workflow. The two deferrals that tracked this — the monitoring half of the M2 tooling entry, and the assessment's missing monitor snapshot — are closed and removed from the backlog. | `src/lib/agent/tools.ts`; `tests/evals/legacy-surface-coverage.test.ts` — the members and the operations they may name are asserted as a set, so a monitoring member under ANY name has to land there; `tests/evals/operations.test.ts` — the arc, on an engine that answers no statement. |
 | **A free-form markdown report**, opening with a performance score out of 100 and closing with configuration advice. | A report is claims, each citing an artifact this run read or the snapshot it captured, verified against the run's own ledger before it is recorded. A number cited to nothing cannot be reported — the citation is what is checked, never the claim's text, so a fabricated score citing a real artifact would be accepted. | `src/lib/agent/tools.ts` (`composeReportTool`); `tests/evals/legacy-surface-coverage.test.ts` — an invented correlation id is refused and the run ends `unanswered (no-report)`. |
 | **Maintenance tasks** — `VACUUM`, `ANALYZE`, reindexing — in the same report. | Nothing proposes them: the `change` card has two members and neither is maintenance. It stays where it was before the panels — the monitoring surface, and the user's own editor. | `src/lib/agent/tools.ts` (`recommendationSchema`). |
@@ -2226,14 +2318,14 @@ own.
 | Level | The pill says | The qualifier beside it | When |
 | --- | --- | --- | --- |
 | `safe` | *Executes nothing it drafts* | *one schema read grounds it, nothing else reaches the database* | Plan mode, on every engine, with or without the hand-over |
-| `reads` | *Reads only* | the policy row's own per-statement row cap and timeout, *enforced by the engine* | Agent mode on an engine in `AGENT_EXECUTION_ENGINES`, hand-over not ticked |
+| `reads` | *Reads only* | the policy row's own per-statement row cap and timeout, *enforced by the engine* | Agent mode on a SQL engine in `AGENT_EXECUTION_ENGINES`, hand-over not ticked |
+| `reads` | *Reads only* | the same row cap and timeout, *enforced by Studio's request allowlist* | Agent mode on Kubernetes, ticked or not: no kubectl variant offers the hand-over, so there is nothing to widen |
 | `widened` | *Reads only, and one statement in your editor* | `AGENT_HANDOVER_BUDGET`'s row cap, *no time limit, same read-only session* | The same, with the hand-over consented for the run being opened |
 | `blocked` | *Cannot execute on `<engine>`* | *plan mode drafts here, and the operations workflow still runs* | Agent mode on any other engine |
 | `blocked` | *Cannot execute yet* | *no connection is resolved, so no engine has been established* | Agent mode with no connection resolved |
 
-Four levels and five readings: `blocked` covers both arms that execute nothing and have no bound to
-state, and they stay separate arms because "has no read-only statement path" is a claim about an
-engine, which a panel that has resolved no connection has not seen. Not one engine name and not one
+Four levels and six readings: `blocked` covers both arms that execute nothing and have no bound to state, and they stay separate arms because "has no read-only statement path" is a claim about an engine, which a panel that has resolved no connection has not seen.
+Not one engine name and not one
 figure is typed in the module — the names come from `AGENT_EXECUTION_ENGINES` through
 `getDBConfig().label` and the figures from the policy rows, which is the rule `hero-proof.tsx`
 follows and #425 is the record of what typing them costs. `blocked` also takes no hue of its own
@@ -2268,6 +2360,12 @@ let one click on **Plan** restate a running agent run as *Executes nothing it dr
 the strip goes on promising *one statement in your editor* after the widened run has ended while the
 next consent step defaults the tick to OFF. The same reading writes the workflow-and-mode line under
 the objective, so the panel's two descriptions of one run cannot disagree.
+
+**The kubectl reads arm names the boundary that is really there.**
+A cluster has no read-only session, so its `reads` reading says what bounds it instead: its title is *Agent mode reads, under a boundary Studio enforces*, and its body says that Studio's request allowlist admits reads only, checked on the final request before it is sent, and that the identity's RBAC decides what is visible.
+It names both identities the agent may run as, the connection's agent token when one is set and the connection's own token otherwise, and recommends a token bound to `view`, because the rail is handed a connection id and a type, never the credential fields, and cannot know which is set.
+It also says which values Studio masks before they reach the model, and that nothing reaches the editor.
+The `blocked` arms say "a read-only statement path under a boundary it declares" rather than "database-native", because the engines they list are not all bounded by the database.
 
 The amber engine notice asks the other question — what pressing Start would do — and takes the
 SELECTION (`selectionPosture`): the toggle's mode, and the hand-over tick only where a consent step is
@@ -2718,14 +2816,30 @@ the role's own grants are the whole boundary (A3).
 - **B100**: Oxia is served by plan mode only: MCP is not offered for it (`MCP_EXPOSABLE.oxia` is false), and its provider implements no `queryReadOnly`, so agent execution and MCP `run_read_query` refuse it, because its key paths name Pulsar tenants and topics and no MCP surface that never returns a key value is designed yet (`docs/providers/oxia.md` section 3.6).
 - **B103**: Databend is served by plan mode and the MCP metadata tools only: its provider implements no `queryReadOnly`, so agent execution and MCP `run_read_query` refuse it, because a SELECT shape can write there (`nextval`, `EXECUTE IMMEDIATE`, `CALL`, a `SETTINGS (...)` clause and six `fuse_*` and cache table functions), so no statement classifier can be the boundary until a contract of its own is measured (`docs/providers/databend.md`).
 - **B104**: S3-compatible object storage is served by plan mode only: MCP is not offered for it (`MCP_EXPOSABLE.s3` is false), and its provider implements no `queryReadOnly`, so agent execution and MCP `run_read_query` refuse it, because no MCP surface that never returns a key is designed yet (`docs/providers/s3.md` section 3.6).
-- **B105**: Kubernetes is served by plan mode only: MCP is not offered for it (`MCP_EXPOSABLE.kubernetes` is false), and its provider implements no `queryReadOnly`, so agent execution of a workflow that sends statements and MCP `run_read_query` refuse it, while the operations workflow opens as on every engine; its plan-mode walk reads the session's namespace and `Cluster` and withholds Secret and Namespace names (`docs/providers/kubernetes.md` section 9).
-- **B106**: on Kubernetes, the namespace names plan mode walks reach the configured model as container names, and on a multi-tenant cluster they may name customers; whether a provider may withhold container names is open.
+- **B105**: Kubernetes has no MCP surface: `MCP_EXPOSABLE.kubernetes` is false and the MCP fence reads SQL only, so MCP `run_read_query` and `inspect_schema` refuse a Kubernetes connection, while agent mode reads it through `kubectl.query.read` under machine redaction (`docs/providers/kubernetes.md` section 9).
+- Kubernetes namespace names reach the model as container names; this is accepted by decision.
 - **B107**: Firestore is served by plan mode only: MCP is not offered for it (`MCP_EXPOSABLE.firestore` is false), and its provider implements no `queryReadOnly`, so agent execution and MCP `run_read_query` refuse it, because every read is billed and no read contract for the query chain under an agent's budget is designed yet; its plan-mode walk reads collection names and no document (`docs/providers/firestore.md` section 3.5).
 - **B108**: RabbitMQ is served by plan mode and the MCP metadata tools only: its provider implements no `queryReadOnly`, so agent execution of a workflow that sends statements and MCP `run_read_query` refuse it; its plan-mode walk reads the virtual host `/` alone and counts the others it did not read (`docs/providers/rabbitmq.md` section 8).
 - **B109**: the schema docs route puts table, collection and stream names in the prompt without the untrusted-content fence, for every provider; the route has no tools, so the exposure is a spoofed document on the user's screen.
 - **B110**: the answer card's inventory chip counts every captured object under the engine's entity noun, so a RabbitMQ capture of 17 streams, 6 queues and 18 exchanges reads "41 streams read".
+- **B111**: DuckDB is offered `profile_table` by the database-assessment and data-analysis workflows, and `composeTableProfile` (`src/lib/agent/table-profile.ts`) has no verified DuckDB composition, so every call answers `UNSUPPORTED_DIALECT`; it was kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
+- **B112**: a run's persisted workflow type is not checked when its ledger is read, so a ledger naming a workflow Studio does not know reaches five workflow-keyed tables as `undefined`, and a budget read on it fails as a `TypeError` rather than a named refusal.
+- **B113**: [`AGENT_GUIDE.md`](./AGENT_GUIDE.md) cites code by line number, and those numbers have drifted from the code they name; read the file and symbol a citation names rather than its line.
+- **B114**: a cluster health run drops the Warning events of a controller whose kind the workload profile does not list, such as a CloudNativePG `Cluster` or an Argo `Rollout`, when that controller has no pod in the namespace, because `readWorkloadProfile` gives it no row to count them under.
+- **B115**: plan mode on a Kubernetes connection still speaks of a database: its safety strip says nothing else reaches the database, and the objective field suggests "Why is checkout slow?".
+- **B116**: the agent section of [`FEATURES.md`](./FEATURES.md), the "Two independent axes" bullet among others, still carries em dashes.
 - **B101**: a principal the read-only execution profile refuses for lacking a privilege it needs, such as `SHOWPLAN` on SQL Server, ends its run with the advice to point the agent credential at a least-privilege user, the repair for the opposite refusal, because the run classifier folds both deny codes into the one reason `agent-principal-refused`, and the right advice reaches only the run's ledger; measured on a seeded SQL Server login without `SHOWPLAN`.
 - **B102**: plan mode's name check marks two kinds of correct statement as naming something the inventory does not hold: a read of the engine's own catalog (`sys.databases`, `information_schema.tables`, `pg_class`), which the catalog reading leaves out of the inventory, and a `FROM` inside a function call (`EXTRACT(YEAR FROM created_at)`), which the reader takes for a table position; the statements run, and the mark is a hint, not a refusal.
+
+**What machine redaction leaves unmasked on Kubernetes.**
+Agent reads on a cluster are masked by structural rules and by request target (see [On a Kubernetes connection](#on-a-kubernetes-connection)), and what those rules do not reach is stated here, in the same six lines as [`docs/providers/kubernetes.md`](./providers/kubernetes.md) section 9:
+
+- Log lines and event messages are free text the server wrote; a credential an application prints reaches the model.
+- Status and condition messages pass.
+- Label values pass, and can hold anything a team put there.
+- Custom-resource fields with no structural rule pass in -o yaml and -o json.
+- A guessed Secret name can be confirmed to exist through get secret NAME or auth can-i get secrets/NAME; RBAC decides that.
+- The connection's Namespaces field lists the tree; it does not bound a statement, which may use -A or any -n.
 
 **Settled as limits rather than as work.** The eight below have no entry in `docs/BACKLOG.md`, and
 that is the point: each is how the product behaves, stated where a reader of this document will meet

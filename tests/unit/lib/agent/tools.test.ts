@@ -6,12 +6,14 @@ import {
   AGENT_EXECUTION_PROFILE,
   AGENT_OPERATIONS_PROFILE,
 } from "@/lib/agent/execution-policy";
+import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { AgentRunDeadline } from "@/lib/agent/deadline";
 import { AgentRepairLedger, fingerprintStatement } from "@/lib/agent/repair-ledger";
 import {
   AGENT_ANSWER_CONTRACT,
   AGENT_TOOL_DEFINITIONS,
   type AgentToolContext,
+  agentToolDefinition,
   comparePlansTool,
   composeReportTool,
   executeAgentOperation,
@@ -255,6 +257,41 @@ describe("selectAgentTools — the server decides, from the persisted mode and w
     expect(names).toEqual(["inspect_operations", "recommend_change", "compose_report"]);
   });
 
+  test("the persisted statement language picks the variant, and an absent one reads as sql", () => {
+    // The same frozen array for the same variant, so a run recorded before languages existed and one recorded
+    // as sql are offered exactly the same tools.
+    expect(selectAgentTools({ ...persisted("agent"), statementLanguage: "sql" })).toBe(
+      selectAgentTools(persisted("agent")),
+    );
+    expect(selectAgentTools({ ...persisted("agent", "operations"), statementLanguage: "kubectl" })).toBe(
+      selectAgentTools(persisted("agent", "operations")),
+    );
+    expect(selectAgentTools({ ...persisted("planning"), statementLanguage: "kubectl" })).toEqual([]);
+    expect(
+      selectAgentTools({ ...persisted("agent", "database-assessment"), statementLanguage: "kubectl" }).map(
+        (tool) => tool.name,
+      ),
+    ).toEqual(["run_read_query", "profile_workloads", "compose_report"]);
+  });
+
+  test("a SQL run is offered the SQL definitions themselves, by name", () => {
+    // Every definition is read through `agentToolDefinition`, so a later language's override cannot reach a SQL
+    // run: what an investigation sends is the record's own entry for each name, the same object.
+    const offered = selectAgentTools({ mode: "agent", workflowType: "investigation" });
+
+    expect(offered).toEqual(offered.map((definition) => AGENT_TOOL_DEFINITIONS[definition.name]));
+    for (const definition of offered) expect(definition, definition.name).toBe(AGENT_TOOL_DEFINITIONS[definition.name]);
+  });
+
+  test("a run with no recorded language reads the SQL definition", () => {
+    expect(agentToolDefinition(undefined, "investigation", "run_read_query")).toBe(
+      AGENT_TOOL_DEFINITIONS.run_read_query,
+    );
+    expect(agentToolDefinition("sql", "operations", "inspect_operations")).toBe(
+      AGENT_TOOL_DEFINITIONS.inspect_operations,
+    );
+  });
+
   test("present_answer is offered exactly where AGENT_WORKFLOW_PRESENTS_ANSWER says it is", () => {
     // The binding that keeps four layers agreeing. The rail offers the auto-execute
     // checkbox from this record, the route accepts the field from it, and
@@ -392,6 +429,8 @@ describe("selectAgentTools — the server decides, from the persisted mode and w
     // the array comparison this assertion used to make was blind to every tool that
     // declares no operation — it passed unchanged when two more were added.
     expect([...operations].sort()).toStrictEqual([
+      "cluster.usage.read",
+      "cluster.workloads.read",
       "db.operations.read",
       "sql.explain.estimate",
       "sql.query.read",
@@ -487,6 +526,20 @@ describe("a tool that demands a citation says what a citation IS (#350)", () => 
     );
 
     expect(report.kind).toBe("composed");
+  });
+
+  test("provider warnings reach the model fenced, and a result with none reads as it always did", async () => {
+    const warned = harness({}, async () =>
+      queryResult({ warnings: [{ message: "Studio read the last 100 lines of each stream." }] }),
+    );
+    const plain = harness();
+    const withWarnings = await runReadQueryTool(warned.context, { sql: "SELECT 1" });
+    const without = await runReadQueryTool(plain.context, { sql: "SELECT 1" });
+
+    expect(withWarnings.modelText).toContain("Studio read the last 100 lines of each stream.");
+    expect(withWarnings.modelText).toContain("warnings");
+    expect(without.modelText).not.toContain("warnings");
+    expect(without.modelText.split(UNTRUSTED_CONTENT_BEGIN)).toHaveLength(2);
   });
 
   /*
@@ -2744,6 +2797,24 @@ describe("runReadQueryTool — a database error is repairable, bounded, and neve
     expect(outcome.modelText.split(UNTRUSTED_CONTENT_END)[1]).toContain("LIMIT 200");
   });
 
+  test("a statement in a language with no server adapter is a named error, never a SQL fingerprint", async () => {
+    // A statement fingerprinted as SQL, or refused with a SQL sentence, would be a wrong answer that looks like a
+    // right one, so a language id this server does not know (one a ledger carried) throws before anything is spent.
+    let reached = false;
+    const h = harness({}, async () => {
+      reached = true;
+      throw new QueryError("never sent", "postgres");
+    });
+
+    await expect(
+      executeAgentOperation(
+        { ...h.context, statementLanguage: "cypher" as AgentStatementLanguageId },
+        { operationId: "sql.query.read", sql: "MATCH (n) RETURN n" },
+      ),
+    ).rejects.toThrow("no server adapter for cypher");
+    expect(reached).toBe(false);
+  });
+
   test("a catalog from another engine is answered with the engine this connection actually is", async () => {
     // 31 refusals of this shape: information_schema and schema-qualified names sent to SQLite.
     const h = harness({}, async () => {
@@ -3344,8 +3415,8 @@ describe("inspectSchemaTool — the server composes the catalog statement", () =
     const outcomes = [
       await inspectSchemaTool(h.context, { schema: 42 } as unknown as { schema?: string }),
       await inspectSchemaTool(h.context, { unexpected: "x" } as unknown as { schema?: string }),
-      await runReadQueryTool(h.context, { sql: 7 } as unknown as { sql: string }),
-      await runReadQueryTool(h.context, {} as unknown as { sql: string }),
+      await runReadQueryTool(h.context, { sql: 7 }),
+      await runReadQueryTool(h.context, {}),
       await inspectPlanTool(h.context, { sql: null } as unknown as { sql: string }),
     ];
 
@@ -3957,7 +4028,7 @@ describe("recommendChangeTool — a change the run proposes and does not make", 
 
     if (outcome.kind !== "recommended") throw new Error("expected recommended");
     expect(outcome.recommendation.change).toBe("index");
-    expect(outcome.recommendation.statement).toBe(INDEX_DDL);
+    expect(outcome.recommendation).toMatchObject({ statement: INDEX_DDL });
     expect(outcome.recommendation.evidence).toEqual([{ source: "artifact", correlationId: "corr-1" }]);
     expect(outcome.modelText).toContain("not executed");
   });
@@ -4201,7 +4272,7 @@ describe("recommendChangeTool — a change the run proposes and does not make", 
 
     if (outcome.kind !== "recommended") throw new Error(`expected recommended, got ${outcome.reasonCode}`);
     expect(outcome.recommendation.change).toBe("index");
-    expect(outcome.recommendation.statement).toBe(INDEX_DDL);
+    expect(outcome.recommendation).toMatchObject({ statement: INDEX_DDL });
     expect(outcome.recommendation.rationale).toBe("the filtered column has no index");
     expect(outcome.recommendation.evidence).toEqual([{ source: "artifact", correlationId: "corr-1" }]);
   });
@@ -4234,7 +4305,7 @@ describe("recommendChangeTool — a change the run proposes and does not make", 
 
     if (outcome.kind !== "recommended") throw new Error(`expected recommended, got ${outcome.reasonCode}`);
     expect(outcome.recommendation.change).toBe("rewrite");
-    expect(outcome.recommendation.statement).toBe("SELECT emp_no, first_name FROM employee");
+    expect(outcome.recommendation).toMatchObject({ statement: "SELECT emp_no, first_name FROM employee" });
   });
 
   test("but a card whose statement is prose is still refused", () => {
@@ -4289,7 +4360,7 @@ describe("recommendChangeTool — a change the run proposes and does not make", 
 
     if (outcome.kind !== "recommended") throw new Error(`expected recommended, got ${outcome.reasonCode}`);
     expect(outcome.recommendation.change).toBe("rewrite");
-    expect(outcome.recommendation.statement).toBe("SELECT id FROM orders WHERE customer_id = 1");
+    expect(outcome.recommendation).toMatchObject({ statement: "SELECT id FROM orders WHERE customer_id = 1" });
   });
 
   test("the statement under a key of the model's own, when `statement` is empty", () => {
@@ -4321,7 +4392,7 @@ describe("recommendChangeTool — a change the run proposes and does not make", 
 
     if (outcome.kind !== "recommended") throw new Error(`expected recommended, got ${outcome.reasonCode}`);
     expect(outcome.recommendation.change).toBe("index");
-    expect(outcome.recommendation.statement).toBe(INDEX_DDL);
+    expect(outcome.recommendation).toMatchObject({ statement: INDEX_DDL });
   });
 
   test("the same, with the model's other spellings of that key", () => {
@@ -4336,7 +4407,7 @@ describe("recommendChangeTool — a change the run proposes and does not make", 
       } as never);
 
       if (outcome.kind !== "recommended") throw new Error(`${key}: expected recommended, got ${outcome.reasonCode}`);
-      expect(outcome.recommendation.statement).toBe(INDEX_DDL);
+      expect(outcome.recommendation).toMatchObject({ statement: INDEX_DDL });
     }
   });
 
@@ -4404,7 +4475,7 @@ describe("recommendChangeTool — a change the run proposes and does not make", 
     });
 
     if (outcome.kind !== "recommended") throw new Error("expected recommended");
-    expect(outcome.recommendation.statement).toBe(INDEX_DDL);
+    expect(outcome.recommendation).toMatchObject({ statement: INDEX_DDL });
   });
 
   test("a recommendation citing something the run never produced is refused", () => {
@@ -6342,6 +6413,39 @@ describe("present_answer records which result IS the answer, and how to show it"
       expect(outcome.reasonCode).toBe("ANSWER_NOT_A_DATA_READ");
       // The way out, named: this run has a tool that reads data, and the refusal says so.
       expect(outcome.modelText).toContain("run_read_query");
+    });
+
+    test("a kubectl read the model drafted IS a data read, and is accepted as the answer", () => {
+      // The second statement-read operation. Its id is its own so the SQL contract stays
+      // what it was, and that must not make it a plan or a profile in this tool's eyes:
+      // it is a statement the model wrote and the engine ran.
+      const h = harness();
+      const events: AgentRunEvent[] = [
+        {
+          kind: "statement-drafted",
+          atMs: 1,
+          stepId: "step-kubectl",
+          sql: "get pods -n shop",
+          rationale: "which pods run in shop",
+        },
+        {
+          kind: "tool-completed",
+          atMs: 2,
+          stepId: "step-kubectl",
+          artifact: {
+            correlationId: "corr-kubectl-read",
+            runId: "run-1",
+            operationId: "kubectl.query.read",
+            summary: { rowCount: 2, columnNames: ["NAME", "STATUS"], elapsedMs: 5 },
+          },
+        },
+      ];
+
+      const outcome = present(h, events, { artifact: "corr-kubectl-read", presentation: { kind: "table" } });
+
+      if (outcome.kind !== "answered") throw new Error(`expected an answer, got ${outcome.kind}`);
+      expect(outcome.answer.artifact.correlationId).toBe("corr-kubectl-read");
+      expect(outcome.answer.sql).toBe("get pods -n shop");
     });
 
     test("and when the run already holds a read, the refusal hands over ITS id", () => {

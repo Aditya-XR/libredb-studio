@@ -41,7 +41,7 @@ None of it is a GitHub issue.
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4-K8 · 5
 - [Security scanner triage](#security-scanner-triage) — SCAN1-SCAN2 · 2
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A2–A8 · 5
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B110 · 45
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B116 · 50
 - [Passkey deferrals (#785)](#passkey-deferrals-785) — PK1-PK9 · 8
 - [MCP server deferrals (#246)](#mcp-server-deferrals-246) — MCP1-MCP3 · 3
 
@@ -6792,7 +6792,7 @@ there. `agent-investigation.1`, `agent-database-assessment.1` and `agent-data-an
 artifact is scored `empty-evidence` for the same wrong reason: a plan arrives in one column, the
 driver reports no row count for it, and that zero measures nothing.
 
-Reachable rather than theoretical - `inspect_plan` is in `AGENT_MODE_TOOLS`, so every one of those
+Reachable rather than theoretical - `inspect_plan` is in every SQL statement variant's `tools` (`agent-manifest.ts`), so every one of those
 workflows is offered it. Left out of B45 because closing it means changing what three released
 verifier ids mean, which by this file's own versioning rule (`goal-verifier.ts`: a rule that changes
 its mind takes a new id) forces `agent-investigation.1` to `.2` plus the two ids composing on it,
@@ -7172,21 +7172,12 @@ Found 2026-10-09 while designing the S3 provider.
 
 **Done when:** an MCP metadata surface that lists buckets and never returns an object key is designed; `MCP_EXPOSABLE.s3` turns true for it; and `run_read_query` and agent execution serve a `queryReadOnly` that runs one console read command, with tests; cited in `docs/AGENT.md` beside B103.
 
-### B105. Kubernetes has no agent execution and no MCP surface
+### B105. Kubernetes has no MCP surface
 
-`MCP_EXPOSABLE.kubernetes` is false and the provider implements no `queryReadOnly`, so agent execution of a workflow that sends statements and MCP `run_read_query` refuse it, while the operations workflow opens as on every engine; plan mode works, walking the session's namespace and `Cluster`, with Secret and Namespace names withheld (`docs/providers/kubernetes.md` section 9).
+`MCP_EXPOSABLE.kubernetes` is false and the MCP fence reads SQL only, so MCP `run_read_query` and `inspect_schema` refuse a Kubernetes connection, while agent mode reads it through `kubectl.query.read` under machine redaction (`docs/providers/kubernetes.md` section 9).
+Found 2026-10-10 while designing the Kubernetes provider; narrowed to its MCP half when agent execution landed.
 
-Found 2026-10-10 while designing the Kubernetes provider.
-
-**Done when:** an MCP metadata surface that returns no value, label, annotation or Secret name is designed, and `run_read_query` serves the kubectl subset under its own read policy, with tests; cited in `docs/AGENT.md` beside B104.
-
-### B106. Kubernetes namespace names reach plan mode as container names
-
-Plan mode's inventory names the namespaces it walked and counts the ones it did not read, and those names reach the configured model; on a multi-tenant cluster they may name customers.
-
-Found 2026-10-10 while designing the Kubernetes provider; an open question of the design.
-
-**Done when:** the owner decides whether a provider may withhold container names from machine surfaces, and either a declaration does it with a test, or the item is closed as accepted and `docs/AGENT.md` says so.
+**Done when:** an MCP surface for kubectl reads is designed that applies the agent's machine redaction to every answer, `MCP_EXPOSABLE.kubernetes` turns true for it, and `run_read_query` serves it with tests; cited in `docs/AGENT.md` beside B104.
 
 ### B107. Firestore has no agent execution and no MCP surface
 
@@ -7195,7 +7186,7 @@ Every Firestore read is billed, and no read contract for the query chain under a
 
 Found 2026-10-12 while designing the Firestore provider.
 
-**Done when:** an MCP metadata surface that reads no document is designed, `MCP_EXPOSABLE.firestore` turns true for it, and `run_read_query` and agent execution serve a `queryReadOnly` that runs one console statement under a per-run read bound, with tests; cited in `docs/AGENT.md` beside B106.
+**Done when:** an MCP metadata surface that reads no document is designed, `MCP_EXPOSABLE.firestore` turns true for it, and `run_read_query` and agent execution serve a `queryReadOnly` that runs one console statement under a per-run read bound, with tests; cited in `docs/AGENT.md` beside B105.
 
 ### B108. RabbitMQ has no agent execution and no MCP `run_read_query`
 
@@ -7222,6 +7213,56 @@ A RabbitMQ plan run's chip read "41 streams read" while the capture held 17 stre
 Found 2026-10-12 in a plan-mode pass of the RabbitMQ provider.
 
 **Done when:** the chip names objects of several kinds as what they are, by kind or by a neutral noun, with a test over a capture that holds three kinds.
+
+### B111. DuckDB is offered profile_table, which can only refuse
+
+`profile_table` is offered to the database-assessment and data-analysis workflows on DuckDB, and `composeTableProfile` (`src/lib/agent/table-profile.ts`) has no verified DuckDB composition, so every call answers `UNSUPPORTED_DIALECT`.
+Kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
+Found 2026-10-14 while building the statement-language layer.
+
+**Done when:** DuckDB gains a verified profile composition with tests, or its SQL variants stop offering `profile_table` through a requirement, with the eval and docs updated; cited in `docs/AGENT.md`.
+
+### B112. A run's persisted workflow type is never checked when the ledger is read
+
+`foldLedger` in `src/lib/agent/run-store.ts` takes `workflowType` from the ledger as written, defaulting only a missing one, and no check asks whether the value is a workflow Studio knows.
+Five plain-object tables are then indexed with it: `WORKFLOW_TOOL_RULES` (`src/lib/agent/investigation.ts`), `AGENT_WORKFLOW_PRESENTS_ANSWER` (`src/lib/agent/types.ts`), `AGENT_WORKFLOW_BUDGETS` (`src/lib/agent/execution-policy.ts`), `WORKFLOW_DETAIL` (`src/lib/agent/er-diagram.ts`) and `AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION` (`src/lib/agent/tools.ts`).
+A ledger carrying an unknown or renamed workflow reads `undefined` from each: the boolean tables take it for false, and a budget read such as `runDeadlineMs` fails as a `TypeError` with no name for the cause.
+The workflow-variant lookup (`agentVariant` in `src/lib/agent/agent-manifest.ts`) guards its own index against an inherited name such as `toString`; these five tables do not.
+Found 2026-10-14 while building agent execution on Kubernetes.
+
+**Done when:** a ledger header whose `workflowType` is not an `AgentRunWorkflowType` is refused at read with a named error, with a test that writes such a header and reads it back; cited in `docs/AGENT.md`.
+
+### B113. The agent user guide cites code by line number and carries em dashes
+
+`docs/AGENT_GUIDE.md` cites code as `file:line` 46 times, on 41 lines (`timeline.ts:499`, `goal-verifier.ts:349-355` and `AgentRail.tsx:401-447` among them), and those numbers have drifted as the files changed, so a reader following one lands on unrelated code.
+The same page carries 152 lines with an em dash, against the repository's writing rule.
+Found 2026-10-14 while building agent execution on Kubernetes.
+
+**Done when:** every code citation in `docs/AGENT_GUIDE.md` names a file and a symbol instead of a line, no em or en dash remains on the page, and a guard test fails on a new `file:line` citation there; cited in `docs/AGENT.md`.
+
+### B114. A cluster health run drops the Warning events of a controller of an unlisted kind that has no pod
+
+`readWorkloadProfile` (`src/lib/db/providers/platform/kubernetes/agent-readings.ts`) lists the controller kinds in `WORKLOAD_KINDS` and adds a row for a controller of any other kind only when it meets a pod that controller owns.
+A controller of a kind outside that set with no pod in the namespace, such as a CloudNativePG `Cluster` or an Argo `Rollout` that cannot start one, gets no row, and the Warning events about it are discarded because their involved object is not a key of `podsOf`.
+That is the controller a health run most needs to see, since a controller that cannot create its pods is what those events report.
+Found 2026-10-14 while building agent execution on Kubernetes.
+
+**Done when:** the Warning events of such a controller are counted under a row keyed by the event's involved object, with a test over a namespace that holds a custom-resource controller with Warning events and no pod; cited in `docs/AGENT.md`.
+
+### B115. Plan mode on Kubernetes still speaks of a database
+
+The plan-mode safety strip comes from `planPosture` in `src/lib/agent/posture.ts`, whose qualifier reads "one schema read grounds it, nothing else reaches the database" on every engine, and the objective field in `src/components/agent/AgentRail.tsx` has the fixed placeholder "Why is checkout slow?".
+On a Kubernetes connection both name a database and an application query the cluster does not have, while the statement language's own copy already lives in the manifest (`AGENT_LANGUAGE_COPY` in `src/lib/agent/agent-manifest.ts`).
+Found 2026-10-14 while building agent execution on Kubernetes.
+
+**Done when:** the plan-mode qualifier and the objective placeholder take the statement language's copy from the manifest, with a component test that a Kubernetes connection shows neither database wording; cited in `docs/AGENT.md`.
+
+### B116. The features page carries em dashes
+
+`docs/FEATURES.md` still carries em dashes against the repository's writing rule, on 17 lines: among them the "Two independent axes" bullet of the agent section and the bullets beside it, which the agent execution work on Kubernetes did not touch.
+Found 2026-10-14 while building agent execution on Kubernetes.
+
+**Done when:** no em or en dash remains in `docs/FEATURES.md`; cited in `docs/AGENT.md`.
 
 ## Passkey deferrals (#785)
 

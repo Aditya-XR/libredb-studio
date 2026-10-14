@@ -56,6 +56,7 @@ import { ConnectionError, DatabaseConfigError, ExecutionProfileError, TimeoutErr
 import { READ_ONLY_ENFORCED, SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { connectionFingerprint } from "@/lib/db/connection-fingerprint";
 import { supportsQueryCancel } from "@/lib/db/query-cancel";
+import { MACHINE_PROFILE_SENTENCE } from "@/lib/db/providers/platform/kubernetes/machine-read";
 import type { SSHTunnelConfig } from "@/lib/types";
 
 // The SQLite agent-profile tests below construct the read-only profile for its
@@ -862,6 +863,28 @@ describe("createDatabaseProvider", () => {
     expect(provider.getCapabilities().queryDialect).toBe("kubectl");
     expect(provider.getCapabilities().enforcesReadOnly).toBe(true);
     expect(provider.isConnected()).toBe(false);
+  });
+
+  test("the execution context rides along to kubernetes: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("kubernetes", { port: 6443, database: undefined });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // Unconnected, both refuse at the session before the profile is consulted.
+    await expect(profiled.queryReadOnly("get pods", AGENT_BUDGET)).rejects.toThrow("Provider is not connected");
+    // With a session in place, and a statement the console refuses before sending anything, only the provider built
+    // without the context stops at the profile.
+    const lifetime = new AbortController();
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, { requireSession: () => ({ surface: {}, explainCache: null, lifetime }) });
+    }
+    const write = "delete pod web-1";
+    await expect(editor.queryReadOnly(write, AGENT_BUDGET)).rejects.toThrow(MACHINE_PROFILE_SENTENCE);
+    const refusal = await profiled.queryReadOnly(write, AGENT_BUDGET).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("it is not read-only");
+    expect((refusal as Error).message).not.toContain(MACHINE_PROFILE_SENTENCE);
+    lifetime.abort();
   });
 
   test("the factory error lists qdrant among the supported types, before the embedded store", async () => {
@@ -1999,6 +2022,69 @@ describe("acquireExecutionProfileProvider", () => {
 
     expect(error).toBeInstanceOf(ExecutionProfileError);
     expect((error as InstanceType<typeof ExecutionProfileError>).reasonCode).toBe("AGENT_CREDENTIAL_UNRESOLVABLE");
+    expect((error as Error).message).toBe(
+      'Connection "pg-password-only" configures an incomplete agent credential (user and password are both required)',
+    );
+    expect(getExecutionProfileCacheStats().size).toBe(0);
+  });
+
+  /**
+   * An engine declaring `agentCredential: "token"` takes `agentPassword` alone as the agent's own bearer token.
+   * Kubernetes' connect dials the API server, so its prototype's connect is stubbed for these tests only.
+   */
+  async function kubernetesConnectStubbed(conn: DatabaseConnection): Promise<() => void> {
+    const prototype = Object.getPrototypeOf(await createDatabaseProvider(conn)) as DatabaseProvider;
+    const spy = spyOn(prototype, "connect").mockImplementation(async function (this: DatabaseProvider) {
+      (this as unknown as { setConnected(value: boolean): void }).setConnected(true);
+    });
+    return () => spy.mockRestore();
+  }
+
+  const kubernetesConn = (overrides: Partial<DatabaseConnection> = {}) =>
+    makeConnection("kubernetes", { id: "k8s-profile", port: 6443, database: undefined, ...overrides });
+
+  test("a token engine's agent password alone is the agent's token, and the connection's user is kept", async () => {
+    const conn = kubernetesConn({ id: "k8s-agent-token", password: "connection-token", agentPassword: "agent-token" });
+    const restore = await kubernetesConnectStubbed(conn);
+    try {
+      const agent = await acquireExecutionProfileProvider(conn, "agent-operations");
+
+      expect(agent.config.password).toBe("agent-token");
+      expect(agent.config.user).toBe("test");
+      expect(getExecutionProfileCacheStats().size).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a token engine refuses an agent user beside the agent token", async () => {
+    const conn = kubernetesConn({ id: "k8s-agent-user", agentUser: "agent", agentPassword: "agent-token" });
+    const restore = await kubernetesConnectStubbed(conn);
+    try {
+      const error: unknown = await acquireExecutionProfileProvider(conn, "agent-operations").catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ExecutionProfileError);
+      expect((error as InstanceType<typeof ExecutionProfileError>).reasonCode).toBe("AGENT_CREDENTIAL_UNRESOLVABLE");
+      expect((error as Error).message).toBe(
+        `Connection "k8s-agent-user" configures an agent user, and this engine takes the agent's token alone: clear the agent user`,
+      );
+      expect(getExecutionProfileCacheStats().size).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a token engine refuses an agent user with no agent token", async () => {
+    const conn = kubernetesConn({ id: "k8s-agent-user-only", agentUser: "agent" });
+    const restore = await kubernetesConnectStubbed(conn);
+    try {
+      const error: unknown = await acquireExecutionProfileProvider(conn, "agent-operations").catch((e: unknown) => e);
+
+      expect((error as InstanceType<typeof ExecutionProfileError>).reasonCode).toBe("AGENT_CREDENTIAL_UNRESOLVABLE");
+      expect((error as Error).message).toContain("takes the agent's token alone");
+    } finally {
+      restore();
+    }
   });
 
   test("denies an agent credential on a connection-string connection", async () => {

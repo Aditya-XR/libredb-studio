@@ -9,8 +9,10 @@
  * failure sentence `errors.ts`. What stays here is the session's lifecycle, the declarations and the one call shape
  * every module reads through.
  *
- * Read-only whatever `readOnly` says: no request path writes, and no maintenance is offered. No `queryReadOnly`, so
- * no agent statement execution and no MCP read. The clock, the randomness and the transport factory are seams.
+ * Read-only whatever `readOnly` says: no request path writes, and no maintenance is offered. `queryReadOnly` and
+ * the curated `readClusterUsage` and `readWorkloadProfile` (`agent-readings.ts`) serve the agent under the read-only
+ * profile (`machine-read.ts`, `machine-redaction.ts`); MCP is not offered (`MCP_EXPOSABLE.kubernetes`). The clock,
+ * the randomness and the transport factory are seams.
  *
  * The console is `console/`: `query()` runs one statement through `console/run.ts` under the run registry, so a
  * cancel stops it, and `prepareQuery` pages only the list form of a single-type get (`console/paging.ts`).
@@ -20,6 +22,8 @@ import { BaseDatabaseProvider } from "@/lib/db/base-provider";
 import { ConnectionError, DatabaseConfigError, QueryCancelledError, QueryError } from "@/lib/db/errors";
 import type {
   ActiveSessionDetails,
+  ClusterUsageInput,
+  ClusterUsageReading,
   Container,
   DatabaseObject,
   DatabaseOverview,
@@ -33,19 +37,25 @@ import type {
   PerformanceMetrics,
   PreparedQuery,
   ProviderCapabilities,
+  ProviderExecutionContext,
   ProviderLabels,
   ProviderOptions,
   QueryPrepareOptions,
   QueryResult,
+  ReadOnlyStatementBudget,
+  ReadOnlyStatementMode,
   SlowQueryStats,
   StorageStats,
   TableStats,
+  WorkloadProfileInput,
+  WorkloadProfileReading,
 } from "@/lib/db/types";
 import { createRunRegistry, type RunRegistry } from "@/lib/db/utils/bounded-limiter";
 import type { DatabaseConnection, QueryWarning, WithTunnelFarEnd } from "@/lib/types";
+import { readClusterUsage, readWorkloadProfile } from "./agent-readings";
 import { createKubernetesClient, DEFAULT_KUBERNETES_SEAMS, type KubernetesCall, type KubernetesSeams } from "./client";
 import { kubernetesConnectWarnings } from "./connect-warnings";
-import { ExplainCache, type KubectlGrid, statementCall } from "./console/context";
+import { ExplainCache, resultOf, statementCall } from "./console/context";
 import { EXPLAIN_CACHE_ENTRIES } from "./console/explain";
 import { prepareKubectlQuery } from "./console/paging";
 import { runKubectl } from "./console/run";
@@ -53,7 +63,8 @@ import { type ClusterEndpoint, readClusterEndpoint } from "./connection-options"
 import { DiscoveryCache, readDiscovery, requireSupportedServer } from "./discovery";
 import { CLUSTER_CONTAINER, KUBERNETES_OBJECT_KINDS, KUBERNETES_ROW_ACTIONS } from "./kinds";
 import { KUBERNETES_LABELS } from "./labels";
-import { KUBERNETES_DEFAULT_PORT, KUBERNETES_MAX_STATEMENT_ROWS, KUBERNETES_TYPE } from "./limits";
+import { KUBERNETES_DEFAULT_PORT, KUBERNETES_TYPE } from "./limits";
+import { type MachineOptions, type MachineSession, readKubectlForMachine, withMachineContext } from "./machine-read";
 import { kubernetesHealth, kubernetesOverview } from "./monitoring";
 import {
   countKubernetesObjects,
@@ -80,29 +91,6 @@ interface KubernetesSession {
   readonly explainCache: ExplainCache;
 }
 
-/** A command's grid as a query result: the rows it answered, and a bound it applied itself. */
-function resultOf(grid: KubectlGrid, executionTime: number): QueryResult {
-  return {
-    rows: grid.rows,
-    fields: grid.fields,
-    rowCount: grid.rows.length,
-    executionTime,
-    ...(grid.columnTypes === undefined ? {} : { columnTypes: grid.columnTypes }),
-    ...(grid.warnings === undefined ? {} : { warnings: grid.warnings }),
-    ...(grid.bounded === true
-      ? {
-          pagination: {
-            limit: KUBERNETES_MAX_STATEMENT_ROWS,
-            offset: 0,
-            hasMore: true,
-            totalReturned: grid.rows.length,
-            wasLimited: true,
-          },
-        }
-      : {}),
-  };
-}
-
 /** Aborts every request of a session and closes its transport; a second call changes nothing. */
 function closeSession(session: KubernetesSession): void {
   // Aborted and closed go together, so an aborted session is already closed.
@@ -123,15 +111,23 @@ export class KubernetesProvider extends BaseDatabaseProvider {
   private warnings: QueryWarning[] = [];
   private readonly seams: KubernetesSeams;
   private readonly runs: RunRegistry = createRunRegistry();
+  /** Whether this provider was opened under the agent read-only profile; only then does `queryReadOnly` answer. */
+  private readonly readOnlyProfile: boolean;
 
   /**
    * Validates nothing and opens nothing: the connection rules run in `connect()`, so a provider built only for its
-   * declarations (the factory's census, `POST /api/db/provider-meta`) touches no socket. No execution context is
-   * taken: the provider is read-only whatever a profile asks, as Neo4j's is.
+   * declarations (the factory's census, `POST /api/db/provider-meta`) touches no socket. The execution context is
+   * kept for `queryReadOnly` alone: every other path is read-only whatever a profile asks.
    */
-  constructor(config: DatabaseConnection, options: ProviderOptions = {}, seams: Partial<KubernetesSeams> = {}) {
+  constructor(
+    config: DatabaseConnection,
+    options: ProviderOptions = {},
+    seams: Partial<KubernetesSeams> = {},
+    execution: ProviderExecutionContext = {},
+  ) {
     super(config, options);
     this.seams = { ...DEFAULT_KUBERNETES_SEAMS, ...seams };
+    this.readOnlyProfile = execution.readOnly === true;
   }
 
   /** Every member written out: the base's defaults are SQL's, so each flag here is a decision. */
@@ -165,6 +161,13 @@ export class KubernetesProvider extends BaseDatabaseProvider {
       containersNameKinds: true,
       // Plan mode reads the session's namespace and Cluster, not every namespace of a large cluster.
       agentWalkScope: { mode: "session-default", alsoWalk: [[CLUSTER_CONTAINER]] },
+      // The agent's identity is its own ServiceAccount token when `agentPassword` is set, else the connection's token.
+      agentCredential: "token",
+      // The agent's reads mask every Secret name its output carries, so the withheld kind holds on `queryReadOnly` too.
+      machineRedaction: { maskedNameKinds: ["secrets"] },
+      // Container usage against requests and limits (`readClusterUsage`) and a namespace's workload profile
+      // (`readWorkloadProfile`), each read in one call for the agent.
+      agentReadings: ["usage", "workloads"],
       // Nothing a statement runs changes the tree.
       schemaRefreshPattern: "(?!)",
     };
@@ -287,6 +290,53 @@ export class KubernetesProvider extends BaseDatabaseProvider {
     } finally {
       run.end();
     }
+  }
+
+  /**
+   * One kubectl statement for the agent: under the read-only profile, bounded by the agent budget (discovery
+   * included), refused rather than truncated past its rows or bytes, and masked on its output projection. The
+   * boundary is the request allowlist on the final method and path and the identity's RBAC, not the reader
+   * (`kubectl.query.read`). `query()` is the editor's and is never masked.
+   */
+  public async queryReadOnly(
+    statement: string,
+    budget: ReadOnlyStatementBudget,
+    mode?: ReadOnlyStatementMode,
+  ): Promise<QueryResult> {
+    const session = this.requireSession();
+    return readKubectlForMachine(this.machineSession(session), statement, budget, mode, this.machineOptions());
+  }
+
+  /** Container usage against requests and limits for the agent (`cluster.usage.read`), in the machine context. */
+  public async readClusterUsage(
+    input: ClusterUsageInput,
+    budget: ReadOnlyStatementBudget,
+  ): Promise<ClusterUsageReading> {
+    const session = this.requireSession();
+    return withMachineContext(this.machineSession(session), budget, this.machineOptions(), (context) =>
+      readClusterUsage(context, input),
+    );
+  }
+
+  /** A namespace's workload profile for the agent (`cluster.workloads.read`), in the machine context. */
+  public async readWorkloadProfile(
+    input: WorkloadProfileInput,
+    budget: ReadOnlyStatementBudget,
+  ): Promise<WorkloadProfileReading> {
+    const session = this.requireSession();
+    return withMachineContext(this.machineSession(session), budget, this.machineOptions(), (context) =>
+      readWorkloadProfile(context, input),
+    );
+  }
+
+  /** The session as the agent's reads see it: its surface, its explain cache and its lifetime. */
+  private machineSession(session: KubernetesSession): MachineSession {
+    return { surface: session.surface, explainCache: session.explainCache, lifetime: session.lifetime.signal };
+  }
+
+  /** What every agent read is held to: the read-only profile, the clock and sleep seams, and the version it reports. */
+  private machineOptions(): MachineOptions {
+    return { readOnly: this.readOnlyProfile, seams: this.seams, appVersion: getAppVersion() };
   }
 
   /** Stops a running statement by its id and answers true; an id that names no run answers false. */

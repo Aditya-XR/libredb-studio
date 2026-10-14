@@ -2829,6 +2829,47 @@ describe("AgentRail", () => {
       expect(onApplyStatement).toHaveBeenCalledWith("SELECT count(*) FROM orders");
     });
 
+    /*
+      A resources recommendation changes a workload's manifest, which nothing here writes and no editor holds, so its
+      entry quotes the change and offers no hand-off, even to a host that takes statements.
+    */
+    test("a resources recommendation quotes the change and offers nothing to apply", async () => {
+      mockAgentFetch([
+        OPENED_LINE,
+        STARTED_LINE,
+        `${JSON.stringify({
+          kind: "event",
+          event: {
+            kind: "recommendation",
+            atMs: 1_002,
+            change: "resources",
+            namespace: "shop",
+            ownerKind: "Deployment",
+            ownerName: "web",
+            container: "web",
+            current: { requests: { cpu: "500m", memory: "256Mi" }, limits: {} },
+            proposed: { requests: { cpu: "150m", memory: "128Mi" }, limits: {} },
+            rationale: "The container uses a third of its request.",
+            evidence: [{ source: "artifact", correlationId: "corr_9" }],
+          },
+        })}\n`,
+      ]);
+      const onApplyStatement = mock(() => {});
+      const { findAllByText, findByText, queryAllByTestId } = await runWith({ onApplyStatement });
+
+      // The headline is said twice while the run is open: by the entry, and by the answer card naming the newest step.
+      expect((await findAllByText("Resources recommended")).length).toBeGreaterThan(0);
+      expect(
+        (
+          await findByText(
+            "Deployment/web, container web: requests cpu 500m, memory 256Mi to cpu 150m, memory 128Mi; limits unset to unset",
+          )
+        ).tagName,
+      ).toBe("PRE");
+      expect(queryAllByTestId("agent-apply-statement")).toHaveLength(0);
+      expect(onApplyStatement).not.toHaveBeenCalled();
+    });
+
     test("a host that offers neither gets no controls, rather than disabled ones", async () => {
       mockAgentFetch([OPENED_LINE, STARTED_LINE, DRAFTED_LINE, COMPLETED_LINE]);
       const { findAllByTestId, queryAllByTestId } = await runWith({});
@@ -3991,6 +4032,49 @@ describe("AgentRail", () => {
      * to claim it is not to promise it: `onRunStatement` is an optional public prop,
      * so any embedding host can be in this state.
      */
+    /*
+      The hand-over is the variant's `canAutoExecute`, read for the connection's own language. An engine with no
+      statement language has no variant to hand anything over from, so it is not offered the promise; a host that
+      names no engine at all keeps the SQL reading, which is what every host passing no type has always seen.
+    */
+    describe("the hand-over follows the connection's statement language", () => {
+      test("an engine with no statement language reaches no consent step", async () => {
+        const fetchMock = mockAgentFetch([OPENED_LINE, STARTED_LINE]);
+        const view = analyze({ connectionType: "mongodb" });
+        fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "sales by region" } });
+        await act(async () => {
+          fireEvent.click(view.getByTestId("agent-start"));
+        });
+
+        expect(view.queryByTestId("agent-consent")).toBeNull();
+        expect(startBodyOf(fetchMock).autoExecute).toBe(false);
+      });
+
+      test("a Kubernetes data-analysis run reaches no consent step: its variant cannot auto-execute", async () => {
+        const fetchMock = mockAgentFetch([OPENED_LINE, STARTED_LINE]);
+        const view = analyze({ connectionType: "kubernetes" });
+        fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "pods by status" } });
+        await act(async () => {
+          fireEvent.click(view.getByTestId("agent-start"));
+        });
+
+        expect(view.queryByTestId("agent-consent")).toBeNull();
+        expect(view.queryByTestId("agent-auto-execute")).toBeNull();
+        expect(startBodyOf(fetchMock).autoExecute).toBe(false);
+      });
+
+      test.each([undefined, null, "postgres"])("a connection type of %p is offered it", async (connectionType) => {
+        mockAgentFetch([OPENED_LINE, STARTED_LINE]);
+        const view = analyze({ connectionType });
+        fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "sales by region" } });
+        await act(async () => {
+          fireEvent.click(view.getByTestId("agent-start"));
+        });
+
+        expect(view.getByTestId("agent-consent")).toBeTruthy();
+      });
+    });
+
     describe("a host with no runner is not offered the promise", () => {
       test("no consent step is reached at all on the workflow that otherwise has one", async () => {
         const fetchMock = mockAgentFetch([OPENED_LINE, STARTED_LINE]);
@@ -4853,8 +4937,10 @@ describe("AgentRail", () => {
       await startWith(view, "why is checkout slow");
 
       expect(classifyCalls(fetchMock)).toHaveLength(1);
+      // The connection the run is opened on goes with the objective, so it is classified in that engine's language.
       expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
         objective: "why is checkout slow",
+        connectionId: "seed:sales",
       });
       expect(openRequests(fetchMock)[0]).toEqual({
         mode: "planning",

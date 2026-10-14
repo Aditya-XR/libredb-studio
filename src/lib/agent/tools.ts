@@ -68,12 +68,18 @@ import {
   type AgentCuratedReadInput,
   type CuratedOperationKind,
   agentCuratedReadInput,
+  clusterUsageReadInput,
+  clusterWorkloadsReadInput,
+  isStatementReadOperation,
 } from "@/lib/db/operations/descriptors";
+import { measureResultBytes } from "@/lib/db/providers/sql/read-only-budget";
+import { parseQuantity } from "@/lib/db/providers/platform/kubernetes/console/top";
 import { actorLabel, executeAuditedOperation } from "@/lib/db/operations/execution";
 import { inspectAgentStatement } from "@/lib/db/operations/statement-guard";
 import type { ExecutionActor, ExecutionPolicy, PolicyDenyCode, TargetScope } from "@/lib/db/operations/policy";
 import type { OperationRegistry } from "@/lib/db/operations/registry";
 import type {
+  ClusterUsageInput,
   Container,
   DatabaseObject,
   KindCount,
@@ -83,6 +89,7 @@ import type {
   ProviderCapabilities,
   ProviderLabels,
   ReadOnlyStatementMode,
+  WorkloadProfileInput,
 } from "@/lib/db/types";
 import type { ContainerEnumeration } from "@/lib/db/container-walk";
 import {
@@ -117,6 +124,12 @@ import {
 import { asBytes, binaryText } from "@/lib/export/binary";
 import { nonFiniteWord } from "@/lib/non-finite";
 import { hasOptimizerHint } from "@/lib/sql/optimizer-hints";
+import {
+  AGENT_LANGUAGE_COPY,
+  type AgentStatementLanguageId,
+  type AgentWorkflowVariant,
+  requiredVariant,
+} from "./agent-manifest";
 import { connectionIdentity, heldSnapshotForConnection } from "./context-snapshot";
 import { offersRefusalExamples } from "./models";
 import type { ColumnSchema, DatabaseConnection, QueryResult } from "@/lib/types";
@@ -140,6 +153,7 @@ import {
 } from "./execution-policy";
 import type { AgentRepairDenyCode, AgentRepairLedger } from "./repair-ledger";
 import { fingerprintStatement } from "./repair-ledger";
+import { languageServer } from "./statement-languages";
 import { evaluateAutoExecute } from "./auto-execute";
 import { summarisePlan } from "./plan-summary";
 import {
@@ -182,12 +196,16 @@ export type AgentToolName =
   | "recommend_change"
   /** Operations only: one curated reading of what the engine says about itself. */
   | "inspect_operations"
+  /** Resource efficiency on a cluster: container usage against requests and limits in one namespace. */
+  | "inspect_usage"
+  /** Cluster health: one namespace's workloads, their readiness, restarts, missing resources and probes, and events. */
+  | "profile_workloads"
   /**
    * Which result IS the answer, and how it should be shown. Reaches no database.
    *
-   * Offered by no workflow yet: the record below is the one place a tool set is
-   * decided, and this slice decides that nothing may call it until the workflow that
-   * asks for an answer exists.
+   * Offered to `data-analysis` alone: the workflow variants in `agent-manifest.ts` are
+   * the one place a tool set is decided, and only that workflow's verdict asks for an
+   * answer.
    */
   | "present_answer";
 
@@ -215,7 +233,13 @@ export type AgentOperationId =
    * this list because the audited path types every operation it runs through it, not
    * because a model can ask for it.
    */
-  | "db.schema.read";
+  | "db.schema.read"
+  /** One kubectl read the model wrote, on a `kubernetes` connection; see `kubectlQueryReadDescriptor` for its id. */
+  | "kubectl.query.read"
+  /** Container usage in one namespace, a curated cluster reading; see `clusterUsageReadDescriptor` for its id. */
+  | "cluster.usage.read"
+  /** One namespace's workload profile, a curated cluster reading; see `clusterWorkloadsReadDescriptor` for its id. */
+  | "cluster.workloads.read";
 
 export interface AgentToolDefinition {
   readonly name: AgentToolName;
@@ -260,6 +284,11 @@ export interface AgentToolContext {
    * body could contribute one.
    */
   readonly workflowType: AgentRunWorkflowType;
+  /**
+   * The run's PERSISTED statement language, absent for `sql`. Like `workflowType`, it
+   * can only have come from the run record, never from the live connection.
+   */
+  readonly statementLanguage?: AgentStatementLanguageId;
   /** The persisted actor — the sole authority for authorizing this call. */
   readonly actor: AgentRunActor;
   readonly connection: DatabaseConnection;
@@ -375,6 +404,12 @@ export type AgentToolUnavailableCode =
   | "CHART_TOO_FEW_ROWS"
   /** The chart type does not fit the columns named. */
   | "CHART_SHAPE_MISMATCH"
+  /**
+   * The language's own reader refused the statement before the policy pipeline saw it, and its sentence is the
+   * detail. The pipeline's input stage keeps only a reason code, so without this a model refused for `exec` would read
+   * only that its read had the wrong shape. SQL has no such reader and never meets it.
+   */
+  | "STATEMENT_NOT_ADMITTED"
   | AgentDeadlineDenyCode
   | AgentRepairDenyCode;
 
@@ -417,8 +452,16 @@ export type AgentPlanComparisonOutcome =
     }
   | AgentToolUnavailable;
 
-/** Everything a `recommendation` event carries except when it happened. */
-export type AgentRecommendation = Omit<Extract<AgentRunEvent, { kind: "recommendation" }>, "kind" | "atMs">;
+/**
+ * Everything a `recommendation` event carries except when it happened, arm by arm: `Omit` over the union itself would
+ * keep only the fields both arms share, and lose the statement of one and the container of the other.
+ */
+export type AgentRecommendation =
+  Extract<AgentRunEvent, { kind: "recommendation" }> extends infer Arm
+    ? Arm extends unknown
+      ? Omit<Arm, "kind" | "atMs">
+      : never
+    : never;
 
 export type AgentRecommendationOutcome =
   | { readonly kind: "recommended"; readonly recommendation: AgentRecommendation; readonly modelText: string }
@@ -442,6 +485,12 @@ export interface AgentOperationRequest {
   readonly operationId: AgentOperationId;
   /** The statement as it will be evaluated — composed by the server for two of the tools. */
   readonly sql: string;
+  /**
+   * The key the descriptor's input carries the statement under: `sql` for `sql.query.read`, `statement` for
+   * `kubectl.query.read`. Absent reads as `sql`, so every server-composed SQL read is unchanged. The request keeps
+   * `sql` as its own field name because it is this server's text, not the model's argument.
+   */
+  readonly argument?: "sql" | "statement";
   /** Prose naming what the result is, for the untrusted-content header. */
   readonly label?: string;
   /** Declared target dimensions, so a scope allowlist can bound them. */
@@ -946,6 +995,41 @@ const recommendationSchema = z.strictObject({
   evidence: z.array(evidenceSchema).min(1),
 });
 
+/**
+ * A Kubernetes quantity as a manifest states one: `250m`, `0.5`, `512Mi`, `1Gi`. Read by the same parser that reads
+ * the cluster's own figures, so a value this accepts is one the API server would accept too.
+ */
+const resourceQuantity = z
+  .string()
+  .min(1)
+  .max(32)
+  .refine((text) => parseQuantity(text) !== undefined, "not a Kubernetes quantity, such as 250m, 0.5, 512Mi or 1Gi");
+const resourceQuantities = z.strictObject({ cpu: resourceQuantity.optional(), memory: resourceQuantity.optional() });
+const resourceSettings = z.strictObject({ requests: resourceQuantities, limits: resourceQuantities });
+
+/**
+ * The resource-efficiency card: one container's requests and limits, as they are and as the run proposes them.
+ *
+ * No `statement`: the change is to a workload's manifest, which nothing here writes and no editor runs, so there is
+ * nothing to hand over. The owner is named so the user knows which manifest holds the container. `rationale` and
+ * `evidence` are declared as `recommendationSchema` declares them, against the same evidence schema.
+ */
+const resourcesRecommendationSchema = z.strictObject({
+  change: z.literal("resources"),
+  namespace: z.string().min(1),
+  // Any kind `inspect_usage` reports: a database operator's custom resource owns pods as a Deployment does.
+  ownerKind: z.string().min(1),
+  ownerName: z.string().min(1),
+  container: z.string().min(1),
+  current: resourceSettings,
+  proposed: resourceSettings,
+  rationale: z.string().min(1),
+  evidence: z.array(evidenceSchema).min(1),
+});
+
+/** What a `recommend_change` call parses to, on whichever card the run's language offers. */
+type RecommendationInput = z.infer<typeof recommendationSchema> | z.infer<typeof resourcesRecommendationSchema>;
+
 /** The four keys `recommendationSchema` accepts, for the lone-rename reading below. */
 const RECOMMENDATION_KEYS = ["change", "statement", "rationale", "evidence"] as const;
 
@@ -1167,6 +1251,20 @@ export const AGENT_TOOL_DEFINITIONS: Readonly<Record<AgentToolName, AgentToolDef
     inputSchema: agentCuratedReadInput,
     operationId: "db.operations.read",
   },
+  inspect_usage: {
+    name: "inspect_usage",
+    description:
+      "Read how much CPU and memory each container in one namespace uses right now, against its requests and limits. Pass namespace, and a label selector to narrow it. One row per container: its pod and owning workload, CPU in millicores and memory in bytes as numbers, its requests and limits, and usage divided by request. The figures are metrics-server's latest sample over its window, a moment and not a history. More than 500 containers are refused: narrow by selector.",
+    inputSchema: clusterUsageReadInput,
+    operationId: "cluster.usage.read",
+  },
+  profile_workloads: {
+    name: "profile_workloads",
+    description:
+      "Profile the workloads of one namespace: one row per Deployment, StatefulSet, DaemonSet, Job, CronJob and bare Pod, and one per other controller that owns a pod there (an operator's custom resource, a Rollout, an orphan ReplicaSet) with no desired count, with desired and ready counts in the kind's own terms, pods not ready, cumulative restarts with the latest termination's reason and time, how many containers run without requests, limits, a readiness probe or a liveness probe, and the Warning events by reason. Pass namespace. More than 500 workloads are refused.",
+    inputSchema: clusterWorkloadsReadInput,
+    operationId: "cluster.workloads.read",
+  },
   present_answer: {
     name: "present_answer",
     description: `Record that one result you have already read IS the answer, and how it should be shown. Only a result of a run_read_query you drafted can be the answer: a plan describes a statement without running it and a profile returns counts about a table, so neither may be presented — both may still be cited as evidence. Pass the artifact id that read reported; the statement behind it comes from this run's own ledger, so you do not supply it. The columns a chart names are checked against that result's real columns and refused if they do not match. Your report must then cite this same artifact in at least one claim: the presentation shows the result and the claims say what it means, so a report resting on other evidence entirely leaves the run scored as not having answered. ${AGENT_ANSWER_CONTRACT}`,
@@ -1179,113 +1277,108 @@ export const AGENT_TOOL_DEFINITIONS: Readonly<Record<AgentToolName, AgentToolDef
   },
 } satisfies Record<AgentToolName, AgentToolDefinition>);
 
-const AGENT_MODE_TOOLS: readonly AgentToolDefinition[] = Object.freeze([
-  AGENT_TOOL_DEFINITIONS.inspect_schema,
-  AGENT_TOOL_DEFINITIONS.run_read_query,
-  AGENT_TOOL_DEFINITIONS.inspect_plan,
-  AGENT_TOOL_DEFINITIONS.compose_report,
-]);
+const readKubectlStatementSchema = z.strictObject({
+  statement: z.string().min(1),
+  /** Why the model wrote this read; accepted and not recorded, as `readStatementSchema`'s rationale. */
+  rationale: z.string().optional(),
+});
+
+const KUBECTL_RUN_READ_QUERY: AgentToolDefinition = Object.freeze({
+  name: "run_read_query",
+  description:
+    "Run one bounded read-only kubectl statement: get, describe, logs, top, events, api-resources, api-versions, explain, auth can-i, auth whoami or version, with or without the kubectl word. Writes, exec, port-forward, proxy, watches and Studio's paging line are refused before the cluster is reached, and you are told why.",
+  inputSchema: readKubectlStatementSchema,
+  operationId: "kubectl.query.read",
+});
+
+/** The kubectl overrides every kubectl workflow that sends a statement shares. */
+const KUBECTL_STATEMENT_TOOLS: Readonly<Partial<Record<AgentToolName, AgentToolDefinition>>> = Object.freeze({
+  run_read_query: KUBECTL_RUN_READ_QUERY,
+});
+
+const KUBECTL_RECOMMEND_CHANGE: AgentToolDefinition = Object.freeze({
+  name: "recommend_change",
+  description: `Propose one change to one container's CPU and memory requests and limits, for the user to apply themselves. Nothing is applied by this run and nothing here changes the cluster. State the current and the proposed values as Kubernetes quantities, and cite the inspect_usage reading the change rests on. ${AGENT_EVIDENCE_CONTRACT}`,
+  inputSchema: resourcesRecommendationSchema,
+});
+
+/**
+ * Resource efficiency, the kubectl query-optimization: the statement tools plus the resources card. Only this variant
+ * proposes a change to a container's resources, so only it replaces `recommend_change`.
+ */
+const KUBECTL_RESOURCE_EFFICIENCY_TOOLS: Readonly<Partial<Record<AgentToolName, AgentToolDefinition>>> = Object.freeze({
+  ...KUBECTL_STATEMENT_TOOLS,
+  recommend_change: KUBECTL_RECOMMEND_CHANGE,
+});
+
+/**
+ * The tool definitions a workflow on a language replaces, keyed by language and then by workflow, because a
+ * language's tools are not uniform across its workflows: one kubectl workflow may be offered a schema another is not.
+ * Keyed rather than compared, so a later language or workflow registers its own row and no call site changes. SQL
+ * replaces nothing: its definitions are `AGENT_TOOL_DEFINITIONS`. Kubectl `operations` sends no statement, so it
+ * replaces nothing either.
+ */
+const TOOL_OVERRIDES: Readonly<
+  Record<
+    AgentStatementLanguageId,
+    Readonly<Partial<Record<AgentRunWorkflowType, Readonly<Partial<Record<AgentToolName, AgentToolDefinition>>>>>>
+  >
+> = Object.freeze({
+  sql: Object.freeze({}),
+  kubectl: Object.freeze({
+    investigation: KUBECTL_STATEMENT_TOOLS,
+    "query-optimization": KUBECTL_RESOURCE_EFFICIENCY_TOOLS,
+    "database-assessment": KUBECTL_STATEMENT_TOOLS,
+    "data-analysis": KUBECTL_STATEMENT_TOOLS,
+  }),
+});
+
+/**
+ * The definition a run of `workflow` in `language` is offered for the tool `name`.
+ *
+ * Every SQL run, and every run recorded before languages existed, reads the record above unchanged, which is what
+ * keeps the SQL tool schemas byte-identical. A workflow on a later language overrides only the entries whose argument
+ * it names differently; the lookup is here so that the run loop's offer and its dispatch read the same definition.
+ */
+export function agentToolDefinition(
+  language: AgentStatementLanguageId | undefined,
+  workflow: AgentRunWorkflowType,
+  name: AgentToolName,
+): AgentToolDefinition {
+  return TOOL_OVERRIDES[language ?? "sql"][workflow]?.[name] ?? AGENT_TOOL_DEFINITIONS[name];
+}
 
 /** Planning is toolless. Not "filtered to nothing" — there is nothing to filter. */
 const NO_TOOLS: readonly AgentToolDefinition[] = Object.freeze([]);
 
 /**
- * Workflow type → the tools that workflow may use (#330 T2).
+ * Workflow type → the tools that workflow may use (#330 T2), read from the workflow's
+ * variant in `agent-manifest.ts`, which is the one place a tool set is decided.
  *
- * A total record, so a workflow type added to the contract stops this file compiling
- * until somebody decides what it may do. All three name the same set today, and that
- * is the honest state rather than a placeholder: M3's two templates are about what
- * the model is ASKED to produce and how the run is JUDGED, and the tools that would
- * distinguish them — bounded per-table profiling, a monitor snapshot — arrive with
- * the templates themselves (#330 T3). What exists now is the seam, in the one place
- * a tool set may be decided, so widening one workflow later cannot become a second
- * decision about where that decision lives.
+ * Memoised per VARIANT, not per workflow or language, so a run is handed the same
+ * frozen array on every turn, as it was when each set was a constant here, and so two
+ * variants of one workflow can never share a set by accident.
  */
-/**
- * The optimization template's own two, on top of the read-class four.
- *
- * Offered to ONE workflow rather than added to `AGENT_MODE_TOOLS`, which is what
- * makes the axis load-bearing: an investigation that calls `compare_plans` is told
- * there is no such tool, because for that run there is not.
- */
-const QUERY_OPTIMIZATION_TOOLS: readonly AgentToolDefinition[] = Object.freeze([
-  ...AGENT_MODE_TOOLS,
-  AGENT_TOOL_DEFINITIONS.compare_plans,
-  AGENT_TOOL_DEFINITIONS.recommend_change,
-]);
+const VARIANT_TOOLS = new WeakMap<AgentWorkflowVariant, readonly AgentToolDefinition[]>();
 
-/** The assessment template's own tool, on top of the read-class four. */
-const DATABASE_ASSESSMENT_TOOLS: readonly AgentToolDefinition[] = Object.freeze([
-  ...AGENT_MODE_TOOLS,
-  AGENT_TOOL_DEFINITIONS.profile_table,
-]);
+function workflowTools(
+  language: AgentStatementLanguageId | undefined,
+  workflow: AgentRunWorkflowType,
+): readonly AgentToolDefinition[] {
+  const variant = requiredVariant(language, workflow);
+  let tools = VARIANT_TOOLS.get(variant);
+  if (tools === undefined) {
+    tools = Object.freeze(variant.tools.map((name) => agentToolDefinition(language, workflow, name)));
+    VARIANT_TOOLS.set(variant, tools);
+  }
+  return tools;
+}
 
 /**
- * The operations template's tools, and the ONLY set that is not built on the
- * read-class four.
+ * The tools this run may use, decided from its persisted mode, workflow type and
+ * statement language and nothing else.
  *
- * Deliberately not `[...AGENT_MODE_TOOLS, inspect_operations]`, which is what every
- * other template does. All three of the read-class tools this leaves out —
- * `inspect_schema`, `run_read_query`, `inspect_plan` — reach the database through
- * `provider.queryReadOnly`, which only the engines `AGENT_EXECUTION_ENGINES`
- * (`src/lib/agent/engine-support.ts`) names implement. That list is named rather than
- * restated here, and its own docblock records why: the real rule is the probe the
- * factory runs against the provider, so a count written out in prose goes stale the
- * next time an engine implements the method. Offering any of those tools here would
- * reintroduce, tool by tool, the exact engine restriction this workflow exists to
- * escape: the run would open on MySQL, be offered a tool, call it, and be answered by
- * an acquisition that refuses the engine.
- *
- * `inspect_schema` was checked rather than assumed, per the spec's condition:
- * `inspectSchemaTool` composes a statement and hands it to `executeAgentOperation`,
- * whose invoke callback is `runStatement`, which calls `provider.queryReadOnly`. It
- * depends on it, so it is left out.
- *
- * `recommend_change` is here and `compare_plans` is not: a comparison names two
- * `inspect_plan` artifacts this run cannot produce, so offering it would be offering
- * a tool that can only ever refuse.
- */
-const OPERATIONS_TOOLS: readonly AgentToolDefinition[] = Object.freeze([
-  AGENT_TOOL_DEFINITIONS.inspect_operations,
-  AGENT_TOOL_DEFINITIONS.recommend_change,
-  AGENT_TOOL_DEFINITIONS.compose_report,
-]);
-
-/**
- * The analysis template's two tools, on top of the read-class four.
- *
- * `present_answer` is the one this workflow's verdict requires, and it is offered
- * HERE and nowhere else for exactly that reason: a tool a run's bar never asks for is
- * a tool that can only distract it.
- *
- * `profile_table` is borrowed from the assessment template rather than duplicated,
- * and it is borrowed at the design's cheapest recommendation (§5.4). The schema
- * carries no row counts, so a 400 M-row fact table and a 12-row lookup table are
- * indistinguishable in the inventory, and a `shipped_at` that is 80% null and a
- * `placed_at` that is fully populated say which date column the business actually
- * fills. Basic depth answers both, costs one statement per table, and reads no value
- * out of any column — which is what makes pointing it at a table of personal data
- * acceptable at all.
- */
-const DATA_ANALYSIS_TOOLS: readonly AgentToolDefinition[] = Object.freeze([
-  ...AGENT_MODE_TOOLS,
-  AGENT_TOOL_DEFINITIONS.profile_table,
-  AGENT_TOOL_DEFINITIONS.present_answer,
-]);
-
-const WORKFLOW_TOOLS: Readonly<Record<AgentRunWorkflowType, readonly AgentToolDefinition[]>> = Object.freeze({
-  investigation: AGENT_MODE_TOOLS,
-  "query-optimization": QUERY_OPTIMIZATION_TOOLS,
-  "database-assessment": DATABASE_ASSESSMENT_TOOLS,
-  operations: OPERATIONS_TOOLS,
-  "data-analysis": DATA_ANALYSIS_TOOLS,
-} satisfies Record<AgentRunWorkflowType, readonly AgentToolDefinition[]>);
-
-/**
- * The tools this run may use, decided from its persisted mode and workflow type and
- * nothing else.
- *
- * The parameter is the run record (narrowed to the two fields that matter) rather
+ * The parameter is the run record (narrowed to the three fields that matter) rather
  * than bare strings, so the values can only have come from persisted state. There is
  * no parameter through which a request body could contribute a tool, which is what
  * "a client-supplied tool list is ignored, not merged" means here.
@@ -1294,8 +1387,10 @@ const WORKFLOW_TOOLS: Readonly<Record<AgentRunWorkflowType, readonly AgentToolDe
  * contract whatever it is for, so a workflow type is never a way to give a planning
  * run a tool.
  */
-export function selectAgentTools(run: Pick<AgentRunRecord, "mode" | "workflowType">): readonly AgentToolDefinition[] {
-  return run.mode === "agent" ? WORKFLOW_TOOLS[run.workflowType] : NO_TOOLS;
+export function selectAgentTools(
+  run: Pick<AgentRunRecord, "mode" | "workflowType" | "statementLanguage">,
+): readonly AgentToolDefinition[] {
+  return run.mode === "agent" ? workflowTools(run.statementLanguage, run.workflowType) : NO_TOOLS;
 }
 
 // ============================================================================
@@ -1407,6 +1502,8 @@ const UNAVAILABLE_TEXT: Readonly<Record<AgentToolUnavailableCode, string>> = Obj
     "A chart needs at least two rows and this result has fewer, so a chart of it would render an empty state. Present the answer as a table: one row is a complete answer, not a lesser one.",
   CHART_SHAPE_MISMATCH:
     "That chart type does not fit the columns named: a pie takes exactly one y column, and a scatter needs a numeric x as well as a numeric y. Choose a type that fits the columns, or present the answer as a table.",
+  STATEMENT_NOT_ADMITTED:
+    "This statement was refused before anything was sent, for the reason in parentheses; write a read inside the read-only subset.",
   /*
     Both of these name `compose_report`, and that is the whole correction.
 
@@ -1497,11 +1594,17 @@ const DENIAL_ADVICE_TEXT: Record<DenialAdvice, string> = {
  * The version is the one that DECIDED — the run's own workflow policy — rather than a
  * module-level constant, so what the model is told and what an operator can trace the
  * denial back to are the same string.
+ *
+ * A shape denial is told in the statement language's own words where the language has
+ * them: a kubectl read is neither valid nor invalid SQL. SQL keeps its sentence (D6).
  */
-function denialText(reasonCode: PolicyDenyCode, policyVersion: string): string {
+function denialText(reasonCode: PolicyDenyCode, policyVersion: string, language: AgentStatementLanguageId): string {
+  const advice = DENIAL_ADVICE[reasonCode];
   return [
     `The database operation layer refused this call: ${reasonCode} (policy ${policyVersion}).`,
-    DENIAL_ADVICE_TEXT[DENIAL_ADVICE[reasonCode]],
+    advice === "shape"
+      ? (languageServer(language).shapeAdvice ?? DENIAL_ADVICE_TEXT.shape)
+      : DENIAL_ADVICE_TEXT[advice],
     "Choose a different approach that stays inside a bounded read-only inspection.",
   ].join(" ");
 }
@@ -1521,6 +1624,8 @@ const READING_REFUSAL_TEXT: Record<AgentReadingDenyCode, string> = {
     "This database serves no reading of that kind, so nothing was read. Ask for a different kind, or report what the other readings established — including that this one is unavailable here.",
   READING_OVER_BUDGET:
     "That reading came back larger than this run may carry, so none of it was kept: a partial reading would be a misleading one. Ask again with a smaller limit; it bounds every kind of reading, not only the ones the engine limits itself.",
+  METRICS_UNAVAILABLE:
+    "This cluster serves no usage metrics (metrics.k8s.io), so nothing could be measured: metrics-server is not installed or not answering. Report that, and what your other readings established; usage cannot be read here.",
 };
 
 function approvalText(operationId: string): string {
@@ -1752,7 +1857,11 @@ export function presentableArtifact(events: readonly AgentRunEvent[]): string | 
   const drafted = new Set(events.flatMap((event) => (event.kind === "statement-drafted" ? [event.stepId] : [])));
   let latest: string | undefined;
   for (const event of events) {
-    if (event.kind === "tool-completed" && event.artifact.operationId === ANSWER_OPERATION && drafted.has(event.stepId))
+    if (
+      event.kind === "tool-completed" &&
+      isStatementReadOperation(event.artifact.operationId) &&
+      drafted.has(event.stepId)
+    )
       latest = event.artifact.correlationId;
   }
   return latest;
@@ -1958,6 +2067,7 @@ async function runStatement(
   validatedInput: unknown,
   budget: ExecutionBudget,
   phase: { statementSent: boolean },
+  argument: "sql" | "statement",
   mode?: ReadOnlyStatementMode,
 ): Promise<QueryResult> {
   const provider = await context.acquireProvider(context.connection, AGENT_EXECUTION_PROFILE);
@@ -1975,7 +2085,7 @@ async function runStatement(
     // was asked for, so it is a note rather than a second guard.
     throw new Error("agent tool layer: the acquired provider exposes no read-only execution path");
   }
-  const { sql } = validatedInput as { readonly sql: string };
+  const sql = (validatedInput as Readonly<Record<string, string>>)[argument];
   // Set immediately before the statement leaves, and never reset. This flag is the
   // whole phase discriminator: anything that threw while we were still connecting
   // cannot be a statement the model could repair, whatever class it carries, so the
@@ -2006,16 +2116,19 @@ export async function executeAgentOperation(
   context: AgentToolContext,
   request: AgentOperationRequest,
 ): Promise<AgentToolOutcome> {
+  const argument = request.argument ?? "sql";
   return runAuditedAgentCall(context, {
     operationId: request.operationId,
     // The statement IS the identity of a SQL call: two calls sending the same text
     // are the same call however the model worded its way to them.
     fingerprintSource: request.sql,
-    input: { sql: request.sql },
+    fingerprintLanguage: context.statementLanguage ?? "sql",
+    input: { [argument]: request.sql },
     ...(request.label === undefined ? {} : { label: request.label }),
     ...(request.target === undefined ? {} : { target: request.target }),
     ...(request.grounding === undefined ? {} : { grounding: request.grounding }),
-    invoke: (validatedInput, budget, phase) => runStatement(context, validatedInput, budget, phase, request.mode),
+    invoke: (validatedInput, budget, phase) =>
+      runStatement(context, validatedInput, budget, phase, argument, request.mode),
   });
 }
 
@@ -2033,7 +2146,12 @@ interface AuditedAgentCall {
   readonly operationId: AgentOperationId;
   /** Canonical text this call is identified by in the repair ledger. */
   readonly fingerprintSource: string;
-  /** The input the DESCRIPTOR validates. `{sql}` for a statement, the selector for a curated read. */
+  /**
+   * The language `fingerprintSource` is written in, set by statement calls only. A curated call leaves it unset and
+   * keeps the SQL fingerprint of its own `operations:...` or `objects:...` key, which is no statement in any language.
+   */
+  readonly fingerprintLanguage?: AgentStatementLanguageId;
+  /** The input the DESCRIPTOR validates. `{sql}` or `{statement}` for a statement, the selector for a curated read. */
   readonly input: unknown;
   readonly label?: string;
   readonly target?: { readonly catalog?: string; readonly schema?: string };
@@ -2057,7 +2175,11 @@ interface AuditedAgentCall {
  * happened.
  */
 class AgentCuratedReadError extends Error {
-  constructor(readonly reasonCode: AgentReadingDenyCode) {
+  constructor(
+    readonly reasonCode: AgentReadingDenyCode,
+    /** The sentence the model reads, where this reading's advice differs from the generic one. */
+    readonly modelText?: string,
+  ) {
     super(reasonCode);
     this.name = "AgentCuratedReadError";
   }
@@ -2170,13 +2292,20 @@ function columnsThatExist(message: string, connection: DatabaseConnection): stri
  *
  * Takes no connection: neither branch reads our own state. They are derived from the shape of the
  * engine's message and from the engine this connection IS, which is why neither can be free.
+ *
+ * The row-budget sentence is the statement language's own, since the way to ask for fewer rows is
+ * written in that language. The catalog branch is SQL's alone: a foreign catalog is a SQL mistake.
  */
-function otherStatementAdvice(message: string, engine: string): string | undefined {
+function otherStatementAdvice(
+  message: string,
+  engine: string,
+  statement: string,
+  language: AgentStatementLanguageId,
+): string | undefined {
   const overBudget = /row budget: \d+ rows > (\d+) allowed/.exec(message);
-  if (overBudget !== null) {
-    return `Ask for fewer rows: add LIMIT ${overBudget[1]} (or an aggregate that returns one row) and run it again.`;
-  }
-  if (/information_schema|pg_catalog/i.test(message) || /no such table: \w+\./i.test(message)) {
+  if (overBudget !== null) return languageServer(language).rowCapAdvice(statement, overBudget[1]);
+  const foreignCatalog = /information_schema|pg_catalog/i.test(message) || /no such table: \w+\./i.test(message);
+  if (language === "sql" && foreignCatalog) {
     return `That catalog belongs to another engine — this connection is ${engine}. Call inspect_schema for this database's tables and columns rather than querying a catalog directly.`;
   }
   return undefined;
@@ -2188,7 +2317,7 @@ async function runAuditedAgentCall(context: AgentToolContext, call: AuditedAgent
   // set, so no dispatch of a model's tool call ever arrives here with it.
   if (context.mode !== "agent" && call.grounding !== true) return unavailable("MODE_HAS_NO_TOOLS");
 
-  const fingerprint = fingerprintStatement(call.fingerprintSource);
+  const fingerprint = languageServer(call.fingerprintLanguage ?? "sql").fingerprint(call.fingerprintSource);
   const repairAdmission = context.repairs.admit(fingerprint);
   if (!repairAdmission.admitted) return unavailable(repairAdmission.reasonCode);
 
@@ -2313,7 +2442,7 @@ async function runAuditedAgentCall(context: AgentToolContext, call: AuditedAgent
         },
         // The server's own words: nothing an engine wrote is in this sentence, so it
         // is not fenced.
-        modelText: READING_REFUSAL_TEXT[error.reasonCode],
+        modelText: error.modelText ?? READING_REFUSAL_TEXT[error.reasonCode],
       };
     }
     // The phase gate comes FIRST and is unconditional. A failure raised before the
@@ -2345,7 +2474,14 @@ async function runAuditedAgentCall(context: AgentToolContext, call: AuditedAgent
       applies. `columnsThatExist` is computed once and used for both rather than called twice.
     */
     const columns = columnsThatExist(error.message, context.connection);
-    const advice = columns ?? otherStatementAdvice(error.message, context.connection.type);
+    const advice =
+      columns ??
+      otherStatementAdvice(
+        error.message,
+        context.connection.type,
+        call.fingerprintSource,
+        call.fingerprintLanguage ?? "sql",
+      );
     const answered = columns !== undefined;
     context.repairs.recordFailure(fingerprint, answered ? "database-error-answered" : "database-error");
     return {
@@ -2399,7 +2535,7 @@ async function runAuditedAgentCall(context: AgentToolContext, call: AuditedAgent
       return {
         kind: "refused",
         refusal: { class: "policy-denied", reasonCode: decision.reasonCode },
-        modelText: denialText(decision.reasonCode, policy.version),
+        modelText: denialText(decision.reasonCode, policy.version, call.fingerprintLanguage ?? "sql"),
       };
     }
     context.repairs.recordFailure(fingerprint, "approval-required");
@@ -2425,6 +2561,18 @@ async function runAuditedAgentCall(context: AgentToolContext, call: AuditedAgent
       elapsedMs: result.executionTime,
     },
   };
+  const warnings = result.warnings ?? [];
+  // What the provider said about its own answer (an applied tail, a defaulted container) is part of the answer: a
+  // model that cannot see it reads 100 lines as the whole log. Fenced like the rows, because a provider may quote
+  // engine text in one. Absent when there is none, so a result with no warnings reads exactly as it always did.
+  const warned =
+    warnings.length === 0
+      ? ""
+      : `\n${fenceUntrustedContent(warnings.map((warning) => warning.message).join("\n"), {
+          label: `${call.label ?? "result"} warnings`,
+          operationId: artifact.operationId,
+          reference: artifact.correlationId,
+        })}`;
   return {
     kind: "completed",
     artifact,
@@ -2438,7 +2586,7 @@ async function runAuditedAgentCall(context: AgentToolContext, call: AuditedAgent
       label: `${call.label ?? "result"}, ${result.rowCount} row(s)`,
       operationId: artifact.operationId,
       reference: artifact.correlationId,
-    })}`,
+    })}${warned}`,
   };
 }
 
@@ -3498,14 +3646,31 @@ async function readCatalog(
   return outcome;
 }
 
-/** One bounded read the model drafted. The statement guard is what bounds it. */
-export async function runReadQueryTool(
-  context: AgentToolContext,
-  input: { readonly sql: string; readonly rationale?: string },
-): Promise<AgentToolOutcome> {
-  const parsed = parseToolInput(readStatementSchema, input);
+/**
+ * One bounded read the model drafted, in the run's language. The statement guard is what bounds it.
+ *
+ * The input is unknown because it is re-validated here against the definition the run was offered, whose argument
+ * the language names (`sql` or `statement`).
+ */
+export async function runReadQueryTool(context: AgentToolContext, input: unknown): Promise<AgentToolOutcome> {
+  const language = context.statementLanguage ?? "sql";
+  const definition = agentToolDefinition(language, context.workflowType, "run_read_query");
+  const parsed = parseToolInput(definition.inputSchema, input);
   if (!parsed.ok) return unavailable("INVALID_TOOL_INPUT", parsed.problems);
-  return executeAgentOperation(context, { operationId: "sql.query.read", sql: parsed.value.sql, label: "read result" });
+  const argument = AGENT_LANGUAGE_COPY[language].argument;
+  const statement = (parsed.value as Readonly<Record<string, string>>)[argument];
+  const server = languageServer(language);
+  // The reader's own sentence, before the policy pipeline: the pipeline's input stage keeps only a reason code, so
+  // without this a model refused for `exec` would read only that its read had the wrong shape. SQL keeps its generic
+  // shape advice (no `admit`), which the golden snapshot holds.
+  const refusal = server.admit?.(statement) ?? null;
+  if (refusal !== null) return unavailable("STATEMENT_NOT_ADMITTED", refusal.message);
+  return executeAgentOperation(context, {
+    operationId: server.readOperation,
+    sql: statement,
+    argument,
+    label: "read result",
+  });
 }
 
 // ============================================================================
@@ -3870,6 +4035,121 @@ export async function inspectOperationsTool(context: AgentToolContext, input: un
     label: scope === undefined ? reading.label : `${reading.label} (${scope})`,
     invoke: (validatedInput, budget, phase) => runCuratedRead(context, validatedInput, budget, phase),
     ...(selector.schema === undefined ? {} : { target: { schema: selector.schema } }),
+  });
+}
+
+/** The cluster usage reading's advice past its row ceiling: it takes no limit, so a smaller limit is not advice. */
+const CLUSTER_OVER_CEILING_TEXT =
+  "That reading holds more than 500 rows, the most it may carry, so none of it was kept. Ask again narrowed by a label selector, or for a smaller namespace.";
+
+/** The same advice past the run's byte budget, which a few hundred wide rows can reach under the row ceiling. */
+const clusterOverBytesText = (bytes: number, allowed: number): string =>
+  `That reading came to ${bytes} bytes, more than the ${allowed} bytes this run may carry, so none of it was kept. Ask again narrowed by a label selector, or for a smaller namespace.`;
+
+/**
+ * The cluster usage reading, inside the audited call.
+ *
+ * Acquired under the agent's read-only profile rather than the operations one: the selector is the model's and reaches
+ * the API server, so the reading is a `data-read` under the kubectl read boundary, and machine redaction applies.
+ * `metrics-unavailable` and `over-ceiling` are the provider's answers, not failures, and become the typed refusals
+ * here, after the call was charged. Both bounds refuse and nothing is cut: the provider's own 500-row ceiling, and the
+ * run's byte budget measured as the read path measures it.
+ */
+async function runClusterUsage(
+  context: AgentToolContext,
+  input: ClusterUsageInput,
+  budget: ExecutionBudget,
+  phase: { statementSent: boolean },
+): Promise<QueryResult> {
+  const provider = await context.acquireProvider(context.connection, AGENT_EXECUTION_PROFILE);
+  if (typeof provider.readClusterUsage !== "function") throw new AgentCuratedReadError("KIND_UNSUPPORTED_BY_PROVIDER");
+  phase.statementSent = true;
+  const reading = await provider.readClusterUsage(input, {
+    statementTimeoutMs: budget.statementTimeoutMs,
+    maxResultRows: budget.maxResultRows,
+    maxResultBytes: budget.maxResultBytes,
+  });
+  if (reading.kind === "metrics-unavailable") throw new AgentCuratedReadError("METRICS_UNAVAILABLE");
+  if (reading.kind === "over-ceiling")
+    throw new AgentCuratedReadError("READING_OVER_BUDGET", CLUSTER_OVER_CEILING_TEXT);
+  const bytes = measureResultBytes(reading.result.rows);
+  if (bytes > budget.maxResultBytes) {
+    throw new AgentCuratedReadError("READING_OVER_BUDGET", clusterOverBytesText(bytes, budget.maxResultBytes));
+  }
+  return reading.result;
+}
+
+/** Container usage against requests and limits in one namespace: one audited call, one statement charge. */
+export async function inspectUsageTool(context: AgentToolContext, input: unknown): Promise<AgentToolOutcome> {
+  const parsed = parseToolInput(clusterUsageReadInput, input);
+  if (!parsed.ok) return unavailable("INVALID_TOOL_INPUT", parsed.problems);
+  const selector = parsed.value;
+  return runAuditedAgentCall(context, {
+    operationId: "cluster.usage.read",
+    // The kubectl fingerprint, which keeps case: two selectors differing in case are two reads.
+    fingerprintSource: `usage ${selector.namespace} ${selector.selector ?? ""}`,
+    fingerprintLanguage: "kubectl",
+    input: selector,
+    label: `container usage in ${selector.namespace}`,
+    invoke: (validatedInput, budget, phase) =>
+      runClusterUsage(context, validatedInput as ClusterUsageInput, budget, phase),
+  });
+}
+
+/** The workload profile's advice past its row ceiling: it takes a namespace alone, so a selector is not advice. */
+const WORKLOADS_OVER_CEILING_TEXT =
+  "That profile holds more than 500 workloads, the most it may carry, so none of it was kept. Profile a smaller namespace, or read the workloads in question with run_read_query.";
+
+/** The same advice past the run's byte budget. */
+const workloadsOverBytesText = (bytes: number, allowed: number): string =>
+  `That profile came to ${bytes} bytes, more than the ${allowed} bytes this run may carry, so none of it was kept. Profile a smaller namespace, or read the workloads in question with run_read_query.`;
+
+/**
+ * The workload profile, inside the audited call: `runClusterUsage`'s shape for `readWorkloadProfile`.
+ *
+ * The namespace is the model's and reaches the API server, so the profile is acquired under the agent's read-only
+ * profile and machine redaction applies. `over-ceiling` is the provider's answer, not a failure, and becomes the typed
+ * refusal here, after the call was charged; the byte budget is measured as the read path measures it. Both refuse and
+ * nothing is cut.
+ */
+async function runWorkloadProfile(
+  context: AgentToolContext,
+  input: WorkloadProfileInput,
+  budget: ExecutionBudget,
+  phase: { statementSent: boolean },
+): Promise<QueryResult> {
+  const provider = await context.acquireProvider(context.connection, AGENT_EXECUTION_PROFILE);
+  if (typeof provider.readWorkloadProfile !== "function") {
+    throw new AgentCuratedReadError("KIND_UNSUPPORTED_BY_PROVIDER");
+  }
+  phase.statementSent = true;
+  const reading = await provider.readWorkloadProfile(input, {
+    statementTimeoutMs: budget.statementTimeoutMs,
+    maxResultRows: budget.maxResultRows,
+    maxResultBytes: budget.maxResultBytes,
+  });
+  if (reading.kind === "over-ceiling")
+    throw new AgentCuratedReadError("READING_OVER_BUDGET", WORKLOADS_OVER_CEILING_TEXT);
+  const bytes = measureResultBytes(reading.result.rows);
+  if (bytes > budget.maxResultBytes) {
+    throw new AgentCuratedReadError("READING_OVER_BUDGET", workloadsOverBytesText(bytes, budget.maxResultBytes));
+  }
+  return reading.result;
+}
+
+/** One namespace's workload profile: one audited call, one statement charge. */
+export async function profileWorkloadsTool(context: AgentToolContext, input: unknown): Promise<AgentToolOutcome> {
+  const parsed = parseToolInput(clusterWorkloadsReadInput, input);
+  if (!parsed.ok) return unavailable("INVALID_TOOL_INPUT", parsed.problems);
+  const target = parsed.value;
+  return runAuditedAgentCall(context, {
+    operationId: "cluster.workloads.read",
+    fingerprintSource: `workloads ${target.namespace}`,
+    fingerprintLanguage: "kubectl",
+    input: target,
+    label: `workload profile of ${target.namespace}`,
+    invoke: (validatedInput, budget, phase) =>
+      runWorkloadProfile(context, validatedInput as WorkloadProfileInput, budget, phase),
   });
 }
 
@@ -4358,7 +4638,18 @@ export function recommendChangeTool(
     throw new Error("agent tool layer: the recommendation's run record does not belong to this run");
   }
 
-  const parsed = parseToolInput(recommendationSchema, readDisplacedRecommendation(input));
+  const definition = agentToolDefinition(context.statementLanguage, context.workflowType, "recommend_change");
+  /*
+    The statement card's readings and refusal copy are about a statement: the displaced-field repair moves SQL between
+    fields, and the shape sentence describes a CREATE INDEX or a SELECT. Neither says anything true about the resources
+    card, so both apply only where the definition is the statement one, which every SQL run's is.
+  */
+  const statementCard = definition.inputSchema === recommendationSchema;
+  const parsed = parseToolInput(
+    definition.inputSchema as z.ZodType<RecommendationInput>,
+    statementCard ? readDisplacedRecommendation(input) : input,
+  );
+  if (!parsed.ok && !statementCard) return invalidEvidenceInput(parsed.problems);
   if (!parsed.ok) {
     return invalidEvidenceInput(
       parsed.problems,
@@ -4373,6 +4664,26 @@ export function recommendChangeTool(
           ? AGENT_RECOMMENDATION_SHAPE
           : undefined,
     );
+  }
+  if (parsed.value.change === "resources") {
+    const { container, ownerKind, ownerName } = parsed.value;
+    if (!parsed.value.evidence.every((reference) => verifiedAgainst(run.events, reference))) {
+      return unavailable(
+        "UNVERIFIABLE_EVIDENCE",
+        unverifiableCitation(run.events, [{ evidence: parsed.value.evidence }]),
+      );
+    }
+    return {
+      kind: "recommended",
+      recommendation: {
+        ...parsed.value,
+        // Carried by the schema's `.min(1)`, as on the statement card.
+        evidence: parsed.value.evidence as [AgentEvidenceReference, ...AgentEvidenceReference[]],
+      },
+      // The container and the owner are text the model itself sent in this call, so quoting them back adds no
+      // untrusted content.
+      modelText: `Recommendation recorded: new requests and limits for container ${container} of ${ownerKind}/${ownerName}, offered to the user and not applied. It is theirs to apply.`,
+    };
   }
   if (!matchesCard(parsed.value.change, parsed.value.statement)) {
     /*
@@ -4433,6 +4744,17 @@ function matchesCard(change: "index" | "rewrite", statement: string): boolean {
 }
 
 /**
+ * The event kinds that carry an artifact this run produced. A set rather than two comparisons, so a later reading
+ * that produces an artifact of its own is added here once and is citable everywhere `producedArtifact` is read.
+ */
+const ARTIFACT_EVENTS: ReadonlySet<AgentRunEvent["kind"]> = new Set([
+  "tool-completed",
+  "table-profiled",
+  "usage-read",
+  "workloads-profiled",
+]);
+
+/**
  * The artifact this run produced under that id, or null.
  *
  * Both events that carry an artifact this run produced. A profile settles no step, so
@@ -4447,49 +4769,11 @@ function matchesCard(change: "index" | "rewrite", statement: string): boolean {
  */
 function producedArtifact(events: readonly AgentRunEvent[], correlationId: string): AgentArtifactReference | null {
   for (const event of events) {
-    const artifact = event.kind === "tool-completed" || event.kind === "table-profiled" ? event.artifact : null;
+    const artifact = ARTIFACT_EVENTS.has(event.kind) && "artifact" in event ? event.artifact : null;
     if (artifact !== null && artifact.correlationId === correlationId) return artifact;
   }
   return null;
 }
-
-/**
- * The one operation whose result may be an ANSWER (#373 review).
- *
- * `producedArtifact` above asks "did this run produce that?", which is the right
- * question for a CITATION and the wrong one for an answer. A claim may rest on a plan
- * the run read — that is what `recommend_change` is built on — so narrowing that path
- * would make an honest report uncomposable. An answer is a different act: it nominates
- * one result as WHAT THE QUESTION ASKED FOR, hands its statement to the rail, and is
- * what `agent-data-analysis.1` counts. Without this, a run could present a
- * `sql.explain.estimate` artifact — the engine's DESCRIPTION of a statement, with no
- * data read, no rows and no measured duration — and satisfy the workflow's verdict
- * without ever having read the data it was opened to analyse.
- *
- * **A profile is excluded too, and that is a decision rather than a side effect.** A
- * profile IS a real reading of data, so the question is honest. Three things settle it:
- * it returns COUNTS the server composed from the run's own inventory rather than rows
- * the model asked for, so what would be shown is not an answer to the user's question
- * but an aggregate about a table; its statement is the server's, so there is nothing of
- * the model's to hand to an editor, which is why it could never have been presented
- * anyway (`statementBehind` returns null for it, and today that is the refusal it
- * gets); and its single aggregate row fails `CHART_TOO_FEW_ROWS` on every chart. So
- * admitting it would only change which refusal it is given — and the refusal it is
- * given now is the true one, which is the whole point of moving this check ahead of
- * the statement.
- *
- * The check goes BEFORE `statementBehind`, because a plan step DOES carry a drafted
- * statement: a check placed after it would have accepted the plan outright.
- *
- * One consequence, recorded rather than left to be discovered: the auto-execute gate's
- * first condition — "this run executed that exact statement" — can no longer FAIL from
- * this layer, because the only artifact presentable is a read whose own drafted
- * statement is by construction among `executedStatements`. Presenting a plan was the
- * one way to reach it. The condition stays in `auto-execute.ts` anyway: it is pure and
- * enumerated over every combination there, and a gate guarding an unbounded execution
- * path must not depend on which artifacts some other layer happens to admit.
- */
-const ANSWER_OPERATION: AgentOperationId = "sql.query.read";
 
 /** Does this reference name something the run actually produced? */
 /**
@@ -4739,7 +5023,7 @@ function executedStatements(events: readonly AgentRunEvent[]): readonly string[]
   }
   const executed: string[] = [];
   for (const event of events) {
-    if (event.kind !== "tool-completed" || event.artifact.operationId !== "sql.query.read") continue;
+    if (event.kind !== "tool-completed" || !isStatementReadOperation(event.artifact.operationId)) continue;
     const sql = sqlByStep.get(event.stepId);
     if (sql !== undefined) executed.push(sql);
   }
@@ -4957,7 +5241,44 @@ export function presentAnswerTool(
 
   const artifact = producedArtifact(run.events, parsed.value.artifact);
   if (artifact === null) return unavailable("ANSWER_ARTIFACT_UNKNOWN");
-  if (artifact.operationId !== ANSWER_OPERATION) {
+  /*
+    Only a statement read may be the ANSWER (#373 review): `isStatementReadOperation`, which is
+    `sql.query.read` on SQL and `kubectl.query.read` on Kubernetes.
+
+    `producedArtifact` asks "did this run produce that?", which is the right
+    question for a CITATION and the wrong one for an answer. A claim may rest on a plan
+    the run read (that is what `recommend_change` is built on), so narrowing that path
+    would make an honest report uncomposable. An answer is a different act: it nominates
+    one result as WHAT THE QUESTION ASKED FOR, hands its statement to the rail, and is
+    what `agent-data-analysis.1` counts. Without this, a run could present a
+    `sql.explain.estimate` artifact, the engine's DESCRIPTION of a statement, with no
+    data read, no rows and no measured duration, and satisfy the workflow's verdict
+    without ever having read the data it was opened to analyse.
+
+    **A profile is excluded too, and that is a decision rather than a side effect.** A
+    profile IS a real reading of data, so the question is honest. Three things settle it:
+    it returns COUNTS the server composed from the run's own inventory rather than rows
+    the model asked for, so what would be shown is not an answer to the user's question
+    but an aggregate about a table; its statement is the server's, so there is nothing of
+    the model's to hand to an editor, which is why it could never have been presented
+    anyway (`statementBehind` returns null for it, and today that is the refusal it
+    gets); and its single aggregate row fails `CHART_TOO_FEW_ROWS` on every chart. So
+    admitting it would only change which refusal it is given, and the refusal it is
+    given now is the true one, which is the whole point of moving this check ahead of
+    the statement.
+
+    The check goes BEFORE `statementBehind`, because a plan step DOES carry a drafted
+    statement: a check placed after it would have accepted the plan outright.
+
+    One consequence, recorded rather than left to be discovered: the auto-execute gate's
+    first condition, "this run executed that exact statement", can no longer FAIL from
+    this layer, because the only artifact presentable is a read whose own drafted
+    statement is by construction among `executedStatements`. Presenting a plan was the
+    one way to reach it. The condition stays in `auto-execute.ts` anyway: it is pure and
+    enumerated over every combination there, and a gate guarding an unbounded execution
+    path must not depend on which artifacts some other layer happens to admit.
+  */
+  if (!isStatementReadOperation(artifact.operationId)) {
     /*
       And WHICH result would have been taken, when the run is holding one.
 

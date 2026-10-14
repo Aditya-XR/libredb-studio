@@ -283,7 +283,7 @@ export async function createDatabaseProvider(
 
     case "firestore": {
       // The explicit /index specifier keeps this dynamic import statically analysable. Read-only whatever the flag
-      // says, so no execution context rides along, as for Kubernetes.
+      // says, so no execution context rides along, as for Neo4j.
       const { FirestoreProvider } = await import("./providers/document/firestore/index");
       return new FirestoreProvider(connection, options);
     }
@@ -389,7 +389,7 @@ export async function createDatabaseProvider(
     }
 
     // OPC UA: an industrial address space, browsed level by level. Read-only whatever the flag says,
-    // so no execution context rides along, as for Kubernetes.
+    // so no execution context rides along, as for Neo4j.
     case "opcua": {
       // The explicit /index specifier keeps this dynamic import statically analysable.
       const { OpcuaProvider } = await import("./providers/industrial/opcua/index");
@@ -409,9 +409,9 @@ export async function createDatabaseProvider(
     // Platforms - dynamically imported
     case "kubernetes": {
       // The explicit /index specifier keeps this dynamic import statically analysable. Read-only whatever the flag
-      // says, so no execution context rides along, as for Neo4j.
+      // says; the execution context rides along, so `queryReadOnly` answers only under an agent profile.
       const { KubernetesProvider } = await import("./providers/platform/kubernetes/index");
-      return new KubernetesProvider(connection, options);
+      return new KubernetesProvider(connection, options, {}, execution);
     }
 
     // Embedded databases - dynamically imported
@@ -1021,9 +1021,10 @@ export type ExecutionProfile = "agent-read-only" | "agent-operations" | "agent-h
  * Single source of truth for the profile list, so a new profile cannot be accepted
  * without stating both. The second field is the engine gate, and it is a PROPERTY OF
  * THE PROFILE rather than of the factory: `agent-read-only` sends model-authored
- * statements, so it is served only where the engine itself can bound one, and only
- * the providers of AGENT_EXECUTION_ENGINES implement that: PostgreSQL, SQLite, DuckDB,
- * SQL Server and MySQL (`src/lib/agent/engine-support.ts`). `agent-operations` sends no statement
+ * statements, so it is served only where the provider can bound one (the engine's own
+ * read-only mechanism, or on Kubernetes the request allowlist plus the identity's RBAC),
+ * and only the providers of AGENT_EXECUTION_ENGINES implement that: PostgreSQL, SQLite,
+ * DuckDB, SQL Server, MySQL and Kubernetes (`src/lib/agent/engine-support.ts`). `agent-operations` sends no statement
  * at all — it calls the curated reporting methods every provider implements — so
  * requiring a read-only STATEMENT path of it would refuse an engine over a capability
  * the profile never uses. `agent-handover` sends a statement too — the one a run
@@ -1058,16 +1059,23 @@ const EXECUTION_PROFILES: ReadonlySet<string> = new Set(Object.keys(PROFILE_ACQU
  * opened with readSecret). Fail closed on every misconfiguration:
  *
  * - both fields absent → null (the profile runs under the connection's own
- *   credentials, still inside the database-native read-only boundary);
- * - only one field present → deny; a half-configured credential must not
- *   silently degrade to the more privileged default;
+ *   credentials, still on a read-only statement path under a declared
+ *   boundary: the engine's own read-only session, or on Kubernetes Studio's
+ *   request allowlist with the connection token's RBAC);
+ * - only one field present → deny, unless the engine declares
+ *   `agentCredential: "token"` and the field is `agentPassword`: that engine
+ *   takes the agent's bearer token alone, and refuses an `agentUser` beside it.
+ *   A half-configured credential must not silently degrade to the more
+ *   privileged default. The form is the provider's declaration, so it is
+ *   decided by `assertAgentCredentialForm` once the provider is built and
+ *   before it connects; this function only reads what the fields hold;
  * - a sealed password that does not open → deny, never a plaintext fallback;
  * - combined with a connection string → deny: buildPoolConfig ignores
  *   user/password fields when a connection string is present, so the
  *   credential would be silently dropped and the agent would run as the more
  *   privileged embedded user.
  */
-function resolveAgentCredential(connection: DatabaseConnection): { user: string; password: string } | null {
+function resolveAgentCredential(connection: DatabaseConnection): { user?: string; password?: string } | null {
   const { agentUser, agentPassword } = connection;
   if (agentUser === undefined && agentPassword === undefined) return null;
   if (connection.connectionString) {
@@ -1076,12 +1084,7 @@ function resolveAgentCredential(connection: DatabaseConnection): { user: string;
       "AGENT_CREDENTIAL_WITH_CONNECTION_STRING",
     );
   }
-  if (!agentUser || !agentPassword) {
-    throw new ExecutionProfileError(
-      `Connection "${connection.id}" configures an incomplete agent credential (user and password are both required)`,
-      "AGENT_CREDENTIAL_UNRESOLVABLE",
-    );
-  }
+  if (!agentPassword) return { user: agentUser };
   const read = readSecret(agentPassword);
   if (read.kind === "undecryptable") {
     throw new ExecutionProfileError(
@@ -1090,6 +1093,28 @@ function resolveAgentCredential(connection: DatabaseConnection): { user: string;
     );
   }
   return { user: agentUser, password: read.value };
+}
+
+/**
+ * Refuses an agent credential whose form the built provider does not take, before it connects. An engine declaring
+ * `agentCredential: "token"` takes `agentPassword` alone; every other engine takes `agentUser` and `agentPassword`
+ * together. Read from the provider rather than from `connection.type`, which `CLAUDE.md` forbids here.
+ */
+function assertAgentCredentialForm(connection: DatabaseConnection, provider: DatabaseProvider): void {
+  const { agentUser, agentPassword } = connection;
+  const tokenOnly = provider.getCapabilities().agentCredential === "token";
+  if (tokenOnly && agentUser !== undefined) {
+    throw new ExecutionProfileError(
+      `Connection "${connection.id}" configures an agent user, and this engine takes the agent's token alone: clear the agent user`,
+      "AGENT_CREDENTIAL_UNRESOLVABLE",
+    );
+  }
+  if (!agentPassword || (!tokenOnly && !agentUser)) {
+    throw new ExecutionProfileError(
+      `Connection "${connection.id}" configures an incomplete agent credential (user and password are both required)`,
+      "AGENT_CREDENTIAL_UNRESOLVABLE",
+    );
+  }
 }
 
 /**
@@ -1181,8 +1206,14 @@ export async function acquireExecutionProfileProvider(
     if (open) return open;
   }
 
+  // A partial credential is overlaid as it stands so the provider can be built and asked for its form; one it does
+  // not take is refused below, before any connect.
   let effectiveConnection: DatabaseConnection = credential
-    ? { ...connection, user: credential.user, password: credential.password }
+    ? {
+        ...connection,
+        ...(credential.user === undefined ? {} : { user: credential.user }),
+        ...(credential.password === undefined ? {} : { password: credential.password }),
+      }
     : connection;
 
   // The SSH tunnel is keyed by connection id, bastion route and far end, and shared with the
@@ -1207,6 +1238,14 @@ export async function acquireExecutionProfileProvider(
     ...acquisition.context,
     allowExternalFileAccess: requester.allowExternalFileAccess === true,
   });
+  if (credential !== null) {
+    try {
+      assertAgentCredentialForm(connection, provider);
+    } catch (error) {
+      await closeFreshTunnel();
+      throw error;
+    }
+  }
   if (acquisition.requiresReadOnlyStatements && typeof provider.queryReadOnly !== "function") {
     await closeFreshTunnel();
     throw new ExecutionProfileError(

@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as manifest from "@/lib/agent/agent-manifest";
 import { AGENT_EXECUTION_ENGINES, namedList } from "@/lib/agent/engine-support";
 import { AGENT_HANDOVER_BUDGET, AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { agentPosture, autoExecuteTerms } from "@/lib/agent/posture";
@@ -177,7 +178,7 @@ describe("agentPosture in agent mode, where it cannot execute", () => {
     expect(posture.qualifier).toBe("plan mode drafts here, and the operations workflow still runs");
     expect(posture.title).toBe("Agent mode has no read-only statement path on MongoDB");
     expect(posture.body).toBe(
-      `Agent mode executes only where the provider implements a database-native read-only statement path — ${EXECUTION_ENGINE_NAMES}. On MongoDB a run whose workflow sends a statement is refused when it is started, before a run is opened. The operations workflow still runs here, because it sends no statement at all: it calls the curated reporting methods every provider implements. Plan mode drafts on every engine.`,
+      `Agent mode executes only where the provider implements a read-only statement path under a boundary it declares: ${EXECUTION_ENGINE_NAMES}. On MongoDB a run whose workflow sends a statement is refused when it is started, before a run is opened. The operations workflow still runs here, because it sends no statement at all: it calls the curated reporting methods every provider implements. Plan mode drafts on every engine.`,
     );
   });
 
@@ -202,7 +203,7 @@ describe("agentPosture in agent mode, where it cannot execute", () => {
     expect(posture.qualifier).toBe("no connection is resolved, so no engine has been established");
     expect(posture.title).toBe("Agent mode has no connection to execute on");
     expect(posture.body).toBe(
-      `Agent mode executes only where the provider implements a database-native read-only statement path — ${EXECUTION_ENGINE_NAMES}. No connection is resolved here, so this panel cannot say which engine you are on, or whether it is one of those: until one is resolved, agent mode executes nothing. The operations workflow sends no statement at all, so it runs wherever a connection does, and plan mode drafts on every engine.`,
+      `Agent mode executes only where the provider implements a read-only statement path under a boundary it declares: ${EXECUTION_ENGINE_NAMES}. No connection is resolved here, so this panel cannot say which engine you are on, or whether it is one of those: until one is resolved, agent mode executes nothing. The operations workflow sends no statement at all, so it runs wherever a connection does, and plan mode drafts on every engine.`,
     );
   });
 
@@ -211,6 +212,66 @@ describe("agentPosture in agent mode, where it cannot execute", () => {
 
     expect(posture.headline).toBe("Cannot execute yet");
     expect(posture.body).not.toContain("Postgres-shaped guess");
+  });
+});
+
+describe("the posture on Kubernetes", () => {
+  const posture = agentPosture({ mode: "agent", engine: "kubernetes", engineLabel: "Kubernetes", handover: false });
+  const rows = STATEMENT_BUDGETS.maxResultRows;
+  const seconds = STATEMENT_BUDGETS.statementTimeoutMs / 1000;
+
+  test("says Studio's request allowlist and RBAC bound it, never that the engine or the database does", () => {
+    expect(posture.tone).toBe("reads");
+    expect(posture.body).toContain("request allowlist");
+    expect(posture.body).toContain("RBAC");
+    expect(posture.body).not.toMatch(/database-enforced|database-native|refused by the engine|the database enforces/);
+  });
+
+  test("names both identities the agent may run as, and recommends a view token", () => {
+    expect(posture.body).toContain("agent token");
+    expect(posture.body).toContain("view");
+  });
+
+  test("states the reviewed wording, with the figures read from the policy row", () => {
+    expect(posture.headline).toBe("Reads only");
+    expect(posture.qualifier).toBe(
+      `${rows} rows and ${seconds} s per statement, enforced by Studio's request allowlist`,
+    );
+    expect(posture.title).toBe("Agent mode reads, under a boundary Studio enforces");
+    expect(posture.body).toBe(
+      `Agent mode runs kubectl reads it wrote itself, bounded to ${rows} rows and ${seconds} seconds each. Studio's request allowlist admits reads only, checked on the final request before it is sent, and the identity's RBAC decides what is visible: the agent runs on the connection's agent token when one is set, and on the connection's own token otherwise, so give it a token bound to view. Values Studio masks, such as env values, annotation values, ConfigMap data and Secret names and values, never reach the model. Nothing reaches your editor.`,
+    );
+  });
+
+  test("a hand-over tick widens nothing, because no hand-over is offered on this engine", () => {
+    const ticked = agentPosture({ mode: "agent", engine: "kubernetes", engineLabel: "Kubernetes", handover: true });
+
+    expect(ticked).toEqual(posture);
+  });
+
+  test("the SQL posture is unchanged", () => {
+    const sql = agentPosture({ mode: "agent", engine: "postgres", engineLabel: "PostgreSQL", handover: false });
+    expect(sql.body).toContain("in a read-only session the database enforces");
+  });
+
+  test("the engine-less arms no longer call every listed engine database-native", () => {
+    const unsupported = agentPosture({ mode: "agent", engine: "mongodb", engineLabel: "MongoDB", handover: false });
+    expect(unsupported.body).not.toContain("database-native");
+    expect(unsupported.body).toContain("Kubernetes");
+    const unresolved = agentPosture({ mode: "agent", engine: null, engineLabel: "", handover: false });
+    expect(unresolved.body).not.toContain("database-native");
+    expect(unresolved.body).toContain("Kubernetes");
+  });
+
+  test("autoExecuteTerms on kubectl says no hand-over runs there", () => {
+    expect(autoExecuteTerms("data-analysis", "kubectl")).toContain("never run in your editor");
+    expect(autoExecuteTerms("data-analysis", "kubectl")).toBe(
+      "A kubectl answer is never run in your editor: the hand-over is not offered on this engine, so the run produces its answer on its own read-only path only.",
+    );
+  });
+
+  test("autoExecuteTerms defaults to SQL, the language the consent step is shown for", () => {
+    expect(autoExecuteTerms("data-analysis")).toBe(autoExecuteTerms("data-analysis", "sql"));
   });
 });
 
@@ -279,16 +340,41 @@ describe("the engine names follow the enforcing list", () => {
         handover: false,
       });
 
-      expect(blocked.body).toContain("path — PostgreSQL, SQLite and MySQL.");
+      expect(blocked.body).toContain("boundary it declares: PostgreSQL, SQLite and MySQL.");
       expect(withThree({ mode: "agent", engine: "mysql", engineLabel: "MySQL", handover: false }).tone).toBe("reads");
     } finally {
       mock.module("@/lib/agent/engine-support", () => ({ AGENT_EXECUTION_ENGINES: real, namedList }));
     }
   });
 
+  test("whether an engine executes is the manifest's answer: an engine with a statement language reads", async () => {
+    // Captured as a plain object before the substitution: the namespace itself follows the replacement.
+    const real = { ...manifest };
+    try {
+      mock.module("@/lib/agent/agent-manifest", () => ({
+        ...real,
+        AGENT_STATEMENT_LANGUAGE: { ...real.AGENT_STATEMENT_LANGUAGE, mongodb: "sql", postgres: null },
+      }));
+      const { agentPosture: fromManifest } = await import("@/lib/agent/posture");
+
+      expect(fromManifest({ mode: "agent", engine: "mongodb", engineLabel: "MongoDB", handover: false }).tone).toBe(
+        "reads",
+      );
+      expect(
+        fromManifest({ mode: "agent", engine: "postgres", engineLabel: "PostgreSQL", handover: false }).headline,
+      ).toBe("Cannot execute on PostgreSQL");
+      // No connection is still no engine, whatever the manifest holds: it reads as unresolved, not as SQL.
+      expect(fromManifest({ mode: "agent", engine: null, engineLabel: "", handover: false }).headline).toBe(
+        "Cannot execute yet",
+      );
+    } finally {
+      mock.module("@/lib/agent/agent-manifest", () => real);
+    }
+  });
+
   test("the list is read per call, so nothing in the copy is frozen at module load", () => {
     expect(agentPosture({ mode: "agent", engine: "mongodb", engineLabel: "MongoDB", handover: false }).body).toContain(
-      `path — ${EXECUTION_ENGINE_NAMES}.`,
+      `boundary it declares: ${EXECUTION_ENGINE_NAMES}.`,
     );
   });
 });

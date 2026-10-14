@@ -10,6 +10,7 @@ import {
   type AgentEvidenceReference,
   type AgentReadingDenyCode,
   type AgentReportClaim,
+  type AgentResourceQuantities,
   type AgentRunEvent,
   type AgentRunFailureReason,
   type AgentRunMode,
@@ -79,6 +80,7 @@ const GUIDANCE_HEADLINE: Record<Extract<AgentRunEvent, { kind: "guidance-issued"
   "turn-cut-off": "A turn ran long and was cut; asked again",
   "report-reserve": "Told this is its last turn",
   "plan-bar": "Told what the report is judged on",
+  "usage-bar": "Told what the report is judged on",
   // The call the model wrote out instead of making: the reader sees a turn that did nothing,
   // and this names what it actually was.
   "tool-call-as-text": "Wrote a tool call as text; asked to make it properly",
@@ -494,7 +496,7 @@ const FAILURE_SENTENCES = {
   // Names the credential, because that is the only thing to fix and the engine is
   // not at fault: this refusal reaches PostgreSQL and SQLite too (B47).
   "agent-credential-unusable":
-    "This connection's agent credential cannot be used: check that both the agent user and password are set, that the password still decrypts under the current secret key, and that no connection string is set beside it.",
+    "This connection's agent credential cannot be used: check that it is complete (an agent user and password, or where the database takes one, an agent token alone), that the password still decrypts under the current secret key, and that no connection string is set beside it.",
   // Names the database user, because the engine is supported and the credential was
   // applied: the profile refused the principal it opened as. Folded into the engine
   // sentence, an operator connected as `sa` was told to change engines.
@@ -518,6 +520,15 @@ const PLAN_ESTIMATE_CAVEAT =
 
 /** Said on every recommendation, because the run does not make the change. */
 const NOT_APPLIED_CAVEAT = "Not applied: nothing here runs this statement.";
+
+/**
+ * One side of a resources change, as a user would read it beside a manifest: both quantities, with the one that is
+ * not set named as unset, or `unset` alone when the container sets neither.
+ */
+function describeResourceSide(quantities: AgentResourceQuantities): string {
+  if (quantities.cpu === undefined && quantities.memory === undefined) return "unset";
+  return `cpu ${quantities.cpu ?? "unset"}, memory ${quantities.memory ?? "unset"}`;
+}
 
 /**
  * What an answer's `handover` means, in the app's own words.
@@ -866,6 +877,10 @@ const SHORTFALL_SENTENCES: Readonly<Record<AgentGoalShortfall, string>> = {
     "The run reported what it found but never produced an answer to show, so there is nothing to put in front of you.",
   "answer-uncited":
     "The run presented one result as the answer and its report rests on other evidence entirely, so the claims and the picture are not about the same thing.",
+  "no-usage-reading": "No usage was read, so how the containers use their requests was never established.",
+  "no-usage-evidence": "The report rests on no usage reading of this run.",
+  "no-usage-metrics": "This cluster serves no usage metrics: install metrics-server to measure usage.",
+  "no-workload-profile": "No workloads were profiled, so the namespace's health was never established.",
   cancelled: "The run was stopped before it could finish.",
 };
 
@@ -878,6 +893,7 @@ const SHORTFALL_SENTENCES: Readonly<Record<AgentGoalShortfall, string>> = {
 const READING_REFUSAL_HEADLINES: Readonly<Record<AgentReadingDenyCode, string>> = {
   KIND_UNSUPPORTED_BY_PROVIDER: "This engine serves no reading of that kind",
   READING_OVER_BUDGET: "The reading was larger than the run may carry",
+  METRICS_UNAVAILABLE: "This cluster serves no usage metrics",
 };
 
 /**
@@ -1073,6 +1089,18 @@ function describeEvent(
         applySql: event.after.sql,
       };
     case "recommendation":
+      // A resources change has no statement to quote or to hand the editor: it is a change to a workload's manifest,
+      // which this runtime never writes, so the card offers nothing to apply.
+      if (event.change === "resources") {
+        return {
+          tone: "progress",
+          headline: "Resources recommended",
+          detail: `${event.rationale} Not applied: nothing here changes the cluster.`,
+          // The change itself, quoted rather than narrated because the owner and container names are the cluster's
+          // own text; it is what the user writes into the manifest, so it is offered to the clipboard and nowhere else.
+          quoted: `${event.ownerKind}/${event.ownerName}, container ${event.container}: requests ${describeResourceSide(event.current.requests)} to ${describeResourceSide(event.proposed.requests)}; limits ${describeResourceSide(event.current.limits)} to ${describeResourceSide(event.proposed.limits)}`,
+        };
+      }
       return {
         tone: "progress",
         headline: event.change === "index" ? "Index recommended" : "Rewrite recommended",
@@ -1094,6 +1122,29 @@ function describeEvent(
             : `${event.profile.rowCount} row(s) at ${event.profile.depth} depth. ${event.profile.findings
                 .map((finding) => `${finding.column}: ${finding.code} — ${finding.detail}`)
                 .join(" ")}`,
+      };
+    // The namespace is spoken in the headline the way a profiled table's name is: it is the subject of the entry.
+    case "usage-read":
+      return {
+        tone: "progress",
+        headline: `Read container usage in ${event.namespace}`,
+        detail: `${event.artifact.summary.rowCount} container(s), against their requests and limits.`,
+        artifactId: event.artifact.correlationId,
+      };
+    case "workloads-profiled":
+      return {
+        tone: "progress",
+        headline: `Profiled the workloads of ${event.namespace}`,
+        detail: `${event.artifact.summary.rowCount} workload(s).`,
+        artifactId: event.artifact.correlationId,
+      };
+    case "usage-unavailable":
+      // `neutral`, for the reason a schema that was not captured is: the run continues without the reading, so
+      // `progress` would claim it got somewhere and `refused` would claim the server turned a call back.
+      return {
+        tone: "neutral",
+        headline: "No usage metrics",
+        detail: "This cluster serves no metrics.k8s.io, so usage could not be read: install metrics-server.",
       };
     case "answer-composed":
       return {

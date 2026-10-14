@@ -1299,6 +1299,36 @@ export interface ProviderCapabilities {
    */
   readonly enforcesReadOnly?: true;
   /**
+   * How this engine takes the agent's own credential. Absent: `agentUser` and `agentPassword`, both required.
+   * `"token"`: `agentPassword` alone, as the bearer token the agent's acquisitions send instead of the connection's
+   * own; an `agentUser` beside it is refused. `acquireExecutionProfileProvider` in `src/lib/db/factory.ts` reads it
+   * from the provider it builds, before that provider connects, so no `connection.type` branch is needed (forbidden
+   * by `CLAUDE.md`), and `tests/unit/db/agent-credential-capability.test.ts` pins which engines declare it.
+   *
+   * Optional for the same published-interface reason as `enforcesReadOnly`.
+   */
+  readonly agentCredential?: "token";
+  /**
+   * The object kinds whose names this provider masks in `queryReadOnly` output, the agent's read path, by kind id.
+   * Absent: it masks none. A kind declared `machineNames: "withheld"` keeps that promise on a provider with
+   * `queryReadOnly` only when it is listed here, and the census in `tests/isolated/object-source-declarations.test.ts`
+   * refuses one that is not; the masking itself is the provider's own, proved by its redaction test. Kubernetes
+   * declares `["secrets"]`.
+   *
+   * Optional for the same published-interface reason as `enforcesReadOnly`.
+   */
+  readonly machineRedaction?: { readonly maskedNameKinds: readonly string[] };
+  /**
+   * The curated cluster readings this provider answers for the agent, each one audited call and one statement charge
+   * instead of composed statements: `"usage"` is `readClusterUsage` (`cluster.usage.read`), `"workloads"` is
+   * `readWorkloadProfile` (`cluster.workloads.read`). Absent: it answers none.
+   * `AGENT_REQUIREMENT_ENGINES` in `src/lib/agent/agent-manifest.ts` mirrors it per engine type, and
+   * `agent-manifest.test.ts` holds the mirror to this declaration.
+   *
+   * Optional for the same published-interface reason as `enforcesReadOnly`.
+   */
+  readonly agentReadings?: readonly ("usage" | "workloads")[];
+  /**
    * True when this engine's provider reads `ProviderExecutionContext.allowExternalFileAccess` and
    * opens its editor handle under that file-access posture: `false` closes every statement-level file
    * and network route outside the handle's private temp directory and its database's own file names
@@ -1765,6 +1795,35 @@ export interface ReadOnlyStatementBudget {
   maxResultBytes: number;
 }
 
+/** One namespace, and optionally a label selector over its pods, for a curated cluster reading. */
+export interface ClusterUsageInput {
+  readonly namespace: string;
+  readonly selector?: string;
+}
+
+/**
+ * What a cluster usage reading answers: the rows, or why there are none. `metrics-unavailable` is the cluster's own
+ * fact (no metrics.k8s.io, or one whose backend does not answer), not a failure of the read; `over-ceiling` refuses a
+ * reading past its row ceiling rather than truncating it.
+ */
+export type ClusterUsageReading =
+  | { readonly kind: "rows"; readonly result: QueryResult }
+  | { readonly kind: "metrics-unavailable" }
+  | { readonly kind: "over-ceiling" };
+
+/** One namespace, for the workload profile: every workload in it, with nothing to narrow it. */
+export interface WorkloadProfileInput {
+  readonly namespace: string;
+}
+
+/**
+ * What a workload profile answers: one row per workload, or `over-ceiling`, which refuses a profile past its row
+ * ceiling, or one whose lists run past a statement's read, rather than truncating it.
+ */
+export type WorkloadProfileReading =
+  | { readonly kind: "rows"; readonly result: QueryResult }
+  | { readonly kind: "over-ceiling" };
+
 /**
  * What the caller wants out of the one statement it is sending: the statement's own
  * result, or the engine's ESTIMATE of how it would be run.
@@ -1956,14 +2015,30 @@ export interface DatabaseProvider {
   query(sql: string, params?: unknown[], queryId?: string, scope?: string): Promise<QueryResult>;
 
   /**
-   * Execute exactly one statement under the DATABASE's own read-only
-   * enforcement (#328): the engine, not a parser, rejects writes through this
-   * path. Optional on purpose — only providers with a verified database-native
-   * boundary implement it, and execution-profile acquisition
-   * (`acquireExecutionProfileProvider` in factory.ts) refuses provider types
-   * that lack it rather than falling back to `query()` (fail closed).
+   * Execute exactly one statement under a declared read-only boundary (#328):
+   * the engine's own read-only mechanism, or on an engine without one a
+   * Studio-enforced allowlist on every final request plus the identity's
+   * authorization. Never a parser of the statement text. Optional on purpose:
+   * only providers with a verified boundary implement it, and execution-profile
+   * acquisition (`acquireExecutionProfileProvider` in factory.ts) refuses provider
+   * types that lack it rather than falling back to `query()` (fail closed).
    */
   queryReadOnly?(sql: string, budget: ReadOnlyStatementBudget, mode?: ReadOnlyStatementMode): Promise<QueryResult>;
+
+  /**
+   * Container usage against requests and limits in one namespace, for the agent's `cluster.usage.read`. Optional:
+   * only a provider declaring `agentReadings` `"usage"` implements it, and it answers only under the agent read-only
+   * profile, bounded by `budget` as `queryReadOnly` is.
+   */
+  readClusterUsage?(input: ClusterUsageInput, budget: ReadOnlyStatementBudget): Promise<ClusterUsageReading>;
+
+  /**
+   * The workload profile of one namespace, for the agent's `cluster.workloads.read`: one row per workload, with its
+   * desired and ready counts, pods not Ready, restarts, missing requests, limits and probes, and Warning events.
+   * Optional: only a provider declaring `agentReadings` `"workloads"` implements it, and it answers only under the
+   * agent read-only profile, bounded by `budget` as `queryReadOnly` is.
+   */
+  readWorkloadProfile?(input: WorkloadProfileInput, budget: ReadOnlyStatementBudget): Promise<WorkloadProfileReading>;
 
   /**
    * End a transaction that a statement run through `query()` left open on the session
@@ -2856,11 +2931,13 @@ export interface ObjectKindSpec {
    * sensitive, such as stored secrets, whose names often say what they hold.
    *
    * Read through `kindNamesWithheld()` in `src/lib/db/object-kinds.ts`. The walk knows such a kind's size only
-   * through its count, so a provider that declares it counts it in `countObjects`. The walk is the only machine
-   * surface the declaration reaches, so it holds only where no other one lists the kind: the kind's role is not
-   * `relation` (MCP's `inspect_schema` and the app's schema read list relations, and `relationKindIds` refuses a
-   * withheld one), the engine is not `MCP_EXPOSABLE`, and the provider has no `queryReadOnly`, the agent's read
-   * path. The fleet declarations guard in `tests/isolated/object-source-declarations.test.ts` holds all three.
+   * through its count, so a provider that declares it counts it in `countObjects`. The declaration holds only where
+   * no other machine surface lists the kind: the kind's role is not `relation` (MCP's `inspect_schema` and the app's
+   * schema read list relations, and `relationKindIds` refuses a withheld one), and the engine is not `MCP_EXPOSABLE`.
+   * The kind's names are withheld from grounding, and masked in `queryReadOnly` output where the provider has one,
+   * which the provider declares in `ProviderCapabilities.machineRedaction.maskedNameKinds`; the census in
+   * `tests/isolated/object-source-declarations.test.ts` holds that declaration static, and the behaviour is the
+   * provider's own redaction test.
    */
   readonly machineNames?: "withheld";
   /**

@@ -6,23 +6,30 @@
  * annotation, owner and finalizer; one Conditions row per condition; one Events row per event, oldest first, as
  * kubectl orders them. Both object reads are redacted on the request, so a Secret's values and its last-applied
  * annotation never reach a row; an identity that may not list events sees one row that says so, the anonymous
- * sentence when the connection sends no credential.
+ * sentence when the connection sends no credential. On the agent path the rows are written from the copies masked for
+ * the machine (`machine-redaction.ts`), while the events are still selected by the real object. An agent read whose
+ * events did not all fit the read is refused, never answered with only some of them.
  */
+import { QueryError } from "@/lib/db/errors";
 import { ACCEPT_JSON, ACCEPT_TABLE } from "../client";
 import type { IndexedResource } from "../discovery";
 import { KubernetesRequestError } from "../errors";
-import { KUBERNETES_EVENTS_READ_MAX, KUBERNETES_PAGE_SIZE } from "../limits";
+import { KUBERNETES_EVENTS_READ_MAX, KUBERNETES_PAGE_SIZE, KUBERNETES_TYPE } from "../limits";
+import { maskObjectForMachine, maskTableForMachine } from "../machine-redaction";
 import { redactResponse } from "../redaction";
 import { fieldSelectorValue } from "../request-policy";
 import { cellOf, type KubeTable, parseTable, scanTable } from "../table";
 import {
-  byCodeUnit,
   ageOf,
+  byCodeUnit,
   type KubectlContext,
   type KubectlGrid,
+  machineRowLimit,
   namespaceFor,
   objectOf,
+  redactionMode,
   resolveType,
+  rowBudgetSentence,
   stringOf,
   textGrid,
 } from "./context";
@@ -32,6 +39,9 @@ import type { KubectlStatement } from "./parse";
 type DescribeStatement = Extract<KubectlStatement, { readonly command: "describe" }>;
 
 const FIELDS = ["SECTION", "FIELD", "VALUE"] as const;
+
+const MACHINE_EVENTS_CAP_SENTENCE =
+  "More than 5,000 events name this object, and an agent read is refused rather than answered with only some of them: read them with events --for TYPE/NAME --types=Warning.";
 
 /** `key=value` rows of a string map, or one `<none>` row, as kubectl prints an empty map. */
 function mapRows(section: string, field: string, value: unknown): unknown[][] {
@@ -78,14 +88,15 @@ async function eventRows(
       },
       { ...context.call(), accept: ACCEPT_JSON },
     );
-    return parseTable(redactResponse(events, body));
+    return parseTable(redactResponse(events, body, redactionMode(context)));
   };
   let items: readonly KubeEvent[];
   let more = false;
   try {
     const scan = await scanTable(read, {
       offset: 0,
-      limit: KUBERNETES_EVENTS_READ_MAX,
+      // On the agent path the read stops one row past the budget, so the refusal costs 201 rows, not 5,000.
+      limit: machineRowLimit(context, KUBERNETES_EVENTS_READ_MAX),
       pageSize: KUBERNETES_PAGE_SIZE,
     });
     items = scan.rows.map((row) => (row.object ?? {}) as KubeEvent);
@@ -95,6 +106,14 @@ async function eventRows(
     // The client's own sentence: it names the list and, for a connection that sends no credential, the anonymous request.
     return [["Events", "Events", error.message]];
   }
+  // The editor is told the list is partial; the agent's answer must be whole, so its read is refused instead.
+  if (more && context.machine !== undefined)
+    throw new QueryError(
+      items.length > context.machine.maxRows
+        ? rowBudgetSentence(items.length, context.machine.maxRows)
+        : MACHINE_EVENTS_CAP_SENTENCE,
+      KUBERNETES_TYPE,
+    );
   if (items.length === 0) return [["Events", "Events", "<none>"]];
   const sorted = [...items].sort((a, b) => eventTime(a) - eventTime(b));
   const rows = sorted.map((event) => {
@@ -124,19 +143,25 @@ export async function describeObject(context: KubectlContext, statement: Describ
     { op: "get", target: resource, ...where, includeObject: "None" },
     { ...context.call(), accept: ACCEPT_TABLE },
   );
-  const table = parseTable(redactResponse(resource, tableBody));
+  const table = parseTable(redactResponse(resource, tableBody, redactionMode(context)));
   const object =
     objectOf(
       redactResponse(
         resource,
         await context.surface.client.json({ op: "get", target: resource, ...where }, context.call()),
+        redactionMode(context),
       ),
     ) ?? {};
-  const metadata = objectOf(object.metadata) ?? {};
+  // Routing reads the body, the rows are written from the masked copy (R6): on the agent path the Summary cells and
+  // the metadata and condition rows come from copies masked for the machine, while `eventRows` below keeps the real
+  // object, so a Secret's events are still selected by its real name and uid.
+  const shownTable = context.machine === undefined ? table : maskTableForMachine(resource, table);
+  const shown = context.machine === undefined ? object : maskObjectForMachine(resource, object);
+  const metadata = objectOf(shown.metadata) ?? {};
   const rows: unknown[][] = [];
-  const [first] = table.rows;
-  for (const column of table.columns) {
-    const cell = first === undefined ? undefined : cellOf(table, first, column.name);
+  const [first] = shownTable.rows;
+  for (const column of shownTable.columns) {
+    const cell = first === undefined ? undefined : cellOf(shownTable, first, column.name);
     rows.push([
       "Summary",
       column.name,
@@ -157,7 +182,7 @@ export async function describeObject(context: KubectlContext, statement: Describ
   }
   const finalizers = Array.isArray(metadata.finalizers) ? metadata.finalizers : [];
   for (const finalizer of finalizers) rows.push(["Summary", "Finalizer", String(finalizer)]);
-  const status = objectOf(object.status) ?? {};
+  const status = objectOf(shown.status) ?? {};
   const conditions = Array.isArray(status.conditions) ? status.conditions : [];
   for (const condition of conditions.map((entry) => objectOf(entry) ?? {})) {
     const reason = stringOf(condition.reason);

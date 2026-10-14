@@ -222,7 +222,7 @@ describe("foldLedgerEntries", () => {
 
     const detail = view.items.at(-1)?.detail ?? "";
     expect(detail).toBe(
-      "This connection's agent credential cannot be used: check that both the agent user and password are set, that the password still decrypts under the current secret key, and that no connection string is set beside it.",
+      "This connection's agent credential cannot be used: check that it is complete (an agent user and password, or where the database takes one, an agent token alone), that the password still decrypts under the current secret key, and that no connection string is set beside it.",
     );
     // The whole point of the second reason: the sentence must not send the reader
     // after their engine, which is not what refused the run.
@@ -2445,6 +2445,145 @@ describe("a recommendation reads as a proposal, never as something that happened
   });
 });
 
+describe("a resources recommendation folds", () => {
+  test("it has an entry and offers nothing to the editor", () => {
+    const view = foldLedgerEntries([
+      OPENED,
+      event({
+        kind: "event",
+        event: {
+          kind: "recommendation",
+          atMs: 6,
+          change: "resources",
+          namespace: "shop",
+          ownerKind: "Deployment",
+          ownerName: "web",
+          container: "web",
+          current: { requests: { cpu: "500m", memory: "256Mi" }, limits: { cpu: "1", memory: "512Mi" } },
+          proposed: { requests: { cpu: "150m", memory: "128Mi" }, limits: { cpu: "500m", memory: "256Mi" } },
+          rationale: "The container uses a third of its request.",
+          evidence: [{ source: "artifact", correlationId: "u1" }],
+        },
+      } as AgentLedgerEntry & { kind: "event" }),
+    ]);
+
+    expect(view.items).toHaveLength(2);
+    expect(view.items[1]).toMatchObject({
+      tone: "progress",
+      headline: "Resources recommended",
+      detail: "The container uses a third of its request. Not applied: nothing here changes the cluster.",
+      quoted:
+        "Deployment/web, container web: requests cpu 500m, memory 256Mi to cpu 150m, memory 128Mi; limits cpu 1, memory 512Mi to cpu 500m, memory 256Mi",
+    });
+    expect(view.items[1]?.applySql).toBeUndefined();
+  });
+
+  test("a side with nothing set reads as unset, and a half-set side names the missing half", () => {
+    const view = foldLedgerEntries([
+      OPENED,
+      event({
+        kind: "event",
+        event: {
+          kind: "recommendation",
+          atMs: 6,
+          change: "resources",
+          namespace: "shop",
+          ownerKind: "StatefulSet",
+          ownerName: "db",
+          container: "postgres",
+          current: { requests: {}, limits: {} },
+          proposed: { requests: { cpu: "250m" }, limits: { memory: "1Gi" } },
+          rationale: "The container has no requests at all.",
+          evidence: [{ source: "artifact", correlationId: "u1" }],
+        },
+      } as AgentLedgerEntry & { kind: "event" }),
+    ]);
+
+    expect(view.items[1]?.quoted).toBe(
+      "StatefulSet/db, container postgres: requests unset to cpu 250m, memory unset; limits unset to cpu unset, memory 1Gi",
+    );
+    expect(view.items[1]?.applySql).toBeUndefined();
+  });
+});
+
+describe("a cluster usage reading folds", () => {
+  test("a usage reading, a cluster without usage metrics and its refusal each have an entry", () => {
+    const view = foldLedgerEntries([
+      OPENED,
+      event({
+        kind: "event",
+        event: {
+          kind: "usage-read",
+          atMs: 7,
+          artifact: {
+            correlationId: "corr-usage",
+            runId: "run-1",
+            operationId: "cluster.usage.read",
+            summary: { rowCount: 3, columnNames: ["pod"], elapsedMs: 9 },
+          },
+          namespace: "shop",
+        },
+      }),
+      event({ kind: "event", event: { kind: "usage-unavailable", atMs: 8, namespace: "web" } }),
+      event({
+        kind: "event",
+        event: {
+          kind: "tool-refused",
+          atMs: 9,
+          stepId: "s1",
+          refusal: { class: "reading-refused", reasonCode: "METRICS_UNAVAILABLE" },
+        },
+      }),
+    ]);
+
+    expect(view.items[1]).toMatchObject({
+      tone: "progress",
+      headline: "Read container usage in shop",
+      detail: "3 container(s), against their requests and limits.",
+      artifactId: "corr-usage",
+    });
+    expect(view.items[1]?.applySql).toBeUndefined();
+    expect(view.items[2]).toMatchObject({
+      tone: "neutral",
+      headline: "No usage metrics",
+      detail: "This cluster serves no metrics.k8s.io, so usage could not be read: install metrics-server.",
+    });
+    expect(view.items[2]?.artifactId).toBeUndefined();
+    expect(view.items[3]?.headline).toBe("This cluster serves no usage metrics");
+    expect(view.items[3]?.detail).toBe("METRICS_UNAVAILABLE");
+  });
+});
+
+describe("a workload profile folds", () => {
+  test("a workload profile has an entry naming its namespace and citing its artifact", () => {
+    const view = foldLedgerEntries([
+      OPENED,
+      event({
+        kind: "event",
+        event: {
+          kind: "workloads-profiled",
+          atMs: 7,
+          artifact: {
+            correlationId: "corr-profile",
+            runId: "run-1",
+            operationId: "cluster.workloads.read",
+            summary: { rowCount: 5, columnNames: ["kind"], elapsedMs: 9 },
+          },
+          namespace: "shop",
+        },
+      }),
+    ]);
+
+    expect(view.items[1]).toMatchObject({
+      tone: "progress",
+      headline: "Profiled the workloads of shop",
+      detail: "5 workload(s).",
+      artifactId: "corr-profile",
+    });
+    expect(view.items[1]?.applySql).toBeUndefined();
+  });
+});
+
 describe("a table profile reads as counts and findings, never as values", () => {
   const profiled = (findings: readonly { code: string; column: string; detail: string }[]): AgentLedgerEntry =>
     event({
@@ -2548,6 +2687,41 @@ describe("an ending says whether the run ANSWERED, not only how it stopped (B24)
     expect(view.items[1]?.detail).toContain("before-and-after plan comparison");
   });
 
+  test("a resource-efficiency shortfall names usage, and a cluster without metrics names metrics-server", () => {
+    const said = (code: "no-usage-reading" | "no-usage-evidence" | "no-usage-metrics") =>
+      foldLedgerEntries([
+        OPENED,
+        finished(
+          "succeeded",
+          { outcome: "unanswered", verifier: "agent-query-optimization-kubectl.1", unmet: [code] },
+          "report-composed",
+        ),
+      ]).items[1]?.detail;
+
+    expect(said("no-usage-reading")).toContain(
+      "No usage was read, so how the containers use their requests was never established.",
+    );
+    expect(said("no-usage-evidence")).toContain("The report rests on no usage reading of this run.");
+    expect(said("no-usage-metrics")).toContain(
+      "This cluster serves no usage metrics: install metrics-server to measure usage.",
+    );
+  });
+
+  test("a cluster-health shortfall says the namespace's health was never established", () => {
+    const view = foldLedgerEntries([
+      OPENED,
+      finished(
+        "succeeded",
+        { outcome: "unanswered", verifier: "agent-database-assessment-kubectl.1", unmet: ["no-workload-profile"] },
+        "report-composed",
+      ),
+    ]);
+
+    expect(view.items[1]?.detail).toContain(
+      "No workloads were profiled, so the namespace's health was never established.",
+    );
+  });
+
   test("every shortfall has words, so none reaches a user as a raw code", () => {
     for (const code of [
       "no-report",
@@ -2559,6 +2733,10 @@ describe("an ending says whether the run ANSWERED, not only how it stopped (B24)
       "no-table-profile",
       "no-reading",
       "no-answer",
+      "no-usage-reading",
+      "no-usage-evidence",
+      "no-usage-metrics",
+      "no-workload-profile",
       "cancelled",
     ]) {
       const view = foldLedgerEntries([
@@ -3071,6 +3249,7 @@ describe("an answer reads as the app's decision, with the model's caption quoted
       "plan-statement",
       "turn-cut-off",
       "report-reserve",
+      "usage-bar",
       "unread-stop",
       // The three delivered as a tool result (B51). They reach a reader through the
       // `call-held` entry, so these ids only render here for a ledger written by a build

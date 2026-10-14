@@ -41,8 +41,16 @@
  * claims RESTED on, which is a fact about the run.
  */
 
+import { requiredVariant } from "./agent-manifest";
 import { readPlanStatement } from "./plan-draft";
-import type { AgentReportClaim, AgentRunEvent, AgentRunMode, AgentRunRecord, AgentRunWorkflowType } from "./types";
+import type {
+  AgentEvidenceReference,
+  AgentReportClaim,
+  AgentRunEvent,
+  AgentRunMode,
+  AgentRunRecord,
+  AgentRunWorkflowType,
+} from "./types";
 
 /**
  * Which rule judged a run. Versioned in the value, like the execution policy: a
@@ -78,7 +86,22 @@ export type AgentGoalVerifierId =
    * different rules is exactly what a versioned id exists to prevent.
    */
   | "agent-query-optimization.3"
+  /**
+   * Resource efficiency on a cluster, the kubectl query optimization: a usage reading of this run, cited by a
+   * resources recommendation or by a report that recommends nothing.
+   *
+   * Its own id rather than a new version of the SQL one, because it is a different bar and not a revision of it:
+   * a statement and a container are different subjects, and both rules stay live side by side.
+   */
+  | "agent-query-optimization-kubectl.1"
   | "agent-database-assessment.1"
+  /**
+   * Cluster health, the kubectl database assessment: the investigation baseline, with a workload profile counted as
+   * meaningful even when it holds no row, then at least one workload profile of this run. The report need not cite it.
+   *
+   * Its own id for the reason the kubectl optimization has one: a workload is not a table, and both rules stay live.
+   */
+  | "agent-database-assessment-kubectl.1"
   /**
    * Kept for the reason `agent-query-optimization.1` is kept: it shipped on `main` and
    * real runs were measured against it, so a reader of one of those ledgers holds this
@@ -202,6 +225,35 @@ export type AgentGoalShortfall =
    */
   | "answer-uncited"
   /**
+   * A resource-efficiency run never read usage.
+   *
+   * The template's own artifact. Whether a container is sized for what it uses can only be said from what it uses,
+   * and a run that reported from the cluster's objects alone has described the requests and not measured them.
+   */
+  | "no-usage-reading"
+  /**
+   * A resource-efficiency run read usage, and its answer does not rest on that reading: the resources recommendation
+   * cites something else, or the report recommends nothing and cites no usage reading.
+   *
+   * The link between the reading and the conclusion, kept apart from `no-usage-reading` because the run here did
+   * the measuring and then answered beside it.
+   */
+  | "no-usage-evidence"
+  /**
+   * A resource-efficiency run could not read usage because the cluster serves no usage metrics, and read none.
+   *
+   * Kept apart from `no-usage-reading` because the cause is the cluster and not the run: metrics.k8s.io is absent or
+   * metrics-server does not answer, and the reader is owed that sentence rather than one about the model.
+   */
+  | "no-usage-metrics"
+  /**
+   * A cluster-health run never profiled a namespace's workloads.
+   *
+   * The template's own artifact, as `no-table-profile` is the SQL assessment's: reads the model composed may describe
+   * a few objects, and only the profile establishes every workload's state in one place.
+   */
+  | "no-workload-profile"
+  /**
    * The run was stopped before it could conclude. Substituted for the missing
    * output rather than reported alongside it: a user's stop is not a defect of the
    * run, and counting it as one would make every cancellation read as a model that
@@ -235,7 +287,10 @@ export interface AgentWorkflowGoal {
 }
 
 /** Everything the verdict is a function of, and nothing else. */
-export type VerifiableAgentRun = Pick<AgentRunRecord, "mode" | "workflowType" | "status" | "events">;
+export type VerifiableAgentRun = Pick<
+  AgentRunRecord,
+  "mode" | "workflowType" | "status" | "events" | "statementLanguage" | "verifier"
+>;
 
 /**
  * Every claim the run composed, across every report entry it wrote.
@@ -297,7 +352,7 @@ const EVERY_COUNT_MEANS_SOMETHING: ReadonlySet<string> = Object.freeze(new Set<s
  * lecture about how one would find it.
  *
  * **Two bars in one rule, because plan mode has two deliverables.** Every workflow but
- * `operations` is asked for a statement (`PLAN_DELIVERABLES` in `investigation.ts`),
+ * `operations` is asked for a statement (each variant's `planDeliverable` in `agent-manifest.ts`),
  * and `operations` is asked for prose — it composes no SQL, so holding it to a
  * statement would fail every run that did exactly what the workflow is for. (It reads a
  * schema since #411, and since the Operate-statement fix its rules welcome a fenced
@@ -432,6 +487,46 @@ function verifyQueryOptimizationGoal(run: VerifiableAgentRun): readonly AgentGoa
     event.evidence.some((reference) => reference.source === "artifact" && plans.has(reference.correlationId)),
   );
   return grounded ? [] : ["no-plan-evidence"];
+}
+
+/** Every usage reading THIS run took, by the id a citation would name. */
+function usageArtifacts(events: readonly AgentRunEvent[]): ReadonlySet<string> {
+  return new Set(events.flatMap((event) => (event.kind === "usage-read" ? [event.artifact.correlationId] : [])));
+}
+
+/**
+ * Resource efficiency on a cluster: the investigation baseline over the run's own artifacts, with a usage reading
+ * counted as meaningful even when empty (a namespace with nothing running is an answer); then either a resources
+ * recommendation citing a usage reading of this run, or a report citing one and recommending nothing, because a
+ * well-sized namespace must not force an invented change. A run whose only reading was "metrics unavailable" stays
+ * unanswered under its own name, so the rail can say metrics-server is missing rather than that the model failed.
+ */
+function verifyQueryOptimizationKubectlGoal(run: VerifiableAgentRun): readonly AgentGoalShortfall[] {
+  const usage = usageArtifacts(run.events);
+  const baseline = verifyInvestigationGoal(run, usage);
+  if (baseline.length > 0) return baseline;
+  if (usage.size === 0)
+    return run.events.some((event) => event.kind === "usage-unavailable") ? ["no-usage-metrics"] : ["no-usage-reading"];
+  const cites = (evidence: readonly AgentEvidenceReference[]) =>
+    evidence.some((reference) => reference.source === "artifact" && usage.has(reference.correlationId));
+  const resources = run.events.flatMap((event) =>
+    event.kind === "recommendation" && event.change === "resources" ? [event] : [],
+  );
+  if (resources.length > 0) return resources.some((event) => cites(event.evidence)) ? [] : ["no-usage-evidence"];
+  return composedClaims(run.events).some((claim) => cites(claim.evidence)) ? [] : ["no-usage-evidence"];
+}
+
+/**
+ * Cluster health: the investigation baseline over the run's own artifacts, with a workload profile counted as
+ * meaningful even when empty (an empty namespace is an answer), then at least one profile.
+ */
+function verifyDatabaseAssessmentKubectlGoal(run: VerifiableAgentRun): readonly AgentGoalShortfall[] {
+  const profiles = new Set(
+    run.events.flatMap((event) => (event.kind === "workloads-profiled" ? [event.artifact.correlationId] : [])),
+  );
+  const baseline = verifyInvestigationGoal(run, profiles);
+  if (baseline.length > 0) return baseline;
+  return profiles.size > 0 ? [] : ["no-workload-profile"];
 }
 
 /**
@@ -575,12 +670,51 @@ function verifyOperationsGoal(run: VerifiableAgentRun): readonly AgentGoalShortf
   return citesReading ? [] : ["no-reading"];
 }
 
+/**
+ * Verifier id → the rule it names, for every id a run can still be judged under.
+ *
+ * Keyed by id rather than by workflow because a run persists the id it was opened
+ * under, and a resumed drive must apply THAT rule. Partial on purpose: a retired id
+ * stays in the union for the ledgers that carry it, but no new verdict is ever
+ * measured against it, so it has no entry here and asking for one is an error.
+ */
+const AGENT_GOAL_RULES: Readonly<Partial<Record<AgentGoalVerifierId, GoalRule>>> = Object.freeze({
+  "agent-investigation.1": (run: VerifiableAgentRun) => verifyInvestigationGoal(run),
+  "agent-query-optimization.3": verifyQueryOptimizationGoal,
+  "agent-query-optimization-kubectl.1": verifyQueryOptimizationKubectlGoal,
+  "agent-database-assessment.1": verifyDatabaseAssessmentGoal,
+  "agent-database-assessment-kubectl.1": verifyDatabaseAssessmentKubectlGoal,
+  "agent-operations.2": verifyOperationsGoal,
+  "agent-data-analysis.1": verifyDataAnalysisGoal,
+});
+
+/** A verifier id with no rule: a retired id, or a ledger this build never wrote. */
+class AgentGoalVerifierError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentGoalVerifierError";
+    Object.setPrototypeOf(this, AgentGoalVerifierError.prototype);
+  }
+}
+
+/**
+ * The id and the rule as ONE value, read from the one record, so a verdict cannot name a bar it did not apply.
+ *
+ * `Object.hasOwn` rather than an undefined check: the id comes from a ledger, and an id such as `toString`
+ * would otherwise find the inherited method and hand back a verdict measured against no rule at all.
+ */
+function goalOf(verifier: AgentGoalVerifierId): AgentWorkflowGoal {
+  const verify = Object.hasOwn(AGENT_GOAL_RULES, verifier) ? AGENT_GOAL_RULES[verifier] : undefined;
+  if (verify === undefined) throw new AgentGoalVerifierError(`no rule for verifier ${verifier}`);
+  return { verifier, verify };
+}
+
 export const AGENT_WORKFLOW_GOALS: Readonly<Record<AgentRunWorkflowType, AgentWorkflowGoal>> = Object.freeze({
-  investigation: { verifier: "agent-investigation.1", verify: verifyInvestigationGoal },
-  "query-optimization": { verifier: "agent-query-optimization.3", verify: verifyQueryOptimizationGoal },
-  "database-assessment": { verifier: "agent-database-assessment.1", verify: verifyDatabaseAssessmentGoal },
-  operations: { verifier: "agent-operations.2", verify: verifyOperationsGoal },
-  "data-analysis": { verifier: "agent-data-analysis.1", verify: verifyDataAnalysisGoal },
+  investigation: goalOf("agent-investigation.1"),
+  "query-optimization": goalOf("agent-query-optimization.3"),
+  "database-assessment": goalOf("agent-database-assessment.1"),
+  operations: goalOf("agent-operations.2"),
+  "data-analysis": goalOf("agent-data-analysis.1"),
 } satisfies Record<AgentRunWorkflowType, AgentWorkflowGoal>);
 
 const PLANNING_GOAL: AgentWorkflowGoal = { verifier: AGENT_PLANNING_VERIFIER, verify: verifyPlanningGoal };
@@ -589,9 +723,14 @@ const PLANNING_GOAL: AgentWorkflowGoal = { verifier: AGENT_PLANNING_VERIFIER, ve
  * The goal this run is judged against. Mode decides first and the workflow cannot
  * override it, for the same reason it cannot in `selectAgentTools`: planning has no
  * tools whatever it is for, so it can never be held to a bar requiring evidence.
+ *
+ * An agent-mode run is judged by the verifier it persisted at open. A ledger written
+ * before that field reads its variant's verifier, which for a run with no language
+ * is the SQL workflow's: the rule that judged every run written then.
  */
 function goalFor(run: VerifiableAgentRun): AgentWorkflowGoal {
-  return run.mode === "planning" ? PLANNING_GOAL : AGENT_WORKFLOW_GOALS[run.workflowType];
+  if (run.mode === "planning") return PLANNING_GOAL;
+  return goalOf(run.verifier ?? requiredVariant(run.statementLanguage, run.workflowType).verifier);
 }
 
 /**

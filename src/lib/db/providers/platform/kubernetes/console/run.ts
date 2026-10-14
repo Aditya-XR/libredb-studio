@@ -17,7 +17,7 @@ import { explain } from "./explain";
 import { getDocuments } from "./get-documents";
 import { getList, getNamed, type RowWindow } from "./get-list";
 import { readLogs } from "./logs";
-import { readKubectlRun } from "./paging";
+import { AGENT_PAGING_SENTENCE, readKubectlRun } from "./paging";
 import type { KubectlStatement } from "./parse";
 import { readTop } from "./top";
 import { getWatch } from "./watch";
@@ -55,9 +55,24 @@ async function answer(
   }
 }
 
-/** The grid one statement answers, or the sentence it is refused with before anything is sent. */
+/** The sentence for `get -w` on an agent read: a watch is a stream, and an agent read is one bounded answer. */
+export const MACHINE_WATCH_SENTENCE =
+  "get -w streams changes for a window, which an agent read does not hold: drop -w and read the list once. Nothing was sent.";
+
+/**
+ * The grid one statement answers, or the sentence it is refused with before anything is sent. An agent read (a
+ * context with `machine`) also refuses the paging clause and a watch, before any request.
+ */
 export async function runKubectl(context: KubectlContext, text: string): Promise<KubectlGrid> {
   const run = readKubectlRun(text);
   if (!run.ok) throw new QueryError(run.message, KUBERNETES_TYPE);
-  return withTypeRefresh(context.surface.discovery, () => answer(context, run.statement, run.page));
+  if (context.machine !== undefined) {
+    if (run.page !== undefined) throw new QueryError(AGENT_PAGING_SENTENCE, KUBERNETES_TYPE);
+    if (run.statement.command === "get" && run.statement.watch)
+      throw new QueryError(MACHINE_WATCH_SENTENCE, KUBERNETES_TYPE);
+  }
+  // On the agent path the read stops one row past the budget, so the refusal costs 201 rows, not 5,000.
+  const window =
+    run.page ?? (context.machine === undefined ? undefined : { offset: 0, limit: context.machine.maxRows + 1 });
+  return withTypeRefresh(context.surface.discovery, () => answer(context, run.statement, window));
 }

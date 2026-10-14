@@ -158,6 +158,27 @@ describe("AgentRunStore — opening a run", () => {
     expect(folded?.threadId).toBe(record.runId);
   });
 
+  test("a run opened on kubectl carries its language and verifier, and a run opened without reads as neither", async () => {
+    const { store, dataDir } = storeAt();
+    const kubectl = await store.openRun({
+      ...OPEN_INPUT,
+      statementLanguage: "kubectl",
+      verifier: "agent-investigation.1",
+    });
+    const plain = await store.openRun({ ...OPEN_INPUT });
+
+    // Read back through a second store on the same files: a resumed drive in a fresh process has the ledger and
+    // nothing else, so the language and the verifier must come back from it alone.
+    const { store: resumed } = storeAt(dataDir);
+    expect((await resumed.read(kubectl.runId))?.record).toMatchObject({
+      statementLanguage: "kubectl",
+      verifier: "agent-investigation.1",
+    });
+    const folded = (await resumed.read(plain.runId))?.record;
+    expect(folded && "statementLanguage" in folded).toBe(false);
+    expect(folded && "verifier" in folded).toBe(false);
+  });
+
   test("a run that continues nothing folds to a thread of one named after itself", async () => {
     const { store } = storeAt();
 
@@ -340,6 +361,68 @@ describe("AgentRunStore — folding the ledger into a record", () => {
     expect(view?.record.events.map((entry) => (entry as { stepId: string }).stepId)).toEqual(
       Array.from({ length: 150 }, (_unused, index) => `s${index}`),
     );
+  });
+
+  test("a ledger holding a usage reading and a cluster without usage metrics folds", async () => {
+    const { store } = storeAt();
+    const { runId } = await store.openRun(OPEN_INPUT);
+    await store.appendEvent(runId, event("run-started", 1, { mode: "agent" }));
+    await store.appendEvent(
+      runId,
+      event("usage-read", 2, {
+        artifact: { ...artifactFor(runId, "usage_1"), operationId: "cluster.usage.read" },
+        namespace: "shop",
+        selector: "app=web",
+      }),
+    );
+    await store.appendEvent(runId, event("usage-unavailable", 3, { namespace: "web" }));
+
+    const view = await store.read(runId);
+    expect(view?.record.events.map((entry) => entry.kind)).toEqual(["run-started", "usage-read", "usage-unavailable"]);
+    expect(view?.record.status).toBe("running");
+  });
+
+  test("a ledger holding a workload profile folds", async () => {
+    const { store } = storeAt();
+    const { runId } = await store.openRun(OPEN_INPUT);
+    await store.appendEvent(runId, event("run-started", 1, { mode: "agent" }));
+    await store.appendEvent(
+      runId,
+      event("workloads-profiled", 2, {
+        artifact: { ...artifactFor(runId, "profile_1"), operationId: "cluster.workloads.read" },
+        namespace: "shop",
+      }),
+    );
+
+    const view = await store.read(runId);
+    expect(view?.record.events.map((entry) => entry.kind)).toEqual(["run-started", "workloads-profiled"]);
+    expect(view?.record.events[1]).toMatchObject({ kind: "workloads-profiled", namespace: "shop" });
+    expect(view?.record.status).toBe("running");
+  });
+
+  test("a ledger holding a resources recommendation folds", async () => {
+    const { store } = storeAt();
+    const { runId } = await store.openRun(OPEN_INPUT);
+    await store.appendEvent(runId, event("run-started", 1, { mode: "agent" }));
+    await store.appendEvent(
+      runId,
+      event("recommendation", 2, {
+        change: "resources",
+        namespace: "shop",
+        ownerKind: "Deployment",
+        ownerName: "web",
+        container: "web",
+        current: { requests: { cpu: "500m", memory: "256Mi" }, limits: { cpu: "1", memory: "512Mi" } },
+        proposed: { requests: { cpu: "150m", memory: "128Mi" }, limits: { cpu: "500m", memory: "256Mi" } },
+        rationale: "r",
+        evidence: [{ source: "artifact", correlationId: "u1" }],
+      }),
+    );
+
+    const view = await store.read(runId);
+    expect(view?.record.events.map((entry) => entry.kind)).toEqual(["run-started", "recommendation"]);
+    expect(view?.record.events[1]).toMatchObject({ change: "resources", container: "web" });
+    expect(view?.record.status).toBe("running");
   });
 
   test("a cancellation request is visible in the view but is not one of the run's events", async () => {
