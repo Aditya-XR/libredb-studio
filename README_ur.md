@@ -326,4 +326,8 @@ bun run test:coverage  # coverage report
 
 <span dir="rtl">[MIT](LICENSE)۔ کوئی CLA نہیں، کوئی enterprise edition نہیں، اور کچھ بھی reserved نہیں۔</span>
 
+<p align="center" dir="rtl">
+  ہر اس شخص کے لیے جو data کے ساتھ کام کرتا ہے، data چاہے کہیں بھی رکھا ہو یا کہیں بھی جا رہا ہو۔
+</p>
+
 </div>

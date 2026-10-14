@@ -1076,6 +1076,6 @@ _成为第一个赞助 libredb-studio 的人！_
 见 [`docs/THIRD_PARTY_LICENSES.md`](docs/THIRD_PARTY_LICENSES.md)。
 
 <p align="center">
-  为 DBA 与开发者而做。
+  为所有与数据打交道的人而做，无论数据存放在哪里、流向何处。
 </p>
 

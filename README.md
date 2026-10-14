@@ -1157,5 +1157,5 @@ LibreDB Studio has no affiliation with and is not endorsed by Broadcom.
 ---
 
 <p align="center">
-  Built for DBAs and Developers.
+  Built for everyone who works with data, wherever it lives or moves.
 </p>

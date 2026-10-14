@@ -1092,6 +1092,6 @@ Issue와 PR을 환영합니다. 한국어로 작성해도 괜찮습니다. 먼�
 MIT 라이선스로 배포됩니다. 자세한 내용은 `LICENSE`를 참고하세요. 직접 dependency 중 `elkjs`는 reciprocal license인 EPL-2.0을 사용합니다. 자세한 내용은 [`docs/THIRD_PARTY_LICENSES.md`](docs/THIRD_PARTY_LICENSES.md)를 참고하세요.
 
 <p align="center">
-  DBA와 개발자를 위해 만들었습니다.
+  데이터가 어디에 있든, 어디로 흐르든, 데이터를 다루는 모든 사람을 위해 만들었습니다.
 </p>
 

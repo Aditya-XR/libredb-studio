@@ -280,3 +280,7 @@ Para agregar un motor de base de datos, ver [`docs/ADDING_A_PROVIDER.md`](docs/A
 ## Licencia
 
 [MIT](LICENSE). Sin CLA, sin edición empresarial, sin nada reservado.
+
+<p align="center">
+  Hecho para todos los que trabajan con datos, estén donde estén o vayan adonde vayan.
+</p>
