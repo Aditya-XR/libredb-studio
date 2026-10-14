@@ -672,7 +672,7 @@ bun run test:coverage
 |-------|-----------|-------|-------|----------------|
 | **Unit** | `tests/unit/` | 328 | 9,645 | Pure functions: SQL parser, connection strings, data masking, query limiter, schema diff, error classes, DB icons, showcase queries, and the packaging and chart manifests |
 | **API** | `tests/api/` | 35 | 602 | Route handlers: auth, query, transaction, maintenance, AI endpoints, middleware |
-| **Integration** | `tests/integration/` | 24 | 2,768 | Database providers: PG, MySQL, SQLite, MongoDB, Couchbase, Redis, Oracle, MSSQL, ClickHouse, Druid, Elasticsearch, OpenSearch, Trino |
+| **Integration** | `tests/integration/` | 24 | 2,768 | Database providers, one test file per provider in `tests/integration/db/`, plus the MCP server, seed and storage layers |
 | **Hooks** | `tests/hooks/` | 21 | 566 | React hooks: auth, connections, tabs, query execution, transactions, inline editing, monitoring |
 | **Security** | `tests/security/` | 21 | 322 | The posture `docs/SECURITY.md` claims: route exposure, headers, audit channels, credential handling |
 | **Evals** | `tests/evals/` | 13 | 198 | LLM prompt behaviour against recorded models |
