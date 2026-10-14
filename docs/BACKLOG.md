@@ -33,7 +33,7 @@ None of it is a GitHub issue.
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U144 · 132
 - [Dependencies](#dependencies) — P1-P9 · 7
-- [Documentation](#documentation) — DOC3-DOC33 · 30
+- [Documentation](#documentation) — DOC3-DOC33 · 29
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H14 · 4
@@ -5945,17 +5945,6 @@ Found 2026-10-04 while planning the platform integration, which pins a released 
 Not fixed there: the listing text is outside that work.
 
 **Done when:** the table says that `latest` and `X.Y.Z` come from a release, lists the `main` tag, and matches the tags `docker-build-push.yml` publishes.
-
-### DOC16. The drive-token docblock counts the proxy's public paths as four
-
-The header of `src/lib/agent/drive-token.ts` says that `src/proxy.ts` exempts exactly four things: the auth paths, static assets, the health GET and the storage-config GET.
-The proxy's public list names eight paths beside its static-asset test, `/api/auth`, `/_next`, `/favicon.ico`, `/health`, `/api/health`, `/api/db/health`, `/api/storage/config` and `/launch`, and `tests/api/proxy.test.ts` pins them in `the public-path list is exactly the eight it names`.
-The docblock's point, that the drive path is not on that list, still holds; its count and its list do not.
-
-Found 2026-10-04 while adding `/launch` to that list for launch sign-in.
-Not fixed there: the agent module is outside that work.
-
-**Done when:** the docblock points at the proxy's list and the test that pins it instead of counting the list, or states the list as it is.
 
 ### DOC17. SECURITY.md leaves passkey sign-in off its list of routes that need no session
 

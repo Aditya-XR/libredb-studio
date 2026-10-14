@@ -8,9 +8,10 @@
  * The credential exists now because the seam it guards had to be designed with the
  * boundary, not bolted onto it afterwards.
  *
- * `src/proxy.ts` exempts exactly four things — the auth paths, static assets, the
- * health GET and the storage-config GET — and this milestone's constraint is that
- * the drive path does NOT join them. An exemption is path-shaped: anyone who can
+ * `src/proxy.ts` lets a short list of public paths through without a session
+ * (the block under its `// Allow public routes` comment, pinned by
+ * `tests/api/proxy.test.ts`), and this milestone's constraint is that the
+ * drive path does NOT join them. An exemption is path-shaped: anyone who can
  * reach the port gets in. So the drive path is guarded by a credential instead, and
  * this module is that credential:
  *
