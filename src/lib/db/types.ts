@@ -993,7 +993,8 @@ export interface ProviderCapabilities {
     | "opcua"
     | "mtconnect"
     | "modbus"
-    | "netconf";
+    | "netconf"
+    | "snmp";
   supportsExplain: boolean;
   /**
    * Present iff supportsExplain is true (enforced by provider tests).

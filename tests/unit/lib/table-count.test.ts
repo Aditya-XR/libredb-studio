@@ -115,6 +115,7 @@ const EXPECTED_COUNT: Readonly<Record<DatabaseType, string | null>> = Object.fre
   // register map's own, which the provider already holds (#1723).
   modbus: null,
   netconf: null,
+  snmp: null,
 });
 
 async function censusCapabilities(type: DatabaseType): Promise<ProviderCapabilities> {

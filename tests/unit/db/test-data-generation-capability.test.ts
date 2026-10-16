@@ -64,6 +64,7 @@ const OFFERED: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   // The same, and structurally: there is no code here that can build a write (#1723).
   modbus: false,
   netconf: false,
+  snmp: false,
 });
 
 const TYPES = Object.keys(OFFERED) as DatabaseType[];

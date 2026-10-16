@@ -69,6 +69,7 @@ const EXPECTED_CONTAINER_PATH_SHAPES: Readonly<
   modbus: "prefixes",
   // datastore and a module), which is the same shape the other absent engines are in.
   netconf: "absent",
+  snmp: "absent",
   libredb: "exact",
   duckdb: "prefixes",
   mssql: "prefixes",

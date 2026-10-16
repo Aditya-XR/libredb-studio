@@ -231,6 +231,9 @@ const SOURCE_DECLARATIONS: Readonly<Record<DatabaseType, readonly string[]>> = O
   // map, which is not the device's and is already in front of them (#1723).
   modbus: [],
   netconf: ["node/plaintext", "key/xml"],
+  // No kind declares `hasSource`. SNMP's objects are values read from a numbered tree, and
+  // there is no text behind one for a Source tab to show.
+  snmp: [],
   libredb: [],
 });
 
@@ -260,6 +263,9 @@ const CENSUS_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   // No kind carries a definition text: a point is a line in the user's own register map, which is a
   // connection field rather than something the device publishes (#1723).
   "modbus",
+  // SNMP (#1721): every kind it declares answers values read from a numbered tree, and there is no
+  // text behind one, so it declares no source-bearing kind at all.
+  "snmp",
 ]);
 
 /** MariaDB's two extra kinds, which arrive only once the flavour has been measured. */
@@ -329,7 +335,7 @@ describe("the fleet census of object source declarations", () => {
     expect([...CENSUS_TYPES].sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
     // EXTERNAL_DATABASE_TYPES.length (36 with db2, neo4j, milvus, qdrant, influxdb, influxdb3, oxia, databend,
     // bigquery, snowflake, s3, kubernetes, mqtt, firestore, rabbitmq, opcua and mtconnect) plus the embedded store.
-    expect(CENSUS_TYPES).toHaveLength(40);
+    expect(CENSUS_TYPES).toHaveLength(41);
     expect(Object.keys(SOURCE_DECLARATIONS).sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
   });
 
@@ -354,11 +360,12 @@ describe("the fleet census of object source declarations", () => {
     // two source-bearing kinds, databend four source-bearing kinds, bigquery three kinds, snowflake nine source-bearing
     // kinds and its stage, s3 two source-bearing kinds, kubernetes 37 source-bearing kinds and its Custom Resources
     // kind, firestore one source-bearing kind and one other, rabbitmq three source-bearing kinds, opcua one
-    // source-bearing kind, and mtconnect three kinds of which two are not source-bearing: a data item and a
-    expect(rows.filter((row) => row.kind.hasSource !== true)).toHaveLength(46);
-    expect(rows).toHaveLength(190);
-    expect(rows.filter((row) => row.kind.hasSource !== true)).toHaveLength(46);
-    expect(rows).toHaveLength(190);
+    // source-bearing kind, spark two source-bearing kinds and its function kind, mtconnect three kinds of
+    // which two are not source-bearing, and snmp two kinds, neither source-bearing: an SNMP object is a
+    // value at a numbered place, and there is no text behind it to show.
+    // SNMP added two kinds, neither source-bearing: an object group and a table.
+    expect(rows.filter((row) => row.kind.hasSource !== true)).toHaveLength(48);
+    expect(rows).toHaveLength(192);
   });
 
   test("the MariaDB branch declares two more, which an unconnected provider cannot show", async () => {
@@ -473,9 +480,9 @@ describe("the fleet census of object source declarations", () => {
         throw new Error(`the half-declaration guard never reached ${extra}, so it does not cover the MariaDB branch`);
       }
     }
-    // 181 unconnected kinds plus the MariaDB branch's eight: MTConnect's three joined (#1722), of which
-    expect(rows).toHaveLength(198);
-    expect(rows).toHaveLength(198);
+    // 181 unconnected kinds plus the MariaDB branch's eight, and the kinds each new
+    // provider brought: MTConnect's three (#1722), NETCONF's and Modbus's, and SNMP's two (#1721).
+    expect(rows).toHaveLength(200);
 
     const halfDeclared = rows
       .filter((row) => row.kind.sourceLanguage !== undefined && row.kind.hasSource !== true)

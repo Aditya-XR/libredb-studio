@@ -51,6 +51,7 @@ describe("DIALECT_EDITORS", () => {
       "rabbitmq",
       "redis",
       "s3",
+      "snmp",
       "sql",
     ]);
   });
@@ -67,6 +68,7 @@ describe("DIALECT_EDITORS", () => {
       opcua: "json",
       mtconnect: "mtconnect",
       netconf: "json",
+      snmp: "json",
       libredb: "libredb",
       redis: "redis",
       promql: "promql",
@@ -84,7 +86,7 @@ describe("DIALECT_EDITORS", () => {
     });
   });
 
-  test("only the SQL tab, the seven JSON tabs and the Milvus and Qdrant consoles have a formatter", () => {
+  test("only the SQL tab, the eight JSON tabs and the Milvus and Qdrant consoles have a formatter", () => {
     const formatted = Object.entries(DIALECT_EDITORS)
       .filter(([, editor]) => editor.format !== undefined)
       .map(([type]) => type)
@@ -99,6 +101,7 @@ describe("DIALECT_EDITORS", () => {
       "opcua",
       "qdrant",
       "rabbitmq",
+      "snmp",
       "sql",
     ]);
   });

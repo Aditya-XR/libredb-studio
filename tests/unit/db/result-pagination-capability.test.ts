@@ -119,6 +119,7 @@ const EXPECTED: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   // what was asked for: there is no page two to ask for (#1723).
   modbus: false,
   netconf: false,
+  snmp: false,
 });
 
 const TYPES = Object.keys(EXPECTED) as DatabaseType[];

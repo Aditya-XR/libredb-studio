@@ -554,6 +554,7 @@ export const NON_SQL_DESTRUCTIVE_VOCABULARY: Readonly<Partial<Record<DatabaseTyp
   // `requests.ts` builds four read operations and a close, and no function in the provider can build an
   // `<edit-config>`, a `<commit>` or a `<lock>`. Naming an operation here would claim this provider can send one.
   netconf: { operations: new Set<string>(), read: () => [], decidesAlone: true, safetyAnalysis: false },
+  snmp: { operations: new Set<string>(), read: () => [], decidesAlone: true, safetyAnalysis: false },
   kubernetes: {
     operations: KUBERNETES_DESTRUCTIVE_OPERATIONS,
     read: readKubernetesOperations,

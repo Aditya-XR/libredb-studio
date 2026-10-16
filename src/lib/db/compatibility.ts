@@ -131,6 +131,7 @@ const SHIPPED: Readonly<Record<DatabaseType, true>> = Object.freeze({
   mtconnect: true,
   modbus: true,
   netconf: true,
+  snmp: true,
   libredb: true,
 });
 
@@ -217,6 +218,7 @@ const EXTERNAL: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   mtconnect: true,
   modbus: true,
   netconf: true,
+  snmp: true,
   // The one false entry. SQLite is a file rather than a server and is still
   // external: it is the user's file, opened from a path they give us. libredb is
   // ours, created by this app, so it is the only id that answers no here.
@@ -331,6 +333,7 @@ export const READ_ONLY_ENFORCED: Record<DatabaseType, boolean> = Object.freeze({
   modbus: true,
   // `get-schema` answered data.
   netconf: true,
+  snmp: true,
   libredb: false,
 });
 
@@ -395,6 +398,7 @@ export const READS_FILE_ACCESS_POSTURE: Readonly<Record<DatabaseType, boolean>> 
   modbus: false,
   // `tests/unit/db/reads-file-access-posture-capability.test.ts`.
   netconf: false,
+  snmp: false,
   libredb: false,
 });
 
@@ -481,6 +485,7 @@ export const MCP_EXPOSABLE: Readonly<Record<DatabaseType, boolean>> = Object.fre
   modbus: false,
   // not taken by default.
   netconf: false,
+  snmp: false,
   libredb: true,
 });
 
@@ -538,6 +543,7 @@ export const CONNECTION_FORM_URI_MODE: Readonly<Record<DatabaseType, boolean>> =
   // and `netconf://` is a scheme nothing in this product parses. Held equal to
   // `DB_UI_CONFIG[type].showConnectionStringToggle` by `connection-string-records.test.ts`.
   netconf: false,
+  snmp: false,
   libredb: false,
 });
 
@@ -601,6 +607,7 @@ export const CONNECTION_STRING_ACCEPTED: Readonly<Record<DatabaseType, boolean>>
   modbus: false,
   // in one box.
   netconf: false,
+  snmp: false,
   libredb: false,
 });
 

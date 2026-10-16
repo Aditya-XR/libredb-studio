@@ -12,6 +12,7 @@ import {
   MtconnectIcon,
   NetconfIcon,
   OpcuaIcon,
+  SnmpIcon,
   CouchbaseIcon,
   ClickHouseIcon,
   DruidIcon,
@@ -1453,6 +1454,83 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     // fingerprint has a field of its own rather than borrowing `serverCertificateThumbprint`: a
     // host key is not a certificate, and the two are checked by different code.
     connectionFields: ["host", "port", "user", "password", "privateKey", "privateKeyPassphrase", "hostKeyFingerprint"],
+  },
+  snmp: {
+    // A mark drawn for Studio: a trunk with three numbered stops descending from it, because an
+    // agent answers from a named tree and is read by walking it. Not a router silhouette, which
+    // would say what is being read rather than what the reading is.
+    icon: SnmpIcon,
+    // `mauve`, measured rather than chosen. Four grey hues were already spoken for by the time
+    // this registered (slate, mist, stone, neutral), and clearing AA stopped being the deciding
+    // test among them: `zinc`, `gray` and `taupe` all clear it and all sit closer to a
+    // neighbour. Against the declared identity set, `mauve-700` reads 9.51 on the worst light
+    // ground and leaves the closest pair in BOTH palettes exactly where it was, light 0.0166 and
+    // dark 0.0100, which none of the other three do. Putting `gray-800` in this slot instead
+    // fails the separation test (tests/unit/theme-accent-contrast.test.ts).
+    color: "text-hue-mauve",
+    label: "SNMP",
+    // RFC 3417 section 3.2. 162 is the trap port and is deliberately not the default: a reader
+    // pointed there would be talking to a trap receiver, which answers no Get at all.
+    defaultPort: "161",
+    // No URI form. Measured: `snmp://` is not in `ENGINE_URI_SCHEMES`, and the house rule runs
+    // one way only - an engine with this toggle on must have a scheme, and of the 36 engines
+    // measured there was no exception.
+    showConnectionStringToggle: false,
+    // AND NO SSL / TLS PANEL. The transport is bare UDP - `client.ts` opens `createSocket("udp4")`
+    // and nothing else - so there is no session for a certificate chain to secure. MEASURED: across
+    // the nineteen files of this provider, `sslMode`, `sslCa`, `sslCert`, `sslKey` and
+    // `rejectUnauthorized` appear zero times, so every value the panel collected was written to the
+    // connection and read by nothing.
+    //
+    // The field below says the same thing in the other direction: the consent box's hint states
+    // there is no transport security under a v2c datagram at all. A panel offering `verify-full`
+    // beside that sentence contradicts it. What secures this protocol is SNMPv3's own USM, inside
+    // the message rather than under it.
+    showSslPanel: false,
+    // AND NO SSH TUNNEL, which is a different reason and not the same one twice. Something would
+    // read it - `factory.ts` opens the tunnel for any connection that carries one, with no test on
+    // the engine - and that is exactly the problem: MEASURED, the shared tunnel is a local TCP
+    // listener (`src/lib/ssh/tunnel.ts` is `net.createServer` plus `forwardOut`, and the word
+    // `dgram` does not appear in its 392 lines). The factory then rewrites host and port to that
+    // TCP endpoint, and this provider sends datagrams to it, where nothing is listening for them.
+    // A tunnel the dialog offers and the transport cannot use is a box that breaks the connection
+    // it promises to carry.
+    showSshTunnel: false,
+    // FOUR FIELDS. Three are what the provider reads; the fourth is the consent without which it
+    // REFUSES to open. `connection-options.ts` turns down a v2c connection to a host that is not
+    // loopback unless `allowInsecureAuth` is set, and names two ways out: choose v3, or consent to
+    // the community travelling in clear. Declaring only the first three left NEITHER way on the
+    // screen, so every agent off this machine was unreachable through the dialog - a defect that
+    // lived between two correct halves, a refusal that reads right and a field list that is valid.
+    // The v3 half is still missing and this list does not pretend otherwise: v3 needs a security
+    // level, a privacy passphrase, a context name and an engine id pin, and none of those exist on
+    // the shared connection record. A field collected and dropped is worse than one that is absent.
+    connectionFields: ["host", "port", "password", "allowInsecureAuth"],
+    // The community is one shared secret with no user beside it, which is why it sits in the
+    // password field and is labelled for what it is.
+    // Both labels are declared because the dialog's own fallbacks are wrong here twice over: the
+    // secret is a community rather than a password, and the consent box's default sentence offers
+    // TLS, which SNMP has nowhere to put. What v2c lacks is not TLS, it is any transport security
+    // at all; v3's answer is USM inside the message, not a tunnel under it.
+    fieldLabels: {
+      // `host` because the dialog's own default is "Host & Instance", which is SQL Server's
+      // vocabulary: an SNMP agent has no instance, and a reader asked for one looks for a thing
+      // that does not exist. Twenty-three entries declare this label for the same reason, and the
+      // browser spec of this engine is what found it here.
+      host: "Host",
+      password: "Community",
+      allowInsecureAuth: "Send the community in clear to an agent that is not on this machine",
+    },
+    fieldPlaceholders: { password: "" },
+    fieldHints: {
+      host: "A name or address only. If Studio runs in a container, localhost is that container: use host.docker.internal.",
+      password:
+        "The read community. It travels in clear in every v2c datagram and there is no transport security under it, so `public` and `private` are the documented defaults every device ships with.",
+      allowInsecureAuth:
+        "Ticked, the community travels in clear in every datagram to an agent that is not on this machine. SNMPv2c has no authentication either: an answer can be forged by anything that can reach this connection.",
+    },
+    readOnlyHint:
+      "SNMP connections are read-only whether or not this is ticked, and not by a setting: the outgoing valve parses every datagram and refuses any PDU that is not a Get, GetNext or GetBulk, so a Set never reaches the socket.",
   },
   libredb: {
     icon: LibreDBIcon,

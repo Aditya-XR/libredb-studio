@@ -1753,6 +1753,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     "rabbitmq",
     "snowflake",
     "opcua",
+    "snmp",
     "spark",
     "mtconnect",
     "modbus",

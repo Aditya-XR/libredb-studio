@@ -816,6 +816,19 @@ export interface DialectGenerators {
  * and `generateRowActionQuery` are its only readers, and this module's export list is pinned
  * (`tests/unit/lib/query-generators.test.ts`).
  */
+/**
+ * Every query dialect's generators, read by `generateTableQuery` and `generateSelectQuery` BEFORE their JSON arm:
+ * each dialect declares `queryLanguage: "json"` too, and without its record a tree click auto-executes a MongoDB
+ * `find` its provider refuses (#427, #1088, #1089). A `Record` over `QueryDialect`, so a dialect added to the
+ * union does not compile until it has its generators. Module-internal: the two generators, `generateCountQuery`
+ * and `generateRowActionQuery` are its only readers, and this module's export list is pinned
+ * (`tests/unit/lib/query-generators.test.ts`).
+ */
+/** The object a tree click landed on: the last segment, which is the numbered name itself. */
+function snmpObjectName(path: readonly string[]): string {
+  return path[path.length - 1] ?? "";
+}
+
 const DIALECT_GENERATORS: Readonly<Record<QueryDialect, DialectGenerators>> = Object.freeze({
   // LibreDB speaks its own command grammar (get/put/delete/prefix/range), not SQL and not MongoDB JSON. "Scan"
   // lists everything under the group's prefix, and "Scan Keys" AUTO-EXECUTES, so a newline in the name, which
@@ -972,6 +985,13 @@ const DIALECT_GENERATORS: Readonly<Record<QueryDialect, DialectGenerators>> = Ob
   netconf: Object.freeze({
     table: (path: readonly string[]) => netconfReadRequest(path),
     select: (path: readonly string[]) => netconfReadRequest(path),
+  }),
+  // A tree click writes the statement this provider's own grammar reads, and nothing else: four
+  // words and a numbered name. `walk` rather than `get`, because a click lands on a subtree and
+  // a Get of a subtree answers one object or nothing at all.
+  snmp: Object.freeze({
+    table: (path: readonly string[]) => `walk ${snmpObjectName(path)}`,
+    select: (path: readonly string[]) => `walk ${snmpObjectName(path)}`,
   }),
 });
 

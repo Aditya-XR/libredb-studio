@@ -140,6 +140,7 @@ export const DIALECT_EDITORS: Readonly<Record<QueryTab["type"], DialectEditor>> 
   modbus: Object.freeze({ monacoId: "json", format: formatJson }),
   // language is XML, and a reader never types any, so no XML editor is registered here.
   netconf: Object.freeze({ monacoId: "json", format: formatJson }),
+  snmp: Object.freeze({ monacoId: "json", format: formatJson }),
 });
 
 /**

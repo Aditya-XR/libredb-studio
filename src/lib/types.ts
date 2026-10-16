@@ -218,7 +218,8 @@ export type DatabaseType =
   // engine here whose container levels are two kinds of thing rather than one. The module list and
   // every namespace come from the device's own YANG library, never from a guess, because a wrong
   // namespace answers an empty document rather than an error on both servers measured.
-  | "netconf";
+  | "netconf"
+  | "snmp";
 
 export type ConnectionEnvironment = "production" | "staging" | "development" | "local" | "other";
 
@@ -1002,7 +1003,8 @@ export interface QueryTab {
     | "opcua"
     | "mtconnect"
     | "modbus"
-    | "netconf";
+    | "netconf"
+    | "snmp";
   viewMode?: "results" | "explain" | "history" | "saved";
   explainPlan?: unknown;
   // Pagination state

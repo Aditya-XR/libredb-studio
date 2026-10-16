@@ -248,6 +248,13 @@ const HUES: ReadonlyArray<{ hue: string; light: string; lightAlt: string }> = [
   // Modbus's identity (#1723): every base hue and every `-alt` step was an engine's by the time it registered,
   // closest identity pair on record (0.0205). `neutral-600`'s nearest is `olive-600` at 0.0368.
   { hue: "neutral", light: "neutral-600", lightAlt: "neutral-800" },
+  // SNMP's identity (#1721). Five greys were spoken for by the time it registered, and among the
+  // families left, clearing AA no longer separates them: zinc, gray and taupe all clear it and
+  // all sit closer to a neighbour. MEASURED against the declared identity set: `mauve-700` reads
+  // 9.51 on the worst light ground and leaves the closest pair in BOTH palettes exactly where it
+  // was, light 0.0166 and dark 0.0100, which none of the other three do. Putting `gray-800` in
+  // this slot instead fails "the light set is no tighter than the dark set it is modelled on".
+  { hue: "mauve", light: "mauve-700", lightAlt: "mauve-900" },
 ];
 
 /**

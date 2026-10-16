@@ -1123,6 +1123,7 @@ describe("generateMigrationSQL: SQLite's grammar declares a foreign key only ins
     mtconnect: "engine-has-no-foreign-key",
     modbus: "engine-has-no-foreign-key",
     netconf: "engine-has-no-foreign-key",
+    snmp: "engine-has-no-foreign-key",
   };
 
   for (const [dialectId, entry] of Object.entries(GRAMMAR)) {
@@ -1304,6 +1305,11 @@ const MODIFIED_COLUMN_COVERAGE: Record<
     label: "OPC UA",
     reason:
       "An OPC UA node has attributes defined by its type in the server's own model, not columns, and this provider has no code that can write to a server, so there is no column definition to change.",
+  },
+  snmp: {
+    label: "SNMP",
+    reason:
+      "An SNMP object's type is declared in the MIB module the device was built with, not in columns a client can change, and this provider's valve refuses any PDU that is not a Get, GetNext or GetBulk, so there is no column definition to change.",
   },
 };
 
@@ -1635,6 +1641,7 @@ describe("generateMigrationSQL: dialects that cannot modify a column", () => {
           "mtconnect",
           "modbus",
           "netconf",
+          "snmp",
         ].includes(dialect)
       ) {
         expect(sql).toContain(`-- ${expected.label}: Cannot generate table DDL.`);
@@ -1710,11 +1717,12 @@ const TRANSACTION_WRAPPER_COVERAGE: Record<DatabaseType, "BEGIN;" | "BEGIN TRANS
   mqtt: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
   firestore: false, // one read-only query chain, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
   rabbitmq: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  opcua: false,
+  opcua: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
   // No wrapper: every request this provider sends is a GET, so there is no statement to wrap (#1722).
   mtconnect: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
   modbus: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
   netconf: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  snmp: false, // a Get is not SQL text and there is no table DDL to wrap
 };
 
 // Both creation and modification paths must use the same wrapper policy.
@@ -1759,6 +1767,7 @@ describe("generateMigrationSQL: transaction wrapper by dialect", () => {
             "mtconnect",
             "modbus",
             "netconf",
+            "snmp",
           ].includes(dialect)
         ) {
           expect(sql).toMatch(/^CREATE TABLE /m);

@@ -68,6 +68,7 @@ export const EXPECTED_EDIT_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   "kubernetes",
   // A node has attributes defined by its type in the server's model, and this provider writes nothing.
   "opcua",
+  "snmp",
   "libredb",
   "libsql",
   // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: this provider has no code that can write to a

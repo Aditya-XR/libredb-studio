@@ -1437,6 +1437,7 @@ const NON_SQL_DIALECTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   "modbus",
   // One JSON read request naming a datastore and a path, so no span of it is SQL (#1724).
   "netconf",
+  "snmp",
 ]);
 
 /**

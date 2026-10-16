@@ -143,6 +143,7 @@ const SeedDatabaseType = z.enum([
   "mtconnect",
   "modbus",
   "netconf",
+  "snmp",
 ]);
 
 export const SeedDefaultsSchema = z.object({

@@ -414,6 +414,14 @@ export async function createDatabaseProvider(
       const { MTConnectProvider } = await import("./providers/industrial/mtconnect/index");
       return new MTConnectProvider(connection, options);
     }
+    // SNMP: an agent on a device, read over UDP by this repository's own client through the
+    // shared egress rule. Read-only not by a flag but by construction: the outgoing valve parses
+    // every datagram and refuses any PDU that is not a Get, GetNext or GetBulk, so a Set never
+    // reaches the socket. No library, so the import is the provider module itself.
+    case "snmp": {
+      const { SnmpProvider } = await import("./providers/network/snmp/index");
+      return new SnmpProvider(connection, options);
+    }
 
     // Modbus TCP: a device or a gateway, read over a raw socket by this repository's own client
     // through the shared egress rule. Read-only whatever the flag says, as for the two above, so
@@ -455,7 +463,7 @@ export async function createDatabaseProvider(
         // This list is NOT type-checked against the union - a new case above with no
         // entry here is silent - so it is kept in the same order as the cases and
         // tests/isolated/factory.test.ts pins individual names in it by regex.
-        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, db2, mssql, clickhouse, druid, trino, databend, bigquery, snowflake, spark, cassandra, elasticsearch, opensearch, mongodb, couchbase, firestore, redis, etcd, oxia, prometheus, influxdb, influxdb3, kafka, neo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, rabbitmq, kubernetes, netconf, libredb`,
+        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, db2, mssql, clickhouse, druid, trino, databend, bigquery, snowflake, spark, cassandra, elasticsearch, opensearch, mongodb, couchbase, firestore, redis, etcd, oxia, prometheus, influxdb, influxdb3, kafka, neo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, libredb`,
         connection.type,
       );
   }

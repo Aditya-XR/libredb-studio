@@ -58,6 +58,7 @@ export const AGENT_STATEMENT_LANGUAGE: Readonly<Record<DatabaseType, AgentStatem
   mtconnect: null,
   modbus: null,
   netconf: null,
+  snmp: null,
   libredb: null,
 } satisfies Record<DatabaseType, AgentStatementLanguageId | null>);
 

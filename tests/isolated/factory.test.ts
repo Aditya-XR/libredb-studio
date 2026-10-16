@@ -851,7 +851,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists milvus among the supported types, before qdrant and the embedded store", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bneo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, rabbitmq, kubernetes, netconf, libredb$/,
+      /Supported types: .*\bneo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, libredb$/,
     );
   });
 
@@ -917,7 +917,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists s3 between qdrant and kubernetes, kubernetes before the embedded store", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bqdrant, s3, mqtt, opcua, mtconnect, modbus, rabbitmq, kubernetes, netconf, libredb$/,
+      /Supported types: .*\bqdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, libredb$/,
     );
   });
 
@@ -1047,9 +1047,14 @@ describe("createDatabaseProvider", () => {
       "netconf",
       // No cancel either: a read is bounded instead, at most 200 nodes or 500 values a request, and
       // the protocol has no service that stops one in flight (#1677).
+      // No cancel: the eight read services the seam names have no Cancel among them.
       "opcua",
       "opensearch",
       "redis",
+      // No cancel either, and the reason is UDP's: a Get is one datagram out and one back, with
+      // nothing in RFC 3416 that stops one in flight. A read is bounded instead, by the walk's
+      // budget and by what one datagram can carry (#1721).
+      "snmp",
     ]);
   });
 });

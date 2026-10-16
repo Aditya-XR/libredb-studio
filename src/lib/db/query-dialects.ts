@@ -210,6 +210,18 @@ export const QUERY_DIALECTS: Readonly<Record<QueryDialect, DialectSpec>> = Objec
     offersCodeGeneration: false,
     offersCountQuery: false,
   }),
+  // Registered rather than left absent, and the measurement is why: with no dialect the registry
+  // fell back to MongoDB's tab, so a tree click on an SNMP object would have opened a MongoDB
+  // editor and the generator would have written a `find`. No profiling, because summarising a
+  // column means walking the subtree a second time with no statement the agent understands; no
+  // count, because an SNMP table is assembled by walking and there is nothing to count without
+  // doing it; no code generation, because the grammar is four words and a numbered name.
+  snmp: Object.freeze({
+    tabType: "snmp",
+    offersColumnProfiling: false,
+    offersCodeGeneration: false,
+    offersCountQuery: false,
+  }),
 });
 
 /**

@@ -234,6 +234,7 @@
      an industrial one on one hue, and `mysql` and `kubernetes` share another. */
   --studio-hue-slate-alt: #0f172b;
   --studio-hue-taupe: #473c39;
+  --studio-hue-mauve: #463947;
 }
 
 .dark {
@@ -365,6 +366,7 @@
   --studio-hue-neutral: #a1a1a1;
   --studio-hue-slate-alt: #cad5e2;
   --studio-hue-taupe: #aba09c;
+  --studio-hue-mauve: #a89ea9;
 }
 
 /*
@@ -479,6 +481,7 @@
   --color-hue-neutral: var(--studio-hue-neutral);
   --color-hue-slate-alt: var(--studio-hue-slate-alt);
   --color-hue-taupe: var(--studio-hue-taupe);
+  --color-hue-mauve: var(--studio-hue-mauve);
   --color-hue-teal-solid: var(--studio-hue-teal-solid);
   --color-hue-teal-solid-hover: var(--studio-hue-teal-solid-hover);
   --color-hue-purple-solid: var(--studio-hue-purple-solid);

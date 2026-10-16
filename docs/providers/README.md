@@ -45,6 +45,7 @@ in lockstep with the code (see the tri-sync rule in [`../../CLAUDE.md`](../../CL
 | MTConnect | `mtconnect` | Industrial (agent) | none: Studio's own client over the shared `node:http(s)` transport | A request line in the agent's own URL grammar | [mtconnect.md](./mtconnect.md) |
 | Modbus | `modbus` | Industrial (device or gateway) | none: Studio's own client over a raw socket through the shared egress rule | One JSON read request against a register map the user supplies | [modbus.md](./modbus.md) |
 | NETCONF | `netconf` | Network (one device) | `ssh2` (the SSH transport only; Studio opens the socket and hands it over, and the NETCONF framing, requests and session are Studio's own) | One NETCONF read request per execution, no statement terminator | [netconf.md](./netconf.md) |
+| SNMP | `snmp` | Device (managed objects) | none: Studio's own client over UDP, through the shared egress rule | Four read words and a numbered name | [snmp.md](./snmp.md) |
 | LibreDB | `libredb` | Embedded (Key-Value) | `@libredb/libredb` | JSON (command grammar) | [libredb.md](./libredb.md) |
 
 ## Conventions

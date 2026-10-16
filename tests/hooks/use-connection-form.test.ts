@@ -2028,6 +2028,7 @@ describe("useConnectionForm", () => {
     mtconnect: true,
     modbus: true,
     netconf: true,
+    snmp: true,
   };
 
   test("dbTypes offers every database type a connection can carry", () => {

@@ -152,6 +152,10 @@ const EXPECTED_COLUMN_KINDS: Readonly<Record<DatabaseType, readonly string[]>> =
   // first committed, which was a claim about `describeObject` rather than about the declaration
   // this census measures; see docs/providers/netconf.md section 6.3 for what each surface answers.
   netconf: ["node"],
+  // Measured, not assumed: the provider's kinds carry no column list of their own, so the census
+  // reads an empty set for both. The entry was briefly written as the two kind ids and the census
+  // contradicted it, which is the direction this file is for.
+  snmp: [],
   libredb: ["table", "collection", "keyspace"],
 });
 
@@ -239,7 +243,7 @@ describe("the fleet census of object column declarations", () => {
     // bigquery, snowflake, s3, kubernetes, mqtt, firestore, rabbitmq, opcua and mtconnect) plus the embedded store.
     // `EXTERNAL_DATABASE_TYPES.length` plus the embedded store, and the figure moves with every
     // registration rather than being a sentence somebody remembers to update.
-    expect(CENSUS_TYPES).toHaveLength(40);
+    expect(CENSUS_TYPES).toHaveLength(41);
     expect(Object.keys(EXPECTED_COLUMN_KINDS).sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
     // A row naming nothing would make its type-id's census pass on the empty set, so the design's
     // table has three such rows, and they are named here: every engine but Oxia, S3, Kubernetes, MQTT, OPC UA and Modbus has at least one
@@ -247,7 +251,7 @@ describe("the fleet census of object column declarations", () => {
     // every Kubernetes kind opens its YAML instead. A Modbus point is one value rather than a
     // shape the tree can show beneath it (#1723).
     const empty = CENSUS_TYPES.filter((type) => EXPECTED_COLUMN_KINDS[type].length === 0);
-    expect(empty).toEqual(["oxia", "s3", "kubernetes", "mqtt", "opcua", "modbus"]);
+    expect(empty).toEqual(["oxia", "s3", "kubernetes", "mqtt", "opcua", "modbus", "snmp"]);
   });
 
   test("every kind id the expectation names is a kind its provider actually declares", async () => {

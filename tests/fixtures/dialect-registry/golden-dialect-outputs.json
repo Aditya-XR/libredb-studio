@@ -467,6 +467,18 @@
   "selectQuery": "{\n  \"datastore\": \"c0\",\n  \"path\": \"\",\n  \"limit\": 1000\n}",
   "countQuery": null
  },
+ "snmp": {
+  "queryLanguage": "json",
+  "queryDialect": "snmp",
+  "tabType": "snmp",
+  "monacoLanguage": "json",
+  "offersColumnProfiling": false,
+  "offersCodeGeneration": false,
+  "offersCountQuery": false,
+  "tableQuery": "walk Order\"Items",
+  "selectQuery": "walk Order\"Items",
+  "countQuery": null
+ },
  "libredb": {
   "queryLanguage": "json",
   "queryDialect": "libredb",
