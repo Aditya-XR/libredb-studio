@@ -108,6 +108,10 @@ export const EXPECTED_EDIT_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: object edit is not in this version, which
   // docs/providers/spark.md names under "Object edit".
   "spark",
+  // No editable kind either, and the absence is structural rather than a setting: this provider's
+  // encoder has no function that writes a PUBLISH, so there is no packet it could send that changes
+  // a metric. A metric's shape is declared by the birth certificate its edge node publishes (#1720).
+  "sparkplug",
   "sqlite",
 ] as const);
 

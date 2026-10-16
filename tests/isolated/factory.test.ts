@@ -851,7 +851,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists milvus among the supported types, before qdrant and the embedded store", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bneo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, libredb$/,
+      /Supported types: .*\bneo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, sparkplug, libredb$/,
     );
   });
 
@@ -917,7 +917,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists s3 between qdrant and kubernetes, kubernetes before the embedded store", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bqdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, libredb$/,
+      /Supported types: .*\bqdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, sparkplug, libredb$/,
     );
   });
 
@@ -1055,6 +1055,7 @@ describe("createDatabaseProvider", () => {
       // nothing in RFC 3416 that stops one in flight. A read is bounded instead, by the walk's
       // budget and by what one datagram can carry (#1721).
       "snmp",
+      "sparkplug",
     ]);
   });
 });

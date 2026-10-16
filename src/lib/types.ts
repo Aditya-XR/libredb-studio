@@ -219,7 +219,16 @@ export type DatabaseType =
   // every namespace come from the device's own YANG library, never from a guess, because a wrong
   // namespace answers an empty document rather than an error on both servers measured.
   | "netconf"
-  | "snmp";
+  | "snmp"
+  // Eclipse Sparkplug B (#1720). One MQTT subscription read only, the third member of the `industrial/` family,
+  // with its own bounded session (`src/lib/db/providers/industrial/sparkplug/`) rather than the shipped MQTT read,
+  // because that read returns a map keyed by topic while a Sparkplug read depends on the ORDER of successive
+  // messages on one topic: a sequence gap is read from two consecutive data messages, a rebirth replaces a
+  // definition mid-read, and the specification warns a death can arrive after the next birth. One connection is
+  // one broker. Read-only is structural rather than a mode: the provider's encoder has no function that writes a
+  // PUBLISH, and its CONNECT takes no will parameter, because 5.4 registers an edge node's death certificate as
+  // its MQTT will and a reader that set one would publish a death when its own socket dropped.
+  | "sparkplug";
 
 export type ConnectionEnvironment = "production" | "staging" | "development" | "local" | "other";
 
@@ -1004,7 +1013,8 @@ export interface QueryTab {
     | "mtconnect"
     | "modbus"
     | "netconf"
-    | "snmp";
+    | "snmp"
+    | "sparkplug";
   viewMode?: "results" | "explain" | "history" | "saved";
   explainPlan?: unknown;
   // Pagination state

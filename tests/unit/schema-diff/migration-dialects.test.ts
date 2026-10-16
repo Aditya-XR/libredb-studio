@@ -62,6 +62,9 @@ const COLUMN_GRAMMAR: Record<DatabaseType, [string, string] | null> = {
   modbus: null,
   netconf: null,
   snmp: null,
+  // No migration dialect: a metric's shape is declared by a birth certificate the edge node publishes, and
+  // this provider has no code that can publish one (#1720).
+  sparkplug: null,
 };
 
 describe("migration dialect regressions (#284)", () => {

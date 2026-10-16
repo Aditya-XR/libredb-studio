@@ -993,6 +993,17 @@ const DIALECT_GENERATORS: Readonly<Record<QueryDialect, DialectGenerators>> = Ob
     table: (path: readonly string[]) => `walk ${snmpObjectName(path)}`,
     select: (path: readonly string[]) => `walk ${snmpObjectName(path)}`,
   }),
+
+  /*
+   * A tree click writes the read request for what was clicked, which is a JSON object rather than a
+   * statement: a Sparkplug read names a group, an edge node and a device and takes a window, and
+   * there is nothing to compose. The deeper the click the narrower the read, and a click on nothing
+   * reads every group, which is what an empty request means.
+   */
+  sparkplug: Object.freeze({
+    table: (path: readonly string[]) => sparkplugReadRequest(path),
+    select: (path: readonly string[]) => sparkplugReadRequest(path),
+  }),
 });
 
 /**
@@ -1519,4 +1530,19 @@ function netconfReadRequest(path: readonly string[]): string {
   const node = path.length > 2 ? path[path.length - 1] : undefined;
   const addressed = moduleName === undefined || node === undefined ? "" : `${moduleName}:${node}`;
   return JSON.stringify({ datastore, path: addressed, limit: 1000 }, null, 2);
+}
+
+/**
+ * The read request for a clicked path: group, then edge node, then device, as far as the path goes.
+ *
+ * The window and the row limit are left out rather than written with their defaults: a number a user
+ * did not choose, printed in the console they are about to run, reads as a measurement of something.
+ */
+function sparkplugReadRequest(path: readonly string[]): string {
+  const [group, edgeNode, device] = path;
+  const request: Record<string, string> = {};
+  if (group !== undefined && group !== "") request.group = group;
+  if (edgeNode !== undefined && edgeNode !== "") request.edgeNode = edgeNode;
+  if (device !== undefined && device !== "") request.device = device;
+  return JSON.stringify(request, null, 2);
 }

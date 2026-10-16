@@ -1754,6 +1754,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     "snowflake",
     "opcua",
     "snmp",
+    "sparkplug",
     "spark",
     "mtconnect",
     "modbus",

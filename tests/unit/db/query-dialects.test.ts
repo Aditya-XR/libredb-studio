@@ -49,6 +49,7 @@ describe("QUERY_DIALECTS", () => {
       "redis",
       "s3",
       "snmp",
+      "sparkplug",
     ]);
   });
 
@@ -164,6 +165,13 @@ describe("QUERY_DIALECTS", () => {
       },
       snmp: {
         tabType: "snmp",
+        offersColumnProfiling: false,
+        offersCodeGeneration: false,
+        offersCountQuery: false,
+      },
+
+      sparkplug: {
+        tabType: "sparkplug",
         offersColumnProfiling: false,
         offersCodeGeneration: false,
         offersCountQuery: false,

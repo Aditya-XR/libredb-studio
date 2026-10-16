@@ -1438,6 +1438,8 @@ const NON_SQL_DIALECTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   // One JSON read request naming a datastore and a path, so no span of it is SQL (#1724).
   "netconf",
   "snmp",
+  // One JSON read request naming a group, an edge node and a window, so no span of it is SQL (#1720).
+  "sparkplug",
 ]);
 
 /**

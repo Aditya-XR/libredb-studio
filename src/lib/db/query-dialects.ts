@@ -222,6 +222,20 @@ export const QUERY_DIALECTS: Readonly<Record<QueryDialect, DialectSpec>> = Objec
     offersCodeGeneration: false,
     offersCountQuery: false,
   }),
+
+  // FOUR FALSE ANSWERS, AND THE REGISTRY'S GOLDEN FILE IS WHAT MADE THEM VISIBLE. Without a record
+  // here a provider falls back to its query language, and `json` answers yes to three of these: the
+  // golden file recorded this engine as `tabType: "mongodb"` with column profiling, code generation
+  // and a count query all true, which are four things it cannot do. There is no count because a
+  // broker publishes none and a metric is not a table; no column profile because a column here is a
+  // metric a certificate declared rather than a sampled set of values; and no code generation
+  // because a read request names a group and a window rather than a statement to compose.
+  sparkplug: Object.freeze({
+    tabType: "sparkplug",
+    offersColumnProfiling: false,
+    offersCodeGeneration: false,
+    offersCountQuery: false,
+  }),
 });
 
 /**

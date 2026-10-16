@@ -11,6 +11,7 @@ import {
   ModbusIcon,
   MtconnectIcon,
   NetconfIcon,
+  SparkplugIcon,
   OpcuaIcon,
   SnmpIcon,
   CouchbaseIcon,
@@ -1531,6 +1532,55 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     },
     readOnlyHint:
       "SNMP connections are read-only whether or not this is ticked, and not by a setting: the outgoing valve parses every datagram and refuses any PDU that is not a Get, GetNext or GetBulk, so a Set never reaches the socket.",
+  },
+
+  sparkplug: {
+    // A mark drawn for Studio, never the Eclipse Foundation's logo, and deliberately not a spark.
+    icon: SparkplugIcon,
+    // A NEW hue, for the third time: every base hue and every `-alt` step theme.css declared was an
+    // engine's by the time this registered, so the palette gains `olive`. The step is `-600` rather than
+    // the -700/-800 the others use, and that is measured rather than stylistic: `olive-700` would clear
+    // AA more comfortably and fall to 0.0351 from `mist-700`, and `olive-800` to 0.0237 from `stone-800`.
+    // The unusual step is the separable one.
+    //
+    // THE SEPARATION FIGURE, RE-MEASURED against the palette as it now stands (42 identity tokens,
+    // holding stone, neutral, mauve and taupe, which it did not when the line above was written):
+    // `olive`'s nearest identity is `neutral` at 0.0373 in light and `taupe` at 0.0305 in dark, while
+    // the closest pair the palette already had without it is 0.0205 in light and 0.0076 in dark. So the
+    // hue tightens neither palette. Those figures are read from the hex values theme.css stores, which
+    // are 8-bit; the same pair measured from the installed palette's oklch, before that rounding, gives
+    // 0.0368. Two numbers, one distance, and neither is wrong - said here so a reader does not "correct"
+    // one of them. The earlier note said 0.0940, measured
+    // before stone, neutral, mauve and taupe joined;
+    // the figures that hold the palette are the separation assertions in
+    // tests/unit/theme-accent-contrast.test.ts, which read theme.css at run time and now see `olive`.
+    //
+    // This class resolved to NO RULE until theme.css declared `--studio-hue-olive`: the entry named a
+    // hue the stylesheet did not have, Tailwind emitted no `.text-hue-olive`, and the mark inherited
+    // the surrounding text colour. Nothing was red, because both completeness tests walked a list of
+    // hues kept by hand. The census that reads these entries closes that direction.
+    color: "text-hue-olive",
+    label: "Sparkplug B",
+    // The IANA-assigned port for MQTT, which Sparkplug runs over. 8883 is the TLS port.
+    defaultPort: "1883",
+    // Host and Port hold the broker, as MQTT's do. There is no URI form that says more.
+    showConnectionStringToggle: false,
+    // THREE FIELDS AND NOT MQTT'S SIX, because these are the three the provider reads. `config.host`,
+    // `config.port` and `config.database` are the only connection fields `SparkplugProvider` touches;
+    // declaring a user or a password here would put a box on the form that the read ignores. The session
+    // can carry credentials and the encoder sets their flags, but nothing passes them from a connection
+    // yet, and a field that is collected and dropped is worse than one that is absent.
+    connectionFields: ["host", "port", "database"],
+    // `database` carries the group, as MQTT's carries a topic filter: one connection reads one group.
+    fieldLabels: { database: "Group" },
+    fieldPlaceholders: { database: "" },
+    fieldHints: {
+      host: "A name or address only. If Studio runs in a container, localhost is that container: use host.docker.internal.",
+      database:
+        "One Sparkplug group id, or empty for every group. A group is a level of the topic and nothing else: it is not a thing on the broker that can be subscribed to on its own, so an empty field reads every group under spBv1.0 and a filled one reads that group alone.",
+    },
+    readOnlyHint:
+      "Sparkplug connections are read-only whether or not this is ticked, and not by a setting: this provider's encoder has no function that writes a PUBLISH, and its CONNECT carries no Will, which is how a death certificate would be registered.",
   },
   libredb: {
     icon: LibreDBIcon,

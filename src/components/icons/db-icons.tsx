@@ -1026,3 +1026,35 @@ export const SnmpIcon: React.FC<IconProps> = ({ className, ...props }) => (
     <path d="M19.5 8.5 V11 H13.5" />
   </svg>
 );
+
+/**
+ * A mark drawn for Studio, never the Eclipse Foundation's logo or any vendor's asset, and
+ * deliberately NOT a spark: the published mark for Sparkplug is a lightning form, so borrowing that
+ * shape would be borrowing the mark itself.
+ *
+ * What the mark says instead is the thing that makes this engine different from plain MQTT: an edge
+ * node publishes a BIRTH CERTIFICATE that defines what it will later send, so the mark is a node
+ * carrying a small tag, with the two it defines hanging under it. The tag is the schema; the two
+ * below are what the tag names.
+ */
+export const SparkplugIcon: React.FC<IconProps> = ({ className, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <circle cx="12" cy="6" r="2.5" />
+    <rect x="15" y="3.5" width="5.5" height="5" rx="1" />
+    <path d="M12 8.5 V13" />
+    <path d="M7 13 H17" />
+    <path d="M7 13 V16" />
+    <path d="M17 13 V16" />
+    <circle cx="7" cy="18.5" r="2" />
+    <circle cx="17" cy="18.5" r="2" />
+  </svg>
+);

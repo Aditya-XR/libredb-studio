@@ -122,6 +122,9 @@ const EXPECTED: Readonly<Record<DatabaseType, SurfaceRow>> = {
   modbus: NONE,
   netconf: NONE,
   snmp: NONE,
+  // The same, and for an absence rather than a choice: there is no packet this provider can send that writes
+  // (#1720).
+  sparkplug: NONE,
   libredb: NONE,
 };
 
@@ -135,9 +138,9 @@ describe("every shipped provider's per-row maintenance controls (R46 C3)", () =>
     expect(surfacesOf(provider.getCapabilities(), provider.getLabels())).toEqual(EXPECTED[type]);
   });
 
-  test("11 of 40 type-ids offer per-row controls on the two tabs, 10 on the row menus, one outside MaintenanceType", () => {
+  test("11 of 4041 type-ids offer per-row controls on the two tabs, 10 on the row menus, one outside MaintenanceType", () => {
     const rows = Object.values(EXPECTED);
-    expect(rows.length).toBe(41);
+    expect(rows.length).toBe(42);
     expect(rows.filter((row) => row.tabs !== "").length).toBe(11);
     expect(rows.filter((row) => row.tree !== "").length).toBe(10);
     expect(rows.filter((row) => row.outsideMaintenanceType !== "").length).toBe(1);

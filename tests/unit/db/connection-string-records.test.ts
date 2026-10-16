@@ -194,6 +194,7 @@ describe("CONNECTION_STRING_ACCEPTED against each provider's own declaration (Sp
       "modbus",
       "netconf",
       "snmp",
+      "sparkplug",
       "libredb",
     ]);
   });

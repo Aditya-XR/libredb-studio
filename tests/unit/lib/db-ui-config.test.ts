@@ -125,6 +125,7 @@ const ALL_TYPES: DatabaseType[] = [
   "modbus",
   "netconf",
   "snmp",
+  "sparkplug",
 ];
 
 describe("db-ui-config", () => {
@@ -1079,6 +1080,7 @@ describe("declared connection-field copy (#1085)", () => {
       // document is the only thing that can name a point and the box has to say so (#1723).
       "modbus",
       "snmp",
+      "sparkplug",
     ]);
     // The control that the walk saw the whole table rather than nothing.
     expect(Object.keys(DB_UI_CONFIG).sort()).toEqual([...ALL_TYPES].sort());
@@ -1615,6 +1617,10 @@ describe("db-showcase", () => {
         // network engineers rather than by the readers a page of databases is written for (#1724).
         "netconf",
         "snmp",
+        // Last, behind the register map: the name on the box is a specification's rather than a
+        // product's, so a reader scanning the login page is least likely to arrive already knowing
+        // it, and no existing engine moves for it (#1720).
+        "sparkplug",
       ]);
     });
   });

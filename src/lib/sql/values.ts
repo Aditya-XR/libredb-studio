@@ -109,6 +109,8 @@ const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
   modbus: "standard",
   netconf: "standard",
   snmp: "standard",
+  // No generator calls `quoteLiteral` for Sparkplug either: a read request writes its names into JSON.
+  sparkplug: "standard",
   // Default `sql_mode`. A server running with NO_BACKSLASH_ESCAPES reads the
   // doubled backslash as two characters, which is why binding the value beats
   // quoting it wherever a bind form exists.

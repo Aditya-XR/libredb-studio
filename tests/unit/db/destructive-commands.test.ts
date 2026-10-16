@@ -384,6 +384,7 @@ describe("vocabularyDecidesAlone", () => {
       "modbus",
       "netconf",
       "snmp",
+      "sparkplug",
     ]);
   });
 
@@ -415,6 +416,7 @@ describe("NON_SQL_DESTRUCTIVE_VOCABULARY", () => {
       "redis",
       "s3",
       "snmp",
+      "sparkplug",
     ]);
   });
 
@@ -537,6 +539,7 @@ describe("vocabularySendsToModel", () => {
       "modbus",
       "netconf",
       "snmp",
+      "sparkplug",
     ]);
   });
 

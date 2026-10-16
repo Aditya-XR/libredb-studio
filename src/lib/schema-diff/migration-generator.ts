@@ -329,6 +329,15 @@ const NO_COLUMN_MODIFICATION: Partial<Record<DatabaseType, { label: string; reas
     reason:
       "An SNMP object's type is declared in the MIB module the device was built with, not in columns a client can change, and this provider's valve refuses any PDU that is not a Get, GetNext or GetBulk, so there is no column definition to change.",
   },
+
+  // Not a table store either (#1720): a metric's shape is declared by the birth certificate the edge
+  // node publishes, and this provider's encoder has no function that writes a PUBLISH, so there is
+  // nothing a client here could change.
+  sparkplug: {
+    label: "Sparkplug B",
+    reason:
+      "A Sparkplug metric's shape is declared in the birth certificate its edge node publishes, not in columns a client can change, and this provider's encoder has no function that writes a PUBLISH, so there is no column definition to change.",
+  },
 };
 
 /**
@@ -441,6 +450,8 @@ const NO_TRANSACTION_WRAPPER: ReadonlySet<DatabaseType> = new Set<DatabaseType>(
   // down in the user's map rather than in anything a client could migrate.
   "modbus",
   "netconf",
+  // No table DDL to wrap either (#1720): a birth certificate is the edge node's own.
+  "sparkplug",
 ]);
 
 // These engines cannot apply a relational table diff through SQL. In particular,
@@ -479,6 +490,9 @@ const NO_TABLE_DDL: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   "modbus",
   "netconf",
   "snmp",
+  // One container level of edge nodes and no schema; a metric's shape is the birth certificate's,
+  // and the encoder has no function that writes a PUBLISH (#1720).
+  "sparkplug",
 ]);
 
 // IndexDiff carries column names/uniqueness, not ClickHouse's index expression,

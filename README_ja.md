@@ -112,9 +112,9 @@ LibreDB Studioは逆向きです。**データをツールのところへ持っ�
 
 ## 主な機能
 
-### 40のエンジン、1つのインターフェース
+### 41のエンジン、1つのインターフェース
 
-PostgreSQL · MySQL · Oracle · Db2 LUW · SQL Server · SQLite · libSQL · DuckDB · MongoDB · Redis · Couchbase · Firestore · ClickHouse · Apache Druid · Elasticsearch · OpenSearch · Trino · BigQuery · Databend · Snowflake · Apache Spark · Apache Cassandra · Prometheus · Apache Kafka · etcd · Neo4j · Milvus · Qdrant · InfluxDB (InfluxQL) · InfluxDB 3 (SQL) · Oxia · S3-compatible object storage · Kubernetes · MQTT · RabbitMQ · OPC UA · MTConnect · Modbus · NETCONF · SNMP
+PostgreSQL · MySQL · Oracle · Db2 LUW · SQL Server · SQLite · libSQL · DuckDB · MongoDB · Redis · Couchbase · Firestore · ClickHouse · Apache Druid · Elasticsearch · OpenSearch · Trino · BigQuery · Databend · Snowflake · Apache Spark · Apache Cassandra · Prometheus · Apache Kafka · etcd · Neo4j · Milvus · Qdrant · InfluxDB (InfluxQL) · InfluxDB 3 (SQL) · Oxia · S3-compatible object storage · Kubernetes · MQTT · RabbitMQ · OPC UA · MTConnect · Modbus · NETCONF · SNMP · Sparkplug B
 
 スキーマエクスプローラ、ER図、スキーマ差分、モニタリングは全SQLエンジンで共通です。MongoDBとRedisはSQLエンジンではないため、ER図とスキーマ差分はありません。Druid、Elasticsearch、OpenSearch、TrinoはこのビルドがパースできるURI形式を持たないためhostとportで設定する二重の例外で、生成されるマイグレーションもDDLを出力せず制約を明示します（Couchbaseのスキーマレスなコレクションも同様）。検索クラスタのER図は箱だけで線がありません。インデックスは外部キーを宣言せず、エンジンのモデルにも宣言できる外部キーが存在しないためです。
 
@@ -159,6 +159,7 @@ PostgreSQL · MySQL · Oracle · Db2 LUW · SQL Server · SQLite · libSQL · Du
 | **Modbus** | なし：共用の送信規則を通る raw socket 上で動く本リポジトリ独自のクライアント（ポート502、MODBUS/TCP Security は802） | 構造上の読み取り専用。エンコーダが組み立てられるのは四つの読み取りファンクションコードとデバイス識別だけで、書き込みを組み立てる関数は存在せず、バルブが送出する全バイトを再検査します。Modbus にはディスカバリがないため、ツリーは接続とともに保持されるレジスタマップから作られ、読み取りはそのマップが名前を付けたポイントに対する一つの JSON リクエストです |
 | **NETCONF** | `ssh2`（SSH トランスポートのみ。本リポジトリがソケットを開いて渡し、NETCONF のフレーミング、リクエスト、セッションは独自のもの、ポート830） | 構造上の読み取り専用。`requests.ts` が組み立てるリクエストボディは五つで、そのうち四つが読み取りの `<get-config>`、`<get>`、`<get-data>`、`<get-schema>` であり、五つめはセッションを閉じるもので、`<edit-config>`、`<copy-config>`、`<commit>`、`<lock>` を組み立てる関数は存在しません。データストアがコンテナ、その下の YANG モジュールがもう一つのコンテナで、モジュール最上位のコンテナまたはリストがオブジェクト、リストエントリのキーリーフがそのオブジェクトの列です |
 | **SNMP** | なし：共用の送信規則を通る本リポジトリ独自のUDPクライアント（ポート161） | 構造上の読み取り専用。送信側のバルブはGet、GetNext、GetBulk以外のPDUを拒むので、Setがソケットに届くことはない。オブジェクトグループはコンテナ、サブツリーのwalkが読み取りで、テーブルはGetBulkの応答から組み立てられる |
+| **Sparkplug B** | なし：共用の `node:net` と `node:tls` トランスポート上で動く本リポジトリ独自の有界MQTTセッション（ポート1883、SSL / TLSパネル経由では8883） | 構造上の読み取り専用。エンコーダにPUBLISHを書く関数はなく、CONNECTはwillを持たない。5.4がエッジノードの死亡証明書をwillとして登録するため、willを設定した読み取り側は自分のソケットが切れたときに死亡を公開してしまう。グループとエッジノードはコンテナ、metricは一行で、その値・タイムスタンプ・定義はそれを宣言した出生証明書から来る |
 | **Redis** | `ioredis` | コマンドエディタ、キーブラウザ、INFOベースの監視 |
 
 > **トランスポート層のセキュリティはエンジンごとではなく横断的な機能です。** SSHトンネルはproviderが接続する前に張られ、接続先はローカルのエンドポイントに書き換えられます。つまりエンジンに依存せず、hostとportが設定された接続であれば適用されます。ただしKafkaの接続はトンネルを拒否します。Kafkaクライアントは各brokerにそのbrokerが広告するアドレスで接続し、1つのアドレスだけを転送するトンネルはそのアドレスを運べないためです。接続文字列で入力した接続（MongoDB、Couchbase、ClickHouseで選択できます）はhostもportも持たないためトンネルされません。SQLiteとDuckDBも同様です。SSL/TLSパネルが実際に効くのはPostgreSQL、MySQL、SQL Server、Couchbase、ClickHouse、Druid、Elasticsearch、OpenSearch、Trino、Prometheus、Apache Kafkaです。Trinoでは任意ではなく必須に近い意味を持ちます。コーディネータが平文HTTP上のパスワードを拒否するためです。Oracle、MongoDB、Redisはこの設定を無視するため、この3つで暗号化されるかどうかはダイアログの選択ではなく接続文字列の内容次第になります。

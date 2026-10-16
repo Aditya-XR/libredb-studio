@@ -506,9 +506,9 @@ describe("wire-compatibility registry", () => {
     // The one place these numerals live. A new provider moves them here and nowhere else, and the derived
     // assertions around this test say how the counts relate.
     expect([SHIPPED_DATABASE_TYPES.length, EXTERNAL_DATABASE_TYPES.length, WIRE_COMPATIBLE_ENGINES.length]).toEqual([
-      41, 40, 27,
+      42, 41, 27,
     ]);
-    expect(connectableProductCount()).toBe(67);
+    expect(connectableProductCount()).toBe(68);
   });
 
   test("the Apache Spark row of each record (#1736)", () => {
@@ -663,6 +663,7 @@ describe("MCP_EXPOSABLE (#1089)", () => {
       "modbus",
       "netconf",
       "snmp",
+      "sparkplug",
     ]);
   });
 });

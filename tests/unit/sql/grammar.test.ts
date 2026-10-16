@@ -462,6 +462,8 @@ const GRAMMAR_COVERAGE: Record<DatabaseType, "established" | "default"> = {
   modbus: "default",
   netconf: "default",
   snmp: "default",
+  // One JSON read request, not SQL: no SQL grammar is established for it (#1720).
+  sparkplug: "default",
 };
 
 /**
@@ -791,6 +793,7 @@ const SQL_TEXT_COVERAGE: Record<DatabaseType, boolean> = {
   modbus: false,
   netconf: false,
   snmp: false,
+  sparkplug: false,
 };
 
 describe("readsSqlText", () => {

@@ -479,6 +479,18 @@
   "selectQuery": "walk Order\"Items",
   "countQuery": null
  },
+ "sparkplug": {
+  "queryLanguage": "json",
+  "queryDialect": "sparkplug",
+  "tabType": "sparkplug",
+  "monacoLanguage": "json",
+  "offersColumnProfiling": false,
+  "offersCodeGeneration": false,
+  "offersCountQuery": false,
+  "tableQuery": "{\n  \"group\": \"c0\",\n  \"edgeNode\": \"Order\\\"Items\"\n}",
+  "selectQuery": "{\n  \"group\": \"c0\",\n  \"edgeNode\": \"Order\\\"Items\"\n}",
+  "countQuery": null
+ },
  "libredb": {
   "queryLanguage": "json",
   "queryDialect": "libredb",

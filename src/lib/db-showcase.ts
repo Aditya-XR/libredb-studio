@@ -135,6 +135,15 @@ export const SHOWCASE_RANK: Record<DatabaseType, number> = {
   // either knows from managing networks or does not know at all, and the page is read by people
   // who came for databases (#1721).
   snmp: 40,
+  // Last (rank 41), behind the agent's object tree: the name on the box is a specification's rather
+  // than a product's, so a reader scanning the login page is least likely to arrive already knowing
+  // it (#1720). THE RANK MOVES WITH THE BASE AND THE SENTENCE WITH IT: this entry has been written
+  // against five trees now, whose last engine was in turn NETCONF, MTConnect, Modbus, NETCONF again
+  // and SNMP. A rank carried from another base collides silently - 37, 38, 39 and 40 were each
+  // already taken by the time this branch rebased onto them - and the census that covers 0..N-1 is
+  // what said so, all four times. Nothing else would: a duplicate rank only reorders two engines on
+  // the page, so there is no failure to notice and no user to report it.
+  sparkplug: 41,
 };
 
 /**

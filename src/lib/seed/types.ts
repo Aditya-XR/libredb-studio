@@ -144,6 +144,7 @@ const SeedDatabaseType = z.enum([
   "modbus",
   "netconf",
   "snmp",
+  "sparkplug",
 ]);
 
 export const SeedDefaultsSchema = z.object({

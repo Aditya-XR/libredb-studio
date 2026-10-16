@@ -141,6 +141,8 @@ const ENGINE_FENCE_TAGS: Readonly<Record<DatabaseType, true>> = Object.freeze({
   // the console runs as it is. The device's own language is XML and nothing here writes any.
   netconf: true,
   snmp: true,
+  // An ```sparkplug block holds one read request in the JSON shape the console runs as it is.
+  sparkplug: true,
 });
 
 /**

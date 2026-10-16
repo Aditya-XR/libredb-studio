@@ -118,5 +118,6 @@ export const CENSUS_CONNECTION: Readonly<Record<DatabaseType, DatabaseConnection
   modbus: unconnected("modbus"),
   netconf: unconnected("netconf"),
   snmp: unconnected("snmp"),
+  sparkplug: unconnected("sparkplug"),
   libredb: unconnected("libredb"),
 });

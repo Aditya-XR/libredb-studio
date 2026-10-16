@@ -53,11 +53,11 @@ describe("docs/MCP.md", () => {
     const refused = SHIPPED_DATABASE_TYPES.filter((type) => !MCP_EXPOSABLE[type]).map(
       (type) => DB_UI_CONFIG[type].label,
     );
-    // The control that the record answers: etcd, Oxia, S3, Kubernetes, MQTT, Firestore, OPC UA, Modbus and NETCONF are the engines it
-    // refuses today, with SNMP (#1721) the eighth: a Get is a read of one numbered object, and the
+    // The control that the record answers: etcd, Oxia, S3, Kubernetes, MQTT, Firestore, OPC UA,
+    // Modbus, NETCONF and Sparkplug B are the engines it refuses today, with SNMP (#1721) the eighth: a Get is a read of one numbered object, and the
     // tools answer schemas rather than objects.
     expect(refused).toEqual(
-      ["etcd", "oxia", "s3", "kubernetes", "mqtt", "firestore", "opcua", "modbus", "netconf", "snmp"].map(
+      ["etcd", "oxia", "s3", "kubernetes", "mqtt", "firestore", "opcua", "modbus", "netconf", "snmp", "sparkplug"].map(
         (type) => DB_UI_CONFIG[type as DatabaseType].label,
       ),
     );

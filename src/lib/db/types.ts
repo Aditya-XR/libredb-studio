@@ -994,7 +994,8 @@ export interface ProviderCapabilities {
     | "mtconnect"
     | "modbus"
     | "netconf"
-    | "snmp";
+    | "snmp"
+    | "sparkplug";
   supportsExplain: boolean;
   /**
    * Present iff supportsExplain is true (enforced by provider tests).

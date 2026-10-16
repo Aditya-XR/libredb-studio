@@ -1124,6 +1124,7 @@ describe("generateMigrationSQL: SQLite's grammar declares a foreign key only ins
     modbus: "engine-has-no-foreign-key",
     netconf: "engine-has-no-foreign-key",
     snmp: "engine-has-no-foreign-key",
+    sparkplug: "engine-has-no-foreign-key",
   };
 
   for (const [dialectId, entry] of Object.entries(GRAMMAR)) {
@@ -1310,6 +1311,11 @@ const MODIFIED_COLUMN_COVERAGE: Record<
     label: "SNMP",
     reason:
       "An SNMP object's type is declared in the MIB module the device was built with, not in columns a client can change, and this provider's valve refuses any PDU that is not a Get, GetNext or GetBulk, so there is no column definition to change.",
+  },
+  sparkplug: {
+    label: "Sparkplug B",
+    reason:
+      "A Sparkplug metric's shape is declared in the birth certificate its edge node publishes, not in columns a client can change, and this provider's encoder has no function that writes a PUBLISH, so there is no column definition to change.",
   },
 };
 
@@ -1642,6 +1648,7 @@ describe("generateMigrationSQL: dialects that cannot modify a column", () => {
           "modbus",
           "netconf",
           "snmp",
+          "sparkplug",
         ].includes(dialect)
       ) {
         expect(sql).toContain(`-- ${expected.label}: Cannot generate table DDL.`);
@@ -1723,6 +1730,7 @@ const TRANSACTION_WRAPPER_COVERAGE: Record<DatabaseType, "BEGIN;" | "BEGIN TRANS
   modbus: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
   netconf: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
   snmp: false, // a Get is not SQL text and there is no table DDL to wrap
+  sparkplug: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
 };
 
 // Both creation and modification paths must use the same wrapper policy.
@@ -1768,6 +1776,7 @@ describe("generateMigrationSQL: transaction wrapper by dialect", () => {
             "modbus",
             "netconf",
             "snmp",
+            "sparkplug",
           ].includes(dialect)
         ) {
           expect(sql).toMatch(/^CREATE TABLE /m);

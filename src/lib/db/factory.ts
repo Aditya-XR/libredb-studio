@@ -452,6 +452,15 @@ export async function createDatabaseProvider(
       return new NetconfProvider(connection, options);
     }
 
+    // Sparkplug B (#1720), the third member of the `industrial/` family. Its own bounded MQTT session
+    // rather than the shipped MQTT read, because that read returns one row per topic and a Sparkplug
+    // read depends on the order of successive messages on one topic.
+    case "sparkplug": {
+      // The explicit /index specifier keeps this dynamic import statically analysable.
+      const { SparkplugProvider } = await import("./providers/industrial/sparkplug/index");
+      return new SparkplugProvider(connection, options);
+    }
+
     // Embedded databases - dynamically imported
     case "libredb": {
       const { LibreDBProvider } = await import("./providers/embedded/libredb");
@@ -463,7 +472,7 @@ export async function createDatabaseProvider(
         // This list is NOT type-checked against the union - a new case above with no
         // entry here is silent - so it is kept in the same order as the cases and
         // tests/isolated/factory.test.ts pins individual names in it by regex.
-        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, db2, mssql, clickhouse, druid, trino, databend, bigquery, snowflake, spark, cassandra, elasticsearch, opensearch, mongodb, couchbase, firestore, redis, etcd, oxia, prometheus, influxdb, influxdb3, kafka, neo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, libredb`,
+        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, db2, mssql, clickhouse, druid, trino, databend, bigquery, snowflake, spark, cassandra, elasticsearch, opensearch, mongodb, couchbase, firestore, redis, etcd, oxia, prometheus, influxdb, influxdb3, kafka, neo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, sparkplug, libredb`,
         connection.type,
       );
   }

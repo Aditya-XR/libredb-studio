@@ -359,7 +359,9 @@ describe("the installed editor's language ids", () => {
     // the fleet to declare it, and a key declares `xml`. `plaintext` is the honest answer rather
     // than a near relative: the installed bundle registers no YANG, and declaring `ini` or `sql`
     // for a module's text would colour it as something it is not.
-    expect(declared).toHaveLength(146);
+    // 146 with that pair, and 148 since Sparkplug B's two kinds joined (#1720): a node and a device
+    // each declare `json`, the payload this provider decodes a birth certificate into.
+    expect(declared).toHaveLength(148);
 
     const unregistered = declared.filter((entry) => !registered.has(entry.language));
     // Named, so a failure says which kind on which engine declared what, rather than false. This
