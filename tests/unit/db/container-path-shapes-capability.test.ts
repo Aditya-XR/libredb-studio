@@ -64,6 +64,9 @@ const EXPECTED_CONTAINER_PATH_SHAPES: Readonly<
   // One level, the agent's devices, and a path is the device name exactly as the probe document
   // spells it: nothing is prefixed and nothing is derived (#1722).
   mtconnect: "exact",
+  // A container is one unit id, written as the number the map holds: nothing is prefixed and nothing
+  // is derived (#1723).
+  modbus: "prefixes",
   libredb: "exact",
   duckdb: "prefixes",
   mssql: "prefixes",
@@ -171,7 +174,7 @@ describe("the declaration follows the check (#1147)", () => {
     expect(unknownTypeIds(callerFiles)).toEqual([]);
     const callers = callerFiles.map(providerTypeId).sort();
     const declaring = TYPES.filter((type) => EXPECTED_CONTAINER_PATH_SHAPES[type] !== "absent").sort();
-    expect(callers).toHaveLength(25);
+    expect(callers).toHaveLength(26);
     expect(callers).toEqual(declaring);
   });
 });

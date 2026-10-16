@@ -199,7 +199,16 @@ export type DatabaseType =
   // Basic answers with an HTML 401 rather than an MTConnect document, which the provider reports as what it is.
   // Read-only is structural rather than a mode: the request table holds nine routes and every one of them is a GET,
   // so there is nothing to send that writes.
-  | "mtconnect";
+  | "mtconnect"
+  // Modbus TCP (#1723), the third member of the `industrial/` family. A device or a gateway in
+  // front of serial devices, read only: the encoder names four read function codes and device
+  // identification, and there is no code here that can build a write - read-only is structural
+  // rather than a mode, as it is for the two above. Modbus has NO DISCOVERY: no request lists
+  // what a device holds, and no register carries a name, a type or a unit, so the object tree is
+  // built from a register map the user supplies with the connection rather than from the device.
+  // One connection is one device address and one unit id; `mbaps`, the protocol's TLS form on
+  // port 802, rides on the SSL panel the other engines already use.
+  | "modbus";
 
 export type ConnectionEnvironment = "production" | "staging" | "development" | "local" | "other";
 
@@ -579,6 +588,37 @@ export interface DatabaseConnection {
    */
   apiKeyId?: string;
   apiKeySecret?: string;
+  /**
+   * Modbus only: the register map, as the JSON document the provider parses. A point names a unit,
+   * a table, a zero-based PDU address, a type and the orders a value wider than one register needs.
+   *
+   * WHY IT IS A FIELD. Modbus has no discovery: the protocol offers no request that lists what a
+   * device holds, so the map is the only thing that can name a point, and the user is who writes
+   * it. `keyof DatabaseConnection` is the write list of what a user may fill in, send and have
+   * stored (see `WithTunnelFarEnd`, which is deliberately NOT a field because nobody fills it in),
+   * and a document the user writes belongs on it. The length is no argument against that: BigQuery
+   * carries a whole key file's JSON in `password`.
+   *
+   * WHY NOT `password`. It is not a secret. `password` is classified `secret` in
+   * `connection-secrets.ts`, which would mask the map in the dialog and store it as a credential,
+   * and a reader cannot correct a document they cannot see.
+   *
+   * WHY `resolution` IN `CONNECTION_RELEVANCE`, and it is NOT the summary criterion there. That
+   * record's docblock asks which database a connection reaches and as whom, and this field answers
+   * neither: the same device answers, and Modbus TCP authenticates nobody. The reason is what READS
+   * the key. `use-provider-metadata` makes `connectionResolutionKey` part of its `readKey`,
+   * `use-connection-pulse` keys the pulse on it and `SchemaDiff` keys its snapshot on it, so a map
+   * that changed while the key did not would leave the PREVIOUS map's points drawn on screen.
+   *
+   * And the map DEFINES the names rather than filtering them, which is why Kubernetes' namespace
+   * list is `cosmetic` and this is not: that list narrows names the cluster itself defines, while
+   * `volts` is unit 1, holding register 100 under one document and can be unit 3, coil 5 under the
+   * next. Two such maps are not two views of one answer.
+   *
+   * Bounded by `MAX_REGISTER_MAP_BYTES` at the parser rather than here, so a seed file and a
+   * dialog answer the same way. Read by no other engine.
+   */
+  registerMap?: string;
 }
 
 export interface ForeignKeySchema {
@@ -935,7 +975,8 @@ export interface QueryTab {
     | "firestore"
     | "rabbitmq"
     | "opcua"
-    | "mtconnect";
+    | "mtconnect"
+    | "modbus";
   viewMode?: "results" | "explain" | "history" | "saved";
   explainPlan?: unknown;
   // Pagination state
