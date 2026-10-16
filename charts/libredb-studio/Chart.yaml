@@ -1,8 +1,8 @@
 apiVersion: v2
 name: libredb-studio
-description: Web-based SQL IDE for cloud-native teams supporting thirty-eight engines - PostgreSQL, MySQL, SQLite, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Redis, Couchbase, Firestore, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, BigQuery, Snowflake, Apache Spark, Apache Cassandra, libSQL, Prometheus, Apache Kafka, MQTT, RabbitMQ, etcd, Neo4j, Milvus, Qdrant, InfluxDB, InfluxDB 3, Oxia, Databend, S3-compatible object storage, Kubernetes, OPC UA, MTConnect and Modbus
+description: Web-based SQL IDE for cloud-native teams supporting thirty-nine engines - PostgreSQL, MySQL, SQLite, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Redis, Couchbase, Firestore, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, BigQuery, Snowflake, Apache Spark, Apache Cassandra, libSQL, Prometheus, Apache Kafka, MQTT, RabbitMQ, etcd, Neo4j, Milvus, Qdrant, InfluxDB, InfluxDB 3, Oxia, Databend, S3-compatible object storage, Kubernetes, OPC UA, MTConnect, Modbus and NETCONF
 type: application
-version: 0.1.94
+version: 0.1.95
 appVersion: "0.18.3"
 kubeVersion: ">=1.26.0-0"
 home: https://github.com/libredb/libredb-studio
@@ -117,6 +117,7 @@ keywords:
   # One keyword, like mtconnect above: `modbus` is the type-id and the protocol an evaluator
   # looking for a device reader searches for.
   - modbus
+  - netconf
   - web-ide
 maintainers:
   - name: cevheri
@@ -294,6 +295,7 @@ annotations:
       url: https://github.com/libredb/libredb-studio
   artifacthub.io/changes: |
     - "Name Apache Spark, reached over Spark Connect, in the description and the keywords"
+    - "Name NETCONF, read over SSH with the device's own host key, in the description and the keywords"
 dependencies:
   - name: postgresql
     version: "16.x.x"

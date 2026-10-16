@@ -107,6 +107,7 @@ const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
   mtconnect: "standard",
   // No generator calls `quoteLiteral` for Modbus either: a read request is JSON and names points.
   modbus: "standard",
+  netconf: "standard",
   // Default `sql_mode`. A server running with NO_BACKSLASH_ESCAPES reads the
   // doubled backslash as two characters, which is why binding the value beats
   // quoting it wherever a bind form exists.

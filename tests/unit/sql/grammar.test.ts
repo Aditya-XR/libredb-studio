@@ -460,6 +460,7 @@ const GRAMMAR_COVERAGE: Record<DatabaseType, "established" | "default"> = {
   mtconnect: "default",
   // One JSON read request, not SQL: no SQL grammar is established for it (#1723).
   modbus: "default",
+  netconf: "default",
 };
 
 /**
@@ -787,6 +788,7 @@ const SQL_TEXT_COVERAGE: Record<DatabaseType, boolean> = {
   mtconnect: false,
   // A read request is JSON, not SQL text.
   modbus: false,
+  netconf: false,
 };
 
 describe("readsSqlText", () => {

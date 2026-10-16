@@ -221,6 +221,12 @@
      and a warm grey stands apart from `slate`, which is OPC UA's: both are industrial protocols and
      telling them apart on a tree matters more than telling either apart from a database. */
   --studio-hue-stone: #292524;
+  /* NETCONF (#1724). The step is NOT chosen by contrast, and that is the measurement worth
+     keeping: `neutral-600`, `-700` and `-800` all clear AA in light by a wide margin (6.85, 9.12,
+     13.27 against the worst ground). Separation decides it. In OKLab distance `neutral-800` sits
+     `neutral-700` sits 0.0166 from Snowflake's `mist-700`, nearer than the closest pair on record,
+     in the palette, "it clears AA" stopped being enough to choose a step. */
+  --studio-hue-neutral: #525252;
   /* MTConnect (#1722) takes the step this hue never had. MEASURED against this file at 90881379:
      of nineteen base hues, exactly two carried no `-alt` in either theme, `mist` and `slate`, so
      this is one of the two steps the palette was still missing rather than a new colour. A base
@@ -356,6 +362,7 @@
   --studio-hue-mist: #9ca8ab;
   --studio-hue-slate: #90a1b9;
   --studio-hue-stone: #a6a09b;
+  --studio-hue-neutral: #a1a1a1;
   --studio-hue-slate-alt: #cad5e2;
   --studio-hue-taupe: #aba09c;
 }
@@ -469,6 +476,7 @@
   --color-hue-mist: var(--studio-hue-mist);
   --color-hue-slate: var(--studio-hue-slate);
   --color-hue-stone: var(--studio-hue-stone);
+  --color-hue-neutral: var(--studio-hue-neutral);
   --color-hue-slate-alt: var(--studio-hue-slate-alt);
   --color-hue-taupe: var(--studio-hue-taupe);
   --color-hue-teal-solid: var(--studio-hue-teal-solid);

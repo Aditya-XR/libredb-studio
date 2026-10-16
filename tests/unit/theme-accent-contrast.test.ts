@@ -246,6 +246,8 @@ const HUES: ReadonlyArray<{ hue: string; light: string; lightAlt: string }> = [
   // industrial pair a reader is most likely to need to tell apart.
   { hue: "stone", light: "stone-800", lightAlt: "stone-900" },
   // Modbus's identity (#1723): every base hue and every `-alt` step was an engine's by the time it registered,
+  // closest identity pair on record (0.0205). `neutral-600`'s nearest is `olive-600` at 0.0368.
+  { hue: "neutral", light: "neutral-600", lightAlt: "neutral-800" },
 ];
 
 /**

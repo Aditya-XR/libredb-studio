@@ -548,6 +548,12 @@ export const NON_SQL_DESTRUCTIVE_VOCABULARY: Readonly<Partial<Record<DatabaseTyp
   // four read function codes and the identification request and nothing else, so there is no
   // destructive verb to find; naming one would claim this provider can send it.
   modbus: { operations: new Set<string>(), read: () => [], decidesAlone: true, safetyAnalysis: false },
+
+  // NETCONF (#1724): the console reads one JSON read request naming a datastore, a path and a bound, so there is no
+  // destructive verb to find. The operations list is empty BY CONSTRUCTION rather than by this version's scope:
+  // `requests.ts` builds four read operations and a close, and no function in the provider can build an
+  // `<edit-config>`, a `<commit>` or a `<lock>`. Naming an operation here would claim this provider can send one.
+  netconf: { operations: new Set<string>(), read: () => [], decidesAlone: true, safetyAnalysis: false },
   kubernetes: {
     operations: KUBERNETES_DESTRUCTIVE_OPERATIONS,
     read: readKubernetesOperations,

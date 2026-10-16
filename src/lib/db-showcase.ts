@@ -127,6 +127,10 @@ export const SHOWCASE_RANK: Record<DatabaseType, number> = {
   // Last (rank 38): a device's registers are narrower still, and a map the user writes is the only
   // thing that names them, so nothing above it moves for this one either (#1723).
   modbus: 38,
+  // Last (rank 38): a device's configuration tree is the narrowest name of the four, and the people
+  // who know it are network engineers rather than the readers a page of databases is written for, so
+  // nothing above it moves for this one either (#1724).
+  netconf: 39,
 };
 
 /**

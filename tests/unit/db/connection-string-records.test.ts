@@ -192,6 +192,7 @@ describe("CONNECTION_STRING_ACCEPTED against each provider's own declaration (Sp
       "opcua",
       "mtconnect",
       "modbus",
+      "netconf",
       "libredb",
     ]);
   });

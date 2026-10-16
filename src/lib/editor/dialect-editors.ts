@@ -138,6 +138,8 @@ export const DIALECT_EDITORS: Readonly<Record<QueryTab["type"], DialectEditor>> 
   mtconnect: Object.freeze({ monacoId: "mtconnect", console: MTCONNECT_CONSOLE_LANGUAGE }),
   // One JSON read request, so Monaco's built-in `json` mode and the JSON formatter, as Kafka's.
   modbus: Object.freeze({ monacoId: "json", format: formatJson }),
+  // language is XML, and a reader never types any, so no XML editor is registered here.
+  netconf: Object.freeze({ monacoId: "json", format: formatJson }),
 });
 
 /**

@@ -316,6 +316,14 @@ const NO_COLUMN_MODIFICATION: Partial<Record<DatabaseType, { label: string; reas
     reason:
       "A Modbus register has no column definition anywhere: the device holds 16-bit words and single bits with no name, no type and no unit, and what gives them meaning is the register map the user wrote, so there is nothing a client could change here.",
   },
+  // Not a table store either (#1724): a node's shape is declared in the device's own YANG module,
+  // which the device serves and a client only reads, and this provider builds four read operations
+  // and a close, so there is no statement in it that could change a definition.
+  netconf: {
+    label: "NETCONF",
+    reason:
+      "A NETCONF node's shape is declared in the device's YANG module, which the device serves and a client reads, and this provider builds four read operations and a close, and nothing else, so there is no column definition here for anything to change.",
+  },
 };
 
 /**
@@ -426,6 +434,7 @@ const NO_TRANSACTION_WRAPPER: ReadonlySet<DatabaseType> = new Set<DatabaseType>(
   // No table DDL to wrap either (#1723): what a register means is the device vendor's, written
   // down in the user's map rather than in anything a client could migrate.
   "modbus",
+  "netconf",
 ]);
 
 // These engines cannot apply a relational table diff through SQL. In particular,
@@ -462,6 +471,7 @@ const NO_TABLE_DDL: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   // One container level of unit ids and no schema; a register has no definition to alter, and the
   // provider has no code that could write one (#1723).
   "modbus",
+  "netconf",
 ]);
 
 // IndexDiff carries column names/uniqueness, not ClickHouse's index expression,

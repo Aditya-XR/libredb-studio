@@ -1435,6 +1435,8 @@ const NON_SQL_DIALECTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   "mtconnect",
   // One JSON read request against a register map, so no span of it is SQL (#1723).
   "modbus",
+  // One JSON read request naming a datastore and a path, so no span of it is SQL (#1724).
+  "netconf",
 ]);
 
 /**

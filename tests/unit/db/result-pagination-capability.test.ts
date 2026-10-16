@@ -118,6 +118,7 @@ const EXPECTED: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   // A read carries the protocol's own limits, 125 registers or 2000 bits, and the answer is the whole of
   // what was asked for: there is no page two to ask for (#1723).
   modbus: false,
+  netconf: false,
 });
 
 const TYPES = Object.keys(EXPECTED) as DatabaseType[];

@@ -60,6 +60,7 @@ const COLUMN_GRAMMAR: Record<DatabaseType, [string, string] | null> = {
   mtconnect: null,
   // No migration dialect: a register's meaning is the device vendor's, and no client writes it (#1723).
   modbus: null,
+  netconf: null,
 };
 
 describe("migration dialect regressions (#284)", () => {

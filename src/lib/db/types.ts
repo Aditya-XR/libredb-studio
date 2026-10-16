@@ -992,7 +992,8 @@ export interface ProviderCapabilities {
     | "kubectl"
     | "opcua"
     | "mtconnect"
-    | "modbus";
+    | "modbus"
+    | "netconf";
   supportsExplain: boolean;
   /**
    * Present iff supportsExplain is true (enforced by provider tests).

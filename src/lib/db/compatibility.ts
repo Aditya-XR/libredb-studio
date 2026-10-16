@@ -130,6 +130,7 @@ const SHIPPED: Readonly<Record<DatabaseType, true>> = Object.freeze({
   // that are all GET, so the read-only guarantee is a type rather than a setting.
   mtconnect: true,
   modbus: true,
+  netconf: true,
   libredb: true,
 });
 
@@ -215,6 +216,7 @@ const EXTERNAL: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   // An agent the plant already runs, reached over HTTP at one address the reader types.
   mtconnect: true,
   modbus: true,
+  netconf: true,
   // The one false entry. SQLite is a file rather than a server and is still
   // external: it is the user's file, opened from a path they give us. libredb is
   // ours, created by this app, so it is the only id that answers no here.
@@ -327,6 +329,8 @@ export const READ_ONLY_ENFORCED: Record<DatabaseType, boolean> = Object.freeze({
   // identification, and there is no code in the provider that can build a write (#1723 MB-S1,
   // `src/lib/db/providers/industrial/modbus/valve.ts` re-checks every outbound byte).
   modbus: true,
+  // `get-schema` answered data.
+  netconf: true,
   libredb: false,
 });
 
@@ -389,6 +393,8 @@ export const READS_FILE_ACCESS_POSTURE: Readonly<Record<DatabaseType, boolean>> 
   opcua: false,
   mtconnect: false,
   modbus: false,
+  // `tests/unit/db/reads-file-access-posture-capability.test.ts`.
+  netconf: false,
   libredb: false,
 });
 
@@ -473,6 +479,8 @@ export const MCP_EXPOSABLE: Readonly<Record<DatabaseType, boolean>> = Object.fre
   // the connection, because Modbus has no discovery and a name means only what that document
   // says it means, so an MCP client has nothing to form a read from on its own.
   modbus: false,
+  // not taken by default.
+  netconf: false,
   libredb: true,
 });
 
@@ -526,6 +534,10 @@ export const CONNECTION_FORM_URI_MODE: Readonly<Record<DatabaseType, boolean>> =
   opcua: false,
   mtconnect: false,
   modbus: false,
+  // No URI mode: the form names a host, a port, an account and the device's host key fingerprint,
+  // and `netconf://` is a scheme nothing in this product parses. Held equal to
+  // `DB_UI_CONFIG[type].showConnectionStringToggle` by `connection-string-records.test.ts`.
+  netconf: false,
   libredb: false,
 });
 
@@ -587,6 +599,8 @@ export const CONNECTION_STRING_ACCEPTED: Readonly<Record<DatabaseType, boolean>>
   // Host and port are the address and `apiPath` is a field of its own, so there is no string form to parse.
   mtconnect: false,
   modbus: false,
+  // in one box.
+  netconf: false,
   libredb: false,
 });
 

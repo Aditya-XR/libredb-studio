@@ -149,6 +149,9 @@ const EXPECTED_COLUMN_KINDS: Readonly<Record<DatabaseType, readonly string[]>> =
   // No kind declares columns: a point is one value, and what a read answers is a row per point rather
   // than a shape the tree can show under the point itself (#1723).
   modbus: [],
+  // first committed, which was a claim about `describeObject` rather than about the declaration
+  // this census measures; see docs/providers/netconf.md section 6.3 for what each surface answers.
+  netconf: ["node"],
   libredb: ["table", "collection", "keyspace"],
 });
 
@@ -234,7 +237,9 @@ describe("the fleet census of object column declarations", () => {
     expect([...CENSUS_TYPES].sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
     // EXTERNAL_DATABASE_TYPES.length (36 with db2, neo4j, milvus, qdrant, influxdb, influxdb3, oxia, databend,
     // bigquery, snowflake, s3, kubernetes, mqtt, firestore, rabbitmq, opcua and mtconnect) plus the embedded store.
-    expect(CENSUS_TYPES).toHaveLength(39);
+    // `EXTERNAL_DATABASE_TYPES.length` plus the embedded store, and the figure moves with every
+    // registration rather than being a sentence somebody remembers to update.
+    expect(CENSUS_TYPES).toHaveLength(40);
     expect(Object.keys(EXPECTED_COLUMN_KINDS).sort()).toEqual([...SHIPPED_DATABASE_TYPES].sort());
     // A row naming nothing would make its type-id's census pass on the empty set, so the design's
     // table has three such rows, and they are named here: every engine but Oxia, S3, Kubernetes, MQTT, OPC UA and Modbus has at least one

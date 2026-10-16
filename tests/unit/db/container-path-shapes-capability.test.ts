@@ -67,6 +67,8 @@ const EXPECTED_CONTAINER_PATH_SHAPES: Readonly<
   // A container is one unit id, written as the number the map holds: nothing is prefixed and nothing
   // is derived (#1723).
   modbus: "prefixes",
+  // datastore and a module), which is the same shape the other absent engines are in.
+  netconf: "absent",
   libredb: "exact",
   duckdb: "prefixes",
   mssql: "prefixes",
