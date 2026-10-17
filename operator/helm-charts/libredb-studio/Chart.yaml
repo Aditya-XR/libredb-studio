@@ -2,8 +2,8 @@ apiVersion: v2
 name: libredb-studio
 description: Web-based SQL IDE for cloud-native teams supporting forty-one engines - PostgreSQL, MySQL, SQLite, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Redis, Couchbase, Firestore, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, BigQuery, Snowflake, Apache Spark, Apache Cassandra, libSQL, Prometheus, Apache Kafka, MQTT, RabbitMQ, etcd, Neo4j, Milvus, Qdrant, InfluxDB, InfluxDB 3, Oxia, Databend, S3-compatible object storage, Kubernetes, OPC UA, MTConnect, Modbus, NETCONF, SNMP and Sparkplug B
 type: application
-version: 0.1.99
-appVersion: "0.18.3"
+version: 0.1.100
+appVersion: "1.0.0"
 kubeVersion: ">=1.26.0-0"
 home: https://github.com/libredb/libredb-studio
 icon: https://raw.githubusercontent.com/libredb/libredb-studio/main/public/logo.svg
@@ -290,10 +290,16 @@ annotations:
   # governance-private-keys, stickySessions.enabled) and typed values for OIDC_USER_ROLES, OIDC_PROMPT,
   # OIDC_AUTO_REDIRECT, OIDC_LOGOUT_HINT, AUTH_SESSION_TTL_SECONDS and STORAGE_POSTGRES_SCHEMA. Every one
   # is off or empty by default, so an install that sets none of them renders exactly as before.
-  artifacthub.io/containsSecurityUpdates: "false"
+  # True: 0.1.100 tracks app release 1.0.0, which scopes POST /api/db/disconnect to the caller's
+  # own providers: in every earlier release any signed-in user could close the providers and SSH
+  # tunnels other users had open on a connection by naming its id. 1.0.0 is also the first app
+  # release that reads the governance values 0.1.99 added; under 0.1.99's default image, 0.18.3,
+  # governance.enabled points readiness at /api/ready, which that image does not serve. No
+  # template, value or default moves, so the upgrade is the image.
+  artifacthub.io/containsSecurityUpdates: "true"
   artifacthub.io/images: |
     - name: libredb-studio
-      image: ghcr.io/libredb/libredb-studio:0.18.3
+      image: ghcr.io/libredb/libredb-studio:1.0.0
       platforms:
         - linux/amd64
         - linux/arm64
@@ -305,8 +311,9 @@ annotations:
     - name: Source
       url: https://github.com/libredb/libredb-studio
   artifacthub.io/changes: |
-    - "Add governance values: GOVERNANCE_SOURCE=postgres, the governance URL and keyring Secret keys, a read-only keyring file mount, /api/ready readiness and render guards that mirror the boot preflight"
-    - "Add typed values for the OIDC user roles, prompt, auto redirect and logout hint, the session lifetime and the storage schema"
+    - "Default image 1.0.0, the first app release that reads the governance values added in chart 0.1.99; set governance.enabled only with this chart version or later, or with an image of 1.0.0 or later"
+    - "Security: app 1.0.0 scopes POST /api/db/disconnect to the caller's own providers, so a signed-in user can no longer close the connections and SSH tunnels other users have open"
+    - "Track app release 1.0.0 (appVersion bump; default image tag follows)"
 dependencies:
   - name: postgresql
     version: "16.x.x"
