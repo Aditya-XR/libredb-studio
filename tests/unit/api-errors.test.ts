@@ -10,6 +10,7 @@ import {
   DatabaseConfigError,
   ConnectionError,
   AuthenticationError,
+  PermissionDeniedError,
   PoolExhaustedError,
   QueryError,
   QueryCancelledError,
@@ -93,14 +94,18 @@ describe("createErrorResponse", () => {
     expect(Object.hasOwn(new AuthenticationError("refused"), "fixStatement")).toBe(false);
   });
 
-  test("TimeoutError returns 408 with code TIMEOUT_ERROR", async () => {
-    const err = new TimeoutError("query took too long", "postgres", 30000);
-    const res = createErrorResponse(err);
-    expect(res.status).toBe(408);
-    const body = await res.json();
-    expect(body.code).toBe("TIMEOUT_ERROR");
-    expect(body.statusCode).toBe(408);
-    expect(body.retryable).toBe(true);
+  // A missing privilege is the database refusing the statement with the credential accepted: 403 with its own code,
+  // never the 401 of a refused credential, which tells the user to re-enter a password that is right.
+  test("PermissionDeniedError returns 403 with code PERMISSION_DENIED and the database's sentence", async () => {
+    const res = createErrorResponse(
+      new PermissionDeniedError("Permission denied: permission denied for table orders", "postgres", "INSERT"),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: "Permission denied: permission denied for table orders",
+      code: "PERMISSION_DENIED",
+      statusCode: 403,
+    });
   });
 
   test("a TimeoutError is a statement's deadline on every route: a connect's arrives as a ConnectionError", async () => {

@@ -45,6 +45,26 @@ async function expectSessionRequired(response: Response, error: string) {
   expect(await response.json()).toEqual({ error, code: "AUTH_REQUIRED" });
 }
 
+/** Runs one case with NEXT_PUBLIC_AUTH_PROVIDER and OIDC_AUTO_REDIRECT set, restoring both afterwards. */
+async function withAutoRedirectEnv(
+  provider: string,
+  autoRedirect: string | undefined,
+  action: () => Promise<void>,
+): Promise<void> {
+  const saved = [process.env.NEXT_PUBLIC_AUTH_PROVIDER, process.env.OIDC_AUTO_REDIRECT] as const;
+  process.env.NEXT_PUBLIC_AUTH_PROVIDER = provider;
+  if (autoRedirect === undefined) delete process.env.OIDC_AUTO_REDIRECT;
+  else process.env.OIDC_AUTO_REDIRECT = autoRedirect;
+  try {
+    await action();
+  } finally {
+    if (saved[0] === undefined) delete process.env.NEXT_PUBLIC_AUTH_PROVIDER;
+    else process.env.NEXT_PUBLIC_AUTH_PROVIDER = saved[0];
+    if (saved[1] === undefined) delete process.env.OIDC_AUTO_REDIRECT;
+    else process.env.OIDC_AUTO_REDIRECT = saved[1];
+  }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe("proxy", () => {
@@ -76,6 +96,16 @@ describe("proxy", () => {
 
     test("/api/health passes through without redirect", async () => {
       expect(isRedirect(await proxy(createNextRequest("/api/health")))).toBe(false);
+    });
+
+    // The readiness probe (docs/GOVERNANCE.md#freshness-and-readiness) carries no session either, and a 401 or a
+    // redirect would read as not ready or, worse, as ready.
+    test("/api/ready passes without a session", async () => {
+      const res = await proxy(createNextRequest("/api/ready"));
+
+      expect(isRedirect(res)).toBe(false);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-middleware-next")).toBe("1");
     });
 
     test("/_next/static/chunk.js passes through without redirect", async () => {
@@ -156,6 +186,52 @@ describe("proxy", () => {
         resetLaunchConfigWarning();
       }
     });
+
+    // Governance mode has no launch sign-in (docs/GOVERNANCE.md), so the page answers as if launch sign-in did not
+    // exist, before the launch configuration is read, with or without a session and whatever the launch variables say.
+    // An unknown GOVERNANCE_SOURCE counts as on, so the page fails closed under a typo too.
+    test("/launch answers 404 under governance", async () => {
+      const names = [
+        "GOVERNANCE_SOURCE",
+        "NEXT_PUBLIC_AUTH_PROVIDER",
+        "LAUNCH_TOKEN_SECRET",
+        "LAUNCH_TOKEN_AUDIENCE",
+        "LAUNCH_TOKEN_ISSUER",
+      ] as const;
+      const saved = names.map((name) => process.env[name]);
+      process.env.LAUNCH_TOKEN_SECRET = "l".repeat(48);
+      process.env.LAUNCH_TOKEN_AUDIENCE = "studio-1";
+      process.env.LAUNCH_TOKEN_ISSUER = "platform";
+      const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        for (const [source, provider] of [
+          ["postgres", "oidc"],
+          ["postgress", "local"],
+        ] as const) {
+          process.env.GOVERNANCE_SOURCE = source;
+          process.env.NEXT_PUBLIC_AUTH_PROVIDER = provider;
+          for (const token of [undefined, await createToken("user")]) {
+            const res = await proxy(createNextRequest("/launch", token));
+
+            expect(res.status).toBe(404);
+            expect(await res.text()).toBe("Launch sign-in is not enabled on this server.");
+            expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+            expect(res.headers.get("cache-control")).toBe("no-store");
+            expect(res.headers.get("x-frame-options")).toBe("DENY");
+          }
+        }
+        // The launch configuration was never read, so its OIDC problem was never logged.
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        names.forEach((name, index) => {
+          const value = saved[index];
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        });
+        errorSpy.mockRestore();
+        resetLaunchConfigWarning();
+      }
+    });
   });
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -211,6 +287,93 @@ describe("proxy", () => {
       const res = await proxy(createNextRequest("/login?next=%2F%2Fevil.example", token));
 
       expect(getRedirectLocation(res)).toBe("http://localhost:3000/admin");
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Automatic redirect from /login to the identity provider (OIDC_AUTO_REDIRECT)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  describe("/login auto-redirect to the identity provider", () => {
+    test("GET /login under oidc with OIDC_AUTO_REDIRECT=true redirects to /api/auth/oidc/login and keeps a safe next", async () => {
+      await withAutoRedirectEnv("oidc", "true", async () => {
+        const res = await proxy(createNextRequest("/login?next=%2F%3Fconnection%3Dseed%253Aorders"));
+
+        expect(res.status).toBe(307);
+        expect(getRedirectLocation(res)).toBe(
+          "http://localhost:3000/api/auth/oidc/login?next=%2F%3Fconnection%3Dseed%253Aorders",
+        );
+        expect(res.headers.get("x-frame-options")).toBe("DENY");
+      });
+    });
+
+    test("GET /login without next redirects to /api/auth/oidc/login with no next", async () => {
+      await withAutoRedirectEnv("oidc", "yes", async () => {
+        const res = await proxy(createNextRequest("/login"));
+
+        expect(res.status).toBe(307);
+        expect(getRedirectLocation(res)).toBe("http://localhost:3000/api/auth/oidc/login");
+      });
+    });
+
+    test("an unsafe next is dropped from the redirect", async () => {
+      await withAutoRedirectEnv("oidc", "true", async () => {
+        const res = await proxy(createNextRequest("/login?next=%2F%2Fevil.example"));
+
+        expect(res.status).toBe(307);
+        expect(getRedirectLocation(res)).toBe("http://localhost:3000/api/auth/oidc/login");
+      });
+    });
+
+    test("an invalid auth-token still redirects to the identity provider", async () => {
+      await withAutoRedirectEnv("oidc", "true", async () => {
+        const res = await proxy(createNextRequest("/login", "invalid-token-garbage"));
+
+        expect(res.status).toBe(307);
+        expect(getRedirectLocation(res)).toBe("http://localhost:3000/api/auth/oidc/login");
+      });
+    });
+
+    test("a valid auth-token still goes to the role's landing page", async () => {
+      await withAutoRedirectEnv("oidc", "true", async () => {
+        const res = await proxy(createNextRequest("/login", await createToken("admin")));
+
+        expect(getRedirectLocation(res)).toBe("http://localhost:3000/admin");
+      });
+    });
+
+    // Every OIDC failure lands on /login?error=..., so skipping the redirect there is what keeps it from looping.
+    test("GET /login?error=oidc_failed with OIDC_AUTO_REDIRECT=true renders the login page", async () => {
+      await withAutoRedirectEnv("oidc", "true", async () => {
+        const res = await proxy(createNextRequest("/login?error=oidc_failed"));
+
+        expect(isRedirect(res)).toBe(false);
+        expect(res.status).toBe(200);
+      });
+    });
+
+    test("the local provider ignores the flag", async () => {
+      await withAutoRedirectEnv("local", "true", async () => {
+        const res = await proxy(createNextRequest("/login"));
+
+        expect(isRedirect(res)).toBe(false);
+      });
+    });
+
+    test("with the flag unset under oidc the login page renders", async () => {
+      await withAutoRedirectEnv("oidc", undefined, async () => {
+        const res = await proxy(createNextRequest("/login"));
+
+        expect(isRedirect(res)).toBe(false);
+      });
+    });
+
+    test("a method other than GET is not redirected", async () => {
+      await withAutoRedirectEnv("oidc", "true", async () => {
+        const res = await proxy(new NextRequest("http://localhost:3000/login", { method: "HEAD" }));
+
+        expect(isRedirect(res)).toBe(false);
+      });
     });
   });
 
@@ -493,7 +656,7 @@ describe("proxy", () => {
   // ───────────────────────────────────────────────────────────────────────────
 
   describe("agent drive path", () => {
-    test("the public-path list is exactly the eight it names", () => {
+    test("the public-path list is exactly the nine it names", () => {
       const source = readFileSync(new URL("../../src/proxy.ts", import.meta.url), "utf8");
       const block = source.slice(source.indexOf("// Allow public routes"), source.indexOf("if (!token)"));
       const literals = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
@@ -505,6 +668,7 @@ describe("proxy", () => {
         "/health",
         "/api/health",
         "/api/db/health",
+        "/api/ready",
         "/api/storage/config",
         "/launch",
       ]);
@@ -622,6 +786,18 @@ describe("proxy under a nested basePath", () => {
         }),
       );
       expect(signedIn.headers.get("location")).toBe("http://localhost:3000/~/libredb/?connection=seed%3Aorders");
+    });
+  });
+  test("the automatic redirect to the identity provider stays inside the mount", async () => {
+    await withBasePathEnv("/~/libredb", async () => {
+      await withAutoRedirectEnv("oidc", "true", async () => {
+        const request = new NextRequest("http://localhost:3000/~/libredb/login?next=%2Fadmin", {
+          nextConfig: { basePath: "/~/libredb" },
+        });
+        expect((await proxy(request)).headers.get("location")).toBe(
+          "http://localhost:3000/~/libredb/api/auth/oidc/login?next=%2Fadmin",
+        );
+      });
     });
   });
   test("a prefixed API path answers 401 JSON inside the mount, not a redirect", async () => {

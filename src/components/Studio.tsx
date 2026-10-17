@@ -47,7 +47,7 @@ import {
 import { downloadText } from "@/lib/export/download";
 import { writeToClipboard } from "@/components/copy-button";
 import { newLocalId } from "@/lib/ids";
-import { catalogField, resolveAgentRunConnectionId } from "@/hooks/use-connection-payload";
+import { buildConnectionPayload, catalogField, resolveAgentRunConnectionId } from "@/hooks/use-connection-payload";
 import { isMobileViewport, useIsMobile } from "@/hooks/use-mobile";
 import { useAgentCapability } from "@/hooks/use-agent-capability";
 import type { AgentArtifactHydration } from "@/components/agent/hydration";
@@ -106,6 +106,9 @@ const SchemaDiagram = React.lazy(
 const SchemaExplorer = React.lazy(
   lazyRetry(() => import("@/components/schema-explorer").then((m) => ({ default: m.SchemaExplorer }))),
 );
+
+/** The line the editor shows while the server's query log records statements in full (`queryLog.statementCapture`). */
+const STATEMENT_CAPTURE_NOTICE = "Statements you run are recorded in full in this server's query log.";
 
 export default function Studio() {
   const queryEditorRef = useRef<QueryEditorRef>(null);
@@ -1260,14 +1263,20 @@ export default function Studio() {
   }, []);
 
   const handleDeleteConnection = (id: string) => {
-    // Clean up server-side provider cache and close connections/tunnels
-    appFetch("/api/db/disconnect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ connectionId: id }),
-    }).catch(() => {
-      /* best-effort cleanup */
-    });
+    // Clean up the server-side provider cache and close connections and tunnels, best effort. The connection is sent as
+    // every route is sent one, a connection of the user's own as its record: without governance the server removes only
+    // the providers that record's own key names, and refuses a bare id outside the seed namespace (docs/API_DOCS.md, the
+    // note on `POST /api/db/disconnect`).
+    const deleted = conn.connections.find((c) => c.id === id);
+    if (deleted) {
+      appFetch("/api/db/disconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildConnectionPayload(deleted)),
+      }).catch(() => {
+        /* best-effort cleanup */
+      });
+    }
 
     storage.deleteConnection(id);
     // Preserve managed (seed) connections that aren't in localStorage
@@ -1386,6 +1395,8 @@ export default function Studio() {
                 onReorderConnections={handleReorderConnections}
                 {...connectionGroupProps}
                 onAddConnection={addConnectionAction}
+                governed={conn.governance}
+                connectionAccessUnavailable={conn.connectionAccessUnavailable}
                 onObjectClick={onObjectClick}
                 onOpenKey={onOpenKey}
                 objectActions={objectActions}
@@ -1458,6 +1469,14 @@ export default function Studio() {
               onAddTab={handleAddTab}
             />
 
+            {conn.statementCapture === "full" && (
+              // One line, never a dialog: the server's query log records every statement in full
+              // (docs/GOVERNANCE.md#grants-and-the-connection-list).
+              <p role="note" className="px-3 py-1 text-xs text-fg-secondary border-b border-hairline bg-sunken">
+                {STATEMENT_CAPTURE_NOTICE}
+              </p>
+            )}
+
             <main className="flex-1 overflow-hidden relative">
               {showDiagram && (
                 /*
@@ -1512,6 +1531,8 @@ export default function Studio() {
                     onReorderConnections={handleReorderConnections}
                     {...connectionGroupProps}
                     onAddConnection={addConnectionAction}
+                    governed={conn.governance}
+                    accessUnavailable={conn.connectionAccessUnavailable}
                   />
                 </div>
               )}

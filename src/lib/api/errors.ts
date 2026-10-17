@@ -11,6 +11,7 @@ import {
   DatabaseConfigError,
   ConnectionError,
   AuthenticationError,
+  PermissionDeniedError,
   PoolExhaustedError,
   QueryError,
   QueryCancelledError,
@@ -136,17 +137,30 @@ export function createErrorResponse(error: unknown, context?: { route?: string }
     );
   }
 
+  // --- DB: PermissionDeniedError ---
+  // The database accepted the credential and refused the statement for a privilege it lacks: 403, so no client reads
+  // it as a refused credential or an ended session (the browser signs in again only for AUTH_REQUIRED).
+  if (error instanceof PermissionDeniedError) {
+    logger.warn("Database permission denied", { route, provider: error.provider });
+    return NextResponse.json(
+      { error: error.message, code: ApiErrorCode.PERMISSION_DENIED, statusCode: 403 },
+      { status: 403 },
+    );
+  }
+
   // --- DB: TimeoutError ---
+  // 504: Chromium sends a POST answered Request Timeout on a reused connection again, so the statement ran again
+  // on the database. `retryable` is a hint for the person; no client resends on it.
   if (error instanceof TimeoutError) {
     logger.warn("Query timeout", { route, provider: error.provider, duration: error.timeout });
     return NextResponse.json(
       {
         error: "Query timed out. Please try a simpler query or increase timeout.",
         code: ApiErrorCode.TIMEOUT_ERROR,
-        statusCode: 408,
+        statusCode: 504,
         retryable: true,
       },
-      { status: 408 },
+      { status: 504 },
     );
   }
 

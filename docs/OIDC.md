@@ -26,7 +26,11 @@ Browser → Redirect to app (/ or /admin based on role)
     - [Zitadel](#zitadel)
     - [Google Workspace](#google-workspace)
   - [Configuration Reference](#configuration-reference)
+  - [Automatic redirect to the provider](#automatic-redirect-to-the-provider)
   - [Role Mapping](#role-mapping)
+    - [Requiring a role](#requiring-a-role)
+  - [Session Identity](#session-identity)
+  - [Governance mode](#governance-mode)
   - [Security Features](#security-features)
   - [Troubleshooting](#troubleshooting)
   - [Switching Between Auth Modes](#switching-between-auth-modes)
@@ -119,7 +123,7 @@ When the stack is up, open **https://demo.127.0.0.1.nip.io:8443**.
 2. Click **Logout**. Keycloak asks **Do you want to log out?**; confirm it, and you are back on the login page.
 3. Click **Login with SSO** again and sign in as `user` / `user`. You land on the editor, and the admin surfaces are gone: `/admin` sends you back to `/`.
 
-Keycloak asks for a password on that third step whether or not step 2 ended its session, because Studio sends `prompt=login` on every authorization request (`src/lib/oidc.ts`). Treat the prompt as normal, not as proof: what shows the logout worked is that step 2 returns you to the login page and the app stays signed out until you sign in again.
+Keycloak asks for a password on that third step whether or not step 2 ended its session, because Studio sends `prompt=login` on every authorization request by default (`OIDC_PROMPT`, `src/lib/oidc.ts`). Treat the prompt as normal, not as proof: what shows the logout worked is that step 2 returns you to the login page and the app stays signed out until you sign in again.
 
 The difference is the realm role (`admin` or `user`), mapped through `OIDC_ROLE_CLAIM=realm_access.roles` exactly as in the [Keycloak](#keycloak) setup below. The realm already has the roles in the ID token, so nothing needs changing in the Keycloak admin console.
 
@@ -308,8 +312,50 @@ The difference is the realm role (`admin` or `user`), mapped through `OIDC_ROLE_
 | `OIDC_SCOPE` | No | `openid profile email` | OAuth scopes to request |
 | `OIDC_ROLE_CLAIM` | No | — | Claim path for role extraction (dot-notation supported) |
 | `OIDC_ADMIN_ROLES` | No | `admin` | Comma-separated values that map to admin role |
+| `OIDC_USER_ROLES` | No | unset | Comma-separated values that map to user role. Set, an account that holds neither an admin nor a user role is refused at sign-in ([Requiring a role](#requiring-a-role)). Needs `OIDC_ROLE_CLAIM` |
+| `OIDC_PROMPT` | No | `login` | The `prompt` sent on sign-in: `login`, `consent`, `select_account`, or `omit` to send none; see [Single sign-on with OIDC_PROMPT](#single-sign-on-with-oidc_prompt) |
+| `OIDC_AUTO_REDIRECT` | No | off | `true`, `1`, `on` or `yes` sends a signed-out `GET /login` straight to the identity provider; see [Automatic redirect to the provider](#automatic-redirect-to-the-provider) |
+| `OIDC_LOGOUT_HINT` | No | off | `true`, `1`, `on` or `yes` sends `id_token_hint` with the provider's end-session request on logout; see [Logout with id_token_hint](#logout-with-id_token_hint) |
+| `AUTH_SESSION_TTL_SECONDS` | No | `86400` | Session lifetime in seconds, from 300 to 86400; see [Session lifetime](#session-lifetime) |
+
+### Single sign-on with OIDC_PROMPT
+
+By default Studio sends `prompt=login`, so the provider asks for credentials on every sign-in, even when the user already has a provider session.
+Set `OIDC_PROMPT=omit` to send no `prompt` parameter at all.
+The provider then signs a user with a live session straight back in without a form, which is what single sign-on across Studio and other applications on the same provider needs.
+`consent` and `select_account` are passed through for providers that support them.
+The value is trimmed and case-insensitive.
+Any other value, `none` included, is a configuration error: sign-in lands on `/login?error=oidc_config`.
+`none` is refused because the provider answers it with `login_required` whenever there is no session, which leaves the user on an error instead of a sign-in form.
 
 > Storage configuration (`STORAGE_PROVIDER` etc.) is independent of auth. See [STORAGE.md](./STORAGE.md).
+
+### Automatic redirect to the provider
+
+By default the login page shows a single sign-on button, and the user clicks it to reach the identity provider.
+With `OIDC_AUTO_REDIRECT=true`, a signed-out `GET /login` answers 307 to `<BASE_PATH>/api/auth/oidc/login` instead, so the user sees the provider's sign-in page directly.
+The values `true`, `1`, `on` and `yes` (trimmed, any case) turn it on; unset or empty leaves it off, and any other value leaves it off with one warning in the server log.
+A safe `next` on the login address is carried along, so a deep link still opens what it named after sign-in; an unsafe one is dropped.
+Every OIDC failure lands on `/login?error=<code>`, and a login address with `error` always renders the page, so a failing provider shows its error instead of looping.
+After a logout the provider returns to `/login`, which then starts a new sign-in at the provider.
+The flag has no effect unless `NEXT_PUBLIC_AUTH_PROVIDER=oidc`.
+
+### Logout with id_token_hint
+
+By default the end-session request Studio sends on logout names the client and the return address, but not the session to end.
+Without a hint, some providers, Keycloak among them, ask the user to confirm the logout.
+With `OIDC_LOGOUT_HINT=true`, the OIDC callback keeps the raw ID token in the cookie `oidc-logout-hint`, and `POST /api/auth/logout` adds it to the end-session request as `id_token_hint`.
+The values `true`, `1`, `on` and `yes` (trimmed, any case) turn it on; unset or empty leaves it off, and any other value leaves it off with a warning in the server log.
+
+- The cookie is `httpOnly` and `SameSite=Lax`, `Secure` under the same rule as the session cookie, scoped to `<BASE_PATH>/api/auth/logout` so no other request carries it, and lives as long as the session (`AUTH_SESSION_TTL_SECONDS`).
+- A token over 3800 bytes is not kept, because a browser drops a cookie over 4096 bytes; a hint kept by an earlier sign-in is deleted instead, and logout proceeds without a hint.
+- Logout sends the hint only when its `sub` equals the session's identity provider subject, and deletes the cookie whether it sent it or not.
+- The hint is added on the Zitadel and the discovered end-session paths; Auth0's `/v2/logout` takes no hint, so its URL stays the same.
+- With the flag off nothing is written, and the logout URL is exactly what it was before the flag existed.
+
+Providers differ in how they treat a hint for a session that has already ended there, for example by asking the user to confirm or by showing an error.
+An installer therefore turns the flag on only after verifying logout with it against the identity provider it ships.
+The flag has no effect unless `NEXT_PUBLIC_AUTH_PROVIDER=oidc`.
 
 ### Role Mapping
 
@@ -319,7 +365,7 @@ The role mapping system:
 2. Supports dot-notation for nested claims (e.g., `realm_access.roles`)
 3. If the claim value is an array, checks if any element matches `OIDC_ADMIN_ROLES`
 4. If the claim value is a string, checks for exact match (case-insensitive)
-5. If no match or no claim configured, defaults to `user` role
+5. If no match or no claim configured, defaults to `user` role, unless `OIDC_USER_ROLES` is set (see [Requiring a role](#requiring-a-role))
 
 **Examples:**
 
@@ -337,7 +383,91 @@ The role mapping system:
 { "roles": ["viewer", "editor"] }  →  user
 ```
 
+### Requiring a role
+
+By default every account the provider signs in is at least a `user`.
+Set `OIDC_USER_ROLES` to let in only accounts that hold a role: the claim named by `OIDC_ROLE_CLAIM` must then hold a value of `OIDC_ADMIN_ROLES` or of `OIDC_USER_ROLES`.
+An account that holds neither gets no session.
+The callback sends it to `/login?error=oidc_no_role`, the login page says "Your account has no role that allows access to LibreDB Studio. Ask your administrator.", and the audit trail records `login_failure` with reason `oidc_no_role` and the account's email, username or subject as the actor.
+
+The values are a comma list, trimmed, and compared case-insensitively.
+An account that holds both roles is `admin`.
+An empty value, or one of only commas and spaces, keeps the default rule.
+`OIDC_USER_ROLES` needs `OIDC_ROLE_CLAIM`: set without it, every sign-in fails with `oidc_config`, because there is no claim to read the roles from.
+
+A flat claim, one top-level claim whose name has no dot, is the simplest shape.
+For example, Keycloak client roles `admin` and `user` reach the ID token as the claim `libredb_roles` through a **User Client Role** mapper whose **Client ID** names the client that holds the roles, with **Token Claim Name** `libredb_roles` and with **Multivalued** and **Add to ID token** on:
+
+```env
+OIDC_ROLE_CLAIM=libredb_roles
+OIDC_ADMIN_ROLES=admin
+OIDC_USER_ROLES=user
+```
+
+| `libredb_roles` in the ID token | Result |
+|---------------------------------|--------|
+| `["admin"]` | `admin` |
+| `["user"]` | `user` |
+| `["user", "admin"]` | `admin` |
+| `["viewer"]`, `[]`, or no claim at all | Refused with `oidc_no_role` |
+
 > For the precise algorithm and provider-by-provider worked examples, see the [Role Mapping Engine](#role-mapping-engine) in Part 2.
+
+### Session Identity
+
+A session signed in through OIDC also carries the provider's identifiers for the user, as two private claims of the `auth-token` JWT:
+
+| Claim | Value |
+|-------|-------|
+| `idpSubject` | The ID token's `sub`, the provider's stable id for the user (for Keycloak, the user id) |
+| `idpIssuer` | The ID token's `iss` |
+
+`openid-client` accepts an ID token only when its `iss` is exactly the issuer that discovery at `OIDC_ISSUER` returned, and discovery accepts only an issuer that equals `OIDC_ISSUER` once both are normalized as URLs.
+So for a Keycloak realm `idpIssuer` equals `OIDC_ISSUER`, while an issuer that is a bare host, such as Auth0's, ends in a slash that `OIDC_ISSUER` may leave out.
+`username` keeps its meaning: the email, else `preferred_username`, else `sub`, for display and rate limiting.
+The registered JWT claims `sub` and `iss` stay unused, because MCP tokens already put the username in `sub`.
+Password, passkey and launch sessions carry neither claim.
+`GET /api/auth/me` answers with the session payload, so for an OIDC session its `user` object includes `idpSubject` and `idpIssuer`.
+An ID token without a string `sub` or `iss` signs no one in: the callback redirects to `/login?error=oidc_no_claims`.
+
+### Governance mode
+
+With `GOVERNANCE_SOURCE=postgres` a control plane decides which databases each person may open ([GOVERNANCE.md](./GOVERNANCE.md#sign-in)), and the identity provider's `sub` is the key that joins a session to that person's grants.
+The identity provider is then the only way into Studio, and Studio applies these rules on every request:
+
+- A session counts only when it carries a non-empty `idpSubject` and an `idpIssuer` equal to `OIDC_ISSUER`, the two compared as URLs with one trailing slash ignored.
+  Only the OIDC callback writes those claims, so a password, passkey or launch session is refused, and so is a session whose subject is empty or whose issuer is another provider's.
+- A refused session's `auth-token` cookie is cleared, so the next page load reaches the sign-in page.
+  A changed `OIDC_ISSUER` therefore ends every session of the previous issuer at its next request, and with `OIDC_ISSUER` unset or not a URL no session counts.
+- The callback applies the same rule to the ID token before it mints a session: a token with an empty `sub`, or whose `iss` is not `OIDC_ISSUER`, signs no one in and lands on `/login?error=oidc_config`, so `OIDC_AUTO_REDIRECT` never repeats a sign-in that every request would refuse.
+- A session issued at or before its subject's `revoked_before` in the control plane's session revocations is refused too, while Studio serves a snapshot of the governance source ([GOVERNANCE.md](./GOVERNANCE.md#sign-in)).
+- `POST /api/auth/login` answers 403 with `Password sign-in is disabled: this server signs in through the identity provider only` before it reads a credential, and the audit trail records `login_failure` with reason `password_login_disabled`.
+
+The identity provider needs:
+
+- `OIDC_ISSUER` set to the issuer the provider writes in its ID tokens.
+  openid-client accepts another `iss` from Microsoft Entra ID and Azure AD B2C, but governance does not: for Entra ID use the tenant's own `https://login.microsoftonline.com/<tenant id>/v2.0`, never the `common` or `organizations` endpoint, whose tokens name each user's own tenant.
+- A confidential client for Studio that uses the authorization code flow with PKCE S256, with the redirect URI `https://<studio>/api/auth/oidc/callback` and the post-logout URI `https://<studio>/login`.
+- The roles `admin` and `user` in a flat ID-token claim: an array of strings at the top level of the ID token, named by `OIDC_ROLE_CLAIM`, with `OIDC_ADMIN_ROLES=admin` and `OIDC_USER_ROLES=user`.
+  An account that holds neither role is refused as `oidc_no_role` ([Requiring a role](#requiring-a-role)).
+- A sign-in whose subject the governance source revoked at or after the current second gets no session and ends on `/login?error=oidc_session_revoked`, because every request would refuse that session (`docs/GOVERNANCE.md#sign-in`).
+- No pairwise subject mapper on Studio's client or on the control plane's: both must see the same `sub` for a user, because the control plane writes grants under the `sub` it sees and Studio matches them against the session's `idpSubject`.
+
+For single sign-on with the control plane, set `OIDC_PROMPT=omit` and `OIDC_AUTO_REDIRECT=true` as well.
+
+With Keycloak, the roles come from client roles, because the built-in realm-role mapper writes no ID-token claim by default and its `realm_access.roles` claim is nested:
+
+1. A client `libredb` that only holds the client roles `admin` and `user`, with every flow disabled.
+2. A client scope `libredb-roles` with one mapper of type User Client Role: client `libredb`, token claim name `libredb_roles`, multivalued, claim JSON type String, and Add to ID token on.
+   Give the scope the role scope mappings `libredb` `admin` and `libredb` `user`, so the claim is written even when a client has Full Scope Allowed off.
+3. Studio's client: client authentication on, standard flow only, PKCE method S256, and `libredb-roles` among its default client scopes.
+4. Each user assigned the `libredb` client role `admin` or `user`, directly or through a group.
+
+```env
+OIDC_ROLE_CLAIM=libredb_roles
+OIDC_ADMIN_ROLES=admin
+OIDC_USER_ROLES=user
+```
 
 ---
 
@@ -347,7 +477,7 @@ The role mapping system:
 |---------|-------------|
 | **PKCE S256** | Proof Key for Code Exchange prevents authorization code interception |
 | **State Cookie** | PKCE state signed as a JWT with a key derived from `JWT_SECRET` for this purpose, httpOnly, sameSite=lax, 5-min expiry |
-| **Prompt Login** | `prompt=login` forces re-authentication on every SSO click |
+| **Prompt Login** | `prompt=login` (the default) forces re-authentication on every SSO click; `OIDC_PROMPT=omit` turns it off for single sign-on |
 | **Provider Logout** | Logout clears both local JWT and provider session |
 | **Discovery Cache** | OIDC provider metadata cached for 5 minutes to reduce network calls |
 | **Nonce Validation** | ID token nonce validated to prevent replay attacks |
@@ -368,6 +498,7 @@ The role mapping system:
 ### "Single sign-on is not configured correctly on this server"
 
 - `GET /api/auth/oidc/login` found the deployment incomplete: one of `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` is unset or the issuer is not `https://` (both checked before any network call), or the JWT secret the state cookie is signed with is missing or too short (checked after discovery, when the cookie is signed)
+- In [governance mode](#governance-mode), the callback received an ID token with an empty `sub` or with an `iss` other than `OIDC_ISSUER`; the server log names the rule
 - The audit trail records `login_failure` with reason `oidc_config`. Trying again cannot help until the environment is fixed
 
 ### "The identity provider could not be reached"
@@ -389,8 +520,16 @@ The role mapping system:
 
 ### Same user auto-logs in on every SSO click
 
-- This is handled automatically — LibreDB Studio sends `prompt=login` to force re-authentication
+- With the default `OIDC_PROMPT=login`, LibreDB Studio sends `prompt=login` to force re-authentication
+- With `OIDC_PROMPT=omit` this is intended: the provider session signs the user in (single sign-on)
 - If the issue persists, check your provider's session settings
+
+### "Your account has no role that allows access to LibreDB Studio"
+
+- `OIDC_USER_ROLES` is set, and the account's ID token holds no value of `OIDC_ADMIN_ROLES` or `OIDC_USER_ROLES` in the claim `OIDC_ROLE_CLAIM` names.
+- Give the account an admin or a user role at the provider, directly or through a group the provider puts in that claim, and sign in again.
+- The audit trail records `login_failure` with reason `oidc_no_role` and names the account, so the record shows whose role is missing.
+- Use your provider's token debugger to see the claim it actually sends.
 
 ### Role is always "user" even for admins
 
@@ -404,7 +543,7 @@ The role mapping system:
 
 - The return URL must be registered with the provider, or it rejects the redirect: Auth0 "Allowed Logout URLs", Keycloak "Valid post logout redirect URIs", Azure AD "Front-channel logout URL"
 - Keycloak / Okta / Azure AD: the logout endpoint comes from the provider's own Discovery metadata, so no per-provider configuration is needed on Studio's side
-- If the provider advertises no `end_session_endpoint` (Google, for one), the provider session survives on purpose — Studio clears its own cookie and skips the redirect. Signing in again still prompts, because Studio always sends `prompt=login`
+- If the provider advertises no `end_session_endpoint` (Google, for one), the provider session survives on purpose — Studio clears its own cookie and skips the redirect. Signing in again still prompts, because Studio sends `prompt=login` unless `OIDC_PROMPT` says otherwise
 
 ---
 
@@ -547,7 +686,10 @@ The OIDC subsystem follows three core principles:
     │                            │                                   │
     │                            │ 12. Extract claims from id_token  │
     │                            │ 13. mapOIDCRole(claims)           │
-    │                            │     └─ admin or user              │
+    │                            │     ├─ admin or user              │
+    │                            │     └─ neither (OIDC_USER_ROLES   │
+    │                            │        set): no session, 302 →    │
+    │                            │        /login?error=oidc_no_role  │
     │                            │                                   │
     │                            │ 14. login(role, email)            │
     │                            │     └─ signJWT → auth-token cookie│
@@ -623,6 +765,8 @@ interface OIDCConfig {
   scope: string;           // Default: "openid profile email"
   roleClaim: string;       // e.g. "realm_access.roles"
   adminRoles: string[];    // e.g. ["admin"]
+  userRoles: string[];     // e.g. ["user"]; empty (the default) keeps "every non-admin is user"
+  prompt: OIDCPrompt;      // "login" (default), "consent", "select_account" or "omit" (OIDC_PROMPT)
 }
 
 interface OIDCState {
@@ -634,6 +778,7 @@ interface OIDCState {
 
 interface OIDCClaims {
   sub: string;                  // Subject identifier
+  iss: string;                  // Issuer, checked by openid-client against discovery
   email?: string;
   preferred_username?: string;  // Used by Keycloak and others; username fallback
   [claim: string]: unknown;     // Provider-specific claims
@@ -654,7 +799,8 @@ discoverProvider(config?)           ← openid-client discovery + 5-min cache
     └──► exchangeCode(config, callbackUrl, codeVerifier, state, nonce)
              └─ returns OIDCClaims | null
 
-mapOIDCRole(claims, roleClaim, adminRoles)   ← pure function, no deps
+mapOIDCRole(claims, roleClaim, adminRoles, userRoles = [])
+                                             ← pure function, no deps; "admin", "user" or null
 
 encryptState(data) / decryptState(token)     ← jose JWT sign/verify
 
@@ -686,16 +832,17 @@ The cache prevents hitting the provider's discovery endpoint on every login. 5-m
 The JWT session layer is completely auth-mode agnostic:
 
 ```typescript
-// Same function called by both local login route and OIDC callback:
-export async function login(role: Role, username?: string) {
-  const token = await signJWT({ role, username: username || role });
+// Same function called by every sign-in route; only the OIDC callback passes an identity:
+export async function login(role: Role, username?: string, sessionVersion?: number, identity?: { subject: string; issuer: string }) {
+  const idp = identity ? { idpSubject: identity.subject, idpIssuer: identity.issuer } : {};
+  const token = await signJWT({ role, username: username || role, sessionVersion, ...idp });
   const cookieStore = await cookies();
   cookieStore.set('auth-token', token, {
     httpOnly: true,
     secure: await shouldMarkCookieSecure(),
     sameSite: 'lax',
-    maxAge: 86400,     // 24 hours
-    path: '/',
+    maxAge: sessionTtlSeconds(),     // AUTH_SESSION_TTL_SECONDS, 24 hours when unset
+    path: getBasePath() || '/',
   });
 }
 ```
@@ -708,6 +855,9 @@ export async function login(role: Role, username?: string) {
 4. On otherwise.
 
 The optional `username` parameter was added for OIDC — local login passes the email, while the OIDC callback resolves it through a fallback chain: `claims.email || claims.preferred_username || claims.sub || role` (so a username is always set regardless of which claims the provider returns).
+
+The optional `identity` is passed only by the OIDC callback, as `{ subject: claims.sub, issuer: claims.iss }`, and becomes the private claims `idpSubject` and `idpIssuer` described under [Session Identity](#session-identity).
+Every other caller passes none, so password, passkey and launch sessions sign exactly `role`, `username` and `sessionVersion`.
 
 ### `src/proxy.ts`
 
@@ -780,17 +930,30 @@ After OIDC (or local) authentication:
 │  Payload: {                                 │
 │    role: "admin" | "user",                  │
 │    username: "user@example.com",            │
-│    exp: <now + 24 hours>                    │
+│    exp: <now + AUTH_SESSION_TTL_SECONDS>    │
 │  }                                          │
 │                                             │
 │  Cookie flags:                              │
 │    httpOnly: true                           │
 │    secure: true (production)                │
 │    sameSite: lax                            │
-│    maxAge: 86400 (24 hours)                 │
+│    maxAge: AUTH_SESSION_TTL_SECONDS         │
 │    path: /                                  │
 └─────────────────────────────────────────────┘
 ```
+
+An OIDC session's payload also carries `idpSubject` and `idpIssuer`, described under [Session Identity](#session-identity).
+
+#### Session lifetime
+
+`AUTH_SESSION_TTL_SECONDS` sets both the token's `exp` and the cookie's `maxAge`.
+It accepts a whole number of seconds from 300 to 86400, and unset keeps 86400 (24 hours).
+Any other value stops a standalone start at boot with a banner naming the variable, rather than failing every login.
+
+The session token carries the role it was issued with, so a role removed at the identity provider keeps working until the session expires.
+A shorter lifetime bounds that window.
+Paired with silent single sign-on, where the login page goes straight to the provider and the provider's own session signs the user in without a prompt, an expired Studio session renews itself and picks up the current role, so a short lifetime costs the user nothing.
+The governance install sets `AUTH_SESSION_TTL_SECONDS=28800` (8 hours).
 
 ---
 
@@ -866,25 +1029,35 @@ Forces the OIDC provider to show the login screen on every SSO click, even if th
 ## Role Mapping Engine
 
 The role mapping system converts provider-specific claims into LibreDB's binary role model (`admin` | `user`).
+With `OIDC_USER_ROLES` set it can also find that an account holds neither role, and the callback then refuses the sign-in.
 
 Studio reads role claims from the ID token returned by the authorization-code exchange; it does not read the access token.
 
 ### Algorithm (`mapOIDCRole`)
 
 ```
-Input: claims object, roleClaim path, adminRoles list
+Input: claims object, roleClaim path, adminRoles list,
+       userRoles list (OIDC_USER_ROLES, empty unless set)
 
-1. If roleClaim is empty → return "user"
+0. unmatched = "user" when userRoles is empty (the default), null when it is set
+
+1. If roleClaim is empty → return unmatched
 
 2. Navigate claim path (dot-notation):
    "realm_access.roles" → claims["realm_access"]["roles"]
+   A missing value, or a step through a non-object → return unmatched
 
 3. Get claim value:
-   a. If Array → check if ANY element matches adminRoles (case-insensitive)
-   b. If String → check if it matches any adminRole (case-insensitive)
-   c. Otherwise → return "user"
+   a. If Array → its elements, as strings
+   b. Otherwise → the value, as a string
 
-4. Match found → "admin", no match → "user"
+4. Any value matches adminRoles (case-insensitive) → "admin",
+   so admin wins when the claim holds both roles
+
+5. Any value matches userRoles (case-insensitive) → "user", otherwise → unmatched
+
+The callback refuses null: no session, a login_failure audit record with
+reason oidc_no_role, and a redirect to /login?error=oidc_no_role.
 ```
 
 ### Examples
@@ -912,6 +1085,13 @@ Provider: Google
 Claims:   { "sub": "123", "email": "user@gmail.com" }
 Config:   OIDC_ROLE_CLAIM=  (empty)
 Result:   "user" (no claim configured, default)
+
+Provider: Keycloak, client roles in a flat claim
+Claims:   { "libredb_roles": ["viewer"] }
+Config:   OIDC_ROLE_CLAIM=libredb_roles
+          OIDC_ADMIN_ROLES=admin
+          OIDC_USER_ROLES=user
+Result:   null (neither role: refused as oidc_no_role, no session)
 ```
 
 ---
@@ -990,11 +1170,13 @@ Both OIDC routes redirect to `/login?error=<code>` on failure, and record the sa
 
 | Error Code | Route | Cause | When |
 |------------|-------|-------|------|
-| `oidc_config` | login, callback | `AuthConfigError` | Missing `OIDC_*` env vars, a non-`https://` issuer, or a missing/too-short JWT secret |
+| `oidc_config` | login, callback | `AuthConfigError`, or the governed sign-in rule | Missing `OIDC_*` env vars, a non-`https://` issuer, or a missing/too-short JWT secret; in governance mode also an ID token with an empty `sub` or an `iss` other than `OIDC_ISSUER` |
 | `oidc_discovery` | login | Any other error before discovery answered | Issuer does not resolve, TLS failure, response is not JSON or names a different issuer |
 | `oidc_state_missing` | callback | `oidc-state` cookie not found | Cookie expired (>5 min) or blocked by browser |
 | `oidc_state_invalid` | callback | State decryption failed or state mismatch | Tampered cookie, wrong JWT_SECRET, or CSRF attempt |
-| `oidc_no_claims` | callback | Token exchange returned no claims | Provider returned invalid/empty ID token |
+| `oidc_no_claims` | callback | Token exchange returned no claims, or no string `sub` or `iss` | Provider returned invalid/empty ID token |
+| `oidc_no_role` | callback | `mapOIDCRole()` returned null: `OIDC_USER_ROLES` is set and the role claim holds no admin or user role | The account has no role at the provider; no session is created, and the audit record names the account |
+| `oidc_session_revoked` | callback | Governance mode only: the subject's latest `revoked_before` is at or after the current second | The control plane ended the account's sessions with a revocation that still applies, such as one dated ahead of Studio's clock; no session is created, and the audit record names the account |
 | `oidc_failed` | login, callback | Any other error after the provider answered | A discovery document that parses but lacks an endpoint, PKCE or state-cookie failure on login; network error, invalid client credentials, etc. on callback |
 
 ### Login Page Error Display
@@ -1005,6 +1187,8 @@ Both OIDC routes redirect to `/login?error=<code>` on failure, and record the sa
 |------|---------|
 | `oidc_config` | Single sign-on is not configured correctly on this server. Contact your administrator. |
 | `oidc_discovery` | The identity provider could not be reached. Try again later, or contact your administrator if this continues. |
+| `oidc_no_role` | Your account has no role that allows access to LibreDB Studio. Ask your administrator. |
+| `oidc_session_revoked` | An administrator has ended your sessions. Try again later, or ask your administrator. |
 | anything else | Authentication failed. Please try again. |
 
 The page is unauthenticated, so it is never given the underlying error: the code names the class and nothing the issuer said reaches the browser. `tests/components/LoginPageOIDC.test.tsx` asserts the negative.
@@ -1124,3 +1308,4 @@ The OIDC claims contain `name`, `email`, `picture` etc. To display these:
 | **Discovery-based generic logout with Auth0/Zitadel compatibility branches** | Uses the provider-advertised `end_session_endpoint` without changing the existing special integrations | Deriving a logout path from the issuer fails when the issuer contains a path or the provider uses a different endpoint |
 | **Module-level discovery cache** | Fast (avoids HTTP on every login), simple, process-scoped | Redis cache: overkill for single-instance deployments. No cache: 200-500ms per login |
 | **Binary role model (admin/user)** | Matches existing RBAC, simple to map from any claim format | Fine-grained roles: would require schema changes in JWT, proxy, and all components |
+| **`OIDC_USER_ROLES` refuses an account with neither role, off unless set** | A deployment that grants access through provider roles must be able to turn away an account the provider authenticates but never gave a role; unset, every non-admin is a `user`, so existing deployments see no change | Refusing every non-admin by default: locks out every deployment that relies on the default `user` role |

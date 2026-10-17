@@ -40,6 +40,13 @@ Four variables decide it, and `.env.example` documents each.
 | `LIBREDB_MCP_TOKEN_LABEL` | Any non-empty value; changing it revokes every MCP token at once |
 | `LIBREDB_MCP_TOKEN_TTL_DAYS` | How many days a minted token stays valid, from 1 to 365, 30 when unset |
 
+Governance mode (`GOVERNANCE_SOURCE`, see [GOVERNANCE.md](./GOVERNANCE.md)) switches MCP off whatever these variables say, until a later Studio release runs it under governance.
+`/api/mcp` answers a valid token with `404`, as it does with MCP switched off, `GET /api/mcp/token` reports the channel off and names the hold as its one problem, and no token is minted.
+The boot check of governance mode refuses `LIBREDB_MCP_ENABLED` switched on as well, and the hold stands even where that check did not run.
+A control plane may set the runtime setting `mcp.enabled`, which `/api/mcp` reads again on every request and which wins over `LIBREDB_MCP_ENABLED` once the hold is lifted.
+`LIBREDB_MCP_URL`, `LIBREDB_MCP_TOKEN_LABEL` and `LIBREDB_MCP_TOKEN_TTL_DAYS` stay prerequisites in the environment, so `true` enables only what they configure.
+While the hold stands the setting has no effect, so a control plane shows it read-only and Studio's admin status reports it as held, with the note that MCP and agent governance ship in v1.1.
+
 ### npx
 
 The launcher derives `LIBREDB_MCP_URL` from the address and port it serves on, so only the switch and the label are yours:
@@ -321,7 +328,7 @@ For the first few seconds after that service starts, `opencode mcp list` can say
 |---|---|
 | 401 | No `Authorization: Bearer` header, or a token that does not verify: expired, minted before the label changed, or minted for another address (a changed `LIBREDB_MCP_URL`, or under npx a changed `--host` or `--port`); the audit reason says `mcp_token_invalid`, or `mcp_channel_unconfigured` when the label or the URL is unset |
 | 403 | The request's `Origin`, or on a loopback bind its `Host`, is not allowed |
-| 404 | MCP is off on this server; a client that falls back to the older HTTP+SSE transport retries with `GET` and reports a transport error rather than "disabled" |
+| 404 | MCP is off on this server, switched off or held off by governance mode; a client that falls back to the older HTTP+SSE transport retries with `GET` and reports a transport error rather than "disabled" |
 | 409 | At minting, the channel is not ready, and the screen lists what to set |
 | 429 | The per-user query budget is spent; retry after `Retry-After` seconds |
 | 400 `-32020` | A required `MCP-Protocol-Version`, `Mcp-Method` or `Mcp-Name` header is missing, malformed or disagrees with the body |

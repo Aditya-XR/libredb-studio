@@ -2,7 +2,7 @@ import { getBasePath } from "@/lib/config/base-path";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies, headers } from "next/headers";
 import { logger } from "@/lib/logger";
-import { getJwtSecret } from "@/lib/config/auth-env";
+import { getJwtSecret, sessionTtlSeconds } from "@/lib/config/auth-env";
 import { storedAccountAllows } from "@/lib/local-accounts";
 
 // getJwtSecret is called per sign/verify rather than at module load, so a
@@ -27,13 +27,21 @@ export interface UserPayload {
    * compared with that account's current value on every request. Env and OIDC sessions omit it.
    */
   sessionVersion?: number;
+  /**
+   * The ID token's `sub`, set only on sessions the OIDC callback mints; password, passkey and
+   * launch sessions omit it. A private name, because the registered `sub` already holds the
+   * username in MCP tokens (src/lib/mcp/token.ts), and `username` keeps its display meaning.
+   */
+  idpSubject?: string;
+  /** The ID token's `iss`, set together with `idpSubject`. */
+  idpIssuer?: string;
 }
 
 export async function signJWT(payload: UserPayload) {
   return await new SignJWT({ ...payload })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime("24h")
+    .setExpirationTime(`${sessionTtlSeconds()}s`)
     .sign(getJwtSecret());
 }
 
@@ -168,8 +176,15 @@ export async function shouldMarkCookieSecure(): Promise<boolean> {
   }
 }
 
-export async function login(role: Role, username?: string, sessionVersion?: number) {
-  const token = await signJWT({ role, username: username || role, sessionVersion });
+export async function login(
+  role: Role,
+  username?: string,
+  sessionVersion?: number,
+  identity?: { subject: string; issuer: string },
+) {
+  // Only the OIDC callback passes an identity, so every other sign-in signs exactly the claims it did before.
+  const idp = identity ? { idpSubject: identity.subject, idpIssuer: identity.issuer } : {};
+  const token = await signJWT({ role, username: username || role, sessionVersion, ...idp });
   const cookieStore = await cookies();
   cookieStore.set("auth-token", token, {
     httpOnly: true,
@@ -179,7 +194,7 @@ export async function login(role: Role, username?: string, sessionVersion?: numb
     // notably a cross-site POST /api/auth/login, where there is no pre-existing cookie to withhold
     // - are covered by the Origin check in src/proxy.ts (src/lib/api/origin-check.ts).
     sameSite: "lax",
-    maxAge: 60 * 60 * 24, // 1 day
+    maxAge: sessionTtlSeconds(),
     path: getBasePath() || "/",
   });
 }

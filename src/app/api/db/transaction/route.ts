@@ -2,24 +2,44 @@ import { firstResultSet } from "@/lib/api/first-result-set";
 import { pageOfProbe, pageOptionError, probePastPage } from "@/lib/api/page-probe";
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateProvider } from "@/lib/db";
+import { editorCacheKey } from "@/lib/db/factory";
 import type { BeginTransactionOptions, BeginTransactionResult, DatabaseProvider, QueryResult } from "@/lib/db/types";
+import type { DatabaseConnection } from "@/lib/types";
 import { createErrorResponse } from "@/lib/api/errors";
+import { ApiErrorCode } from "@/lib/api/error-codes";
 import { resolveConnection } from "@/lib/seed/resolve-connection";
 import { guardRoute } from "@/lib/api/require-session";
 import { requestCatalog } from "@/lib/db/catalog-scope";
-import { editorProvider } from "@/lib/api/editor-provider";
+import { cachedEditorProvider, editorProvider } from "@/lib/api/editor-provider";
+import { editorExecutionContext } from "@/lib/api/execution-context";
 import { readBoundParams } from "@/lib/api/bound-params";
 import { rowsWithNonFiniteWords } from "@/lib/non-finite";
 import { countCodeStatements, splitExecutionUnits, type ExecutionUnit } from "@/lib/sql/statement-splitter";
 import { resolveSqlGrammar } from "@/lib/sql/grammar";
 import { noteAppendedBound } from "@/lib/db/utils/query-limiter";
+import { withTimeout } from "@/lib/db/utils/pool-manager";
+import { NO_ACTIVE_TRANSACTION, QueryError } from "@/lib/db/errors";
+import { logger } from "@/lib/logger";
+import type { UserPayload } from "@/lib/auth";
+import { clientAddress } from "@/lib/api/client-address";
+import type { GovernedConnection } from "@/lib/governance/visible";
+import { admitQueryExecution } from "@/lib/query-events/admission";
+import { queryEventStart } from "@/lib/query-events/build";
+import type { QueryEventStart } from "@/lib/query-events/types";
 import {
   claimTransaction,
+  endTransactionEvent,
   OWNERSHIP_IDLE_MS,
+  recordTimedOut,
+  recordTransactionStatement,
+  releaseIfProviderChanged,
   releaseTransaction,
   touchTransaction,
+  type TransactionEventScope,
+  type TransactionOwner,
   transactionKey,
   transactionOwner,
+  watchTransactionTimeout,
 } from "@/lib/api/transaction-ownership";
 
 interface TransactionProvider {
@@ -118,6 +138,109 @@ function isTransactionProvider(provider: unknown): provider is TransactionProvid
   );
 }
 
+/**
+ * How long the rollback of a transaction whose credential changed may take before the answer goes out
+ * (docs/GOVERNANCE.md#per-user-providers).
+ */
+const CREDENTIAL_CHANGE_ROLLBACK_MS = 5000;
+
+// One string literal each, never a concatenation across lines: bun's line coverage under-counts the continuation lines
+// of a message built that way.
+const CREDENTIAL_CHANGED_ROLLED_BACK =
+  "Your access to this connection changed while your transaction was open, so the transaction was rolled back and none of its changes were saved. Begin a new transaction to continue with your current access.";
+const CREDENTIAL_CHANGED_UNCONFIRMED =
+  "Your access to this connection changed while your transaction was open, so the transaction cannot continue. Studio asked the database to roll it back and could not confirm that it did; none of its changes were committed. Begin a new transaction to continue with your current access.";
+
+/**
+ * Roll back the transaction a governed owner opened on the provider cached under `providerKey`, the key its `begin`
+ * resolved, once a request of theirs resolves another key (docs/GOVERNANCE.md#per-user-providers), and answer whether
+ * it is known to have ended.
+ *
+ * A provider that is no longer cached was disconnected when it was removed, which ended its transaction, and a
+ * transaction its provider already ended (PostgresProvider and MySQLProvider roll back after their own TX_TIMEOUT_MS)
+ * is not sent a second rollback, which the provider would refuse with "No active transaction". A rollback that fails,
+ * or does not finish within CREDENTIAL_CHANGE_ROLLBACK_MS, is logged and answered as unconfirmed rather than waited
+ * for: the transaction runs on a credential its owner no longer resolves, so their requests no longer reach it, and
+ * what is left of it ends with its provider.
+ */
+async function rollBackOnProvider(
+  providerKey: string,
+  catalog: string | undefined,
+  connection: DatabaseConnection,
+): Promise<boolean> {
+  try {
+    const session = await cachedEditorProvider(providerKey, catalog);
+    if (session !== null && isTransactionProvider(session) && session.isInTransaction()) {
+      const rollback = session.rollbackTransaction();
+      await withTimeout(rollback, CREDENTIAL_CHANGE_ROLLBACK_MS, connection.type, "Rollback after a credential change");
+    }
+    return true;
+  } catch (error) {
+    logger.error("A transaction whose credential changed was released without a confirmed rollback", error, {
+      route: "api/db/transaction",
+      connectionId: connection.id,
+    });
+    return false;
+  }
+}
+
+/** The actions that send a statement to the database: BEGIN, the caller's own, COMMIT and ROLLBACK. */
+const STATEMENT_ACTIONS: ReadonlySet<unknown> = new Set(["begin", "query", "commit", "rollback"]);
+
+/** Of those, the ones that run inside the caller's transaction. */
+const IN_TRANSACTION_ACTIONS: ReadonlySet<unknown> = new Set(["query", "commit", "rollback"]);
+
+/**
+ * Under governance, what every query event of a transaction the caller opens says about who and where
+ * (docs/GOVERNANCE.md#query-events): the session's subject, username and role, and the connection with the grant level
+ * its credential carries.
+ */
+function transactionEventScope(
+  session: UserPayload,
+  subject: string,
+  connection: DatabaseConnection,
+  req: NextRequest,
+): TransactionEventScope {
+  return {
+    principal: { subject, username: session.username, role: session.role },
+    connection: {
+      id: connection.id,
+      name: connection.name,
+      engine: connection.type,
+      accessLevel: (connection as Partial<GovernedConnection>).grantLevel ?? null,
+    },
+    clientIp: clientAddress(req),
+  };
+}
+
+/** A count a query event can hold: a whole number from 0, and none for a driver that reports -1 or nothing. */
+function eventRowCount(count: number | undefined): number | undefined {
+  return count !== undefined && Number.isSafeInteger(count) && count >= 0 ? count : undefined;
+}
+
+/** What a query event says of a failure: the API code a database error carries, and its text. */
+function eventError(error: unknown): { errorCode?: string; errorMessage?: string } {
+  const code: unknown = (error as { code?: unknown } | null)?.code;
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  return { errorCode: typeof code === "string" ? code : undefined, errorMessage };
+}
+
+/**
+ * Records a COMMIT or ROLLBACK the provider refused: the transaction's terminal `rolled-back` event when the provider
+ * no longer holds it, as PostgreSQL ends a transaction whose COMMIT failed, else an `open` event for the attempt.
+ */
+function recordFailedEnd(
+  owner: TransactionOwner,
+  provider: TransactionProvider,
+  statement: "COMMIT" | "ROLLBACK",
+  started: QueryEventStart,
+  error: unknown,
+): void {
+  const detail = { statement, status: "error" as const, started, ...eventError(error) };
+  if (provider.isInTransaction()) recordTransactionStatement(owner, detail);
+  else endTransactionEvent(owner, "rolled-back", detail);
+}
+
 export async function POST(req: NextRequest) {
   const guard = await guardRoute({ route: "POST /api/db/transaction", bucket: "query", request: req });
   if ("response" in guard) return guard.response;
@@ -134,8 +257,39 @@ export async function POST(req: NextRequest) {
 
     // Each database of a server-level connection holds its own transaction (#1530), so ownership is per database.
     const catalog = requestCatalog(body);
+    // Under governance each user's transaction is held on that user's own provider
+    // (docs/GOVERNANCE.md#per-user-providers), so ownership is per user as well: the key and the record carry the owner
+    // the editor context names, the session's identity provider subject. Without governance there is none, and the key
+    // is the one every user of the connection shares.
+    const execution = editorExecutionContext(guard.session, connection);
+    const subject = execution.owner;
+    const owned = transactionKey(connection.id, catalog, subject);
+    // Under governance the provider's cache key also frames the credential of the caller's grant level, and the record
+    // keeps the key its begin resolved (src/lib/api/transaction-ownership.ts). A transaction the caller's key no longer
+    // names is rolled back where it runs and answered here, for every action, before a provider of the new credential
+    // is opened at all. Without governance no key is computed, and every request goes on as before.
+    const providerKey = subject === undefined ? undefined : await editorCacheKey(connection, execution);
+    const released = providerKey === undefined ? null : releaseIfProviderChanged(owned, providerKey);
+    if (released !== null) {
+      const started = queryEventStart();
+      const rolledBack = await rollBackOnProvider(released.providerKey, catalog, connection);
+      // Studio's own rollback ends the transaction: its terminal event, unless the reload that took the grant away
+      // already recorded it (src/lib/governance/grant-diff.ts).
+      endTransactionEvent(released, "rolled-back", {
+        statement: "ROLLBACK",
+        status: rolledBack ? "success" : "error",
+        started,
+      });
+      return NextResponse.json(
+        {
+          error: rolledBack ? CREDENTIAL_CHANGED_ROLLED_BACK : CREDENTIAL_CHANGED_UNCONFIRMED,
+          code: ApiErrorCode.TRANSACTION_CREDENTIAL_CHANGED,
+          rolledBack,
+        },
+        { status: 409 },
+      );
+    }
     const provider = await editorProvider(guard.session, connection, catalog);
-    const owned = transactionKey(connection.id, catalog);
 
     if (!isTransactionProvider(provider)) {
       return NextResponse.json(
@@ -144,9 +298,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // The provider holds ONE transaction per connection id and every Studio user on that
-    // connection drives it, so the caller's right to act on it is decided here, before any
-    // action runs. See src/lib/api/transaction-ownership.ts for what was measured.
+    // The provider holds ONE transaction, and without governance every Studio user who reaches it
+    // drives it, so the caller's right to act on it is decided here, before any action runs. See
+    // src/lib/api/transaction-ownership.ts for what was measured.
     const inTransaction = provider.isInTransaction();
     let owner = transactionOwner(owned);
     if (!inTransaction && owner) {
@@ -154,9 +308,14 @@ export async function POST(req: NextRequest) {
       // MySQLProvider auto-roll back after TX_TIMEOUT_MS - so the record names a transaction that
       // no longer exists. Dropping it here is what stops that record from refusing the next user.
       releaseTransaction(owned);
+      // Under governance that is the provider's own timeout, recorded once whichever path sees it first.
+      recordTimedOut(owner);
       owner = null;
     }
-    const ownedByYou = owner !== null && owner.username === guard.session.username;
+    // Under governance the owner is the subject, and the username a display label that can change
+    // (docs/GOVERNANCE.md#row-semantics).
+    const ownedByYou =
+      owner !== null && (subject === undefined ? owner.username === guard.session.username : owner.subject === subject);
     const heldByAnother = owner !== null && !ownedByYou;
 
     if (owner !== null && !ownedByYou && action !== "status") {
@@ -176,13 +335,32 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Every action that sends a statement, a script of several included, passes the admission gate first, so
+    // while the query event sink cannot record a statement's event the statement is refused rather than run
+    // (docs/GOVERNANCE.md#query-events).
+    if (STATEMENT_ACTIONS.has(action)) admitQueryExecution();
+    // Under governance every statement this route sends belongs to a transaction the caller owns, whose record carries
+    // the scope of its query events (docs/GOVERNANCE.md#query-events). Without that record a statement would reach the
+    // database with no event behind it: right after the provider's own timeout (the reconcile above), or on a
+    // transaction whose record is gone. Every provider that implements the transaction interface refuses a statement
+    // outside a transaction with NO_ACTIVE_TRANSACTION anyway, so this is refused with that same sentence, before the
+    // provider runs anything, and the editor reads it as the end of its transaction as it does the provider's.
+    if (subject !== undefined && owner === null && IN_TRANSACTION_ACTIONS.has(action)) {
+      throw new QueryError(NO_ACTIVE_TRANSACTION, connection.type);
+    }
+
     switch (action) {
       case "begin": {
         // SANDBOX sends `requireReportedState: true`: it is about to promise a rollback, so a
         // server that never says whether a transaction is open is refused rather than trusted.
         const opened = await provider.beginTransaction({ requireReportedState: body.requireReportedState === true });
-        // After the provider, never before: a begin that throws must leave no owner behind.
-        claimTransaction(owned, guard.session.username);
+        // After the provider, never before: a begin that throws must leave no owner behind. Under governance the record
+        // also keeps the key of the provider this transaction runs on, which the check above compares, and the scope of
+        // the transaction's query events, and a timer looks for the provider's own timeout once it is due.
+        const events =
+          subject === undefined ? undefined : transactionEventScope(guard.session, subject, connection, req);
+        const claimed = claimTransaction(owned, guard.session.username, subject, providerKey, events);
+        watchTransactionTimeout(owned, claimed, () => provider.isInTransaction());
         // `stateReported: false` lets the UI say Studio cannot verify this transaction; `null`
         // is a provider that does not say, which is not a claim either way.
         return NextResponse.json({
@@ -193,19 +371,36 @@ export async function POST(req: NextRequest) {
       }
 
       case "commit": {
-        await provider.commitTransaction();
+        const started = queryEventStart();
+        try {
+          await provider.commitTransaction();
+        } catch (error) {
+          if (owner !== null) recordFailedEnd(owner, provider, "COMMIT", started, error);
+          throw error;
+        }
         // The reconcile above would also drop this record, on whatever call comes next. This is
         // not the authorization boundary and no test can tell it apart from that reconcile: it is
         // here so the record's lifetime matches the transaction's, rather than lasting until
         // somebody happens to touch this connection again - which for an idle connection is the
         // life of the process.
         releaseTransaction(owned);
+        if (owner !== null)
+          endTransactionEvent(owner, "committed", { statement: "COMMIT", status: "success", started });
         return NextResponse.json({ status: "committed", message: "Transaction committed" });
       }
 
       case "rollback": {
-        await provider.rollbackTransaction();
+        const started = queryEventStart();
+        try {
+          await provider.rollbackTransaction();
+        } catch (error) {
+          if (owner !== null) recordFailedEnd(owner, provider, "ROLLBACK", started, error);
+          throw error;
+        }
         releaseTransaction(owned);
+        if (owner !== null) {
+          endTransactionEvent(owner, "rolled-back", { statement: "ROLLBACK", status: "success", started });
+        }
         return NextResponse.json({ status: "rolled_back", message: "Transaction rolled back" });
       }
 
@@ -227,6 +422,21 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: optionError }, { status: 400 });
         }
 
+        // Under governance one `open` event per query action, carrying the text the user submitted
+        // (docs/GOVERNANCE.md#query-events).
+        const started = queryEventStart();
+        const recordStatement = (status: "success" | "error", outcome: { rowCount?: number; error?: unknown }) => {
+          if (owner === null) return;
+          const failure = outcome.error === undefined ? {} : eventError(outcome.error);
+          recordTransactionStatement(owner, {
+            statement: sql,
+            status,
+            started,
+            rowCount: outcome.rowCount,
+            ...failure,
+          });
+        };
+
         // Several statements run one by one (#1390). Comment-only fragments are dropped first, so
         // a statement with a trailing `-- note` stays one statement on the path below. Never with
         // bound values: they belong to one statement's placeholders. One statement is sent as the
@@ -238,6 +448,7 @@ export async function POST(req: NextRequest) {
           const units = splitExecutionUnits(sql, grammar).filter((unit) => countCodeStatements(unit.sql, grammar) > 0);
           if (units.length > 1) {
             const script = await runScriptInTransaction(provider, units, options);
+            recordStatement(script.hasError ? "error" : "success", {});
             const stillOpen = provider.isInTransaction();
             if (stillOpen) touchTransaction(owned);
             else releaseTransaction(owned);
@@ -251,9 +462,11 @@ export async function POST(req: NextRequest) {
         // One row past the page, so a full last page is not taken for a full page (#1440).
         const probe = probePastPage(provider, statementSql, options, prepared);
         const result = await provider.queryInTransaction(probe.query, bound.params).catch((error: unknown) => {
+          recordStatement("error", { error });
           // An error that names the bound the limiter added says so (`noteAppendedBound`).
           throw noteAppendedBound(error, statementSql, probe.query);
         });
+        recordStatement("success", { rowCount: eventRowCount(result.rowCount) });
 
         // The provider ends its session when the SERVER says the statement ended the
         // transaction: a typed COMMIT or ROLLBACK, or a statement the engine commits implicitly (MySQL
@@ -295,8 +508,10 @@ export async function POST(req: NextRequest) {
       }
 
       case "status": {
-        // Never refused, for any caller: this is the surface that tells a user why the connection
-        // is busy and when it comes back, so refusing it would hide the refusal above. The three
+        // Never refused because another session holds the transaction: this is the surface that tells
+        // a user why the connection is busy and when it comes back, so refusing it would hide the
+        // refusal above. (Under governance the caller's OWN transaction whose credential changed is
+        // answered with 409 before this, because that is the news it would otherwise hide.) The three
         // booleans are distinguishable on purpose - an open transaction with no live owner record
         // (a restarted process, or a lapsed lease) reports `inTransaction` true with both of the
         // others false, and that state is the one any session is allowed to end.

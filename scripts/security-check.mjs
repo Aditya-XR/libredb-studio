@@ -51,6 +51,8 @@ export const PROGRAMME_CONTROL_IDS = [
   "0.5",
   "0.6",
   "0.7",
+  "0.8",
+  "0.9",
   "1.1",
   "1.2",
   "1.3",
@@ -60,6 +62,7 @@ export const PROGRAMME_CONTROL_IDS = [
   "1.7",
   "1.8",
   "1.9",
+  "1.10",
   "2.1",
   "2.2",
   "2.3",
@@ -85,6 +88,8 @@ export const PROGRAMME_CONTROL_IDS = [
   "3.20",
   "3.21",
   "3.22",
+  "3.23",
+  "3.24",
 ];
 
 export const STATUSES = new Set(["Implemented", "Partial", "Not implemented"]);

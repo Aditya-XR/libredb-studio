@@ -22,6 +22,7 @@ const mockBuildEndSessionUrl = mock(
 const mockClaims = mock(() => ({ sub: "user-123", email: "user@test.com" }) as Record<string, unknown> | undefined);
 const mockAuthorizationCodeGrant = mock(async () => ({
   claims: mockClaims,
+  id_token: "raw.id.token" as string | undefined,
 }));
 const mockClientSecretPost = mock(() => "client-auth-method");
 
@@ -112,6 +113,63 @@ describe("mapOIDCRole", () => {
     const claims = { realm_access: null };
     expect(mapOIDCRole(claims, "realm_access.roles", ["admin"])).toBe("user");
   });
+
+  // OIDC_USER_ROLES arrives as the fourth argument. Left out, or empty, it is the rule above: an
+  // account that matches no admin role is a user, and nobody is ever refused.
+  test("three-argument calls map every non-admin to user and never to null", () => {
+    const unmatched: [Record<string, unknown>, string][] = [
+      [{ roles: "admin" }, ""],
+      [{}, "roles"],
+      [{ role: "viewer" }, "role"],
+      [{ roles: ["viewer", "editor"] }, "roles"],
+      [{ realm_access: {} }, "realm_access.roles"],
+      [{ realm_access: "string" }, "realm_access.roles"],
+      [{ realm_access: null }, "realm_access.roles"],
+      [{ libredb_roles: [] }, "libredb_roles"],
+    ];
+    for (const [claims, roleClaim] of unmatched) {
+      expect(mapOIDCRole(claims, roleClaim, ["admin"])).toBe("user");
+      expect(mapOIDCRole(claims, roleClaim, ["admin"], [])).toBe("user");
+    }
+    expect(mapOIDCRole({ roles: ["viewer", "admin"] }, "roles", ["admin"])).toBe("admin");
+    expect(mapOIDCRole({ roles: ["viewer", "admin"] }, "roles", ["admin"], [])).toBe("admin");
+  });
+
+  test("with userRoles [user], a claim holding only [viewer] maps to null", () => {
+    expect(mapOIDCRole({ libredb_roles: ["viewer"] }, "libredb_roles", ["admin"], ["user"])).toBeNull();
+  });
+
+  test("with userRoles [user], a claim holding [user] maps to user", () => {
+    expect(mapOIDCRole({ libredb_roles: ["user"] }, "libredb_roles", ["admin"], ["user"])).toBe("user");
+    expect(mapOIDCRole({ libredb_roles: "user" }, "libredb_roles", ["admin"], ["user"])).toBe("user");
+  });
+
+  test("admin wins when the claim holds both the admin and the user role", () => {
+    expect(mapOIDCRole({ libredb_roles: ["user", "admin"] }, "libredb_roles", ["admin"], ["user"])).toBe("admin");
+    expect(mapOIDCRole({ libredb_roles: ["admin", "user"] }, "libredb_roles", ["admin"], ["user"])).toBe("admin");
+  });
+
+  test("an admin match needs no user role", () => {
+    expect(mapOIDCRole({ libredb_roles: ["admin"] }, "libredb_roles", ["admin"], ["user"])).toBe("admin");
+  });
+
+  test("user roles compare case-insensitively, as admin roles do", () => {
+    expect(mapOIDCRole({ libredb_roles: ["USER"] }, "libredb_roles", ["admin"], ["User"])).toBe("user");
+    expect(mapOIDCRole({ role: "Analyst" }, "role", ["admin"], ["user", "analyst"])).toBe("user");
+  });
+
+  test("with userRoles set, a claim that is missing, empty or not reachable maps to null", () => {
+    expect(mapOIDCRole({}, "libredb_roles", ["admin"], ["user"])).toBeNull();
+    expect(mapOIDCRole({ libredb_roles: [] }, "libredb_roles", ["admin"], ["user"])).toBeNull();
+    expect(mapOIDCRole({ realm_access: {} }, "realm_access.roles", ["admin"], ["user"])).toBeNull();
+    expect(mapOIDCRole({ realm_access: "string" }, "realm_access.roles", ["admin"], ["user"])).toBeNull();
+    expect(mapOIDCRole({ realm_access: null }, "realm_access.roles", ["admin"], ["user"])).toBeNull();
+  });
+
+  test("with userRoles set and no role claim configured, no account maps to a role", () => {
+    // getOIDCConfig() refuses this configuration; the pure function still answers it consistently.
+    expect(mapOIDCRole({ roles: ["user"] }, "", ["admin"], ["user"])).toBeNull();
+  });
 });
 
 // ─── getOIDCConfig ──────────────────────────────────────────────────────────
@@ -126,10 +184,14 @@ describe("getOIDCConfig", () => {
     process.env.OIDC_SCOPE = "";
     process.env.OIDC_ROLE_CLAIM = "";
     process.env.OIDC_ADMIN_ROLES = "";
+    process.env.OIDC_USER_ROLES = "";
+    delete process.env.OIDC_PROMPT;
   });
 
   afterEach(() => {
     Object.assign(process.env, originalEnv);
+    if (originalEnv.OIDC_PROMPT === undefined) delete process.env.OIDC_PROMPT;
+    if (originalEnv.OIDC_USER_ROLES === undefined) delete process.env.OIDC_USER_ROLES;
   });
 
   test("returns config with all required fields", () => {
@@ -159,6 +221,33 @@ describe("getOIDCConfig", () => {
   test('defaults admin roles to ["admin"]', () => {
     const config = getOIDCConfig();
     expect(config.adminRoles).toEqual(["admin"]);
+  });
+
+  test("parses user roles from a comma list, trimmed and without empty entries", () => {
+    process.env.OIDC_ROLE_CLAIM = "libredb_roles";
+    process.env.OIDC_USER_ROLES = " user, ,Analyst ,";
+    expect(getOIDCConfig().userRoles).toEqual(["user", "Analyst"]);
+  });
+
+  test("defaults user roles to an empty list", () => {
+    expect(getOIDCConfig().userRoles).toEqual([]);
+    delete process.env.OIDC_USER_ROLES;
+    expect(getOIDCConfig().userRoles).toEqual([]);
+  });
+
+  test("throws AuthConfigError when OIDC_USER_ROLES is set while OIDC_ROLE_CLAIM is empty", () => {
+    // Without a claim to read, every account would be refused one sign-in at a time as oidc_no_role;
+    // the login route reports it once, as the configuration error it is.
+    process.env.OIDC_USER_ROLES = "user";
+    expect(() => getOIDCConfig()).toThrow(AuthConfigError);
+    expect(() => getOIDCConfig()).toThrow("OIDC_ROLE_CLAIM");
+    process.env.OIDC_ROLE_CLAIM = "libredb_roles";
+    expect(getOIDCConfig().userRoles).toEqual(["user"]);
+  });
+
+  test("a user role list of only commas and spaces counts as unset", () => {
+    process.env.OIDC_USER_ROLES = " , ,";
+    expect(getOIDCConfig().userRoles).toEqual([]);
   });
 
   test("throws when OIDC_ISSUER is missing", () => {
@@ -198,6 +287,34 @@ describe("getOIDCConfig", () => {
   test("throws when OIDC_CLIENT_SECRET is missing", () => {
     delete process.env.OIDC_CLIENT_SECRET;
     expect(() => getOIDCConfig()).toThrow("OIDC_CLIENT_SECRET");
+  });
+
+  test("OIDC_PROMPT unset or empty keeps prompt=login", () => {
+    expect(getOIDCConfig().prompt).toBe("login");
+    process.env.OIDC_PROMPT = "  ";
+    expect(getOIDCConfig().prompt).toBe("login");
+  });
+
+  test("OIDC_PROMPT is trimmed and lower-cased, and the accepted values pass through", () => {
+    for (const [raw, expected] of [
+      [" Omit ", "omit"],
+      ["LOGIN", "login"],
+      ["consent", "consent"],
+      ["Select_Account", "select_account"],
+    ] as const) {
+      process.env.OIDC_PROMPT = raw;
+      expect(getOIDCConfig().prompt).toBe(expected);
+    }
+  });
+
+  test("OIDC_PROMPT=none throws AuthConfigError naming the variable", () => {
+    // prompt=none fails with login_required whenever the provider has no session, which is a
+    // dead end rather than a sign-in, so it is refused as configuration like any unknown value.
+    for (const value of ["none", "silent"]) {
+      process.env.OIDC_PROMPT = value;
+      expect(() => getOIDCConfig()).toThrow(AuthConfigError);
+      expect(() => getOIDCConfig()).toThrow("OIDC_PROMPT must be one of login, consent, select_account, omit");
+    }
   });
 });
 
@@ -381,6 +498,40 @@ describe("buildLogoutUrl", () => {
     const url = await buildLogoutUrl("http://localhost:3000/login");
     expect(url).toBeNull();
   });
+
+  test("passes id_token_hint to the discovered end-session endpoint", async () => {
+    process.env.OIDC_ISSUER = "https://keycloak.example.com/realms/myrealm";
+    // The Zitadel test above leaves its role claim behind, which would select the Zitadel path.
+    delete process.env.OIDC_ROLE_CLAIM;
+
+    await buildLogoutUrl("http://localhost:3000/login", "raw.id.token");
+
+    expect(mockBuildEndSessionUrl).toHaveBeenCalledWith("mock-oidc-config", {
+      post_logout_redirect_uri: "http://localhost:3000/login",
+      id_token_hint: "raw.id.token",
+    });
+  });
+
+  test("adds id_token_hint to the Zitadel end-session URL", async () => {
+    process.env.OIDC_ISSUER = "https://my-instance.zitadel.cloud";
+    process.env.OIDC_ROLE_CLAIM = "urn:zitadel:iam:org:project:roles";
+    const without = await buildLogoutUrl("http://localhost:3000/login");
+    const url = new URL((await buildLogoutUrl("http://localhost:3000/login", "raw.id.token"))!);
+
+    expect(url.searchParams.get("id_token_hint")).toBe("raw.id.token");
+    url.searchParams.delete("id_token_hint");
+    expect(url.toString()).toBe(without!);
+  });
+
+  test("leaves the Auth0 /v2/logout URL unchanged when a hint is given", async () => {
+    const without = await buildLogoutUrl("http://localhost:3000/login");
+    const withHint = await buildLogoutUrl("http://localhost:3000/login", "raw.id.token");
+
+    expect(withHint).toBe(without!);
+    expect(withHint).toBe(
+      "https://libredb.eu.auth0.com/v2/logout?client_id=test-client-id&returnTo=http%3A%2F%2Flocalhost%3A3000%2Flogin",
+    );
+  });
 });
 
 // ─── discoverProvider ────────────────────────────────────────────────────────
@@ -446,6 +597,8 @@ describe("discoverProvider", () => {
       scope: "openid",
       roleClaim: "",
       adminRoles: ["admin"],
+      userRoles: [],
+      prompt: "login" as const,
     };
 
     await discoverProvider(customConfig);
@@ -506,6 +659,29 @@ describe("generateAuthUrl", () => {
       prompt: "login",
     });
   });
+
+  test("OIDC_PROMPT=omit builds an authorization URL without a prompt parameter", async () => {
+    process.env.OIDC_ISSUER = "https://example.auth0.com";
+    process.env.OIDC_CLIENT_ID = "test-client-id";
+    process.env.OIDC_CLIENT_SECRET = "test-client-secret";
+    process.env.OIDC_PROMPT = "omit";
+    try {
+      await generateAuthUrl("mock-config" as never, "http://localhost:3000/callback", "openid", getOIDCConfig().prompt);
+    } finally {
+      delete process.env.OIDC_PROMPT;
+    }
+
+    const [, params] = mockBuildAuthorizationUrl.mock.calls[0];
+    expect(params).not.toHaveProperty("prompt");
+    expect(params).toMatchObject({ scope: "openid", state: "mock-state-value" });
+  });
+
+  test("passes a configured prompt other than omit through", async () => {
+    await generateAuthUrl("mock-config" as never, "http://localhost:3000/callback", "openid", "select_account");
+
+    const [, params] = mockBuildAuthorizationUrl.mock.calls[0];
+    expect(params).toMatchObject({ prompt: "select_account" });
+  });
 });
 
 // ─── exchangeCode ────────────────────────────────────────────────────────────
@@ -514,7 +690,7 @@ describe("exchangeCode", () => {
   beforeEach(() => {
     mockAuthorizationCodeGrant.mockClear();
     mockClaims.mockClear();
-    mockClaims.mockReturnValue({ sub: "user-123", email: "user@test.com" });
+    mockClaims.mockReturnValue({ iss: "https://example.auth0.com", sub: "user-123", email: "user@test.com" });
   });
 
   test("exchanges code and returns claims", async () => {
@@ -526,7 +702,24 @@ describe("exchangeCode", () => {
       "nonce",
     );
 
-    expect(result).toEqual({ sub: "user-123", email: "user@test.com" });
+    expect(result).toEqual({
+      claims: { iss: "https://example.auth0.com", sub: "user-123", email: "user@test.com" },
+      idToken: "raw.id.token",
+    });
+  });
+
+  test("returns null when the token response carries no ID token", async () => {
+    mockAuthorizationCodeGrant.mockImplementationOnce(async () => ({ claims: mockClaims, id_token: undefined }));
+
+    const result = await exchangeCode(
+      "mock-config" as never,
+      new URL("http://localhost:3000/callback?code=abc"),
+      "verifier",
+      "state",
+      "nonce",
+    );
+
+    expect(result).toBeNull();
   });
 
   test("calls authorizationCodeGrant with correct parameters", async () => {

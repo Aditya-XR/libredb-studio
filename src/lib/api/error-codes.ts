@@ -9,6 +9,12 @@ export const ApiErrorCode = {
   QUERY_ERROR: "QUERY_ERROR",
   CONFIG_ERROR: "CONFIG_ERROR",
   AUTH_ERROR: "AUTH_ERROR",
+  /**
+   * A database accepted the credential and refused the statement for a privilege that credential lacks (403), such as
+   * PostgreSQL's `permission denied for table orders`. Distinct from AUTH_ERROR, which is a database refusing the
+   * credential itself: answering a missing grant with that code told the user to re-enter a password that was right.
+   */
+  PERMISSION_DENIED: "PERMISSION_DENIED",
   TIMEOUT_ERROR: "TIMEOUT_ERROR",
   CONNECTION_ERROR: "CONNECTION_ERROR",
   POOL_EXHAUSTED: "POOL_EXHAUSTED",
@@ -58,6 +64,44 @@ export const ApiErrorCode = {
    * filter refuses a seed: this refusal is the server's policy and no role or credential changes it.
    */
   CUSTOM_CONNECTIONS_DISABLED: "CUSTOM_CONNECTIONS_DISABLED",
+
+  /**
+   * Under governance, the snapshot of the governance source cannot be served (503): it is still loading, older
+   * than GOVERNANCE_MAX_STALENESS_MS, misconfigured or incompatible (docs/GOVERNANCE.md, freshness and readiness).
+   * Distinct from CONNECTION_ERROR, which is a user's database failing: with this code no user database was tried.
+   */
+  GOVERNANCE_UNAVAILABLE: "GOVERNANCE_UNAVAILABLE",
+
+  /**
+   * Under governance, with the runtime setting `queryLog.onSinkFailure` at `refuse`, Studio cannot record query events
+   * right now (503): its query event sink is backing off after a failed insert, or its queue is at least 90% full. The
+   * request was refused before any statement ran (src/lib/query-events/admission.ts). Distinct from
+   * GOVERNANCE_UNAVAILABLE, which is the snapshot of the governance source: here the snapshot serves, and only the
+   * record of what would run cannot be kept.
+   */
+  AUDIT_UNAVAILABLE: "AUDIT_UNAVAILABLE",
+
+  /**
+   * Under governance, the connection a request names is not one the caller holds a grant on (404): it does not exist,
+   * it is granted to someone else, its grant expired, or Studio did not admit the governance source's row. One code
+   * for all of them, decided from the caller's own grants alone, so the answer never tells a caller which ids exist.
+   */
+  CONNECTION_NOT_FOUND: "CONNECTION_NOT_FOUND",
+
+  /**
+   * Under governance, the caller's own open transaction was opened under a credential the caller no longer resolves
+   * (409): its grant level or the connection's credential changed while it was open, so the request resolves another
+   * provider. Studio rolled the transaction back and released its owner record, and the body's `rolledBack` says
+   * whether that rollback was confirmed (src/app/api/db/transaction/route.ts).
+   */
+  TRANSACTION_CREDENTIAL_CHANGED: "TRANSACTION_CREDENTIAL_CHANGED",
+
+  /**
+   * Under governance, the control plane set the runtime setting `ai.enabled` to false, and a route of the AI bucket
+   * refused the request before any LLM provider was built (403). Distinct from LLM_UNCONFIGURED, which is the
+   * environment naming no model: this refusal is the control plane's switch, and no LLM_* variable changes it.
+   */
+  AI_DISABLED: "AI_DISABLED",
 
   // Application rate limiting (distinct from LLM_RATE_LIMIT, which is the provider's limit)
   RATE_LIMITED: "RATE_LIMITED",

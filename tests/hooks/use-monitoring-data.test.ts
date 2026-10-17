@@ -143,6 +143,24 @@ describe("useMonitoringData", () => {
     expect(result.current.loading).toBe(false);
   });
 
+  // Under governance the route refuses a user session with 403 (docs/GOVERNANCE.md#grants-and-the-connection-list). The
+  // page shows that refusal through the same error path as any other failed read, with the route's own sentence.
+  test("a governance refusal (403) is the page's error, in the route's sentence", async () => {
+    mockGlobalFetch({
+      "/api/db/monitoring": { ok: false, status: 403, json: { error: "Unauthorized. Admin access required." } },
+    });
+
+    const { result } = renderHook(() => useMonitoringData(mockConnection));
+
+    await waitFor(() => {
+      expect(result.current.error).not.toBeNull();
+    });
+
+    expect(result.current.error).toBe("Unauthorized. Admin access required.");
+    expect(result.current.data).toBeNull();
+    expect(result.current.loading).toBe(false);
+  });
+
   // ── Does not clear existing data on error ──────────────────────────────────
 
   test("does not clear existing data on error", async () => {

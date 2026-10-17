@@ -66,6 +66,27 @@ describe("LoginPage (OIDC mode)", () => {
     expect(getByText(/identity provider could not be reached/)).not.toBeNull();
   });
 
+  // The provider accepted the account but it holds neither role: trying again fails the same way
+  // until someone assigns one, so the message sends the user to the administrator, not to a retry.
+  test("error=oidc_no_role shows the no-role message", () => {
+    setMockSearchParams(new URLSearchParams("error=oidc_no_role"));
+    const { getByText, queryByText } = render(<LoginForm authProvider="oidc" passkey={null} />);
+    const message = getByText("Your account has no role that allows access to LibreDB Studio. Ask your administrator.");
+    expect(message.textContent).not.toMatch(/try again/i);
+    expect(queryByText("Authentication failed. Please try again.")).toBeNull();
+  });
+
+  // Under governance the control plane ended this account's sessions with a revocation that still applies, so the
+  // callback minted none: the message says who ended them and where to go, instead of a generic failure.
+  test("error=oidc_session_revoked shows the ended-sessions message", () => {
+    setMockSearchParams(new URLSearchParams("error=oidc_session_revoked"));
+    const { getByText, queryByText } = render(<LoginForm authProvider="oidc" passkey={null} />);
+    expect(
+      getByText("An administrator has ended your sessions. Try again later, or ask your administrator."),
+    ).not.toBeNull();
+    expect(queryByText("Authentication failed. Please try again.")).toBeNull();
+  });
+
   test("renders the generic message for every other code", () => {
     for (const code of ["oidc_state_missing", "oidc_state_invalid", "oidc_no_claims", "constructor", "__proto__"]) {
       setMockSearchParams(new URLSearchParams(`error=${code}`));

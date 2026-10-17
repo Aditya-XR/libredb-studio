@@ -14,6 +14,9 @@ import { randomBytes, randomInt } from "node:crypto";
 import { emitAuditEvent, type AuditReason } from "@/lib/audit";
 import type { Role, UserPayload } from "@/lib/auth";
 import { hmacHex } from "@/lib/auth-compare";
+import { governanceEnabled } from "@/lib/governance/config";
+import { governanceServable } from "@/lib/governance/freshness";
+import { governanceState, sessionRevoked } from "@/lib/governance/state";
 import { getAuthUsers, type AuthUser } from "@/lib/local-auth";
 import { logger } from "@/lib/logger";
 import { hashPassword, needsRehash, passwordMatchesHash } from "@/lib/password-hash";
@@ -410,15 +413,84 @@ export async function resolveLocalAuthUsers(): Promise<AuthUser[]> {
 }
 
 /**
+ * An issuer as the governed sign-in rule compares it: serialized by the URL parser, so the host's case and a default
+ * port read the same, with one trailing slash dropped, because a bare-host issuer such as Auth0's ends in a slash that
+ * `OIDC_ISSUER` may leave out. Null when the value is not a URL.
+ */
+function comparableIssuer(value: string): string | null {
+  const href = URL.parse(value)?.href;
+  if (href === undefined) return null;
+  return href.endsWith("/") ? href.slice(0, -1) : href;
+}
+
+/**
+ * The governed sign-in rule (docs/GOVERNANCE.md#sign-in): whether an identity provider's subject and issuer may
+ * speak for someone under governance. The subject must be a non-empty string, because openid-client accepts
+ * `sub: ""`, and the issuer must be the identity provider at `OIDC_ISSUER`, because openid-client accepts another
+ * `iss` for Microsoft Entra ID and Azure AD B2C. With `OIDC_ISSUER` unset or not a URL no issuer matches it.
+ *
+ * `storedAccountAllows()` applies it to a session's `idpSubject` and `idpIssuer`, which only the OIDC callback writes,
+ * and the callback applies it to the ID token, with `governedSignInRevoked()` below, before it mints a session, so it
+ * never mints one that is refused.
+ */
+export function governedIdentityAccepted(subject: unknown, issuer: unknown): boolean {
+  if (typeof subject !== "string" || subject === "" || typeof issuer !== "string") return false;
+  const comparable = comparableIssuer(issuer);
+  return comparable !== null && comparable === comparableIssuer(process.env.OIDC_ISSUER ?? "");
+}
+
+/**
+ * A session as getSession() verified it: the claims signJWT() signed, and the `iat` it set, in whole seconds. jose
+ * refuses a token whose `iat` is not a number and accepts one without, so `iat` is a number or absent.
+ */
+type VerifiedSession = UserPayload & { readonly iat?: number };
+
+/**
+ * Whether the governance source revoked the sessions of `subject` issued at `iat` (docs/GOVERNANCE.md#sign-in). Only
+ * the snapshot data routes are served from revokes anything: while none has loaded, or the one kept is too old,
+ * misconfigured or incompatible, data routes answer 503 instead and no session is refused, so a database outage sends
+ * no one back to the identity provider. It reads the in-process state holder and its freshness only, and neither
+ * imports `pg`.
+ */
+function governanceRevoked(subject: string, iat: number | undefined): boolean {
+  const { snapshot } = governanceState();
+  if (snapshot === null || !governanceServable()) return false;
+  return sessionRevoked(snapshot, subject, iat === undefined ? undefined : iat * 1000);
+}
+
+/**
+ * Whether a session the OIDC callback minted for `subject` now would be refused by the rule above, so the callback
+ * mints none: a revocation dated at or after the current second, as when the control plane's clock runs ahead of
+ * Studio's or a row's `revoked_before` is unreadable and counts as infinity. signJWT() sets `iat` to this second or a
+ * later one, and a later `iat` is never revoked where this one is not, so checking now cannot let a refused session
+ * through. A revocation dated before this second ends the sessions issued before it and lets this sign-in through
+ * (docs/GOVERNANCE.md#sign-in).
+ */
+export function governedSignInRevoked(subject: string): boolean {
+  return governanceRevoked(subject, Math.floor(Date.now() / 1000));
+}
+
+/**
  * Whether a verified session still speaks for its stored account. src/lib/auth.ts getSession()
  * calls this on every request, because the token itself stays valid for 24 hours.
  *
- * OIDC and `STORAGE_PROVIDER=local` sessions have no row to consult and pass. In store mode the
+ * Under governance the governed sign-in rule above decides, before any store is opened and
+ * whatever NEXT_PUBLIC_AUTH_PROVIDER says, together with the session revocations of the governance
+ * source. Only the OIDC callback writes `idpSubject` and `idpIssuer`, so an env password, passkey or
+ * launch session never reaches a route, even when the boot check was bypassed, and neither does a
+ * session minted for another issuer or one issued at or before its subject's `revoked_before`.
+ *
+ * Otherwise, OIDC and `STORAGE_PROVIDER=local` sessions have no row to consult and pass. In store mode the
  * account must exist, be enabled, hold the role the token names, and carry the token's session
  * version. A token with no version predates the registry and matches nothing: its holder signs in
  * once more.
  */
-export async function storedAccountAllows(session: UserPayload): Promise<boolean> {
+export async function storedAccountAllows(session: VerifiedSession): Promise<boolean> {
+  if (governanceEnabled()) {
+    const { idpSubject, idpIssuer, iat } = session;
+    // The rule accepts a non-empty string subject only.
+    return governedIdentityAccepted(idpSubject, idpIssuer) && !governanceRevoked(idpSubject as string, iat);
+  }
   if (process.env.NEXT_PUBLIC_AUTH_PROVIDER === "oidc") return true;
   const provider = await getStorageProvider();
   if (!provider) return true;

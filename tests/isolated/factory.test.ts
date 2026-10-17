@@ -36,7 +36,7 @@
  * the runner is what enforces it: one bun process per test file, no directory and no
  * registration, and `bun test tests/unit` is clean again.
  */
-import { describe, test, expect, mock, beforeEach, beforeAll, afterAll, spyOn } from "bun:test";
+import { describe, test, expect, mock, beforeEach, beforeAll, afterAll, afterEach, jest, spyOn } from "bun:test";
 import { open as libreOpen, kv as libreKv } from "@libredb/libredb";
 import { captureContextSnapshot } from "@/lib/agent/context-snapshot";
 import { AgentRunDeadline } from "@/lib/agent/deadline";
@@ -51,12 +51,14 @@ import type { DatabaseProvider, QueryResult } from "@/lib/db/types";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative as relativePath } from "node:path";
-import type { DatabaseConnection, ReadOnlyStatementBudget } from "@/lib/db/types";
+import type { DatabaseConnection, EditorExecutionContext, ReadOnlyStatementBudget } from "@/lib/db/types";
 import { ConnectionError, DatabaseConfigError, ExecutionProfileError, TimeoutError } from "@/lib/db/errors";
 import { READ_ONLY_ENFORCED, SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { connectionFingerprint } from "@/lib/db/connection-fingerprint";
 import { supportsQueryCancel } from "@/lib/db/query-cancel";
 import { MACHINE_PROFILE_SENTENCE } from "@/lib/db/providers/platform/kubernetes/machine-read";
+import { removeOwnerProviders } from "@/lib/db/owner-removal";
+import { logger } from "@/lib/logger";
 import type { SSHTunnelConfig } from "@/lib/types";
 
 // The SQLite agent-profile tests below construct the read-only profile for its
@@ -132,25 +134,29 @@ const mockPgPool = {
   on: () => {},
 };
 
+/**
+ * The configuration of every pg Pool a PostgreSQL provider built, oldest first, so the pool an owned
+ * provider opens (docs/GOVERNANCE.md#per-user-providers) is read where the driver receives it. A test that reads it
+ * empties it first.
+ */
+const pgPoolConfigs: { min?: number; max?: number; idleTimeoutMillis?: number }[] = [];
+
 // The provider imports `types` from pg for its per-pool parsers, so the mock has to export
 // it. These rows never reach a parser, and the real registry is passed rather than a stub.
 // `Client` likewise: the provider subclasses it to keep server notices (#1401), and the
 // mocked pool never builds one.
 const { types: realPgTypes, Client: realPgClient } = await import("pg");
 
+class MockPgPool {
+  constructor(config: { min?: number; max?: number; idleTimeoutMillis?: number }) {
+    pgPoolConfigs.push(config);
+    return mockPgPool;
+  }
+}
+
 mock.module("pg", () => ({
-  default: {
-    Pool: class {
-      constructor() {
-        return mockPgPool;
-      }
-    },
-  },
-  Pool: class {
-    constructor() {
-      return mockPgPool;
-    }
-  },
+  default: { Pool: MockPgPool },
+  Pool: MockPgPool,
   Client: realPgClient,
   types: realPgTypes,
 }));
@@ -375,6 +381,8 @@ const {
   getExecutionProfileCacheStats,
   withOneShotTunnel,
   assertReadOnlyHonoured,
+  editorCacheKey,
+  findCachedProvider,
 } = await import("@/lib/db/factory");
 // Existing SQLite cache tests exercise trusted callers. Explicitly grant their file posture;
 // denied callers are tested separately against the unwrapped factory below.
@@ -503,6 +511,25 @@ describe("createDatabaseProvider", () => {
     const provider = await createDatabaseProvider(conn);
     expect(provider).toBeDefined();
     expect(provider.type).toBe("oracle");
+  });
+
+  // The owner (docs/GOVERNANCE.md#per-user-providers) reaches OracleProvider and MSSQLProvider, which arm their
+  // transaction timeout only when owned.
+  test("hands the execution context's owner to the oracle and mssql providers", async () => {
+    const oracle = makeConnection("oracle", { serviceName: "ORCL" } as Partial<DatabaseConnection>);
+    const mssql = makeConnection("mssql");
+    const owner = { owner: "subject-a", ownerPoolMax: 3 };
+    const [ownedOracle, sharedOracle, ownedMssql, sharedMssql] = await Promise.all([
+      createDatabaseProvider(oracle, {}, owner),
+      createDatabaseProvider(oracle),
+      createDatabaseProvider(mssql, {}, owner),
+      createDatabaseProvider(mssql),
+    ]);
+    const ownedOf = (provider: unknown) => (provider as { owned: boolean }).owned;
+    expect(ownedOf(ownedOracle)).toBe(true);
+    expect(ownedOf(sharedOracle)).toBe(false);
+    expect(ownedOf(ownedMssql)).toBe(true);
+    expect(ownedOf(sharedMssql)).toBe(false);
   });
 
   test('creates provider for type "db2"', async () => {
@@ -1474,6 +1501,137 @@ describe("getOrCreateProvider cache isolation", () => {
   });
 });
 
+// ─── Per-user providers (docs/GOVERNANCE.md#per-user-providers) ──────────────
+//
+// Under governance every user of a connection gets a provider of their own: the execution context
+// names the session's identity provider subject as `owner`, the cache key frames it, and the provider
+// opens a pool of the user's own share, `ownerPoolMax`. A context without an owner is what every
+// install without governance passes, and the tests above pin that nothing about it changed.
+
+describe("per-user providers", () => {
+  const owned = (owner: string, ownerPoolMax = 3): EditorExecutionContext => ({ owner, ownerPoolMax });
+
+  test("two owners resolving one connection get two provider instances", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders" });
+
+    const alice = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    const bob = await getOrCreateProvider(conn, {}, owned("bob-subject"));
+
+    expect(bob).not.toBe(alice);
+    // The control that the cache is still a cache: the same owner asking again gets its own provider back.
+    expect(await getOrCreateProvider(conn, {}, owned("alice-subject"))).toBe(alice);
+    // And a caller that names no owner gets the provider every such caller shares, apart from both.
+    const shared = await getOrCreateProvider(conn);
+    expect(new Set([alice, bob, shared]).size).toBe(3);
+    expect(getProviderCacheStats()).toEqual({ size: 3, connections: ["seed:orders", "seed:orders", "seed:orders"] });
+  });
+
+  test("an owned provider is created with pool min 0 and max ownerPoolMax", async () => {
+    pgPoolConfigs.length = 0;
+
+    await getOrCreateProvider(makeConnection("postgres", { id: "seed:owned-pool" }), {}, owned("alice-subject", 3));
+    // A caller's own pool options stand, except the size: min and max are the owner's share.
+    await getOrCreateProvider(
+      makeConnection("postgres", { id: "seed:owned-pool-options" }),
+      { pool: { min: 4, max: 50, idleTimeout: 5_000 } },
+      owned("alice-subject", 2),
+    );
+    // Without an owner the pool is the one every provider opened before owners existed.
+    await getOrCreateProvider(makeConnection("postgres", { id: "seed:shared-pool" }));
+
+    expect(pgPoolConfigs.map(({ min, max, idleTimeoutMillis }) => ({ min, max, idleTimeoutMillis }))).toEqual([
+      { min: 0, max: 3, idleTimeoutMillis: 30_000 },
+      { min: 0, max: 2, idleTimeoutMillis: 5_000 },
+      { min: 2, max: 10, idleTimeoutMillis: 30_000 },
+    ]);
+  });
+
+  test("an owner's execution-profile acquisitions are its own too, opened with the owner's pool", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders-agent" });
+    pgPoolConfigs.length = 0;
+
+    const alice = await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("alice-subject"));
+    const bob = await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("bob-subject"));
+
+    expect(bob).not.toBe(alice);
+    expect(await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("alice-subject"))).toBe(alice);
+    expect(pgPoolConfigs.map(({ min, max }) => ({ min, max }))).toEqual([
+      { min: 0, max: 3 },
+      { min: 0, max: 3 },
+    ]);
+    // The profiled key is the writable key with the profile framed onto it, so the owner is its last part as well.
+    expect(await profiledCacheKey(conn, "agent-read-only", owned("alice-subject"))).toBe(
+      `${await profiledCacheKey(conn, "agent-read-only")}19:owner:alice-subject`,
+    );
+  });
+
+  test.each([undefined, 0, -1, 2.5, Number.NaN, "3"])(
+    "an owner with ownerPoolMax %p is refused before anything is built or dialled",
+    async (ownerPoolMax) => {
+      // A pool size pg cannot honour would be replaced or wedged silently: 0 and NaN open its default of 10, and a
+      // negative size never hands out a connection. So an owner states a whole size from 1, or nothing is opened.
+      const conn = makeConnection("postgres", {
+        id: "seed:owned-bad-pool",
+        sshTunnel: {
+          enabled: true,
+          host: "bastion.example.com",
+          port: 22,
+          username: "admin",
+          authMethod: "password",
+          password: "secret",
+        },
+      });
+      const execution = { owner: "alice-subject", ownerPoolMax } as EditorExecutionContext;
+
+      const refusals = await Promise.all([
+        getOrCreateProvider(conn, {}, execution).catch((error: unknown) => error),
+        acquireExecutionProfileProvider(conn, "agent-read-only", {}, execution).catch((error: unknown) => error),
+        createDatabaseProvider(conn, {}, execution).catch((error: unknown) => error),
+      ]);
+
+      for (const refusal of refusals) {
+        expect(refusal).toBeInstanceOf(DatabaseConfigError);
+        expect((refusal as Error).message).toContain("ownerPoolMax");
+      }
+      expect(mockCreateSSHTunnel).not.toHaveBeenCalled();
+      expect(getProviderCacheStats().size).toBe(0);
+      expect(getExecutionProfileCacheStats().size).toBe(0);
+    },
+  );
+});
+
+// ─── The writable cache's key and lookup, for the transaction route (docs/GOVERNANCE.md#per-user-providers) ───
+
+describe("editorCacheKey and findCachedProvider", () => {
+  const owned = (owner: string): EditorExecutionContext => ({ owner, ownerPoolMax: 3 });
+
+  test("editorCacheKey is the key getOrCreateProvider caches under, and findCachedProvider answers what is cached there", async () => {
+    // The transaction route records the key a governed begin resolved and later looks the provider up by it, to roll
+    // back a transaction whose credential changed; both only work if this key is the one the provider is cached under.
+    const writer = makeConnection("postgres", { id: "seed:orders", user: "writer", password: "write-secret" });
+    const reader = makeConnection("postgres", { id: "seed:orders", user: "reader", password: "read-secret" });
+
+    const provider = await getOrCreateProvider(writer, {}, owned("alice-subject"));
+
+    expect(findCachedProvider(await editorCacheKey(writer, owned("alice-subject")))).toBe(provider);
+    // Another credential, another owner, or no owner at all names another key, under which nothing is cached.
+    expect(findCachedProvider(await editorCacheKey(reader, owned("alice-subject")))).toBeNull();
+    expect(findCachedProvider(await editorCacheKey(writer, owned("bob-subject")))).toBeNull();
+    expect(findCachedProvider(await editorCacheKey(writer))).toBeNull();
+    // A lookup opens nothing.
+    expect(getProviderCacheStats().size).toBe(1);
+  });
+
+  test("editorCacheKey refuses a connection without an id, as getOrCreateProvider does", async () => {
+    const refusal = await editorCacheKey(makeConnection("postgres", { id: "" }), owned("alice-subject")).catch(
+      (error: unknown) => error,
+    );
+
+    expect(refusal).toBeInstanceOf(DatabaseConfigError);
+    expect((refusal as Error).message).toBe("Connection ID is required");
+  });
+});
+
 // ─── removeProvider ────────────────────────────────────────────────────────
 
 describe("removeProvider", () => {
@@ -1516,6 +1674,533 @@ describe("removeProvider", () => {
     // Should not throw — the error is caught and logged
     await removeProvider("no-such-connection");
     expect(mockCloseSSHTunnel).toHaveBeenCalledWith("no-such-connection");
+  });
+});
+
+// ─── removeProvider with an owner scope (docs/GOVERNANCE.md#per-user-providers) ───
+//
+// Under governance one user's disconnect must not tear down another user's providers, so the disconnect route names
+// the caller as the owner and only that owner's entries go. The SSH tunnel is shared by every entry of a connection,
+// so a scoped removal closes it only once nothing serves the connection, as the idle sweep does. The unscoped removal
+// above is what every install without governance calls, and it is unchanged.
+
+describe("removeProvider with an owner scope", () => {
+  const owned = (owner: string): EditorExecutionContext => ({ owner, ownerPoolMax: 3 });
+  const TUNNEL: SSHTunnelConfig = {
+    enabled: true,
+    host: "bastion.example.com",
+    port: 22,
+    username: "tunnel",
+    authMethod: "password",
+    password: "example-only-tunnel-password",
+  };
+
+  test("removeProvider with an owner scope removes only that owner's entries", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders", sshTunnel: TUNNEL });
+    const alice = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    const aliceAgent = await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("alice-subject"));
+    const bob = await getOrCreateProvider(conn, {}, owned("bob-subject"));
+    const bobAgent = await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("bob-subject"));
+    const shared = await getOrCreateProvider(conn);
+    const bobBilling = await getOrCreateProvider(
+      makeConnection("postgres", { id: "seed:billing" }),
+      {},
+      owned("bob-subject"),
+    );
+
+    await removeProvider("seed:orders", { owner: "bob-subject" });
+
+    // Bob's providers of the connection are gone, his editor provider and his profiled one alike.
+    expect([bob.isConnected(), bobAgent.isConnected()]).toEqual([false, false]);
+    // Alice's, the one every caller without an owner shares, and Bob's provider of another connection stay open.
+    expect([alice.isConnected(), aliceAgent.isConnected(), shared.isConnected(), bobBilling.isConnected()]).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+    expect(getProviderCacheStats().connections.sort()).toEqual(["seed:billing", "seed:orders", "seed:orders"]);
+    expect(getExecutionProfileCacheStats()).toEqual({ size: 1, connections: ["seed:orders"] });
+    // Alice is served her own provider again rather than a new one, so nothing of hers was reopened.
+    expect(await getOrCreateProvider(conn, {}, owned("alice-subject"))).toBe(alice);
+    // The tunnel still serves Alice and the shared entry.
+    expect(mockCloseSSHTunnel).not.toHaveBeenCalled();
+  });
+
+  test("an owner scope closes the connection's SSH tunnel only once no entry serves the connection", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders", sshTunnel: TUNNEL });
+    await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("bob-subject"));
+
+    // Bob's profiled entry still reaches the connection through the tunnel.
+    await removeProvider("seed:orders", { owner: "alice-subject" });
+    expect(mockCloseSSHTunnel).not.toHaveBeenCalled();
+
+    // Bob's removal takes the last entry, so the tunnel goes with it, and a failing close is logged, not thrown.
+    mockCloseSSHTunnel.mockImplementationOnce(async () => {
+      throw new Error("tunnel close failed");
+    });
+    await removeProvider("seed:orders", { owner: "bob-subject" });
+    expect(mockCloseSSHTunnel).toHaveBeenCalledTimes(1);
+    expect(mockCloseSSHTunnel).toHaveBeenCalledWith("seed:orders");
+    expect(getProviderCacheStats().size).toBe(0);
+    expect(getExecutionProfileCacheStats().size).toBe(0);
+  });
+
+  test("an owner scope leaves the one handle of a single-writer file, which every owner shares", async () => {
+    // A provider per user on such an engine would be a second handle on one file, so the factory opens one handle for
+    // every owner and records no owner on it (`providerOwner`): one user's disconnect must not close it under the rest.
+    const dir = mkdtempSync(join(tmpdir(), "libredb-factory-owner-scope-"));
+    try {
+      const conn = makeConnection("libredb", { id: "seed:local", database: join(dir, "shared.libredb") });
+      const handle = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+
+      await removeProvider("seed:local", { owner: "alice-subject" });
+
+      expect(handle.isConnected()).toBe(true);
+      expect(await getOrCreateProvider(conn, {}, owned("bob-subject"))).toBe(handle);
+    } finally {
+      await clearProviderCache();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["{}", {}],
+    ["{ owner: undefined }", { owner: undefined }],
+    ["{ owner: 7 }", { owner: 7 }],
+  ])("a scope without an owner string, %s, is refused before anything is removed", async (_label, scope) => {
+    // Matching on a missing owner would remove the entries every caller shares, which is not what a scope promises.
+    const conn = makeConnection("postgres", { id: "seed:orders" });
+    const alice = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    const shared = await getOrCreateProvider(conn);
+
+    const refusal: unknown = await removeProvider("seed:orders", scope as { owner: string }).catch(
+      (error: unknown) => error,
+    );
+
+    expect(refusal).toBeInstanceOf(DatabaseConfigError);
+    expect((refusal as Error).message).toContain("owner");
+    expect([alice.isConnected(), shared.isConnected()]).toEqual([true, true]);
+    expect(mockCloseSSHTunnel).not.toHaveBeenCalled();
+  });
+});
+
+// ─── removeProvider with a key scope (docs/SECURITY.md, note 0.9) ────────────
+//
+// Without governance every caller of a connection shares its provider, so a disconnect cannot be scoped by owner. The
+// disconnect route resolves the caller's own record instead and removes only the entries that record's key names
+// (`editorCacheKey`): its editor entry, and its execution-profile entries, which are cached under the same key with the
+// profile framed onto it. The key frames the server and the credentials, so naming another user's connection id closes
+// nothing of theirs. The SSH tunnel serves every entry of the connection, so it closes only once nothing serves it.
+
+describe("removeProvider with a key scope", () => {
+  const TUNNEL: SSHTunnelConfig = {
+    enabled: true,
+    host: "bastion.example.com",
+    port: 22,
+    username: "tunnel",
+    authMethod: "password",
+    password: "example-only-tunnel-password",
+  };
+
+  test("removeProvider with a key scope removes only the entry its key names", async () => {
+    const alice = makeConnection("postgres", { id: "conn-orders", user: "alice", password: "a-pw", sshTunnel: TUNNEL });
+    const bob = makeConnection("postgres", { id: "conn-orders", user: "bob", password: "b-pw", sshTunnel: TUNNEL });
+    const billing = makeConnection("postgres", { id: "conn-billing", user: "bob", password: "b-pw" });
+    const alicesProvider = await getOrCreateProvider(alice);
+    const bobsProvider = await getOrCreateProvider(bob);
+    const billingProvider = await getOrCreateProvider(billing);
+
+    await removeProvider("conn-orders", { key: await editorCacheKey(bob) });
+
+    expect(bobsProvider.isConnected()).toBe(false);
+    expect([alicesProvider.isConnected(), billingProvider.isConnected()]).toEqual([true, true]);
+    // Alice is served her own provider again rather than a new one, and her entry keeps the tunnel open.
+    expect(await getOrCreateProvider(alice)).toBe(alicesProvider);
+    expect(mockCloseSSHTunnel).not.toHaveBeenCalled();
+
+    // A key names an entry of one connection only: under another connection's id it removes nothing.
+    await removeProvider("conn-billing", { key: await editorCacheKey(alice) });
+    expect([alicesProvider.isConnected(), billingProvider.isConnected()]).toEqual([true, true]);
+
+    // Alice's own key takes the last entry of the connection, so the tunnel goes with it.
+    await removeProvider("conn-orders", { key: await editorCacheKey(alice) });
+    expect(alicesProvider.isConnected()).toBe(false);
+    expect(mockCloseSSHTunnel).toHaveBeenCalledTimes(1);
+    expect(mockCloseSSHTunnel).toHaveBeenCalledWith("conn-orders");
+    expect(getProviderCacheStats().connections).toEqual(["conn-billing"]);
+  });
+
+  test("a key scope removes the profiled entries of the record its key names, and nothing of another record's", async () => {
+    // An execution profile caches a record's provider under that record's editor key with the profile framed onto it
+    // (`profiledCacheKey`). A removal by the key must take those entries too, or they and the tunnel they reach the
+    // connection through stay open until the idle sweep.
+    const alice = makeConnection("postgres", { id: "conn-orders", user: "alice", password: "a-pw", sshTunnel: TUNNEL });
+    const bob = makeConnection("postgres", { id: "conn-orders", user: "bob", password: "b-pw", sshTunnel: TUNNEL });
+    const alicesEditor = await getOrCreateProvider(alice);
+    const alicesAgents = [
+      await acquireExecutionProfileProvider(alice, "agent-read-only"),
+      await acquireExecutionProfileProvider(alice, "agent-operations"),
+      await acquireExecutionProfileProvider(alice, "agent-handover"),
+    ];
+    const bobsEditor = await getOrCreateProvider(bob);
+    const bobsAgent = await acquireExecutionProfileProvider(bob, "agent-read-only");
+
+    await removeProvider("conn-orders", { key: await editorCacheKey(alice) });
+
+    // Alice's editor entry goes, and so does her entry under every profile.
+    expect([alicesEditor, ...alicesAgents].map((provider) => provider.isConnected())).toEqual([
+      false,
+      false,
+      false,
+      false,
+    ]);
+    // Bob's record names other keys, so his editor and profiled entries stay, and the tunnel they share stays open.
+    expect([bobsEditor.isConnected(), bobsAgent.isConnected()]).toEqual([true, true]);
+    expect(getProviderCacheStats()).toEqual({ size: 1, connections: ["conn-orders"] });
+    expect(getExecutionProfileCacheStats()).toEqual({ size: 1, connections: ["conn-orders"] });
+    expect(mockCloseSSHTunnel).not.toHaveBeenCalled();
+
+    // Bob's key takes the last entries of the connection, his profiled one included, so the tunnel closes with them.
+    await removeProvider("conn-orders", { key: await editorCacheKey(bob) });
+    expect([bobsEditor.isConnected(), bobsAgent.isConnected()]).toEqual([false, false]);
+    expect(getProviderCacheStats().size).toBe(0);
+    expect(getExecutionProfileCacheStats().size).toBe(0);
+    expect(mockCloseSSHTunnel).toHaveBeenCalledTimes(1);
+    expect(mockCloseSSHTunnel).toHaveBeenCalledWith("conn-orders");
+  });
+
+  test.each([
+    ["{ key: 7 }", { key: 7 }],
+    ["an owner and a key", { owner: "alice-subject", key: "conn-orders" }],
+  ])(
+    "a scope that names no single owner or key string, %s, is refused before anything is removed",
+    async (_label, scope) => {
+      const conn = makeConnection("postgres", { id: "conn-orders" });
+      const provider = await getOrCreateProvider(conn);
+
+      const refusal: unknown = await removeProvider("conn-orders", scope as { key: string }).catch(
+        (error: unknown) => error,
+      );
+
+      expect(refusal).toBeInstanceOf(DatabaseConfigError);
+      expect((refusal as Error).message).toContain("key");
+      expect(provider.isConnected()).toBe(true);
+      expect(mockCloseSSHTunnel).not.toHaveBeenCalled();
+    },
+  );
+});
+
+// ─── Teardown of an owned provider (docs/GOVERNANCE.md#per-user-providers) ───
+//
+// When a reload of the governance snapshot takes a grant away or changes it, the loader removes that subject's
+// providers of the connection (src/lib/governance/snapshot.ts), and an owned provider is torn down rather than only
+// disconnected: its cache entry goes first, so no request is handed it on the way out, an open transaction is rolled
+// back within 5 s, and the disconnect is waited for at most 10 s before the pool is abandoned with a log line, because
+// pg's `end()` waits for every checked-out client and a client stuck in a statement never comes back. A provider every
+// caller shares keeps the path the tests above pin.
+
+describe("teardown of an owned provider", () => {
+  const owned = (owner: string): EditorExecutionContext => ({ owner, ownerPoolMax: 3 });
+  /** Lets every pending promise settle: bun's fake timers leave setImmediate real. */
+  const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+  const hangs = (): Promise<void> => new Promise<void>(() => {});
+  let warn: ReturnType<typeof spyOn>;
+  let info: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    warn = spyOn(logger, "warn").mockImplementation(() => {});
+    info = spyOn(logger, "info").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    warn.mockRestore();
+    info.mockRestore();
+  });
+
+  /**
+   * Gives `provider` an open transaction, as a transaction provider holds one, whose rollback records in `events` how
+   * many providers the writable cache still held when it ran, and then runs `rollback`.
+   */
+  function openTransaction(
+    provider: DatabaseProvider,
+    events: string[],
+    rollback: () => Promise<void> = async () => {},
+  ): void {
+    let open = true;
+    Object.assign(provider, {
+      isInTransaction: () => open,
+      rollbackTransaction: async () => {
+        events.push(`rollback, ${getProviderCacheStats().size} cached`);
+        await rollback();
+        open = false;
+      },
+    });
+  }
+
+  /** Makes `provider`'s disconnect record the same in `events`, then run `disconnect`. */
+  function recordDisconnect(
+    provider: DatabaseProvider,
+    events: string[],
+    disconnect: () => Promise<void> = async () => {},
+  ): void {
+    provider.disconnect = async () => {
+      events.push(`disconnect, ${getProviderCacheStats().size} cached`);
+      await disconnect();
+    };
+  }
+
+  /** The first argument of every call `spy` saw, which is the line each log call writes. */
+  const lines = (spy: ReturnType<typeof spyOn>): string[] => spy.mock.calls.map((call: unknown[]) => String(call[0]));
+
+  test("teardown of an owned provider in a transaction rolls back, removes the entry before disconnecting, and returns within 15 s when disconnect hangs", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders" });
+    const provider = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    const events: string[] = [];
+    openTransaction(provider, events);
+    recordDisconnect(provider, events, hangs);
+    jest.useFakeTimers();
+
+    let returned = false;
+    const removal = removeProvider("seed:orders", { owner: "alice-subject" }).then(() => {
+      returned = true;
+    });
+    await settle();
+
+    // The entry went first, so neither the rollback nor the disconnect ran on a provider a request could still be
+    // handed, and the transaction was rolled back before the provider was closed.
+    expect(events).toEqual(["rollback, 0 cached", "disconnect, 0 cached"]);
+    expect(lines(info)).toContain(
+      "[DB] Rolled back the open transaction of an owned provider of seed:orders before closing it.",
+    );
+    // The disconnect never answers: it is waited for 10 s, so the teardown ends within the 15 s a rollback and a
+    // disconnect may take together, and the pool is abandoned with a line that says so.
+    jest.advanceTimersByTime(9_999);
+    await settle();
+    expect(returned).toBe(false);
+    jest.advanceTimersByTime(1);
+    await removal;
+    expect(lines(warn)).toEqual([
+      "[DB] Abandoned the pool of owned provider seed:orders: its disconnect did not finish within 10000 ms.",
+    ]);
+    expect(getProviderCacheStats().size).toBe(0);
+  });
+
+  test("a rollback that does not finish within 5 s is given up, the provider is still disconnected, and the teardown ends by 15 s", async () => {
+    const provider = await getOrCreateProvider(
+      makeConnection("postgres", { id: "seed:orders" }),
+      {},
+      owned("alice-subject"),
+    );
+    const events: string[] = [];
+    openTransaction(provider, events, hangs);
+    recordDisconnect(provider, events, hangs);
+    jest.useFakeTimers();
+
+    let returned = false;
+    const removal = removeProvider("seed:orders", { owner: "alice-subject" }).then(() => {
+      returned = true;
+    });
+    await settle();
+    expect(events).toEqual(["rollback, 0 cached"]);
+
+    jest.advanceTimersByTime(5_000);
+    await settle();
+    expect(events).toEqual(["rollback, 0 cached", "disconnect, 0 cached"]);
+    jest.advanceTimersByTime(9_999);
+    await settle();
+    expect(returned).toBe(false);
+    jest.advanceTimersByTime(1);
+    await removal;
+    expect(lines(warn)).toEqual([
+      "[DB] The open transaction of an owned provider of seed:orders did not roll back within 5000 ms, so the provider is closed with it open.",
+      "[DB] Abandoned the pool of owned provider seed:orders: its disconnect did not finish within 10000 ms.",
+    ]);
+  });
+
+  test("a rollback that fails is logged, and the provider is still disconnected", async () => {
+    const provider = await getOrCreateProvider(
+      makeConnection("postgres", { id: "seed:orders" }),
+      {},
+      owned("alice-subject"),
+    );
+    const events: string[] = [];
+    openTransaction(provider, events, async () => {
+      throw new Error("Connection terminated unexpectedly");
+    });
+    recordDisconnect(provider, events);
+
+    await removeProvider("seed:orders", { owner: "alice-subject" });
+
+    expect(events).toEqual(["rollback, 0 cached", "disconnect, 0 cached"]);
+    expect(warn.mock.calls).toEqual([
+      [
+        "[DB] The open transaction of an owned provider of seed:orders failed to roll back, so the provider is closed with it open.",
+        { connectionId: "seed:orders", error: "Error: Connection terminated unexpectedly" },
+      ],
+    ]);
+  });
+
+  test("a provider whose transaction state throws is logged as a failed rollback and still disconnected", async () => {
+    // The provider's defect, as a throwing hasRunsInFlight is for the idle sweep: it must not leave the provider open.
+    const provider = await getOrCreateProvider(
+      makeConnection("postgres", { id: "seed:orders" }),
+      {},
+      owned("alice-subject"),
+    );
+    const events: string[] = [];
+    openTransaction(provider, events);
+    Object.assign(provider, {
+      isInTransaction: () => {
+        throw new Error("transaction state unreadable");
+      },
+    });
+    recordDisconnect(provider, events);
+
+    await removeProvider("seed:orders", { owner: "alice-subject" });
+
+    expect(events).toEqual(["disconnect, 0 cached"]);
+    expect(lines(warn)).toEqual([
+      "[DB] The open transaction of an owned provider of seed:orders failed to roll back, so the provider is closed with it open.",
+    ]);
+  });
+
+  test("an owned provider without an open transaction, or without a transaction session at all, is only disconnected, and a failing disconnect is logged", async () => {
+    const postgres = await getOrCreateProvider(
+      makeConnection("postgres", { id: "seed:orders" }),
+      {},
+      owned("alice-subject"),
+    );
+    const redis = await getOrCreateProvider(
+      makeConnection("redis", { id: "seed:orders", port: 6379, database: "0" }),
+      {},
+      owned("alice-subject"),
+    );
+    const events: string[] = [];
+    openTransaction(postgres, events);
+    Object.assign(postgres, { isInTransaction: () => false });
+    recordDisconnect(postgres, events, async () => {
+      throw new Error("pool already ended");
+    });
+    expect("rollbackTransaction" in redis).toBe(false);
+    recordDisconnect(redis, events);
+
+    await removeProvider("seed:orders", { owner: "alice-subject" });
+
+    // Each left the cache just before its own disconnect: the Redis entry was still there at the first one.
+    expect(events).toEqual(["disconnect, 1 cached", "disconnect, 0 cached"]);
+    expect(warn.mock.calls).toEqual([
+      [
+        "[DB] Error disconnecting owned provider seed:orders",
+        { connectionId: "seed:orders", error: "Error: pool already ended" },
+      ],
+    ]);
+    expect(lines(info).some((line) => line.includes("Rolled back"))).toBe(false);
+  });
+
+  test("an owner's profiled provider is torn down with its editor provider, and the shared provider keeps today's path", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders" });
+    const editor = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    const agent = await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("alice-subject"));
+    const shared = await getOrCreateProvider(conn);
+    const events: string[] = [];
+    openTransaction(editor, events);
+    recordDisconnect(editor, events);
+    agent.disconnect = async () => {
+      events.push(`agent disconnect, ${getExecutionProfileCacheStats().size} profiled`);
+    };
+    // Without a scope every entry of the connection goes: the shared one is disconnected while it is still cached,
+    // as before owners existed, and the owned ones are torn down.
+    shared.disconnect = async () => {
+      events.push(`shared disconnect, ${getProviderCacheStats().size} cached`);
+    };
+
+    await removeProvider("seed:orders");
+
+    // The owned editor entry was deleted before its rollback, while the shared one was still cached when it was
+    // disconnected. The owned teardown runs beside the shared disconnect, so only its own order is pinned.
+    expect(events).toContain("rollback, 1 cached");
+    expect(events).toContain("shared disconnect, 1 cached");
+    expect(events).toContain("agent disconnect, 0 profiled");
+    expect(events.indexOf("rollback, 1 cached")).toBeLessThan(
+      events.findIndex((event) => event.startsWith("disconnect")),
+    );
+    expect(events).toHaveLength(4);
+    expect(getProviderCacheStats().size).toBe(0);
+    expect(getExecutionProfileCacheStats().size).toBe(0);
+    expect(mockCloseSSHTunnel).toHaveBeenCalledWith("seed:orders");
+  });
+
+  test("the idle sweep tears down an idle owned provider, rolling back its open transaction, and evicts a shared one as before", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders" });
+    const editor = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    const agent = await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("alice-subject"));
+    const shared = await getOrCreateProvider(makeConnection("sqlite", { id: "idle-shared", database: ":memory:" }));
+    const events: string[] = [];
+    openTransaction(editor, events);
+    recordDisconnect(editor, events);
+    openTransaction(agent, events);
+    agent.disconnect = async () => {
+      events.push(`agent disconnect, ${getExecutionProfileCacheStats().size} profiled`);
+    };
+    shared.disconnect = async () => {
+      events.push(`shared disconnect, ${getProviderCacheStats().size} cached`);
+    };
+
+    expect(await evictIdleProviders(0)).toBe(3);
+
+    // The shared entry is disconnected first and deleted after, as the sweep always did; each owned entry is deleted
+    // before its transaction is rolled back and it is disconnected.
+    expect(events).toEqual([
+      "rollback, 1 cached",
+      "disconnect, 1 cached",
+      "shared disconnect, 1 cached",
+      "rollback, 0 cached",
+      "agent disconnect, 0 profiled",
+    ]);
+    expect(getProviderCacheStats().size).toBe(0);
+    expect(getExecutionProfileCacheStats().size).toBe(0);
+    expect(mockCloseSSHTunnel).toHaveBeenCalledWith("seed:orders");
+  });
+
+  test("clearProviderCache tears down every owned provider, rolling back an open transaction, beside the shared ones", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders" });
+    const editor = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    const agent = await acquireExecutionProfileProvider(conn, "agent-read-only", {}, owned("bob-subject"));
+    const shared = await getOrCreateProvider(conn);
+    const events: string[] = [];
+    openTransaction(editor, events);
+    recordDisconnect(editor, events);
+    agent.disconnect = async () => {
+      events.push("agent disconnect");
+    };
+    shared.disconnect = async () => {
+      events.push("shared disconnect");
+    };
+
+    await clearProviderCache();
+
+    expect(events.sort()).toEqual([
+      "agent disconnect",
+      "disconnect, 1 cached",
+      "rollback, 1 cached",
+      "shared disconnect",
+    ]);
+    expect(getProviderCacheStats().size).toBe(0);
+    expect(getExecutionProfileCacheStats().size).toBe(0);
+  });
+
+  test("the factory registers its owner-scoped removal, so the governance loader reaches this cache from another bundle", async () => {
+    const conn = makeConnection("postgres", { id: "seed:orders" });
+    const alice = await getOrCreateProvider(conn, {}, owned("alice-subject"));
+    const bob = await getOrCreateProvider(conn, {}, owned("bob-subject"));
+
+    await removeOwnerProviders("seed:orders", "bob-subject");
+
+    expect([alice.isConnected(), bob.isConnected()]).toEqual([true, false]);
+    expect(getProviderCacheStats()).toEqual({ size: 1, connections: ["seed:orders"] });
   });
 });
 
@@ -2725,6 +3410,18 @@ describe("single-writer file reuse", () => {
     expect(findOpenSingleWriterProvider(dotted)).toBe(writable);
     expect(findOpenSingleWriterProvider(relative)).toBe(writable);
     await removeProvider(held.id);
+  });
+
+  test("a single-writer file keeps one handle for every owner, because a provider per user would be a second handle", async () => {
+    // Per-user providers stop at the engines that keep one handle per file (docs/GOVERNANCE.md#per-user-providers): a
+    // second owner's provider would be a second handle on the file, which this engine refuses (the first test of this
+    // group) and DuckDB corrupts. So the owner is left out of the key, and every owner is served the one open handle.
+    const conn = libredbConn();
+    const alice = await getOrCreateProvider(conn, {}, { owner: "alice-subject", ownerPoolMax: 3 });
+
+    expect(await getOrCreateProvider(conn, {}, { owner: "bob-subject", ownerPoolMax: 3 })).toBe(alice);
+    expect(await getOrCreateProvider(conn)).toBe(alice);
+    expect(getProviderCacheStats().size).toBe(1);
   });
 
   test("a connection with no file path holds no file, and matches nothing", async () => {

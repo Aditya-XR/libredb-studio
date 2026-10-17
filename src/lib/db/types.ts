@@ -2551,10 +2551,11 @@ export interface ProviderOptions {
  * Two producers pass it. `acquireExecutionProfileProvider` passes an execution
  * profile's context (`readOnly` and `sendsStatements`, with the requester's file-access
  * posture), which `executionContextFor` builds. The db routes pass the editor file-access posture
- * (`allowExternalFileAccess`) through `getOrCreateProvider` or `createDatabaseProvider`,
+ * (`allowExternalFileAccess`), and under governance the owner of a per-user provider
+ * (`owner`, `ownerPoolMax`), through `getOrCreateProvider` or `createDatabaseProvider`,
  * derived by `editorExecutionContext` (`src/lib/api/execution-context.ts`) from the
- * verified session and the resolved connection. `getOrCreateProvider` takes only that
- * posture (`EditorExecutionContext`) and refuses a `readOnly`, because its cache holds
+ * verified session and the resolved connection. `getOrCreateProvider` takes only those
+ * fields (`EditorExecutionContext`) and refuses a `readOnly`, because its cache holds
  * writable providers.
  *
  * For an embedder of `@libredb/studio/providers` the posture is a behaviour change: a
@@ -2630,15 +2631,40 @@ export interface ProviderExecutionContext {
    * with the trusted reach (docs/providers/sqlite.md).
    */
   allowExternalFileAccess?: boolean;
+  /**
+   * The user this provider is opened for (docs/GOVERNANCE.md#per-user-providers): in Studio, the identity provider
+   * subject of the session, which `editorExecutionContext` sets under governance only.
+   *
+   * Server-derived like the posture above. A provider with an owner is that user's own: the
+   * cache keys frame the owner, so two users of one connection never share a pool, a database
+   * session state or an interactive transaction, and the provider opens the pool of one user's
+   * share, see `ownerPoolMax`. Absent, which is every install without governance, the provider is
+   * the one every caller of the connection shares, exactly as before this field existed. An engine
+   * that keeps one handle per file (`SINGLE_WRITER_FILE` in `src/lib/db/compatibility.ts`) shares
+   * that handle whatever the owner.
+   */
+  owner?: string;
+  /**
+   * The most connections the pool of an owned provider may open: the factory opens it with
+   * `min: 0` and this `max`, so an idle user holds no connection and a busy one no more than this.
+   * Required with an `owner`, as a whole number from 1, and refused with a `DatabaseConfigError`
+   * otherwise; read only together with an owner.
+   */
+  ownerPoolMax?: number;
 }
 
 /**
- * The DuckDB editor file-access posture on its own (non-admin DuckDB file access): what `editorExecutionContext`
- * derives from the verified session and the resolved connection, what `getOrCreateProvider`
- * takes, and what an execution-profile acquisition is told about the requester it serves, so it
- * borrows only a handle opened under that requester's own posture. Absent means deny.
+ * What `editorExecutionContext` derives from the verified session and the resolved connection: the DuckDB editor
+ * file-access posture (non-admin DuckDB file access), and under governance the owner of a per-user provider
+ * (docs/GOVERNANCE.md#per-user-providers). It is what `getOrCreateProvider` takes, and what an execution-profile
+ * acquisition is told about the requester it serves, so it borrows only a handle opened under that requester's own
+ * posture and keeps a provider per owner. An absent posture means deny, and an absent owner means the provider every
+ * caller shares.
  */
-export type EditorExecutionContext = Pick<ProviderExecutionContext, "allowExternalFileAccess">;
+export type EditorExecutionContext = Pick<
+  ProviderExecutionContext,
+  "allowExternalFileAccess" | "owner" | "ownerPoolMax"
+>;
 
 // ============================================================================
 // Internal Types
@@ -3899,11 +3925,11 @@ export interface ObjectEditCurrentText {
  *
  * A PROVIDER DOES NOT THROW FOR A VERDICT ITS ENGINE REACHED. It RETURNS one of these, which is
  * what makes "a deliberate engine refusal is never a 500" a property of this type rather than of a
- * mapping table. MEASURED against the mapper this repository already has: `42501` becomes HTTP 401
- * "Authentication failed: permission denied for schema app" for a credential that is connected and
- * correct, `42P13` becomes HTTP 500, and SQLSTATE, `hint`, `severity`, `detail` and `where` are all
- * destroyed. Exceptions stay for what they are for, a programming error or an unexpected driver
- * fault.
+ * mapping table. MEASURED against the mapper this repository had when this type was written: `42501`
+ * became HTTP 401 "Authentication failed: permission denied for schema app" for a credential that is
+ * connected and correct, `42P13` became HTTP 500, and SQLSTATE, `hint`, `severity`, `detail` and
+ * `where` were all destroyed. Exceptions stay for what they are for, a programming error or an
+ * unexpected driver fault.
  */
 export type ObjectEditOutcome =
   /** The engine replaced the addressed object and destroyed nothing else. */
@@ -3988,10 +4014,10 @@ export type ObjectEditOutcome =
    *
    * There is NO `retryable` field on this type and no retry advice in it. MEASURED on the general
    * query path (`POST /api/db/query`), which routes through `mapDatabaseError`: since #1145 a
-   * PostgreSQL statement timeout answers HTTP 408 `TIMEOUT_ERROR` `retryable: true`, the same as
+   * PostgreSQL statement timeout answers HTTP 504 `TIMEOUT_ERROR` `retryable: true`, the same as
    * Trino, which mints a `TimeoutError` directly (`TrinoProvider.mapTrinoError()` in
    * `src/lib/db/providers/sql/trino/index.ts`). The apply route
-   * (`edit-apply/route.ts`) deliberately does NOT inherit that 408: it always answers 200 and never
+   * (`edit-apply/route.ts`) deliberately does NOT inherit that 504: it always answers 200 and never
    * carries a `retryable` flag, because a client that retries an apply whose disposition is unknown
    * applies twice. A PostgreSQL apply-time timeout does not even reach this `interrupted` arm —
    * `classifyApplyFailure` reads its SQLSTATE `57014`, which is not in `APPLY_VERDICT_BY_SQLSTATE`,

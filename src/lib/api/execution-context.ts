@@ -1,4 +1,6 @@
 import type { EditorExecutionContext } from "@/lib/db/types";
+import { governanceEnabled } from "@/lib/governance/config";
+import { runtimeSetting } from "@/lib/governance/settings";
 import type { DatabaseConnection } from "@/lib/types";
 
 /**
@@ -7,6 +9,18 @@ import type { DatabaseConnection } from "@/lib/types";
  * operator's, and so are the roles on the record.
  */
 const SEED_NAMESPACE = "seed:";
+
+/**
+ * The pool size of each user's provider under governance (docs/GOVERNANCE.md#per-user-providers) when the control plane
+ * set no valid `provider.poolMaxPerUser`: the default of that runtime setting (docs/GOVERNANCE.md#runtime-settings),
+ * which `tests/unit/lib/api/execution-context.test.ts` holds equal to the registry's.
+ */
+const OWNER_POOL_MAX = 3;
+
+// One template literal, never a concatenation across lines: bun's line coverage under-counts the continuation lines
+// of a message built that way.
+const SUBJECT_MISSING_MESSAGE =
+  "Under governance every provider belongs to one user, named by the identity provider's subject, and this session carries none";
 
 /**
  * Whether a role other than admin can resolve this record: a seed the operator's configuration offers
@@ -20,6 +34,29 @@ function openToNonAdminRoles(connection: DatabaseConnection): boolean {
   if (connection.id?.startsWith(SEED_NAMESPACE) !== true) return false;
   const roles: unknown = (connection as { roles?: unknown }).roles;
   return Array.isArray(roles) && roles.some((role) => role !== "admin");
+}
+
+/**
+ * The owner of a governed session's providers (docs/GOVERNANCE.md#per-user-providers): its identity provider subject,
+ * the key grants name a user by, never the username, which is a display label (docs/GOVERNANCE.md#row-semantics).
+ */
+function governedOwner(session: { idpSubject?: string }): string {
+  const subject = session.idpSubject;
+  // getSession() refuses a session without a subject under governance (src/lib/local-accounts.ts), and no grant names
+  // one, so one that gets here is an error, never a reason to hand it the provider every user of a connection shares.
+  if (typeof subject !== "string" || subject === "") throw new Error(SUBJECT_MISSING_MESSAGE);
+  return subject;
+}
+
+/**
+ * The owner of the providers a session's requests run on (docs/GOVERNANCE.md#per-user-providers): under governance the
+ * session's identity provider subject, and without governance none, because every caller of a connection shares its
+ * provider. The one place it is decided: `editorExecutionContext` names it for the providers a request opens, and
+ * `POST /api/db/disconnect` removes only this owner's providers, so the two can never disagree about whose providers
+ * they are.
+ */
+export function sessionOwner(session: { idpSubject?: string }): string | undefined {
+  return governanceEnabled() ? governedOwner(session) : undefined;
 }
 
 /**
@@ -49,10 +86,21 @@ function openToNonAdminRoles(connection: DatabaseConnection): boolean {
  *
  * It is deliberately NOT the agent read-only profile: this closes file access without making the
  * database read-only, which is the owner-scoped change.
+ *
+ * Under governance (`GOVERNANCE_SOURCE`, docs/GOVERNANCE.md) it also names the owner of a per-user provider
+ * (docs/GOVERNANCE.md#per-user-providers): `owner`, the session's identity provider subject, and `ownerPoolMax`, the
+ * pool size of that user's provider, the runtime setting `provider.poolMaxPerUser`. The size applies only when the
+ * factory creates a provider: the cache key does not frame it, so a provider already open keeps its pool until it is
+ * torn down. The factory keys, opens and records a provider per owner, so two users of one connection never share a
+ * pool, a database session state or an interactive transaction. Without governance neither field is set, and every
+ * caller of a connection shares its provider exactly as before.
  */
 export function editorExecutionContext(
-  session: { role: string },
+  session: { role: string; idpSubject?: string },
   connection: DatabaseConnection,
 ): EditorExecutionContext {
-  return { allowExternalFileAccess: session.role === "admin" && !openToNonAdminRoles(connection) };
+  const allowExternalFileAccess = session.role === "admin" && !openToNonAdminRoles(connection);
+  const owner = sessionOwner(session);
+  if (owner === undefined) return { allowExternalFileAccess };
+  return { allowExternalFileAccess, owner, ownerPoolMax: runtimeSetting("provider.poolMaxPerUser") ?? OWNER_POOL_MAX };
 }

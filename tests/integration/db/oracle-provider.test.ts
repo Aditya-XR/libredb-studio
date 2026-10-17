@@ -6,7 +6,16 @@ import {
   sourceBoundTruncationReason,
 } from "@/lib/db/object-kinds";
 import type oracledb from "oracledb";
-import { ConnectionError, DatabaseConfigError, DatabaseError, QueryError } from "@/lib/db/errors";
+import {
+  AuthenticationError,
+  ConnectionError,
+  DatabaseConfigError,
+  DatabaseError,
+  PermissionDeniedError,
+  QueryError,
+} from "@/lib/db/errors";
+import { createErrorResponse } from "@/lib/api/errors";
+import { ApiErrorCode } from "@/lib/api/error-codes";
 import type { DatabaseConnection } from "@/lib/types";
 import type { DatabaseProvider } from "@/lib/db/types";
 import { readFileSync } from "node:fs";
@@ -992,6 +1001,41 @@ describe("OracleProvider", () => {
 
       const result = await provider.query("DELETE FROM r5_types WHERE id = 4242");
       expect(result.rowCount).toBe(0);
+    });
+
+    // node-oracledb's Thin mode puts the server's number in `errorNum` and the ORA- prefix in `code`
+    // (`lib/thin/protocol/protocol.js` and `transformErr` in `lib/errors.js`, 6.10).
+    test("a missing privilege (ORA-01031) is a PermissionDeniedError answered 403", async () => {
+      await provider.connect();
+      mockExecuteFn = async () => {
+        throw Object.assign(new Error("ORA-01031: insufficient privileges"), { errorNum: 1031, code: "ORA-01031" });
+      };
+
+      const refused = await provider.query("INSERT INTO orders VALUES (1)").catch((error: unknown) => error);
+
+      expect(refused).toBeInstanceOf(PermissionDeniedError);
+      const response = createErrorResponse(refused, { route: "api/db/query" });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: "Permission denied: ORA-01031: insufficient privileges",
+        code: ApiErrorCode.PERMISSION_DENIED,
+        statusCode: 403,
+      });
+    });
+
+    test("a refused credential (ORA-01017) is still an AuthenticationError answered 401", async () => {
+      await provider.connect();
+      mockExecuteFn = async () => {
+        throw Object.assign(new Error("ORA-01017: invalid credential or not authorized; logon denied"), {
+          errorNum: 1017,
+          code: "ORA-01017",
+        });
+      };
+
+      const refused = await provider.query("SELECT 1 FROM DUAL").catch((error: unknown) => error);
+
+      expect(refused).toBeInstanceOf(AuthenticationError);
+      expect(createErrorResponse(refused, { route: "api/db/query" }).status).toBe(401);
     });
 
     // A PL/SQL block and DDL both leave `rowsAffected` unset or 0 on the wire
@@ -2309,6 +2353,130 @@ describe("OracleProvider", () => {
 
       mockExecuteFn = async (sql: string) => defaultExecute(sql);
       await provider.rollbackTransaction();
+    });
+
+    // The five-minute timeout of PostgreSQL and MySQL, armed only on a provider created with an owner
+    // (docs/providers/oracle.md section 3.4). TX_TIMEOUT_MS is a compile-time-private static read when
+    // beginTransaction() arms the timer, so these tests shrink it at runtime the way the MySQL suite does.
+    describe("the owned-provider transaction timeout", () => {
+      const providerStatics = OracleProvider as unknown as { TX_TIMEOUT_MS: number };
+      const timerOf = (target: InstanceType<typeof OracleProvider>) =>
+        (target as unknown as { txTimeout: unknown }).txTimeout;
+      const owned = () => new OracleProvider(baseConfig, {}, { owner: "subject-a", ownerPoolMax: 3 });
+      let originalTimeout: number;
+      let rollbacks: number;
+      let closes: number;
+      let rollbackFn: () => Promise<void>;
+
+      beforeEach(() => {
+        originalTimeout = providerStatics.TX_TIMEOUT_MS;
+        rollbacks = 0;
+        closes = 0;
+        rollbackFn = async () => {
+          rollbacks++;
+        };
+        mockConnCloseFn = async () => {
+          closes++;
+        };
+        mockCreatePoolFn = async () => ({
+          ...createMockPool(),
+          getConnection: async () => ({ ...createMockConnection(), rollback: () => rollbackFn() }),
+        });
+      });
+
+      afterEach(() => {
+        providerStatics.TX_TIMEOUT_MS = originalTimeout;
+      });
+
+      test("the timeout is five minutes from BEGIN", () => {
+        expect(originalTimeout).toBe(5 * 60 * 1000);
+      });
+
+      test("transaction auto-rolls back when the timeout timer fires on an owned provider", async () => {
+        providerStatics.TX_TIMEOUT_MS = 5;
+        provider = owned();
+        await provider.connect();
+        closes = 0; // connect() closes the connection it probed with
+        await provider.beginTransaction();
+        expect(provider.isInTransaction()).toBe(true);
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(provider.isInTransaction()).toBe(false);
+        expect(rollbacks).toBe(1);
+        expect(closes).toBe(1);
+        expect(timerOf(provider)).toBeNull();
+        await expect(provider.commitTransaction()).rejects.toThrow("No active transaction");
+      });
+
+      test("a provider without an owner keeps today's transaction lifetime", async () => {
+        providerStatics.TX_TIMEOUT_MS = 5;
+        await provider.connect();
+        await provider.beginTransaction();
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(provider.isInTransaction()).toBe(true);
+        expect(rollbacks).toBe(0);
+        expect(timerOf(provider)).toBeNull();
+        await provider.rollbackTransaction();
+        expect(rollbacks).toBe(1);
+      });
+
+      test("commit, rollback and disconnect clear the timer of an owned provider", async () => {
+        provider = owned();
+        await provider.connect();
+
+        await provider.beginTransaction();
+        expect(timerOf(provider)).not.toBeNull();
+        await provider.commitTransaction();
+        expect(timerOf(provider)).toBeNull();
+
+        await provider.beginTransaction();
+        expect(timerOf(provider)).not.toBeNull();
+        await provider.rollbackTransaction();
+        expect(timerOf(provider)).toBeNull();
+
+        await provider.beginTransaction();
+        expect(timerOf(provider)).not.toBeNull();
+        await provider.disconnect();
+        expect(timerOf(provider)).toBeNull();
+      });
+
+      test("a failed auto-rollback still releases the connection, and a failed release says why", async () => {
+        const warn = spyOn(console, "warn").mockImplementation(() => {});
+        rollbackFn = async () => {
+          throw new Error("ORA-03113: end-of-file on communication channel");
+        };
+        try {
+          provider = owned();
+          await provider.connect();
+          await provider.beginTransaction();
+          closes = 0; // connect() closes the connection it probed with
+          mockConnCloseFn = async () => {
+            closes++;
+            throw new Error("NJS-003: invalid or closed connection");
+          };
+
+          await provider.expireTransaction();
+          expect(provider.isInTransaction()).toBe(false);
+          expect(closes).toBe(1);
+          expect(timerOf(provider)).toBeNull();
+          const warnings = warn.mock.calls.map((call) => String(call[0])).join("\n");
+          expect(warnings).toContain("ORA-03113");
+          expect(warnings).toContain("NJS-003");
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      test("expireTransaction is a no-op without an active transaction", async () => {
+        provider = owned();
+        await provider.connect();
+        closes = 0; // connect() closes the connection it probed with
+        await provider.expireTransaction();
+        expect(provider.isInTransaction()).toBe(false);
+        expect(rollbacks).toBe(0);
+        expect(closes).toBe(0);
+      });
     });
   });
 

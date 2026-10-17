@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { ApiErrorCode } from "@/lib/api/error-codes";
+import { API_CODES } from "@/lib/governance/contract";
 
 /**
  * The groups the source declares, restated here so each one is named by a test.
@@ -23,6 +24,7 @@ const GROUPS = {
     "QUERY_ERROR",
     "CONFIG_ERROR",
     "AUTH_ERROR",
+    "PERMISSION_DENIED",
     "TIMEOUT_ERROR",
     "CONNECTION_ERROR",
     "POOL_EXHAUSTED",
@@ -33,6 +35,13 @@ const GROUPS = {
   rateLimit: ["RATE_LIMITED"],
   session: ["AUTH_REQUIRED", "WORKSPACE_OWNER_MISMATCH"],
   connectionPolicy: ["CUSTOM_CONNECTIONS_DISABLED"],
+  governance: [
+    "AI_DISABLED",
+    "AUDIT_UNAVAILABLE",
+    "CONNECTION_NOT_FOUND",
+    "GOVERNANCE_UNAVAILABLE",
+    "TRANSACTION_CREDENTIAL_CHANGED",
+  ],
   generic: ["INTERNAL_ERROR", "NETWORK_ERROR"],
 } as const;
 
@@ -61,6 +70,11 @@ describe("ApiErrorCode", () => {
     for (const code of GROUPS.generic) expect(ApiErrorCode[code]).toBe(code);
   });
 
+  test("contains the database's privilege refusal code, distinct from its refused credential's AUTH_ERROR", () => {
+    expect(ApiErrorCode.PERMISSION_DENIED).toBe("PERMISSION_DENIED");
+    expect(ApiErrorCode.PERMISSION_DENIED).not.toBe(ApiErrorCode.AUTH_ERROR);
+  });
+
   test("contains the session-required code, distinct from a database's AUTH_ERROR", () => {
     expect(ApiErrorCode.AUTH_REQUIRED).toBe("AUTH_REQUIRED");
     expect(ApiErrorCode.AUTH_REQUIRED).not.toBe(ApiErrorCode.AUTH_ERROR);
@@ -74,6 +88,38 @@ describe("ApiErrorCode", () => {
   test("contains the custom-connections refusal code, distinct from a role refusal's AUTH_ERROR", () => {
     expect(ApiErrorCode.CUSTOM_CONNECTIONS_DISABLED).toBe("CUSTOM_CONNECTIONS_DISABLED");
     expect(ApiErrorCode.CUSTOM_CONNECTIONS_DISABLED).not.toBe(ApiErrorCode.AUTH_ERROR);
+  });
+
+  test("contains the governance code a data route answers while the snapshot cannot be served", () => {
+    for (const code of GROUPS.governance) expect(ApiErrorCode[code]).toBe(code);
+    expect(ApiErrorCode.GOVERNANCE_UNAVAILABLE).not.toBe(ApiErrorCode.CONNECTION_ERROR);
+  });
+
+  test("contains the governed miss, one code for a connection that does not exist and one not granted", () => {
+    expect(ApiErrorCode.CONNECTION_NOT_FOUND).toBe("CONNECTION_NOT_FOUND");
+    expect(ApiErrorCode.CONNECTION_NOT_FOUND).not.toBe(ApiErrorCode.AUTH_ERROR);
+  });
+
+  test("contains the governed refusal of a transaction whose grant level or credential changed while it was open", () => {
+    expect(ApiErrorCode.TRANSACTION_CREDENTIAL_CHANGED).toBe("TRANSACTION_CREDENTIAL_CHANGED");
+  });
+
+  test("contains the governed refusal of the AI routes while the runtime setting ai.enabled is false", () => {
+    expect(ApiErrorCode.AI_DISABLED).toBe("AI_DISABLED");
+    expect(ApiErrorCode.AI_DISABLED).not.toBe(ApiErrorCode.LLM_UNCONFIGURED);
+  });
+
+  test("contains the governed refusal of an execution while query events cannot be recorded", () => {
+    expect(ApiErrorCode.AUDIT_UNAVAILABLE).toBe("AUDIT_UNAVAILABLE");
+    expect(ApiErrorCode.AUDIT_UNAVAILABLE).not.toBe(ApiErrorCode.GOVERNANCE_UNAVAILABLE);
+  });
+
+  test("every API code governance contract v1 publishes is declared, in the governance group", () => {
+    const declared: readonly string[] = Object.keys(ApiErrorCode);
+    const governance: readonly string[] = GROUPS.governance;
+    const published = API_CODES.map((entry) => entry.code);
+    expect(published.length).toBeGreaterThan(0);
+    expect(published.filter((code) => !declared.includes(code) || !governance.includes(code))).toEqual([]);
   });
 
   test("contains the application rate-limit error code", () => {

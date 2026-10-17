@@ -85,6 +85,7 @@ The middleware (`src/proxy.ts`) gates every route: all of them require a valid `
 - `/api/auth/*`: login, logout, me, OIDC login/callback, `POST /api/auth/passkey/sign-in` and `POST /api/auth/launch`, which create the session and so cannot need one; the other auth routes that act on an account (`/api/auth/totp`, `/api/auth/passkey`) check the session themselves
 - `/launch`: the page a platform's launch link opens; it posts the token from its URL fragment to `POST /api/auth/launch`, after a Continue click when the browser has no session ([LAUNCH.md](./LAUNCH.md))
 - `/health` and `/api/health` — liveness, fully public, no dependencies
+- `GET /api/ready` — readiness, fully public; it reads only the in-process governance state ([GOVERNANCE.md](./GOVERNANCE.md#freshness-and-readiness))
 - `/api/db/health` — excluded from the middleware for **both** methods; `GET` is fully public and answers the same as the two above, while `POST` performs its own session check and returns JSON `401` if unauthenticated
 - `GET /api/storage/config` — storage-mode discovery (returns `{ provider, serverMode }`, no user data)
 
@@ -194,7 +195,7 @@ Get current authenticated user information.
 }
 ```
 
-> The `user` object is the JWT session payload (`role`, `username`, and `sessionVersion` for an account in the server store). It is a public route in the middleware but self-checks the cookie, returning `{ "authenticated": false }` when absent/invalid.
+> The `user` object is the JWT session payload (`role`, `username`, `sessionVersion` for an account in the server store, and `idpSubject` and `idpIssuer` for an OIDC sign-in, see [OIDC.md](./OIDC.md#session-identity)). It is a public route in the middleware but self-checks the cookie, returning `{ "authenticated": false }` when absent/invalid.
 > With `STORAGE_PROVIDER=sqlite` or `postgres` and local sign-in, a session whose stored account was disabled, deleted, demoted or password-reset since it was issued also answers `401`.
 
 #### GET /api/auth/totp
@@ -280,6 +281,7 @@ Each refusal and each malformed body spends one unit of the `passkey_client` bud
 Exchanges a platform launch token for a session; no session is needed ([LAUNCH.md](./LAUNCH.md)).
 The `/launch` page posts it with the token from its URL fragment: at once when the browser holds a session, and otherwise only after the person clicks Continue on a page that names the account the token signs into.
 With local sign-in the route exists only while `LAUNCH_TOKEN_SECRET` is set; under `NEXT_PUBLIC_AUTH_PROVIDER=oidc` it answers `503`.
+In governance mode (`GOVERNANCE_SOURCE`) it answers `404` whatever the launch variables say, and so does the `/launch` page.
 
 **Request:**
 ```json
@@ -292,11 +294,11 @@ With local sign-in the route exists only while `LAUNCH_TOKEN_SECRET` is set; und
 | `400` | `{ "success": false, "message": "Invalid request body" }` | The body is not JSON or carries no non-empty string `token` |
 | `401` | `{ "success": false, "message": "<reason>" }` | The token is refused, or its account is disabled |
 | `403` | `{ "success": false, "message": "<reason>" }` | The email is `ADMIN_EMAIL`, or with `STORAGE_PROVIDER=local` `USER_EMAIL` while `USER_PASSWORD` is set; in the server store, the account has a password, an authenticator or a passkey, or a launch created it for another `iss` or `sub` |
-| `404` | `{ "success": false, "message": "Launch sign-in is not enabled on this server." }` | `LAUNCH_TOKEN_SECRET` is unset or empty and `NEXT_PUBLIC_AUTH_PROVIDER` is not `oidc` |
+| `404` | `{ "success": false, "message": "Launch sign-in is not enabled on this server." }` | `LAUNCH_TOKEN_SECRET` is unset or empty and `NEXT_PUBLIC_AUTH_PROVIDER` is not `oidc`, or governance mode is on |
 | `409` | `{ "success": false, "message": "<reason>", "signedInAs": "<current username>", "launchFor": "<token email>" }` | The browser holds a valid session for another account; that session stays and the token is spent |
 | `409` | `{ "success": false, "message": "<reason>" }` | The role change would demote the last enabled admin, or crossed another change to the account |
 | `413` | `{ "success": false, "message": "Request body is too large" }` | The body is over 8192 bytes |
-| `503` | `{ "success": false, "message": "<problem>" }` | `NEXT_PUBLIC_AUTH_PROVIDER=oidc` (`Launch sign-in is not available when NEXT_PUBLIC_AUTH_PROVIDER=oidc.`), the launch variables are misconfigured, the server cannot sign sessions, or more launches arrived in the last minute than the process can remember |
+| `503` | `{ "success": false, "message": "<problem>" }` | `NEXT_PUBLIC_AUTH_PROVIDER=oidc` outside governance mode (`Launch sign-in is not available when NEXT_PUBLIC_AUTH_PROVIDER=oidc.`), the launch variables are misconfigured, the server cannot sign sessions, or more launches arrived in the last minute than the process can remember |
 
 Every answer carries `Cache-Control: no-store`.
 The `401` messages name the refusal (expired, already used, issued for a different Studio, not signed for this Studio, and the rest), and the audit log records one reason per refusal; [LAUNCH.md](./LAUNCH.md#audit) lists them.
@@ -328,6 +330,48 @@ a dead application.
   "status": "healthy",
   "timestamp": "2025-12-24T12:00:00.000Z",
   "service": "libredb-studio"
+}
+```
+
+---
+
+#### GET /api/ready
+
+Readiness, for orchestrators: whether this instance can serve data routes now.
+Liveness stays on the three paths above, which depend on nothing, so a governance source that is down never gets a healthy instance restarted.
+Point the readiness probe here and the liveness probe at `GET /api/db/health`.
+
+The route answers one JSON body in every state and never opens a user database.
+Without governance it always answers `200` with `status` `ready`.
+Under governance (`GOVERNANCE_SOURCE=postgres`) it answers the freshness state of the governance snapshot:
+
+| `status` | HTTP | When |
+|----------|------|------|
+| `ready` | 200 | Governance is off |
+| `ok` | 200 | The snapshot is fresh |
+| `degraded` | 200 | Reloads fail and the snapshot is past the refresh interval, also once it is past the maximum staleness, so an administrator can still reach the status page while data routes answer `503 GOVERNANCE_UNAVAILABLE` |
+| `loading` | 503 | No snapshot has loaded since the start |
+| `misconfigured` | 503 | The governance source lacks an object, a column, the schema or a privilege, or the keyring is unusable; `detail` names it |
+| `incompatible` | 503 | No contract version is common to both sides; `detail` lists both version sets |
+
+The route only reads the state and never starts a load; the background refresher retries while the snapshot is absent or old.
+`detail` holds Studio's own words only, the contract object with its SQLSTATE, the keyring variable or both version sets, never the server's or the keyring loader's message.
+The answer carries `Cache-Control: no-store`.
+The body's JSON Schema is `readiness.schema` in `tests/fixtures/governance/contract-v1.json`, and [GOVERNANCE.md](./GOVERNANCE.md#freshness-and-readiness) describes the states.
+
+**Authentication:** Not required
+
+**Response (200 OK, governance off):**
+```json
+{ "status": "ready", "contract": { "supported": [1], "active": null } }
+```
+
+**Response (503 Service Unavailable, governance on):**
+```json
+{
+  "status": "misconfigured",
+  "contract": { "supported": [1], "active": null },
+  "detail": "bridge.grants_v1: 42501"
 }
 ```
 
@@ -608,12 +652,19 @@ Three refusals, each a 400 that runs nothing:
 }
 ```
 
-**Response (408 Request Timeout):**
+**Response (504 Gateway Timeout):**
 ```json
 {
-  "error": "Query timed out. Please try a simpler query or increase timeout."
+  "error": "Query timed out. Please try a simpler query or increase timeout.",
+  "code": "TIMEOUT_ERROR",
+  "statusCode": 504,
+  "retryable": true
 }
 ```
+
+A statement that reaches its query timeout is answered with HTTP 504, never 408.
+Chromium sends a POST answered 408 on a reused keep-alive connection again without telling the page, so a 408 ran one editor run of a statement that timed out up to six times on the database.
+`retryable` is a hint for the person reading the error: no Studio client sends the request again on it.
 
 A deadline met while Studio opens the connection, before any statement is sent, is not a query timeout: it is answered with HTTP 503, code `CONNECTION_ERROR`, and "The connection got no answer after [seconds] seconds: check the address, the port, the network path and that the server is running."
 
@@ -1292,8 +1343,9 @@ engine as broken.
 | `path` absent, or not an array of strings | `400` | `{ "error": "\"path\" must be an array of path segments" }` |
 | `path` empty | `400` | `{ "error": "\"path\" must name an object, and an empty path names none" }` |
 | `kind` absent, not a string, or blank | `400` | `{ "error": "\"kind\" must be a non-empty string" }` |
-| The engine refused the read: a kind it does not declare, a path shape that kind does not take, a permission error | `400` | `{ "error": "<the engine's own sentence>", "code": "QUERY_ERROR" }` |
+| The engine refused the read: a kind it does not declare, a path shape that kind does not take | `400` | `{ "error": "<the engine's own sentence>", "code": "QUERY_ERROR" }` |
 | No session | `401` | `{ "error": "Authentication required", "code": "AUTH_REQUIRED" }` |
+| The engine refused the read for a privilege the connection's credential lacks | `403` | `{ "error": "Permission denied: <the engine's own sentence>", "code": "PERMISSION_DENIED" }`, on the engines [Error Codes](#error-codes) lists |
 | Seed connection not available for the caller's role | `403` | the existing `SeedConnectionError` body |
 | Rate limited | `429` | `{ "error": "...", "code": "RATE_LIMITED" }` |
 | Anything undeclared | `500` | `createErrorResponse`'s body |
@@ -1597,6 +1649,16 @@ one that had started ends there. A caller that disconnects aborts the provider r
 fixed, not configurable: the Query Safety dialog, the only caller in this repo, stops waiting after 15 seconds
 (`QUERY_SAFETY_ANALYSIS_TIMEOUT_MS`), aborts its request and lets the statement run without the analysis.
 
+Under governance (`GOVERNANCE_SOURCE=postgres`) the control plane can switch the three off with the runtime setting `ai.enabled` ([`docs/GOVERNANCE.md`](GOVERNANCE.md#runtime-settings)).
+While it is `false`, each of them answers a signed-in caller before any LLM provider is built and before the rate limit is spent:
+
+```json
+// 403 Forbidden
+{ "error": "AI assistance is switched off on this server", "code": "AI_DISABLED", "statusCode": 403 }
+```
+
+A caller without a session still gets `401`, and without governance, or while `ai.enabled` is `true` or unset, the endpoints answer as the environment configured them.
+
 **Provider-surfaced errors**
 
 These come from the configured **LLM provider** (bad API key, quota, safety filter), not from session
@@ -1659,7 +1721,7 @@ required", "code": "AUTH_REQUIRED" }` without a session). Never `500`, and never
 |-------|---------|
 | `enabled` | A literal boolean. The rail compares `=== true` |
 | `ledgerVerified` | `true` when the durable ledger's writable-path probe passed; `false` for the Postgres backend, which is accepted without being contacted |
-| `reason` | One code per operator action: `OPERATOR_DISABLED`, `NO_MODEL_CONFIGURED`, `LEDGER_UNAVAILABLE`, `LEDGER_INCOMPATIBLE`, `UNSANCTIONED_WORLD_TARGET`, `IMPLICIT_HOSTED_WORLD`. Sent to every session |
+| `reason` | One code per operator action: `GOVERNANCE_HOLD`, `OPERATOR_DISABLED`, `NO_MODEL_CONFIGURED`, `LEDGER_UNAVAILABLE`, `LEDGER_INCOMPATIBLE`, `UNSANCTIONED_WORLD_TARGET`, `IMPLICIT_HOSTED_WORLD`. `GOVERNANCE_HOLD` means governance mode (`GOVERNANCE_SOURCE`) holds the agent off in this version. Sent to every session |
 | `detail` | The underlying message. **Admin sessions only** — the ledger codes' carry an absolute server path plus an OS error string or a quoted fragment of a file on that disk. Every other session gets one stable sentence instead |
 
 This route is **not** metered out of the `ai` bucket: a visibility probe must not spend a run's
@@ -1970,7 +2032,7 @@ The answers, in the order they are checked:
 |---|---|---|
 | 403 | JSON-RPC `-32000`: `Invalid Origin: <host>`, `Invalid Host: <host>` or `Missing Host header` | The `Origin` is not on the MCP allowlist, or on a loopback bind the `Host` is not |
 | 401 | `{"error":"invalid_token","error_description":"..."}` with `WWW-Authenticate: Bearer error="invalid_token", error_description="...", scope="mcp:read"` | No bearer, or one that does not verify |
-| 404 | `{"error":"MCP is not enabled on this server"}` | `LIBREDB_MCP_ENABLED` is off |
+| 404 | `{"error":"MCP is not enabled on this server"}` | `LIBREDB_MCP_ENABLED` is off, or governance mode (`GOVERNANCE_SOURCE`) holds MCP off in this version |
 | 500 | `{"error":"..."}` naming `LIBREDB_MCP_ENABLED` or `NEXT_PUBLIC_APP_VERSION`, or the OAuth `server_error` body | An unrecognized switch value, an unset server version, or a server fault during verification |
 | 429 | The rate-limit body of [Error Handling](#error-handling), with `Retry-After` | The per-user query budget is spent |
 | 415, 413, 400 | JSON-RPC `-32000`, `-32700`, `-32600` or `-32020` | A body that is not JSON, over 4 MiB, unreadable or invalid, a batch, or a standard header outside visible ASCII or missing after `initialize` |
@@ -2011,7 +2073,8 @@ Mints a token for the signed-in user and role; it reads no body field and spends
 
 ### Storage API
 
-The write-through storage sync layer (see [`docs/STORAGE.md`](STORAGE.md)). Data is per-user, keyed by the session username.
+The write-through storage sync layer (see [`docs/STORAGE.md`](STORAGE.md)).
+Data is per-user, keyed by the session username, or under governance by `sub:` followed by the identity provider's subject ([`docs/STORAGE.md`](STORAGE.md#governance-mode)).
 
 In server storage mode a browser tab that has matched its copy of the workspace to the signed-in account sends that account's username, URI-encoded, in the `X-LibreDB-Workspace-Owner` header on every request it makes through `appFetch`, not only on the storage routes.
 When the header is present and does not name the session's username, the middleware (`src/proxy.ts`) answers `409 { "error": "...", "code": "WORKSPACE_OWNER_MISMATCH" }` before any route runs, and the browser reloads the tab so the owner check runs again for the account signed in now.
@@ -2078,6 +2141,18 @@ that file. The browser holds the second as an unread seed list rather than an em
 what stops the agent rail reporting a connection's settings as browser-local when the server's own
 configuration is what failed.
 
+In governance mode (`GOVERNANCE_SOURCE` set, [`docs/GOVERNANCE.md`](GOVERNANCE.md)) it lists the connections the session's identity provider subject holds an unexpired grant on, by name, for an admin as for a user, and nothing for a session without a subject.
+Each is a `managed: true` record of the credential of the grant's level, with every secret-classified field stripped and `queryTimeout: 60000`, and no server-only field.
+`cacheHint` is `10000`, so a grant made or revoked in the control plane reaches the list within seconds, and `pendingSeeds` is `[]`.
+While the governance snapshot cannot be served (still loading, older than `GOVERNANCE_MAX_STALENESS_MS`, misconfigured or incompatible) it answers `503` instead of an empty list:
+
+```json
+{
+  "error": "Connection access is unavailable while this server cannot read its governance source",
+  "code": "GOVERNANCE_UNAVAILABLE"
+}
+```
+
 #### GET /api/connections/policy
 
 Auth required; without a session it answers `401 { "error": "Authentication required", "code": "AUTH_REQUIRED" }`.
@@ -2088,10 +2163,64 @@ It answers what this server lets a session do with connections of its own:
 ```
 
 `customConnections` is `false` when `ALLOW_CUSTOM_CONNECTIONS` is `false`, `0`, `off` or `no`, or any value that is not one of those or `true`, `1`, `on` or `yes` (the switch fails closed; one pair of surrounding quotes is stripped first).
+It is also `false` in governance mode (`GOVERNANCE_SOURCE` set), whatever `ALLOW_CUSTOM_CONNECTIONS` says ([`docs/SEED_CONNECTIONS.md`](SEED_CONNECTIONS.md#governance-mode)).
+In governance mode the answer also carries `"governance": true` and `statementCapture`, the active `queryLog.statementCapture` runtime setting (`none`, `redacted` or `full`, `none` when the control plane set no valid value), and the editor shows a one-line notice while it is `full` ([`docs/GOVERNANCE.md`](GOVERNANCE.md#runtime-settings)).
 Every database route then refuses a connection supplied in the request body, as `connection` or as the whole body, with `403 { "error": "Custom connections are disabled on this server", "code": "CUSTOM_CONNECTIONS_DISABLED", "statusCode": 403 }`, before any provider is built.
 A seed named by `connectionId`, or by an inline record whose `id` is `seed:<id>`, is unaffected.
 `POST /api/admin/fleet-health` reports such an item as `{ "status": "error", "error": "Custom connections are disabled on this server" }` beside the others.
 See [`docs/SEED_CONNECTIONS.md`](SEED_CONNECTIONS.md#custom-connections).
+
+#### Connections under governance
+
+In governance mode every database route that opens a connection, and each item of `POST /api/admin/fleet-health`, resolves a `connectionId` of the form `seed:<id>`, or an inline record whose `id` is one, from the caller's grants alone ([`docs/GOVERNANCE.md`](GOVERNANCE.md)).
+It opens the connection with the credential of the grant's level, and an admin holds only its own grants.
+A connection that does not exist, one granted to someone else, an expired grant and a row Studio did not admit all answer the same `404`, and the refusal is audited as `permission_denied` with reason `connection_not_granted`:
+
+```json
+{
+  "error": "Connection not found: it does not exist or is not granted to you",
+  "code": "CONNECTION_NOT_FOUND",
+  "statusCode": 404
+}
+```
+
+While the governance snapshot cannot be served, every such request answers `503`, whatever the id:
+
+```json
+{
+  "error": "Connection access is unavailable while this server cannot read its governance source",
+  "code": "GOVERNANCE_UNAVAILABLE",
+  "statusCode": 503
+}
+```
+
+A connection the request supplies is refused with `403` and the code `CUSTOM_CONNECTIONS_DISABLED` in every state, as `GET /api/connections/policy` describes.
+
+With the runtime setting `queryLog.onSinkFailure` set to `refuse`, a request that would run a statement answers `503` before the statement reaches the database while Studio cannot record query events: it is backing off after a failed insert of query events, or its query event queue holds at least 9000 events, 90% of its capacity ([`docs/GOVERNANCE.md`](GOVERNANCE.md#query-events)).
+A row the governance source refused for good never causes it, and with `continue`, the default, no request is refused:
+
+```json
+{
+  "error": "Query execution is unavailable while this server cannot record query events",
+  "code": "AUDIT_UNAVAILABLE",
+  "statusCode": 503
+}
+```
+
+A transaction opened through `POST /api/db/transaction` runs on the caller's own provider, opened with the credential of the caller's grant level at `begin`.
+When that grant level or the connection's credential changes while the transaction is open, for example a write grant downgraded to read, the caller's next request on the connection rolls the transaction back and answers `409` whatever its `action`, `status` included.
+Nothing of the request runs, and no connection is opened with the new credential to answer it:
+
+```json
+{
+  "error": "Your access to this connection changed while your transaction was open, so the transaction was rolled back and none of its changes were saved. Begin a new transaction to continue with your current access.",
+  "code": "TRANSACTION_CREDENTIAL_CHANGED",
+  "rolledBack": true
+}
+```
+
+`rolledBack` is `false` when the rollback failed or did not finish within 5 seconds: the error then says that Studio could not confirm it, and the failure is logged.
+The transaction is released either way, so the next request runs with the new credential, and a `begin` opens a new transaction there.
 
 ---
 
@@ -2134,12 +2263,22 @@ Every change, and every refused one, is an `account` event in the audit log nami
 
 The status of the CapRover discovery source ([SEED_CONNECTIONS.md](./SEED_CONNECTIONS.md)), read by the admin Overview page.
 It goes through the shared route guard: `401` with no session, `403` for a non-admin.
-With `SEED_DISCOVERY_PATH` unset it answers `{ "discovery": null }`.
+With `SEED_DISCOVERY_PATH` unset it answers `{ "discovery": null }`, and so it does in governance mode (`GOVERNANCE_SOURCE` set), whatever `SEED_DISCOVERY_PATH` says ([`docs/SEED_CONNECTIONS.md`](./SEED_CONNECTIONS.md#governance-mode)).
 Otherwise it answers `{ "discovery": { "platform": "caprover", "state", "message", "generatedAt", "checkedAt", "error": { "code", "message" } | null, "connected": [{ "name", "type" }], "skipped": [{ "appName", "reason" }] }, "transport": { "plainHttp", "cookieSecureOff" } }`, where `state` is `ok`, `waiting`, `stale` or `error`.
 It names apps and engine types only, never a host name or an environment value.
 `plainHttp` is true when the request arrived over http on a host that is not loopback; `X-Forwarded-Proto` and `X-Forwarded-Host` are read unless `TRUST_PROXY_HEADERS` is `false`, `off` or `0`, in any letter case.
 `cookieSecureOff` is true when `AUTH_COOKIE_SECURE` is `false`, `off` or `0`, in any letter case.
 Both flags drive a display warning and never a security decision.
+
+#### GET /api/admin/governance
+
+The governance status of this instance ([GOVERNANCE.md](./GOVERNANCE.md#admin-status)), read by the admin Overview page.
+It goes through the shared route guard: `401` with no session, `403` for a non-admin, and that refusal is audited as `permission_denied` with reason `insufficient_role`.
+With governance off (`GOVERNANCE_SOURCE` unset) it answers `{ "governance": null }`.
+Otherwise it answers `{ "governance": { "source", "schema", "contract": { "supported", "published", "active" }, "freshness", "snapshot": { "loadedAt", "ageMs" } | null, "lastError": { "at", "kind", "code" } | null, "admittedConnections", "skipped": [{ "kind", "id", "level"?, "path"?, "code", "envelopeCode"? }], "keyringKids" } }`.
+`freshness` is `loading`, `ok`, `degraded`, `unavailable`, `misconfigured` or `incompatible`, and `published`, `active`, `snapshot` and `admittedConnections` are null before the first successful load.
+It names ids, levels, paths and codes only, never a definition value, an envelope, a credential or a statement.
+It answers `500` only when building the status throws, such as when the keyring file does not load.
 
 #### GET /api/admin/seed-sources
 
@@ -2147,6 +2286,7 @@ The status of the operator seed sources ([SEED_CONNECTIONS.md](./SEED_CONNECTION
 It goes through the shared route guard: `401` with no session, `403` for a non-admin.
 It answers `{ "sources": [{ "source", "location", "state", "checkedAt", "error": { "code", "message" } | null, "connected": [{ "id", "name", "type" }], "skipped": [{ "id", "origin", "reason", "variable"?, "field"? }], "notes": [...] }] }`, one entry per enabled source in load order, where `state` is `ok`, `empty`, `missing` or `error`.
 The only operator source today is `SEED_CONFIG_PATH`, so `sources` holds at most that one entry: `source` is `"SEED_CONFIG_PATH"` and `location` is the seed file's path.
+In governance mode (`GOVERNANCE_SOURCE` set) no operator source is read, so it answers `{ "sources": [] }` ([`docs/SEED_CONNECTIONS.md`](./SEED_CONNECTIONS.md#governance-mode)).
 `missing` is a file named explicitly in `SEED_CONFIG_PATH` that does not exist; the default path absent is `empty`.
 `error.code` is `unreadable`, `unparseable`, `invalid` or `duplicate-id`.
 `notes` is always empty.
@@ -2157,6 +2297,19 @@ A source that fails is reported here with `state: "error"` while `GET /api/conne
 ---
 
 > **Internal routes (not part of this public reference).** The frontend also calls several internal `/api/db/*` endpoints that mirror provider internals and change with the UI: `multi-query`, `transaction`, `cancel`, `disconnect`, `test-connection`, `monitoring`, `pool-stats`, `profile`, `provider-meta`, and the object-surface routes under `objects/` that are not documented above (`describe`, `edit-plan` and `edit-apply` are). They're auth-gated by the middleware like everything else; consult the route handlers in `src/app/api/db/` for their shapes.
+>
+> Under governance (`GOVERNANCE_SOURCE=postgres`, see [GOVERNANCE.md](GOVERNANCE.md)) `POST /api/db/monitoring` is admin-only: a session whose role is not `admin` gets `403` with `{"error": "Unauthorized. Admin access required."}` before any connection is resolved, and the denial is audited as `permission_denied` with reason `insufficient_role`.
+> Without governance every signed-in session keeps its monitoring access.
+>
+> `POST /api/db/disconnect` takes the connection as the other `/api/db/*` routes do, `{"connectionId": "seed:<id>"}` for a managed connection or `{"connection": {...}}` with the record of a connection of the user's own, and answers `{"success": true}`.
+> A body that names neither answers `400` with `{"success": false, "error": "Either connection or connectionId is required"}`.
+> Under governance it removes only the caller's own providers of that connection, the ones opened for the session's identity provider subject, for the editor and the agent alike.
+> It rolls back the caller's open transaction there first, and answers within 15 seconds even when the database does not: it waits at most 5 seconds for the rollback and at most 10 for the provider's sessions to close.
+> Another user's providers, transactions and running statements on the same connection stay as they are.
+> Without governance it resolves a connection of the user's own from its record, as every route does, and removes only the providers cached under that record's own key, which frames its server and credentials: the editor's provider of that record and any agent provider opened from it, so a request naming another user's connection id closes nothing of theirs.
+> The SSH tunnel of the connection closes only once no provider of it is left, a bare id outside the `seed:` namespace answers `400` as on every route, and the record is refused with `403 CUSTOM_CONNECTIONS_DISABLED` while custom connections are off.
+> A `seed:` id removes nothing without governance and answers `{"success": true}`, because one provider serves every user of that seed, and the idle sweep closes it once it has been idle for 30 minutes.
+> `POST /api/db/cancel` reaches only the statements the caller's own provider runs, so under governance a `queryId` that another user's statement runs under answers `{"cancelled": false}` and stops nothing.
 
 ---
 
@@ -2390,14 +2543,14 @@ interface ActiveSession {
 | `200` | Success |
 | `400` | Bad Request - Invalid parameters or query syntax |
 | `401` | Unauthorized - Missing or invalid authentication |
-| `403` | Forbidden - Insufficient permissions, or the request's Origin does not match this deployment (`ORIGIN_MISMATCH`) |
-| `408` | Request Timeout - Query exceeded time limit |
+| `403` | Forbidden - Insufficient permissions: a database refused a statement for a privilege its credential lacks (`PERMISSION_DENIED`), or Studio's own policy refused the request; or the request's Origin does not match this deployment (`ORIGIN_MISMATCH`) |
 | `413` | Payload Too Large - the request body, or one part's text, is above the object edit routes' own bound, or a statement is above the console text bound its connection type declares (`POST /api/db/query`) |
 | `429` | Too Many Requests - Rate limit exceeded. Applies to `POST /api/auth/login` and every session-guarded route (see "Rate Limiting" below), not only the AI endpoints |
 | `499` | Client Closed Request - Query cancelled by the client |
 | `500` | Internal Server Error |
 | `502` | Bad Gateway - LLM streaming failure |
 | `503` | Service Unavailable - Database connection failed or LLM misconfigured |
+| `504` | Gateway Timeout - Query exceeded its time limit (`TIMEOUT_ERROR`), or the AI safety analysis did not finish in time |
 
 ### Error Response Format
 
@@ -2410,7 +2563,15 @@ interface ActiveSession {
 
 ### Error Codes
 
-An engine error is `QUERY_ERROR` when the driver's own code says the statement is at fault, read from the code and never the message (#1427): a SQLSTATE of class `0A`, `21`, `22`, `23`, `42` or `44` (PostgreSQL-wire, MySQL-wire and Db2 drivers), a SQL Server error number for a syntax, name, constraint, conversion or object-permission error (`102`, `156`, `208`, `2627`, `2812` and their neighbours), an Oracle statement error (`ORA-00001`, `ORA-00900` to `ORA-00999`, `ORA-01400`, `ORA-01722`, `ORA-02290` to `ORA-02292` and their neighbours) or a SQLite `SQLITE_ERROR`, `SQLITE_CONSTRAINT`, `SQLITE_MISMATCH` or `SQLITE_RANGE`. So `SELEC 1`, an unknown table and a duplicate key answer `400` on MySQL as on PostgreSQL. Connection, authentication, timeout and cancellation errors keep their own codes, MySQL's account limits `1203` (`max_user_connections`) and `1226` (`max_questions` and the like) stay `DATABASE_ERROR` although their SQLSTATE is `42000`, and an engine error with no recognised code is still `DATABASE_ERROR`.
+An engine error is `QUERY_ERROR` when the driver's own code says the statement is at fault, read from the code and never the message (#1427): a SQLSTATE of class `0A`, `21`, `22`, `23`, `42` or `44` (PostgreSQL-wire, MySQL-wire and Db2 drivers), a SQL Server error number for a syntax, name, constraint or conversion error (`102`, `156`, `208`, `2627`, `2812` and their neighbours), an Oracle statement error (`ORA-00001`, `ORA-00900` to `ORA-00999`, `ORA-01400`, `ORA-01722`, `ORA-02290` to `ORA-02292` and their neighbours) or a SQLite `SQLITE_ERROR`, `SQLITE_CONSTRAINT`, `SQLITE_MISMATCH` or `SQLITE_RANGE`.
+So `SELEC 1`, an unknown table and a duplicate key answer `400` on MySQL as on PostgreSQL.
+A refusal of the caller is read from the driver's code before any of that, and is never the statement's fault.
+A privilege the credential lacks is `PERMISSION_DENIED` (403): SQLSTATE `42501` (PostgreSQL and its wire relatives, and Db2's SQL0551N) or `42502` (Db2's SQL0552N), MySQL and MariaDB `1044`, `1142`, `1143`, `1227` and `1370`, SQL Server `229`, `230`, `262`, `297`, `300` and `916`, Oracle `ORA-01031` and `ORA-01045`, Db2 SQLCODE `-1060`, and MongoDB `13` (`Unauthorized`).
+A refused credential stays `AUTH_ERROR` (401): SQLSTATE class `28` (PostgreSQL's `28000` and `28P01`, MySQL's `1045` and `1698`), MySQL `1820`, `1862`, `3118` and `3955`, Oracle `ORA-01005`, `ORA-01017`, `ORA-28000` and `ORA-28001`, Db2 SQLCODE `-30082`, and MongoDB `18` (`AuthenticationFailed`).
+Only an error that carries no code is read by its words: "permission denied" is `PERMISSION_DENIED`, and "password", "authentication", "access denied" and "login failed" are `AUTH_ERROR`, which is how a refused SQL Server login is read, because its driver raises it without the server's `18456`.
+So a column called `password` is a `QUERY_ERROR`, never an `AUTH_ERROR`.
+Connection, timeout and cancellation errors keep their own codes, MySQL's account limits `1203` (`max_user_connections`) and `1226` (`max_questions` and the like) stay `DATABASE_ERROR` although their SQLSTATE is `42000`, and an engine error with no recognised code is still `DATABASE_ERROR`.
+These are the shared mapping's rules, which the engines named above go through; a provider that maps its own driver's errors, such as ClickHouse, Trino or Redis, answers its refusals the way its provider doc describes.
 
 These are the values of the `code` field emitted by `createErrorResponse` (`src/lib/api/error-codes.ts`):
 
@@ -2419,11 +2580,17 @@ These are the values of the `code` field emitted by `createErrorResponse` (`src/
 | `QUERY_ERROR` | SQL syntax or execution error (400) |
 | `QUERY_CANCELLED` | Query cancelled by the client (499) |
 | `CONFIG_ERROR` | Invalid database configuration (400) |
-| `AUTH_ERROR` | Authentication failed (401) |
-| `CUSTOM_CONNECTIONS_DISABLED` | `ALLOW_CUSTOM_CONNECTIONS` is off and the request supplied a connection that is not a seed (403); see `GET /api/connections/policy`. A seed the caller's role may not open is refused with `AUTH_ERROR` (403) instead |
+| `AUTH_ERROR` | A database refused the credential (401), read from the driver's code as the paragraph above says |
+| `PERMISSION_DENIED` | A database accepted the credential and refused the statement for a privilege that credential lacks (403), with `"Permission denied: "` in front of the engine's own sentence; read from the driver's code as the paragraph above says. The browser treats it as the statement's error and never signs in again for it |
+| `CUSTOM_CONNECTIONS_DISABLED` | `ALLOW_CUSTOM_CONNECTIONS` is off, or governance mode is on, and the request supplied a connection that is not a seed (403); see `GET /api/connections/policy`. A seed the caller's role may not open is refused with `AUTH_ERROR` (403) instead |
+| `CONNECTION_NOT_FOUND` | Governance mode only: the connection a request names does not exist or is not granted to the caller (404), and the two are indistinguishable; see [Connections under governance](#connections-under-governance) |
+| `GOVERNANCE_UNAVAILABLE` | Governance mode only: the governance snapshot is still loading, too old, misconfigured or incompatible (503), so `GET /api/connections/managed` and every database route that opens a connection answer it instead, and `GET /api/ready` names the state; see [Connections under governance](#connections-under-governance) and [GOVERNANCE.md](./GOVERNANCE.md#api-codes) |
+| `AUDIT_UNAVAILABLE` | Governance mode only: the runtime setting `queryLog.onSinkFailure` is `refuse` and Studio cannot record query events, because it is backing off after a failed insert of query events or its query event queue is at least 90% full (503), so the request was refused before any statement ran; see [Connections under governance](#connections-under-governance) |
+| `TRANSACTION_CREDENTIAL_CHANGED` | Governance mode only: the caller's grant level or the connection's credential changed while the caller's transaction was open, so `POST /api/db/transaction` rolled it back and answered this instead of the request (409), with `rolledBack` saying whether the rollback was confirmed. Answered by the route rather than `createErrorResponse`; see [Connections under governance](#connections-under-governance) |
+| `AI_DISABLED` | Governance mode only: the control plane set the runtime setting `ai.enabled` to `false`, so a route of the AI bucket refused a signed-in caller before any LLM provider was built (403). Answered by the route guard rather than `createErrorResponse`; see [AI API](#ai-api) |
 | `AUTH_REQUIRED` | No Studio session, or one that no longer verifies (401). Answered by the middleware and the route-level session checks rather than `createErrorResponse`; the only 401 the browser answers by sending the user to sign in |
 | `WORKSPACE_OWNER_MISMATCH` | The request's `X-LibreDB-Workspace-Owner` header names an account other than the signed-in one (409). Answered by the middleware rather than `createErrorResponse`; the browser reloads the tab for it (see [Storage API](#storage-api)) |
-| `TIMEOUT_ERROR` | Query exceeded time limit (408); `POST /api/ai/query-safety` answers it with 504 when the model does not answer in time |
+| `TIMEOUT_ERROR` | Query exceeded time limit (504, never 408, which a browser sends again); `POST /api/ai/query-safety` answers it with 504 when the model does not answer in time |
 | `CONNECTION_ERROR` | Database connection failed (503) |
 | `POOL_EXHAUSTED` | Connection pool exhausted (503) |
 | `DATABASE_ERROR` | Generic database error (500) |
@@ -2715,7 +2882,7 @@ async function streamAIExplanation(query: string, explainPlan: string) {
 | `USER_PASSWORD` | No | Optional lower-privilege account password; the `user` account exists only when this is set |
 | `USER_EMAIL` | No | Regular-user login email (default `user@libredb.org`, only used when `USER_PASSWORD` is set) |
 | `DB_HTTP_BLOCK_PRIVATE_HOSTS` | No | Off when unset. `true`, `on`, or `1` blocks HTTP database requests and RabbitMQ's AMQP dial to loopback, private, link-local, unique-local and selected special-use addresses; `false`, `off`, or `0` allows them. DNS answers are checked at socket connection time. Invalid values fail closed for HTTP databases and RabbitMQ. Other non-HTTP drivers and SSH tunnel hosts are outside this guard; HTTP connections through an SSH tunnel are refused while it is enabled. |
-| `ALLOW_CUSTOM_CONNECTIONS` | No | On when unset. `false`, `0`, `off` or `no`, or any unrecognised value (it fails closed and logs an error), refuses, with 403, every connection a request supplies that is not a seed, on every route that builds a database provider; see `GET /api/connections/policy` |
+| `ALLOW_CUSTOM_CONNECTIONS` | No | On when unset, and off in governance mode whatever its value. `false`, `0`, `off` or `no`, or any unrecognised value (it fails closed and logs an error), refuses, with 403, every connection a request supplies that is not a seed, on every route that builds a database provider; see `GET /api/connections/policy` |
 | `LLM_PROVIDER` | No | AI provider: gemini, openai, ollama, custom |
 | `LLM_API_KEY` | No | AI provider API key |
 | `LLM_MODEL` | No | AI model name |

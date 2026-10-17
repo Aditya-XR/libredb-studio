@@ -280,6 +280,30 @@ A default PostgreSQL 17 `public` schema grants other roles no `CREATE`, so grant
 A missing privilege stops the start with an error that names the passkey tables, the privileges and the manual DDL below.
 Measured on PostgreSQL 17.11; which earlier versions check `CREATE` the same way was not measured.
 
+### A Named Schema (`STORAGE_POSTGRES_SCHEMA`)
+
+By default the statements name the tables without a schema, so they land wherever the connection's `search_path` puts them, usually `public`.
+Set `STORAGE_POSTGRES_SCHEMA` to keep them in one schema instead:
+
+```bash
+STORAGE_POSTGRES_SCHEMA=studio
+```
+
+With it set, every table, foreign key, index and existence check is written as `"studio".<name>`, so the tables never follow a `search_path` into another schema, and a role with no `CREATE` on `public` works.
+Unset or empty, every statement is exactly what it was before the variable existed.
+
+Studio never creates the schema.
+Create it first, owned by the role in `STORAGE_POSTGRES_URL`, and that role then needs no other privilege on the database:
+
+```sql
+CREATE SCHEMA studio AUTHORIZATION libredb_studio;
+```
+
+When the schema is missing, the first storage request fails with `schema studio does not exist: create it with CREATE SCHEMA studio AUTHORIZATION <role>`, naming the role the connection runs as.
+The value must be a lowercase identifier of up to 63 characters (`^[a-z_][a-z0-9_]{0,62}$`); with `STORAGE_PROVIDER=postgres`, any other value stops the boot with a banner that names the variable.
+The [Manual Table Creation](#manual-table-creation-optional-1) DDL below applies once every table name in it, including those after `REFERENCES` and `ON`, carries the schema, as in `CREATE TABLE IF NOT EXISTS studio.user_storage (...)`.
+`tests/live/storage-schema-postgres.ts` proves this on a real server, for a role that owns only schema `studio` and has no `CREATE` on `public`.
+
 ### Docker Compose (App + PostgreSQL)
 
 ```yaml
@@ -567,6 +591,7 @@ version column. A row that is never written again stays plaintext — which is w
 | `STORAGE_PROVIDER` | No | `local` | `local`, `sqlite`, or `postgres` |
 | `STORAGE_SQLITE_PATH` | No | `./data/libredb-storage.db` | Path to SQLite file. Directory and file are auto-created. |
 | `STORAGE_POSTGRES_URL` | **Yes** (postgres mode) | — | PostgreSQL connection string. **No default — app will error without it.** |
+| `STORAGE_POSTGRES_SCHEMA` | No | unset | Schema that holds the storage tables, such as `studio`. The schema must exist. Unset keeps the tables unqualified. See [A Named Schema](#a-named-schema-storage_postgres_schema). |
 
 > These are **server-side only** variables (no `NEXT_PUBLIC_` prefix). The client discovers the mode at runtime via `GET /api/storage/config`. This means one Docker image works for all modes. See [Why Not `NEXT_PUBLIC_*`?](#why-not-next_public_) for the rationale.
 
@@ -612,6 +637,11 @@ curl -b cookies.txt http://localhost:3000/api/storage
 - You set `STORAGE_PROVIDER=postgres` but didn't provide `STORAGE_POSTGRES_URL`
 - Unlike SQLite, PostgreSQL has **no default** — a connection string is always required
 - Fix: add `STORAGE_POSTGRES_URL=postgresql://user:pass@host:5432/dbname` to your env
+
+### PostgreSQL: "schema studio does not exist"
+
+- `STORAGE_POSTGRES_SCHEMA` names a schema the database does not have, and Studio never creates one
+- Fix: run the `CREATE SCHEMA ... AUTHORIZATION ...` statement the message prints, as a role allowed to create schemas
 
 ### PostgreSQL: "Connection refused"
 
@@ -769,7 +799,7 @@ CREATE INDEX IF NOT EXISTS passkey_spent_challenges_expiry ON passkey_spent_chal
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `user_id` | TEXT | User's email from JWT token (e.g., `admin@libredb.org`) |
+| `user_id` | TEXT | User's email from JWT token (e.g., `admin@libredb.org`), or under governance `sub:` followed by the identity provider's subject ([Governance Mode](#governance-mode)) |
 | `collection` | TEXT | Data category: `connections`, `history`, `saved_queries`, `schema_snapshots`, `saved_charts`, `active_connection_id`, `audit_log`, `masking_config`, `threshold_config`, `dismissed_seeds`, `favorite_connections`, `connection_order`, `connection_groups` |
 | `data` | TEXT | JSON-serialized collection data |
 | `updated_at` | TEXT / TIMESTAMPTZ | Last modification timestamp |
@@ -965,6 +995,7 @@ src/lib/storage/
 ├── storage-facade.ts     # Public storage object with domain methods
 ├── provider-type.ts      # getStorageProviderType(), import-free so the proxy can read it
 ├── factory.ts            # Env-based provider instantiation (singleton)
+├── owner-key.ts          # storageOwnerKey(): the user_id a session's rows are filed under
 ├── passkey-row.ts        # passkey_credentials row to StoredPasskey, refusing a malformed row
 └── providers/
     ├── sqlite.ts         # better-sqlite3 implementation
@@ -1145,7 +1176,8 @@ Provider classes are **dynamically imported** — SQLite and PostgreSQL dependen
 
 ## 8. API Routes
 
-All routes (except `/config`) require JWT authentication. The authenticated user's `username` (email) is used as the `user_id` for storage scoping.
+All routes (except `/config`) require JWT authentication.
+The `user_id` for storage scoping is the authenticated user's `username` (email), or under governance `sub:` followed by the identity provider's subject ([Governance Mode](#governance-mode)).
 
 | Endpoint | Method | Auth | Purpose |
 |----------|--------|------|---------|
@@ -1365,7 +1397,7 @@ Every row in `user_storage` is scoped by `user_id`:
 (user@libredb.org,  connections) → [{"id":"c2", "name":"Dev DB"...}]
 ```
 
-- `user_id` = JWT session `username` (email address)
+- `user_id` = JWT session `username` (email address), or under governance `sub:` followed by the identity provider's subject ([Governance Mode](#governance-mode))
 - **Client never sends `user_id`** — server always extracts from JWT cookie
 - Every query includes `WHERE user_id = $username` — no cross-user access possible
 
@@ -1378,6 +1410,26 @@ Every row in `user_storage` is scoped by `user_id`:
 ### OIDC Users
 
 OIDC users (Auth0, Keycloak, Okta, Azure AD) have their `preferred_username` or email claim mapped to the same `username` field used as `user_id`. See [OIDC.md](./OIDC.md) for SSO configuration — it pairs well with server storage for team deployments.
+
+### Governance Mode
+
+With `GOVERNANCE_SOURCE=postgres` ([GOVERNANCE.md](./GOVERNANCE.md#sign-in)) the key is not the username.
+Studio files every row under `sub:` followed by the session's `idpSubject`, the identity provider's subject for the user ([OIDC.md](./OIDC.md#session-identity)), which for Keycloak is the user id:
+
+```
+(sub:6f1c2b7e-0d4a-4c51-9a1e-2f3b8c9d0e11, connections) → [...]
+(sub:6f1c2b7e-0d4a-4c51-9a1e-2f3b8c9d0e11, history)     → [...]
+```
+
+- The subject is the key a control plane writes the user's grants under, and it stays when the email changes.
+  So a later email change does not move a user's storage: the next sign-in reads and writes the same rows.
+- The username keeps its other uses: display, rate limiting and the owner of the browser copy, so the `X-LibreDB-Workspace-Owner` header still names it ([The Browser Copy Belongs to the Signed-In Account](#the-browser-copy-belongs-to-the-signed-in-account)).
+  After an email change the next sign-in finds a copy owned by the old address, clears it, and pulls the same rows from the server again.
+- The prefix keeps subjects apart from usernames.
+  Rows a store filed under a username before governance was switched on stay under that username, and governance mode neither reads nor moves them.
+- Under governance sign-in refuses a session without a subject, and a storage route that meets one answers 500 rather than file rows under the username.
+- `src/lib/storage/owner-key.ts` builds the key.
+  Without governance it is the username exactly as before, also for an OIDC session that carries a subject.
 
 ### Accounts
 

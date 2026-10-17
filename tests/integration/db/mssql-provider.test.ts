@@ -248,12 +248,16 @@ mock.module("mssql", () => {
 // Now import the provider (after mock is in place)
 import { MSSQLProvider } from "@/lib/db/providers/sql/mssql";
 import {
+  AuthenticationError,
   ConnectionError,
   DatabaseConfigError,
   DatabaseError,
   ExecutionProfileError,
+  PermissionDeniedError,
   QueryError,
 } from "@/lib/db/errors";
+import { createErrorResponse } from "@/lib/api/errors";
+import { ApiErrorCode } from "@/lib/api/error-codes";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 import type { DatabaseConnection } from "@/lib/types";
 import type { DatabaseProvider, ReadOnlyStatementBudget } from "@/lib/db/types";
@@ -741,6 +745,41 @@ describe("MSSQLProvider", () => {
         { name: "p1", value: 42 },
         { name: "p2", value: "alice" },
       ]);
+    });
+
+    // The refusals section 12.1 measured on SQL Server 2022 for a principal without the grant: INSERT, UPDATE and
+    // DELETE answer Msg 229 and CREATE TABLE Msg 262, and mssql carries the server's number on the error.
+    test.each([
+      ["229", "The INSERT permission was denied on the object 'orders', database 'shop', schema 'dbo'.", 229, 14],
+      ["262", "CREATE TABLE permission denied in database 'shop'.", 262, 16],
+    ])("a missing permission (Msg %s) is a PermissionDeniedError answered 403", async (_msg, message, number, cls) => {
+      await provider.connect();
+      mockQueryFn = async () => {
+        throw Object.assign(new Error(message), { code: "EREQUEST", number, class: cls, state: 1 });
+      };
+
+      const refused = await provider.query("INSERT INTO orders VALUES (1)").catch((error: unknown) => error);
+
+      expect(refused).toBeInstanceOf(PermissionDeniedError);
+      const response = createErrorResponse(refused, { route: "api/db/query" });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: `Permission denied: ${message}`,
+        code: ApiErrorCode.PERMISSION_DENIED,
+        statusCode: 403,
+      });
+    });
+
+    test("a refused login, which tedious raises without the server's number, is still an AuthenticationError", async () => {
+      await provider.connect();
+      mockQueryFn = async () => {
+        throw Object.assign(new Error("Login failed for user 'app'."), { code: "ELOGIN" });
+      };
+
+      const refused = await provider.query("SELECT 1").catch((error: unknown) => error);
+
+      expect(refused).toBeInstanceOf(AuthenticationError);
+      expect(createErrorResponse(refused, { route: "api/db/query" }).status).toBe(401);
     });
   });
 
@@ -1565,6 +1604,109 @@ describe("MSSQLProvider", () => {
       expect(capturedInputs).toEqual([{ name: "p1", value: 7 }]);
 
       await provider.rollbackTransaction();
+    });
+
+    // The five-minute timeout of PostgreSQL and MySQL, armed only on a provider created with an owner
+    // (docs/providers/mssql.md section 3.6). TX_TIMEOUT_MS is a compile-time-private static read when
+    // beginTransaction() arms the timer, so these tests shrink it at runtime the way the MySQL suite does.
+    describe("the owned-provider transaction timeout", () => {
+      const providerStatics = MSSQLProvider as unknown as { TX_TIMEOUT_MS: number };
+      const timerOf = (target: MSSQLProvider) => (target as unknown as { txTimeout: unknown }).txTimeout;
+      let originalTimeout: number;
+      let rollbacks: number;
+
+      beforeEach(() => {
+        originalTimeout = providerStatics.TX_TIMEOUT_MS;
+        rollbacks = 0;
+        mockTransactionHooks = { begin() {}, commit() {}, rollback: () => void rollbacks++ };
+      });
+
+      afterEach(() => {
+        providerStatics.TX_TIMEOUT_MS = originalTimeout;
+        mockTransactionHooks = { begin() {}, commit() {}, rollback() {} };
+      });
+
+      test("the timeout is five minutes from BEGIN", () => {
+        expect(originalTimeout).toBe(5 * 60 * 1000);
+      });
+
+      test("transaction auto-rolls back when the timeout timer fires on an owned provider", async () => {
+        providerStatics.TX_TIMEOUT_MS = 5;
+        provider = new MSSQLProvider(baseConfig, {}, { owner: "subject-a", ownerPoolMax: 3 });
+        await provider.connect();
+        await provider.beginTransaction();
+        expect(provider.isInTransaction()).toBe(true);
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(provider.isInTransaction()).toBe(false);
+        expect(rollbacks).toBe(1);
+        expect(timerOf(provider)).toBeNull();
+        await expect(provider.commitTransaction()).rejects.toThrow("No active transaction");
+      });
+
+      test("a provider without an owner keeps today's transaction lifetime", async () => {
+        providerStatics.TX_TIMEOUT_MS = 5;
+        await provider.connect();
+        await provider.beginTransaction();
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(provider.isInTransaction()).toBe(true);
+        expect(rollbacks).toBe(0);
+        expect(timerOf(provider)).toBeNull();
+        await provider.rollbackTransaction();
+        expect(rollbacks).toBe(1);
+      });
+
+      test("commit, rollback and disconnect clear the timer of an owned provider", async () => {
+        provider = new MSSQLProvider(baseConfig, {}, { owner: "subject-a", ownerPoolMax: 3 });
+        await provider.connect();
+
+        await provider.beginTransaction();
+        expect(timerOf(provider)).not.toBeNull();
+        await provider.commitTransaction();
+        expect(timerOf(provider)).toBeNull();
+
+        await provider.beginTransaction();
+        expect(timerOf(provider)).not.toBeNull();
+        await provider.rollbackTransaction();
+        expect(timerOf(provider)).toBeNull();
+
+        await provider.beginTransaction();
+        expect(timerOf(provider)).not.toBeNull();
+        await provider.disconnect();
+        expect(timerOf(provider)).toBeNull();
+      });
+
+      test("a failed auto-rollback still releases the transaction and says why", async () => {
+        const warn = spyOn(console, "warn").mockImplementation(() => {});
+        mockTransactionHooks = {
+          begin() {},
+          commit() {},
+          rollback() {
+            throw new Error("Transaction has been aborted.");
+          },
+        };
+        try {
+          provider = new MSSQLProvider(baseConfig, {}, { owner: "subject-a", ownerPoolMax: 3 });
+          await provider.connect();
+          await provider.beginTransaction();
+
+          await provider.expireTransaction();
+          expect(provider.isInTransaction()).toBe(false);
+          expect(timerOf(provider)).toBeNull();
+          expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).toContain("Transaction has been aborted.");
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      test("expireTransaction is a no-op without an active transaction", async () => {
+        provider = new MSSQLProvider(baseConfig, {}, { owner: "subject-a", ownerPoolMax: 3 });
+        await provider.connect();
+        await provider.expireTransaction();
+        expect(provider.isInTransaction()).toBe(false);
+        expect(rollbacks).toBe(0);
+      });
     });
   });
 

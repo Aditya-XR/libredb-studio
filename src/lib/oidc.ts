@@ -6,6 +6,14 @@ import { AuthConfigError } from "@/lib/auth-errors";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+/**
+ * The `prompt` sent on the authorization request (OIDC_PROMPT). `omit` sends none, so a live
+ * identity provider session signs the user in without asking again (single sign-on).
+ */
+export type OIDCPrompt = "login" | "consent" | "select_account" | "omit";
+
+const OIDC_PROMPTS: readonly OIDCPrompt[] = ["login", "consent", "select_account", "omit"];
+
 export interface OIDCConfig {
   issuer: string;
   clientId: string;
@@ -13,6 +21,12 @@ export interface OIDCConfig {
   scope: string;
   roleClaim: string;
   adminRoles: string[];
+  /**
+   * OIDC_USER_ROLES. Empty (the default): an account that matches no admin role is a user. Non-empty: an account must
+   * match an admin or a user role, and any other is refused at sign-in.
+   */
+  userRoles: string[];
+  prompt: OIDCPrompt;
 }
 
 export interface OIDCState {
@@ -31,6 +45,22 @@ const OIDC_CONFIG_MISSING_MESSAGE =
   "OIDC_ISSUER, OIDC_CLIENT_ID, and OIDC_CLIENT_SECRET are required when using OIDC authentication";
 const OIDC_ISSUER_NOT_HTTPS_MESSAGE =
   "OIDC_ISSUER must be an https:// URL; openid-client refuses plain http, localhost included";
+const OIDC_PROMPT_INVALID_MESSAGE = "OIDC_PROMPT must be one of login, consent, select_account, omit; got ";
+const OIDC_USER_ROLES_WITHOUT_CLAIM_MESSAGE =
+  "OIDC_USER_ROLES is set but OIDC_ROLE_CLAIM is empty: with no claim to read roles from, every sign-in would be refused";
+
+/**
+ * Unset or empty keeps `login`, the value Studio always sent before OIDC_PROMPT existed. `none` is
+ * refused with the other unknown values: it fails with login_required whenever the provider has no
+ * session, which leaves the user on an error page instead of a sign-in form.
+ */
+function readOIDCPrompt(): OIDCPrompt {
+  const value = (process.env.OIDC_PROMPT ?? "").trim().toLowerCase() || "login";
+  if (!(OIDC_PROMPTS as readonly string[]).includes(value)) {
+    throw new AuthConfigError(OIDC_PROMPT_INVALID_MESSAGE + value);
+  }
+  return value as OIDCPrompt;
+}
 
 export function getOIDCConfig(): OIDCConfig {
   const issuer = process.env.OIDC_ISSUER;
@@ -58,16 +88,30 @@ export function getOIDCConfig(): OIDCConfig {
     throw new AuthConfigError(OIDC_ISSUER_NOT_HTTPS_MESSAGE);
   }
 
+  const roleClaim = process.env.OIDC_ROLE_CLAIM || "";
+  const userRoles = (process.env.OIDC_USER_ROLES || "")
+    .split(",")
+    .map((r) => r.trim())
+    .filter(Boolean);
+
+  // User roles are read from the role claim, so without one every account would be refused, one sign-in at a time, as
+  // oidc_no_role. Named once as configuration instead, which the login route reports as oidc_config.
+  if (userRoles.length > 0 && !roleClaim) {
+    throw new AuthConfigError(OIDC_USER_ROLES_WITHOUT_CLAIM_MESSAGE);
+  }
+
   return {
     issuer,
     clientId,
     clientSecret,
     scope: process.env.OIDC_SCOPE || "openid profile email",
-    roleClaim: process.env.OIDC_ROLE_CLAIM || "",
+    roleClaim,
     adminRoles: (process.env.OIDC_ADMIN_ROLES || "admin")
       .split(",")
       .map((r) => r.trim())
       .filter(Boolean),
+    userRoles,
+    prompt: readOIDCPrompt(),
   };
 }
 
@@ -108,6 +152,7 @@ export async function generateAuthUrl(
   config: client.Configuration,
   redirectUri: string,
   scope: string,
+  prompt: OIDCPrompt = "login",
 ): Promise<{ url: URL; state: OIDCState }> {
   const code_verifier = client.randomPKCECodeVerifier();
   const code_challenge = await client.calculatePKCECodeChallenge(code_verifier);
@@ -121,8 +166,10 @@ export async function generateAuthUrl(
     code_challenge_method: "S256",
     state,
     nonce,
-    prompt: "login",
   };
+  if (prompt !== "omit") {
+    parameters.prompt = prompt;
+  }
 
   const url = client.buildAuthorizationUrl(config, parameters);
 
@@ -136,9 +183,17 @@ export async function generateAuthUrl(
 
 export interface OIDCClaims {
   sub: string;
+  /** openid-client has checked it against the issuer discovered at OIDC_ISSUER. */
+  iss: string;
   email?: string;
   preferred_username?: string;
   [claim: string]: unknown;
+}
+
+/** The ID token's claims and the raw token, which the logout hint cookie carries (OIDC_LOGOUT_HINT). */
+export interface OIDCExchange {
+  claims: OIDCClaims;
+  idToken: string;
 }
 
 export async function exchangeCode(
@@ -147,7 +202,7 @@ export async function exchangeCode(
   codeVerifier: string,
   expectedState: string,
   expectedNonce: string,
-): Promise<OIDCClaims | null> {
+): Promise<OIDCExchange | null> {
   const tokens = await client.authorizationCodeGrant(config, callbackUrl, {
     pkceCodeVerifier: codeVerifier,
     expectedState,
@@ -156,12 +211,12 @@ export async function exchangeCode(
   });
 
   const claims = tokens.claims();
-  if (!claims) {
-    logger.warn("OIDC token exchange succeeded but claims are empty", { route: "oidc" });
+  if (!claims || !tokens.id_token) {
+    logger.warn("OIDC token exchange succeeded but the ID token or its claims are missing", { route: "oidc" });
     return null;
   }
 
-  return claims as unknown as OIDCClaims;
+  return { claims: claims as unknown as OIDCClaims, idToken: tokens.id_token };
 }
 
 // ─── Role Mapping ──────────────────────────────────────────────────────────
@@ -169,32 +224,39 @@ export async function exchangeCode(
 /**
  * Extract role from OIDC claims using configured claim path.
  * Supports dot-notation for nested claims (e.g. "realm_access.roles").
- * Returns 'admin' if any claim value matches OIDC_ADMIN_ROLES, otherwise 'user'.
+ * Returns 'admin' if any claim value matches OIDC_ADMIN_ROLES, which wins when the claim also holds a user role.
+ * Otherwise, with `userRoles` (OIDC_USER_ROLES) empty, returns 'user'; with it set, returns 'user' only when a claim
+ * value matches one of them, and null for an account that holds neither role.
  */
 export function mapOIDCRole(
   claims: Record<string, unknown>,
   roleClaim: string,
   adminRoles: string[],
-): "admin" | "user" {
-  if (!roleClaim) return "user";
+  userRoles: string[] = [],
+): "admin" | "user" | null {
+  // What an account that matches no role gets: everyone is at least a user until OIDC_USER_ROLES says otherwise.
+  const unmatched = userRoles.length === 0 ? "user" : null;
+  if (!roleClaim) return unmatched;
 
   // Navigate dot-notation path
   const parts = roleClaim.split(".");
   let value: unknown = claims;
   for (const part of parts) {
-    if (value == null || typeof value !== "object") return "user";
+    if (value == null || typeof value !== "object") return unmatched;
     value = (value as Record<string, unknown>)[part];
   }
 
-  if (value == null) return "user";
+  if (value == null) return unmatched;
 
   // Normalize to array of strings
   const values: string[] = Array.isArray(value) ? value.map(String) : [String(value)];
 
   // Check if any value matches admin roles
   const isAdmin = values.some((v) => adminRoles.some((ar) => v.toLowerCase() === ar.toLowerCase()));
+  if (isAdmin) return "admin";
 
-  return isAdmin ? "admin" : "user";
+  const isUser = values.some((v) => userRoles.some((ur) => v.toLowerCase() === ur.toLowerCase()));
+  return isUser ? "user" : unmatched;
 }
 
 // ─── State Cookie Encryption ───────────────────────────────────────────────
@@ -265,8 +327,10 @@ export function getPublicOrigin(request: Request): string {
  * Build the OIDC provider's logout URL.
  * Auth0: /v2/logout?client_id=...&returnTo=...
  * Generic: use the discovered end_session_endpoint.
+ * `idTokenHint` is added as `id_token_hint` on the Zitadel and generic end-session paths; Auth0's /v2/logout takes
+ * no such parameter, so its URL stays the same.
  */
-export async function buildLogoutUrl(returnTo: string): Promise<string | null> {
+export async function buildLogoutUrl(returnTo: string, idTokenHint?: string): Promise<string | null> {
   try {
     const config = getOIDCConfig();
     const issuerUrl = new URL(config.issuer);
@@ -285,6 +349,7 @@ export async function buildLogoutUrl(returnTo: string): Promise<string | null> {
       const logoutUrl = new URL("/oidc/v1/end_session", config.issuer);
       logoutUrl.searchParams.set("client_id", config.clientId);
       logoutUrl.searchParams.set("post_logout_redirect_uri", returnTo);
+      if (idTokenHint !== undefined) logoutUrl.searchParams.set("id_token_hint", idTokenHint);
       return logoutUrl.toString();
     }
 
@@ -292,6 +357,7 @@ export async function buildLogoutUrl(returnTo: string): Promise<string | null> {
     const discovered = await discoverProvider(config);
     const logoutUrl = client.buildEndSessionUrl(discovered, {
       post_logout_redirect_uri: returnTo,
+      ...(idTokenHint === undefined ? {} : { id_token_hint: idTokenHint }),
     });
     return logoutUrl.toString();
   } catch (error) {

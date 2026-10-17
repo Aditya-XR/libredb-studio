@@ -15,10 +15,12 @@ import { connectPhase, DatabaseConfigError, ExecutionProfileError } from "./erro
 import { createSSHTunnel, closeSSHTunnel, hasTunnel } from "@/lib/ssh/tunnel";
 import type { TunnelInfo } from "@/lib/ssh/tunnel";
 import { readSecret } from "@/lib/storage/encryption";
-import { providerCacheKey } from "./provider-cache-key";
+import { providerCacheKey, providerOwner } from "./provider-cache-key";
+import { registerOwnerRemoval } from "./owner-removal";
 import { READ_ONLY_ENFORCED, READS_FILE_ACCESS_POSTURE } from "./compatibility";
 import { TUNNEL_FAR_END, type WithTunnelFarEnd } from "@/lib/types";
 import { logger } from "@/lib/logger";
+import { runShutdownHooks } from "@/lib/shutdown";
 import * as path from "path";
 
 // ============================================================================
@@ -44,10 +46,12 @@ import * as path from "path";
  *   `INSTALL` are refused outside its private temp directory and its database's own file
  *   names (docs/providers/duckdb.md section 3.16) while the database stays writable; pass
  *   `{ allowExternalFileAccess: true }` for the full editor reach. SQLite refuses only an explicit
- *   `false`, so called without a context it opens with the trusted reach.
+ *   `false`, so called without a context it opens with the trusted reach. An `owner` makes the provider
+ *   that user's own (docs/GOVERNANCE.md#per-user-providers): its pool opens with `min: 0` and `max: ownerPoolMax`.
  * @returns Promise<DatabaseProvider> instance
- * @throws DatabaseConfigError if connection type is not supported, or if its `readOnly` cannot be
- *   honoured (see assertReadOnlyHonoured)
+ * @throws DatabaseConfigError if connection type is not supported, if its `readOnly` cannot be
+ *   honoured (see assertReadOnlyHonoured), or if an owner comes without a whole `ownerPoolMax`
+ *   from 1 (see assertOwnerPoolHonoured)
  *
  * @example
  * // SQL Database
@@ -143,16 +147,45 @@ export function assertReadOnlyHonoured(connection: DatabaseConnection): void {
   }
 }
 
+/**
+ * Refuse an owner without a pool size its provider can open with (docs/GOVERNANCE.md#per-user-providers), before
+ * anything is built or dialled.
+ *
+ * An owned provider opens its pool with `min: 0` and `max: ownerPoolMax`, so the size must be a whole number from 1.
+ * pg would refuse nothing else: it opens its default of 10 for 0, NaN or no size at all, and a pool with a negative
+ * size never hands out a connection, so the owner's share would be lifted, or the provider wedged, without a word.
+ * It runs where `assertReadOnlyHonoured` runs and for the reason that function gives: `getOrCreateProvider` and
+ * `acquireExecutionProfileProvider` open the SSH tunnel before they build the provider. `editorExecutionContext`
+ * always sets the owner and the size together, so the refusal reaches only a context built elsewhere.
+ */
+function assertOwnerPoolHonoured(connection: DatabaseConnection, execution: ProviderExecutionContext): void {
+  if (execution.owner === undefined) return;
+  const max: unknown = execution.ownerPoolMax;
+  if (typeof max !== "number" || !Number.isInteger(max) || max < 1) {
+    throw new DatabaseConfigError(
+      "ownerPoolMax must be a whole number from 1 when an owner is given: it is the most connections the owner's provider may open.",
+      connection.type,
+    );
+  }
+}
+
 export async function createDatabaseProvider(
   connection: DatabaseConnection,
   options: ProviderOptions = {},
   execution: ProviderExecutionContext = {},
 ): Promise<DatabaseProvider> {
   assertReadOnlyHonoured(connection);
+  assertOwnerPoolHonoured(connection, execution);
   console.log(`[DB] Creating ${sanitize(connection.type)} provider for "${sanitize(connection.name || "")}"`);
 
   // Explicit overrides (such as the connectivity probe) take precedence over saved settings.
   options = { ...options, queryTimeout: options.queryTimeout ?? connection.queryTimeout };
+  // An owned provider serves one user (docs/GOVERNANCE.md#per-user-providers): its pool opens nothing until that user
+  // asks, and never more than the user's share, whatever size the caller's options name. The rest of the caller's pool
+  // options stand.
+  if (execution.owner !== undefined) {
+    options = { ...options, pool: { ...options.pool, min: 0, max: execution.ownerPoolMax } };
+  }
 
   switch (connection.type) {
     // SQL Databases - dynamically imported to reduce memory
@@ -183,7 +216,7 @@ export async function createDatabaseProvider(
 
     case "oracle": {
       const { OracleProvider } = await import("./providers/sql/oracle");
-      return new OracleProvider(connection, options);
+      return new OracleProvider(connection, options, execution);
     }
 
     case "db2": {
@@ -595,6 +628,13 @@ interface CachedProvider {
    */
   connectionId: string;
   /**
+   * The user this entry was opened for (docs/GOVERNANCE.md#per-user-providers), the `owner` its key frames, or
+   * undefined for an entry every caller of the connection shares. Recorded for the reason `connectionId` is: the key is
+   * a digest and cannot be read back, so "which entries are this user's" matches on this field. An entry with an owner
+   * is torn down when it goes (`teardownProvider`), never only disconnected.
+   */
+  owner?: string;
+  /**
    * The file this entry holds open, when the provider declares
    * `ProviderCapabilities.singleWriterFile` - see `findOpenSingleWriterProvider`.
    * `null` on every other provider, which is all of them but one.
@@ -753,7 +793,9 @@ const profiledProviderCache = new Map<string, ProfiledCachedProvider>();
  *
  * The requester's file-access posture is in it too, for an engine that reads one, exactly as in
  * the writable key: SQLite refuses a denied requester at connect, so a handle a trusted requester
- * opened must never answer a denied requester's key. Absent reads as denied.
+ * opened must never answer a denied requester's key. Absent reads as denied. So is the requester's
+ * owner (docs/GOVERNANCE.md#per-user-providers), as in the writable key: one user's acquisition is never served
+ * another's.
  *
  * Exported for one caller that must join concurrent first acquisitions on exactly this key
  * without deriving a second one: src/lib/mcp/context.ts.
@@ -763,7 +805,16 @@ export async function profiledCacheKey(
   profile: ExecutionProfile,
   requester: EditorExecutionContext = {},
 ): Promise<string> {
-  const key = await providerCacheKey(connection, requester.allowExternalFileAccess === true);
+  const key = await providerCacheKey(connection, requester.allowExternalFileAccess === true, requester.owner);
+  return withProfile(profile, key);
+}
+
+/**
+ * `key`, a key of the writable cache, with `profile` framed onto it: the key the profiled cache holds the entry of that
+ * profile under. {@link profiledCacheKey} keys an acquisition with it, and the key scope of `removeProvider` names the
+ * profiled entries of one record with it, so the two never frame a profile differently.
+ */
+function withProfile(profile: string, key: string): string {
   return `${profile.length}:${profile}${key}`;
 }
 
@@ -771,6 +822,103 @@ export async function profiledCacheKey(
 function connectionStillServed(connectionId: string): boolean {
   if (Array.from(providerCache.values()).some((entry) => entry.connectionId === connectionId)) return true;
   return Array.from(profiledProviderCache.values()).some((entry) => entry.connectionId === connectionId);
+}
+
+// ============================================================================
+// Teardown of an owned provider (docs/GOVERNANCE.md#per-user-providers)
+// ============================================================================
+
+/**
+ * How long a teardown waits for the rollback of an owned provider's open transaction
+ * (docs/GOVERNANCE.md#per-user-providers).
+ */
+const TEARDOWN_ROLLBACK_MS = 5_000;
+/**
+ * How long a teardown waits for an owned provider's disconnect before it abandons the pool
+ * (docs/GOVERNANCE.md#per-user-providers).
+ */
+const TEARDOWN_DISCONNECT_MS = 10_000;
+
+/** What `within` answers for work that did not settle before its deadline. */
+const TIMED_OUT = Symbol("timed out");
+
+/**
+ * Waits for `work` at most `ms`: answers once it resolves, or TIMED_OUT once `ms` pass first, and throws what it
+ * rejects with before then. A rejection after the deadline is already handled by the race, and the timer never holds
+ * the process open.
+ */
+async function within(work: Promise<void>, ms: number): Promise<void | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The interactive transaction session that `POST /api/db/transaction` drives, on a provider that implements one. */
+interface TransactionSession {
+  isInTransaction(): boolean;
+  rollbackTransaction(): Promise<void>;
+}
+
+/** The provider's transaction session while it holds a transaction open, or null. */
+function openTransaction(provider: DatabaseProvider): TransactionSession | null {
+  const session = provider as DatabaseProvider & Partial<TransactionSession>;
+  if (typeof session.isInTransaction !== "function" || typeof session.rollbackTransaction !== "function") return null;
+  return session.isInTransaction() ? (session as TransactionSession) : null;
+}
+
+/**
+ * Tear down an owned provider (docs/GOVERNANCE.md#per-user-providers): the provider of one user, closed because that
+ * user's access changed or the provider went idle. Its entry is deleted from `cache` first, so no request is handed the
+ * provider while it closes; an open transaction is rolled back, waited for at most TEARDOWN_ROLLBACK_MS; and the
+ * provider is disconnected, waited for at most TEARDOWN_DISCONNECT_MS. The rollback comes first because the disconnect
+ * would otherwise wait on the very session the transaction holds: `pg`'s `pool.end()` waits for every checked-out
+ * client.
+ *
+ * A rollback or a disconnect that fails is logged, and a disconnect that does not finish in time is logged and its pool
+ * abandoned, because a client stuck in a statement, or in a rollback that never answered, never comes back. So the
+ * teardown ends within 15 s whatever the user's database does, and it never rejects.
+ */
+async function teardownProvider(cache: Map<string, CachedProvider>, key: string, entry: CachedProvider): Promise<void> {
+  cache.delete(key);
+  const { provider, connectionId: id } = entry;
+  try {
+    // Inside the try, as `keepsRunInFlight` guards `hasRunsInFlight`: a provider that throws here is not left open.
+    const session = openTransaction(provider);
+    if (session !== null) {
+      const rollback = await within(session.rollbackTransaction(), TEARDOWN_ROLLBACK_MS);
+      if (rollback === TIMED_OUT) {
+        logger.warn(
+          `[DB] The open transaction of an owned provider of ${sanitize(id)} did not roll back within ${TEARDOWN_ROLLBACK_MS} ms, so the provider is closed with it open.`,
+          { connectionId: id },
+        );
+      } else {
+        const line = `[DB] Rolled back the open transaction of an owned provider of ${sanitize(id)} before closing it.`;
+        logger.info(line, { connectionId: id });
+      }
+    }
+  } catch (error) {
+    logger.warn(
+      `[DB] The open transaction of an owned provider of ${sanitize(id)} failed to roll back, so the provider is closed with it open.`,
+      { connectionId: id, error: String(error) },
+    );
+  }
+  try {
+    if ((await within(provider.disconnect(), TEARDOWN_DISCONNECT_MS)) === TIMED_OUT) {
+      logger.warn(
+        `[DB] Abandoned the pool of owned provider ${sanitize(id)}: its disconnect did not finish within ${TEARDOWN_DISCONNECT_MS} ms.`,
+        { connectionId: id },
+      );
+    }
+  } catch (error) {
+    logger.warn(`[DB] Error disconnecting owned provider ${sanitize(id)}`, { connectionId: id, error: String(error) });
+  }
 }
 
 /** Idle timeout: evict providers unused for 30 minutes */
@@ -804,6 +952,9 @@ function keepsRunInFlight(
 /**
  * Evict providers that have been idle longer than maxIdleMs.
  * Called by the periodic sweep timer, but also exported for direct testing.
+ * An owned provider (docs/GOVERNANCE.md#per-user-providers) is torn down (`teardownProvider`), so an open transaction
+ * it still holds is rolled back and a pool that hangs is abandoned; a provider every caller shares is disconnected as
+ * before.
  *
  * @returns number of evicted providers
  */
@@ -822,15 +973,20 @@ export async function evictIdleProviders(maxIdleMs: number = IDLE_TIMEOUT_MS): P
         continue;
       }
       logger.info(`[DB] Evicting idle provider: ${sanitize(id)} (idle ${idleMinutes}min)`);
-      try {
-        await entry.provider.disconnect();
-      } catch (error) {
-        logger.warn(`[DB] Error disconnecting idle provider ${sanitize(id)}`, {
-          connectionId: id,
-          error: String(error),
-        });
+      if (entry.owner !== undefined) {
+        // oxlint-disable-next-line no-await-in-loop -- the tunnel below may close only once this provider has closed.
+        await teardownProvider(providerCache, key, entry);
+      } else {
+        try {
+          await entry.provider.disconnect();
+        } catch (error) {
+          logger.warn(`[DB] Error disconnecting idle provider ${sanitize(id)}`, {
+            connectionId: id,
+            error: String(error),
+          });
+        }
+        providerCache.delete(key);
       }
-      providerCache.delete(key);
       // Close the shared tunnel only when nothing serves the connection
       // anymore — a live profiled provider still needs it, and so does another
       // entry of this connection opened with different credentials.
@@ -856,15 +1012,20 @@ export async function evictIdleProviders(maxIdleMs: number = IDLE_TIMEOUT_MS): P
         continue;
       }
       logger.info(`[DB] Evicting idle profiled provider: ${sanitize(entry.connectionId)}`);
-      try {
-        await entry.provider.disconnect();
-      } catch (error) {
-        logger.warn(`[DB] Error disconnecting idle profiled provider ${sanitize(entry.connectionId)}`, {
-          connectionId: entry.connectionId,
-          error: String(error),
-        });
+      if (entry.owner !== undefined) {
+        // oxlint-disable-next-line no-await-in-loop -- the tunnel below may close only once this provider has closed.
+        await teardownProvider(profiledProviderCache, key, entry);
+      } else {
+        try {
+          await entry.provider.disconnect();
+        } catch (error) {
+          logger.warn(`[DB] Error disconnecting idle profiled provider ${sanitize(entry.connectionId)}`, {
+            connectionId: entry.connectionId,
+            error: String(error),
+          });
+        }
+        profiledProviderCache.delete(key);
       }
-      profiledProviderCache.delete(key);
       if (!connectionStillServed(entry.connectionId)) {
         try {
           await closeSSHTunnel(entry.connectionId);
@@ -897,12 +1058,22 @@ function startIdleSweep(): void {
 }
 
 /**
+ * The owner fields a cached provider is built with (docs/GOVERNANCE.md#per-user-providers): the owner its key frames
+ * and the requester's pool size, or nothing for a provider every caller shares, so a context without an owner reaches
+ * the provider exactly as it did before owners existed. `owner` is what `providerOwner` answered for the connection.
+ */
+function ownerContext(owner: string | undefined, requester: EditorExecutionContext): EditorExecutionContext {
+  return owner === undefined ? {} : { owner, ownerPoolMax: requester.ownerPoolMax };
+}
+
+/**
  * Get or create a database provider with caching
  * Useful for API routes to reuse connections
  *
  * @param connection - Database connection configuration
  * @param options - Optional provider options
- * @param execution - The DuckDB editor file-access posture (non-admin DuckDB file access), and nothing else. Studio's
+ * @param execution - The DuckDB editor file-access posture (non-admin DuckDB file access), and under governance the
+ *   owner of a per-user provider (docs/GOVERNANCE.md#per-user-providers), and nothing else. Studio's
  *   routes derive it with `editorExecutionContext` from the verified session and the resolved
  *   connection. ABSENT MEANS DENY: called without it, as an embedder that predates the posture
  *   calls it, a DuckDB handle opens with `enable_external_access: 'false'`, so `read_csv`,
@@ -911,6 +1082,9 @@ function startIdleSweep(): void {
  *   stays writable. Pass
  *   `{ allowExternalFileAccess: true }` for the full editor reach. SQLite refuses a denied handle at
  *   connect, since its drivers cannot confine a statement's file access; every other engine ignores it.
+ *   With an `owner`, the provider is that user's own: cached apart from every other user's, opened
+ *   with the pool of `ownerPoolMax`, and its entry records the owner; an engine that keeps one handle
+ *   per file shares that handle whatever the owner (`providerOwner`).
  *   A `readOnly` in it is refused (`DatabaseConfigError`): this cache holds writable providers,
  *   and a read-only one comes from `createDatabaseProvider` or an execution profile.
  * @returns Cached or new DatabaseProvider instance
@@ -925,6 +1099,7 @@ export async function getOrCreateProvider(
   // refused before the key is computed, as the DatabaseConfigError the provider would have raised (#1539).
   assertConnectionIdPresent(connection);
   assertReadOnlyHonoured(connection);
+  assertOwnerPoolHonoured(connection, execution);
   // The writable cache never holds a read-only handle, and its key frames no such mode for an
   // execution context: a readOnly reaching the provider from here would be served to every later
   // editor request, or a read-only caller handed the writable one. The type has no such field; a
@@ -939,7 +1114,11 @@ export async function getOrCreateProvider(
   // handle it opens and the key it is cached under agree, and absent reads as deny (fail closed).
   // SQLite and DuckDB read it; engines without that capability ignore it.
   const allowExternalFileAccess = execution.allowExternalFileAccess === true;
-  const cacheKey = await providerCacheKey(connection, allowExternalFileAccess);
+  // The user this provider is opened for under governance (docs/GOVERNANCE.md#per-user-providers), or undefined for the
+  // provider every caller shares: the provider, the entry and the key `editorCacheKey` frames all take this value, so
+  // they never disagree.
+  const owner = providerOwner(connection, execution.owner);
+  const cacheKey = await editorCacheKey(connection, execution);
 
   // Check cache
   const cached = providerCache.get(cacheKey);
@@ -1018,10 +1197,14 @@ export async function getOrCreateProvider(
   }
 
   // Create new provider (async - dynamically loads the provider module). Only the derived posture
-  // is handed on, so the handle opens under exactly the posture its key frames; every provider but
-  // DuckDB and SQLite ignores it: DuckDB closes file access under a denied posture, and SQLite
-  // refuses to open under one.
-  const provider = await createDatabaseProvider(effectiveConnection, options, { allowExternalFileAccess });
+  // and owner are handed on, so the handle opens under exactly what its key frames; every provider but
+  // DuckDB and SQLite ignores the posture: DuckDB closes file access under a denied posture, and SQLite
+  // refuses to open under one. An owner opens the pool of that user's share
+  // (docs/GOVERNANCE.md#per-user-providers).
+  const provider = await createDatabaseProvider(effectiveConnection, options, {
+    allowExternalFileAccess,
+    ...ownerContext(owner, execution),
+  });
   try {
     await connectPhase(() => provider.connect());
   } catch (error) {
@@ -1038,6 +1221,7 @@ export async function getOrCreateProvider(
   providerCache.set(cacheKey, {
     provider,
     connectionId: connection.id,
+    owner,
     lastUsed: Date.now(),
     singleWriterFile,
     // Recorded so the single-writer borrow lends a DuckDB handle only to a caller of the same
@@ -1049,6 +1233,43 @@ export async function getOrCreateProvider(
   startIdleSweep();
 
   return provider;
+}
+
+/**
+ * The key `getOrCreateProvider` caches the provider of `connection` under for `execution`: {@link providerCacheKey} of
+ * the connection, of its file-access posture as a definite boolean, absent read as deny, and of the owner that
+ * `providerOwner` answers. A connection without an id is refused before the key frames it, as in `getOrCreateProvider`
+ * (#1539).
+ *
+ * Exported for two callers that must name a cached entry without deriving a second key, as `profiledCacheKey` is for its
+ * own. The transaction route records the key a governed `begin` resolved, and a later request that resolves another
+ * one, because the owner's grant level or the connection's credential changed, has the transaction rolled back on the
+ * provider {@link findCachedProvider} answers for the recorded key (docs/GOVERNANCE.md#per-user-providers). And without
+ * governance the disconnect route removes only the entries the caller's own record names, its editor entry and its
+ * execution-profile entries, by the key scope of `removeProvider` (docs/SECURITY.md, note 0.9). The package does not
+ * re-export it.
+ */
+export async function editorCacheKey(
+  connection: DatabaseConnection,
+  execution: EditorExecutionContext = {},
+): Promise<string> {
+  assertConnectionIdPresent(connection);
+  return providerCacheKey(
+    connection,
+    execution.allowExternalFileAccess === true,
+    providerOwner(connection, execution.owner),
+  );
+}
+
+/**
+ * The provider the writable cache holds under `key`, which {@link editorCacheKey} answers, or null when it holds none
+ * there: the idle sweep, a disconnect or a teardown removed it, and disconnected it on the way out. A lookup, not a
+ * use: it opens nothing and leaves the entry's idle clock alone. For `cachedEditorProvider` in
+ * src/lib/api/editor-provider.ts, on which the transaction route rolls back a transaction whose owner's credential
+ * changed (docs/GOVERNANCE.md#per-user-providers); the package does not re-export it.
+ */
+export function findCachedProvider(key: string): DatabaseProvider | null {
+  return providerCache.get(key)?.provider ?? null;
 }
 
 // ============================================================================
@@ -1227,7 +1448,8 @@ function assertAgentCredentialForm(connection: DatabaseConnection, provider: Dat
  * also decides which open single-writer handle an `agent-operations` acquisition may borrow:
  * one opened under that same posture, so an admin's agent is grounded from the admin's
  * own editor handle as before, and a requester is never lent a handle wider than its own.
- * Absent means deny, like everywhere else on this channel.
+ * Absent means deny, like everywhere else on this channel. Its owner (docs/GOVERNANCE.md#per-user-providers) makes the
+ * profiled provider that user's own, as in the writable cache, with the pool of `ownerPoolMax`.
  */
 export async function acquireExecutionProfileProvider(
   connection: DatabaseConnection,
@@ -1239,9 +1461,13 @@ export async function acquireExecutionProfileProvider(
   // The id refusal shares the place for the same reason: the profiled key frames connection.id (#1539).
   assertConnectionIdPresent(connection);
   assertReadOnlyHonoured(connection);
+  assertOwnerPoolHonoured(connection, requester);
   // Refuses an unknown profile ahead of the cache key, which frames the profile.
   const execution = executionContextFor(profile, requester);
 
+  // The requester's own provider under governance (docs/GOVERNANCE.md#per-user-providers), as in the writable cache:
+  // `profiledCacheKey` frames the same owner, and the provider and its entry take it from here.
+  const owner = providerOwner(connection, requester.owner);
   const cacheKey = await profiledCacheKey(connection, profile, requester);
   const cached = profiledProviderCache.get(cacheKey);
   if (cached && cached.provider.config.queryTimeout !== connection.queryTimeout) {
@@ -1322,7 +1548,10 @@ export async function acquireExecutionProfileProvider(
     if (tunnel && !tunnelPreexisted) await tunnel.close().catch(() => {});
   };
 
-  const provider = await createDatabaseProvider(effectiveConnection, options, execution);
+  const provider = await createDatabaseProvider(effectiveConnection, options, {
+    ...execution,
+    ...ownerContext(owner, requester),
+  });
   if (credential !== null) {
     try {
       assertAgentCredentialForm(connection, provider);
@@ -1346,23 +1575,70 @@ export async function acquireExecutionProfileProvider(
     throw error;
   }
 
-  profiledProviderCache.set(cacheKey, { provider, lastUsed: Date.now(), connectionId: connection.id });
+  profiledProviderCache.set(cacheKey, { provider, lastUsed: Date.now(), connectionId: connection.id, owner });
   startIdleSweep();
 
   return provider;
 }
 
 /**
- * Remove a provider from cache and disconnect. Also removes the connection's
- * execution-profile providers: a deleted or re-credentialed connection must
- * not leave a stale agent pool running under the old configuration.
+ * Remove the cached providers of `connectionId` and disconnect them, from the writable cache and the execution-profile
+ * cache alike: a deleted or re-credentialed connection must not leave a stale agent pool running under the old
+ * configuration. The scope decides which entries of the connection go, and no scope ever reaches another connection's:
+ *
+ * - Without a scope, every entry of the connection in both caches, and then its SSH tunnel, as before owners existed.
+ * - With an owner scope, every entry of either cache opened for `scope.owner`, and no other. Under governance every
+ *   user's providers are their own (docs/GOVERNANCE.md#per-user-providers), so one user's disconnect must not tear down
+ *   another user's pool, session state or transaction. An engine that keeps one handle per file records no owner on it
+ *   (`providerOwner`), so its one handle, which every owner shares, is left to the removal without a scope.
+ * - With a key scope, the entry the writable cache holds under `scope.key`, which {@link editorCacheKey} answers for one
+ *   record of the connection, and the entries the profiled cache holds under that key with a profile framed onto it
+ *   (`withProfile`), the record's own execution-profile providers. No other entry goes: one opened with another record
+ *   of the same id, or under another file-access posture, is cached under another key. Without governance every caller
+ *   of a connection shares its provider, so a disconnect may remove only what the caller's own record names
+ *   (docs/SECURITY.md, note 0.9). The key frames the server and the credentials, so naming a connection id reaches
+ *   nothing.
+ *
+ * The SSH tunnel serves every entry of the connection, so a scoped removal closes it only once no entry of either cache
+ * still serves the connection, as the idle sweep does. A scope that names neither an owner nor a key as a string, or
+ * names both, is refused before anything is removed: matching on a missing owner would remove the entries every caller
+ * shares.
+ *
+ * An owned entry is torn down (`teardownProvider`): it leaves the cache first, an open transaction on it is rolled
+ * back, and a pool that hangs is abandoned, so the removal of a user's providers, which the governance loader asks for
+ * when a grant is taken away or changed (`src/lib/db/owner-removal.ts`), ends within 15 s. The owned entries are torn
+ * down at once, and before the tunnel goes. An entry every caller shares is disconnected as before.
  */
-export async function removeProvider(connectionId: string): Promise<void> {
+export async function removeProvider(
+  connectionId: string,
+  scope?: { owner: string; key?: never } | { key: string; owner?: never },
+): Promise<void> {
+  const owner: unknown = scope?.owner;
+  const scopedKey: unknown = scope?.key;
+  const byKey = typeof scopedKey === "string" && owner === undefined;
+  if (scope !== undefined && !byKey && !(typeof owner === "string" && scopedKey === undefined)) {
+    throw new DatabaseConfigError(
+      "removeProvider takes a scope only with the owner whose providers it removes or the cache key of the record whose providers it removes, as a string, and never with both.",
+    );
+  }
+  // A key scope names the record's writable entry by the key itself, and its profiled entries by the key with each
+  // profile framed onto it.
+  const profiledKeys: ReadonlySet<string> = new Set(
+    byKey ? Array.from(EXECUTION_PROFILES, (profile) => withProfile(profile, scopedKey)) : [],
+  );
+  const removes = (entry: CachedProvider, keyed: boolean): boolean =>
+    entry.connectionId === connectionId && (scope === undefined || (byKey ? keyed : entry.owner === owner));
+  const teardowns: Promise<void>[] = [];
+
   // A connection can hold more than one entry now - one per distinct server-and-credentials
   // it was opened with - so this removes every entry serving it, the way the profiled loop
   // below always has.
   for (const [key, entry] of providerCache) {
-    if (entry.connectionId !== connectionId) continue;
+    if (!removes(entry, key === scopedKey)) continue;
+    if (entry.owner !== undefined) {
+      teardowns.push(teardownProvider(providerCache, key, entry));
+      continue;
+    }
     try {
       await entry.provider.disconnect();
     } catch (error) {
@@ -1372,7 +1648,11 @@ export async function removeProvider(connectionId: string): Promise<void> {
   }
 
   for (const [key, entry] of profiledProviderCache) {
-    if (entry.connectionId !== connectionId) continue;
+    if (!removes(entry, profiledKeys.has(key))) continue;
+    if (entry.owner !== undefined) {
+      teardowns.push(teardownProvider(profiledProviderCache, key, entry));
+      continue;
+    }
     try {
       await entry.provider.disconnect();
     } catch (error) {
@@ -1383,6 +1663,10 @@ export async function removeProvider(connectionId: string): Promise<void> {
     }
     profiledProviderCache.delete(key);
   }
+  await Promise.all(teardowns);
+
+  // The entries the scope left, another owner's or another record's, keep the tunnel they reach the connection through.
+  if (scope !== undefined && connectionStillServed(connectionId)) return;
 
   // Close SSH tunnel if exists
   try {
@@ -1392,8 +1676,15 @@ export async function removeProvider(connectionId: string): Promise<void> {
   }
 }
 
+// Every copy of this module a process loads registers its owner-scoped removal, because the governance loader runs in
+// another Next.js bundle than the route handlers that fill these caches (src/lib/db/owner-removal.ts).
+registerOwnerRemoval(removeProvider);
+
 /**
- * Clear all cached providers (shared and execution-profile)
+ * Clear all cached providers (shared and execution-profile), all at once.
+ * An owned provider (docs/GOVERNANCE.md#per-user-providers) is torn down (`teardownProvider`), so an open transaction
+ * it holds is rolled back before it closes, and it is waited for at most 15 s; a provider every caller shares is
+ * disconnected as before.
  */
 export async function clearProviderCache(): Promise<void> {
   // Stop idle sweep
@@ -1404,7 +1695,11 @@ export async function clearProviderCache(): Promise<void> {
 
   const disconnectPromises: Promise<void>[] = [];
 
-  for (const entry of providerCache.values()) {
+  for (const [key, entry] of providerCache) {
+    if (entry.owner !== undefined) {
+      disconnectPromises.push(teardownProvider(providerCache, key, entry));
+      continue;
+    }
     disconnectPromises.push(
       entry.provider.disconnect().catch((error) => {
         // The id is an argument, never part of the first one: `console.error`'s first argument
@@ -1414,6 +1709,10 @@ export async function clearProviderCache(): Promise<void> {
     );
   }
   for (const [key, entry] of profiledProviderCache) {
+    if (entry.owner !== undefined) {
+      disconnectPromises.push(teardownProvider(profiledProviderCache, key, entry));
+      continue;
+    }
     disconnectPromises.push(
       entry.provider.disconnect().catch((error) => {
         console.error("[DB] Error disconnecting profiled provider", sanitize(entry.connectionId), error);
@@ -1458,6 +1757,8 @@ let shutdownRegistered = false;
 /**
  * Register process signal handlers for graceful shutdown.
  * Safe to call multiple times — handlers are only registered once.
+ * The hooks other modules registered with `onShutdown()` (src/lib/shutdown.ts), such as the governance
+ * listener's close, run first, cut at their 5 s deadline, and the providers are closed after them.
  */
 export function registerShutdownHandlers(): void {
   if (shutdownRegistered) return;
@@ -1465,6 +1766,7 @@ export function registerShutdownHandlers(): void {
 
   const shutdown = async (signal: string) => {
     logger.info(`[DB] Received ${signal}, closing all database connections...`);
+    await runShutdownHooks();
     try {
       await clearProviderCache();
       logger.info("[DB] All database connections closed gracefully");

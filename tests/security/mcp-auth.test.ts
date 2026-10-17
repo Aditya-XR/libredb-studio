@@ -19,9 +19,14 @@ import { clearRateLimitState } from "@/lib/api/rate-limit";
 import { signJWT } from "@/lib/auth";
 import { SQLiteProvider } from "@/lib/db/providers/sql/sqlite";
 import { logger } from "@/lib/logger";
+import * as runtimeSettings from "@/lib/governance/settings";
+import { validateSettings } from "@/lib/governance/settings";
+import { recordGovernanceSnapshot, resetGovernanceState } from "@/lib/governance/state";
+import * as accountCheck from "@/lib/mcp/account-check";
 import { MCP_ENABLED_ENV, MCP_ENABLED_INVALID_MESSAGE } from "@/lib/mcp/config";
 import { config, proxy } from "@/proxy";
 import { withBasePathEnv } from "../helpers/base-path";
+import { grantedSnapshot } from "../helpers/governance/granted-snapshot";
 import {
   countMethod,
   createSqliteFile,
@@ -436,6 +441,73 @@ describe("at the route, the kill switch is read after identity", () => {
     restoreChannel = useMcpChannel({ enabled: "off" });
     expect((await call("GET", token)).status).toBe(404);
   });
+
+  // Governance mode holds MCP off in this version (docs/GOVERNANCE.md). GOVERNANCE_SOURCE is set after boot, so the
+  // boot refusal of LIBREDB_MCP_ENABLED never ran, and the token's owner check is held open, so the 404 is the hold's
+  // whatever that check decides about a token under governance.
+  test("governance: /api/mcp answers 404 although LIBREDB_MCP_ENABLED is true", async () => {
+    const token = await mintTestToken();
+    const saved = process.env.GOVERNANCE_SOURCE;
+    process.env.GOVERNANCE_SOURCE = "postgres";
+    const ownerCheck = spyOn(accountCheck, "mcpTokenOwnerAllowed").mockResolvedValue(true);
+    try {
+      for (const method of methods) {
+        const response = await call(method, token);
+        expect(response.status).toBe(404);
+        expect(await response.json()).toEqual({ error: "MCP is not enabled on this server" });
+      }
+      expect(ownerCheck).toHaveBeenCalledTimes(methods.length);
+    } finally {
+      ownerCheck.mockRestore();
+      if (saved === undefined) delete process.env.GOVERNANCE_SOURCE;
+      else process.env.GOVERNANCE_SOURCE = saved;
+    }
+  });
+  test("governance: mcp.enabled=true in the snapshot leaves /api/mcp at 404 while the v1 hold stands", async () => {
+    const token = await mintTestToken();
+    const saved = process.env.GOVERNANCE_SOURCE;
+    process.env.GOVERNANCE_SOURCE = "postgres";
+    recordGovernanceSnapshot({
+      ...grantedSnapshot([], []),
+      settings: validateSettings([{ key: "mcp.enabled", value: true, updated_at: new Date() }], 1),
+    });
+    const ownerCheck = spyOn(accountCheck, "mcpTokenOwnerAllowed").mockResolvedValue(true);
+    try {
+      expect(runtimeSettings.runtimeSetting("mcp.enabled")).toBe(true);
+      for (const method of methods) {
+        const response = await call(method, token);
+        expect(response.status).toBe(404);
+        expect(await response.json()).toEqual({ error: "MCP is not enabled on this server" });
+      }
+    } finally {
+      ownerCheck.mockRestore();
+      resetGovernanceState();
+      if (saved === undefined) delete process.env.GOVERNANCE_SOURCE;
+      else process.env.GOVERNANCE_SOURCE = saved;
+    }
+  });
+
+  // The release that lifts the hold reads mcp.enabled on every request: these stand in for it by answering the
+  // setting the store would answer then, with no hold in force.
+  test.each([
+    [true, "off", 405],
+    [false, "true", 404],
+    [true, "maybe", 405],
+  ] as const)(
+    "without a hold, a runtime %p wins over LIBREDB_MCP_ENABLED=%p and the GET answers %p",
+    async (value, env, status) => {
+      restoreChannel();
+      restoreChannel = useMcpChannel({ enabled: env });
+      const token = await mintTestToken();
+      const spy = spyOn(runtimeSettings, "runtimeSetting").mockImplementation(((key: string) =>
+        key === "mcp.enabled" ? value : undefined) as typeof runtimeSettings.runtimeSetting);
+      try {
+        expect((await call("GET", token)).status).toBe(status);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
 });
 
 describe("no identity, no work", () => {

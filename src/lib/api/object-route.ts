@@ -30,6 +30,7 @@ import type {
   ProviderCapabilities,
 } from "@/lib/db/types";
 import type { ApiErrorCode } from "@/lib/api/error-codes";
+import type { UserPayload } from "@/lib/auth";
 
 /**
  * Shared request handling for the nine object routes under /api/db/objects (#789).
@@ -146,13 +147,13 @@ export function objectRouteErrorBody(error: ObjectRouteError): {
  * `route` is the same string the caller passed, repeated here so a route that needs it for an
  * audit event does not have to hold a second copy of its own name.
  *
- * The session is typed LOOSELY, `role: string` and an optional `username`, rather than as
- * `UserPayload`. It is a read-only view for a consumer that only ever writes these two into a log
- * line, and widening here means this interface does not move when the auth payload grows a field.
+ * The session is a read-only view of the three `UserPayload` fields a consumer reads: the role and
+ * username an audit line writes, and the identity provider subject a query event names its caller
+ * by (docs/GOVERNANCE.md#query-events), so this interface moves only when a consumer needs another field.
  */
 export interface ObjectRequestContext {
   readonly connection: DatabaseConnection;
-  readonly session: { readonly role: string; readonly username?: string };
+  readonly session: Readonly<Pick<UserPayload, "role" | "username" | "idpSubject">>;
   readonly route: string;
 }
 
@@ -711,7 +712,7 @@ function boundText(part: ObjectSourcePart, limit: number): ObjectSourcePart {
  * was the only engine that had landed; the day-one set is now three and the count was re-measured
  * rather than the digit bumped, because what it counts is what the paragraph is for.
  *
- * The day-one producers of `edit` are: `providers/sql/postgres.ts:4277`, gated on
+ * The day-one producers of `edit` are: `providers/sql/postgres.ts:4278`, gated on
  * `kindAcceptsSourceEdits(capabilities, kind)`; `providers/sql/trino/index.ts:1340` and
  * `providers/keyvalue/redis.ts:2235`, both gated on `spec.acceptsSourceEdits === true`, which is the
  * same fact read through the same declaration. Later engines may produce it too, as etcd does for a
@@ -741,12 +742,12 @@ function boundText(part: ObjectSourcePart, limit: number): ObjectSourcePart {
  * THE KIND, at `src/app/api/db/objects/edit-plan/route.ts:89`: that route calls
  * `requireEditableKind(provider.getCapabilities(), kind, ...)` before it reaches the builder, on the
  * CONNECTED provider and never on the client's copy of the declaration, and its comment there cites
- * this docblock by name as the reason. `src/app/api/db/objects/edit-apply/route.ts:142` asks the same
+ * this docblock by name as the reason. `src/app/api/db/objects/edit-apply/route.ts:148` asks the same
  * question of the plan's kind, so neither half of the write path takes a caller's word for it.
  *
  * THE BOUND, on both sides of the same constant. `edit-plan/route.ts:74` refuses a SUBMITTED text
  * longer than `EDIT_CHARACTER_LIMIT`, and all three day-one providers refuse a READ definition longer
- * than it inside `buildObjectEdit`: `providers/sql/postgres.ts:4445`, `providers/keyvalue/redis.ts:2325`
+ * than it inside `buildObjectEdit`: `providers/sql/postgres.ts:4446`, `providers/keyvalue/redis.ts:2325`
  * and `providers/sql/trino/index.ts:1534`. The second is what closes the class rather than narrowing
  * it: a plan is minted only from the build's own read, so a definition the pane could only have shown
  * truncated never reaches a plan at all, whatever the client POSTs.

@@ -40,6 +40,10 @@ function oidcErrorMessage(code: string): string {
       return "Single sign-on is not configured correctly on this server. Contact your administrator.";
     case "oidc_discovery" satisfies AuditReason:
       return "The identity provider could not be reached. Try again later, or contact your administrator if this continues.";
+    case "oidc_no_role" satisfies AuditReason:
+      return "Your account has no role that allows access to LibreDB Studio. Ask your administrator.";
+    case "oidc_session_revoked" satisfies AuditReason:
+      return "An administrator has ended your sessions. Try again later, or ask your administrator.";
     default:
       return "Authentication failed. Please try again.";
   }

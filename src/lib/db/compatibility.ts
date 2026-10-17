@@ -414,6 +414,66 @@ export const READS_FILE_ACCESS_POSTURE: Readonly<Record<DatabaseType, boolean>> 
 });
 
 /**
+ * Which shipped engines keep one handle per database file in this process: the static answer
+ * `ProviderCapabilities.singleWriterFile` gives once a provider is built.
+ *
+ * Static because `providerCacheKey` decides before a provider exists: under governance every user of a
+ * connection gets a provider of their own (docs/GOVERNANCE.md#per-user-providers), and the key frames the user as its
+ * owner, except on these engines, where a provider per user would be a second handle on one file. DuckDB keeps its own
+ * copy of the catalog in a second read-write handle and checkpoints it over the file when it closes, and LibreDB
+ * refuses the second open outright, so every user of such a connection is served the one open handle. Reading
+ * `connection.type` there was the alternative and is forbidden by `CLAUDE.md`.
+ *
+ * An exhaustive Record for the reason `EXTERNAL` gives, so a new type-id cannot join without someone
+ * answering, and `tests/unit/db/compatibility.test.ts` holds every entry equal to what that engine's
+ * provider declares. Frozen like the records above it.
+ */
+export const SINGLE_WRITER_FILE: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
+  postgres: false,
+  bigquery: false,
+  snowflake: false,
+  spark: false,
+  mysql: false,
+  sqlite: false,
+  libsql: false,
+  duckdb: true,
+  oracle: false,
+  db2: false,
+  mssql: false,
+  clickhouse: false,
+  druid: false,
+  trino: false,
+  cassandra: false,
+  elasticsearch: false,
+  opensearch: false,
+  mongodb: false,
+  couchbase: false,
+  redis: false,
+  prometheus: false,
+  kafka: false,
+  etcd: false,
+  neo4j: false,
+  milvus: false,
+  qdrant: false,
+  influxdb: false,
+  influxdb3: false,
+  oxia: false,
+  databend: false,
+  s3: false,
+  kubernetes: false,
+  mqtt: false,
+  firestore: false,
+  rabbitmq: false,
+  opcua: false,
+  mtconnect: false,
+  modbus: false,
+  netconf: false,
+  snmp: false,
+  sparkplug: false,
+  libredb: true,
+});
+
+/**
  * Which shipped engines a seed connection may expose to MCP clients (#246): the seed schema refuses
  * `mcp: true` at load on an engine where this answers false, naming the engine, so an opt-in the
  * product does not honour fails the file instead of listing a connection. Static for the reason
@@ -626,6 +686,125 @@ export const CONNECTION_STRING_ACCEPTED: Readonly<Record<DatabaseType, boolean>>
   mtconnect: false,
   modbus: false,
   // in one box.
+  netconf: false,
+  snmp: false,
+  sparkplug: false,
+  libredb: false,
+});
+
+/**
+ * Which shipped engines open a file on Studio's own host rather than reach a server: the connection is a path, and
+ * the provider opens it inside Studio's process. A governance source can never grant one
+ * (docs/GOVERNANCE.md#row-admission-and-skip-codes): row admission in `src/lib/governance/admission.ts` skips it as
+ * ENGINE_UNSUPPORTED whatever `GOVERNANCE_ALLOWED_ENGINES` says, because a grant would hand its users a file of the
+ * host Studio runs on.
+ *
+ * Static because admission decides from a row before any provider exists, and reads this record rather than a type
+ * id. Kept here because the governance layer must not load `src/lib/db-ui-config.ts`, which value-imports the React
+ * icon components; `tests/unit/db/compatibility.test.ts` holds every entry equal to that file's `isFileBased()`, the
+ * connection form's own answer. An exhaustive Record for the reason `EXTERNAL` gives, frozen like the records above it.
+ */
+export const OPENS_LOCAL_FILE: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
+  postgres: false,
+  bigquery: false,
+  snowflake: false,
+  spark: false,
+  mysql: false,
+  // A database file opened through `bun:sqlite` or `node:sqlite` in Studio's own process.
+  sqlite: true,
+  libsql: false,
+  // A database file (or `:memory:`) opened by the native DuckDB addon in Studio's own process.
+  duckdb: true,
+  oracle: false,
+  db2: false,
+  mssql: false,
+  clickhouse: false,
+  druid: false,
+  trino: false,
+  cassandra: false,
+  elasticsearch: false,
+  opensearch: false,
+  mongodb: false,
+  couchbase: false,
+  redis: false,
+  prometheus: false,
+  kafka: false,
+  etcd: false,
+  neo4j: false,
+  milvus: false,
+  qdrant: false,
+  influxdb: false,
+  influxdb3: false,
+  oxia: false,
+  databend: false,
+  s3: false,
+  kubernetes: false,
+  mqtt: false,
+  firestore: false,
+  rabbitmq: false,
+  opcua: false,
+  mtconnect: false,
+  modbus: false,
+  netconf: false,
+  snmp: false,
+  sparkplug: false,
+  // The embedded store this app creates, a file on Studio's own volume.
+  libredb: true,
+});
+
+/**
+ * Which shipped engines reach the whole server when a connection names no database (#1530): the provider then
+ * declares `catalogSessions` and opens a session of its own to each database the caller picks, so one credential
+ * reaches every database it can sign in to. A governance source grants one database per connection, so row admission
+ * in `src/lib/governance/admission.ts` skips such an engine's definition without a database as
+ * SERVER_LEVEL_NOT_ALLOWED (docs/GOVERNANCE.md#row-admission-and-skip-codes).
+ *
+ * Static for the reason `OPENS_LOCAL_FILE` is. `tests/unit/db/compatibility.test.ts` builds every shipped provider
+ * with no database and no connection string, nothing connecting, and holds this record equal to the engines whose
+ * provider then reports `catalogSessions`. An exhaustive Record for the reason `EXTERNAL` gives, frozen like the
+ * records above it.
+ */
+export const OPENS_SERVER_LEVEL_WITHOUT_DATABASE: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
+  // An empty `database` on discrete fields reaches the whole server (`serverLevel` in providers/sql/postgres.ts);
+  // a connection string never does.
+  postgres: true,
+  bigquery: false,
+  snowflake: false,
+  spark: false,
+  mysql: false,
+  sqlite: false,
+  libsql: false,
+  duckdb: false,
+  oracle: false,
+  db2: false,
+  mssql: false,
+  clickhouse: false,
+  druid: false,
+  trino: false,
+  cassandra: false,
+  elasticsearch: false,
+  opensearch: false,
+  mongodb: false,
+  couchbase: false,
+  redis: false,
+  prometheus: false,
+  kafka: false,
+  etcd: false,
+  neo4j: false,
+  milvus: false,
+  qdrant: false,
+  influxdb: false,
+  influxdb3: false,
+  oxia: false,
+  databend: false,
+  s3: false,
+  kubernetes: false,
+  mqtt: false,
+  firestore: false,
+  rabbitmq: false,
+  opcua: false,
+  mtconnect: false,
+  modbus: false,
   netconf: false,
   snmp: false,
   sparkplug: false,

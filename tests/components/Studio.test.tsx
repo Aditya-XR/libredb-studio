@@ -557,6 +557,12 @@ import type { TreeRowActionHandlers } from "@/components/object-tree/row-actions
 // Test data
 // =============================================================================
 
+/**
+ * The one line the editor shows while the query log records statements in full
+ * (docs/GOVERNANCE.md#grants-and-the-connection-list).
+ */
+const CAPTURE_NOTICE = "Statements you run are recorded in full in this server's query log.";
+
 const pgConn = {
   id: "c1",
   type: "postgres" as const,
@@ -823,6 +829,25 @@ describe("Studio", () => {
     await waitFor(() => expect(capturedSchemaExplorerProps.onOpenMaintenance).toBeDefined());
   }
 
+  test("statementCapture full shows the capture notice", () => {
+    connMgrOverride = { governance: true, statementCapture: "full" };
+    const { getByText } = render(<Studio />);
+    expect(getByText(CAPTURE_NOTICE).getAttribute("role")).toBe("note");
+  });
+
+  test("any other statementCapture, and no governance, shows no capture notice", () => {
+    for (const override of [
+      {},
+      { governance: true, statementCapture: "none" },
+      { governance: true, statementCapture: "redacted" },
+    ]) {
+      connMgrOverride = override;
+      const { queryByText, unmount } = render(<Studio />);
+      expect(queryByText(CAPTURE_NOTICE)).toBeNull();
+      unmount();
+    }
+  });
+
   test("openMaintenance navigates to admin operations when admin", async () => {
     connMgrOverride = { activeConnection: pgConn };
     render(<Studio />);
@@ -917,6 +942,26 @@ describe("Studio", () => {
     expect(mockSetConnections).toHaveBeenCalledWith(remaining);
     expect(mockActivateFallback).toHaveBeenCalledWith(remaining[0]);
     expect(dialog.queryByText("Delete connection?")).toBeNull();
+  });
+
+  // Without governance the server removes only the providers the caller's own record names (docs/SECURITY.md, note 0.9),
+  // so a connection of the user's own, which has no seed id, reaches it as its record and never as a bare id.
+  test("deleting a custom connection posts its record to /api/db/disconnect", () => {
+    const fetchMock = mock(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    connMgrOverride = { activeConnection: pgConn, connections: [pgConn] };
+    render(<Studio />);
+
+    act(() => (capturedSidebarProps.onDeleteConnection as (id: string) => void)("c1"));
+    fireEvent.click(within(document.body as HTMLElement).getByText("Delete"));
+
+    const disconnects = (fetchMock.mock.calls as unknown as [RequestInfo | URL, RequestInit?][]).filter(([input]) =>
+      String(input).endsWith("/api/db/disconnect"),
+    );
+    expect(disconnects).toHaveLength(1);
+    const [, init] = disconnects[0];
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({ connection: pgConn });
   });
 
   // CL-CORE-2: the connection a delete leaves active is the page's choice, not the person's, so it is made active

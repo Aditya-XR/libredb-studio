@@ -106,6 +106,29 @@ export type AuditReason =
    * because the login page tells the user something different for each.
    */
   | "oidc_discovery"
+  /**
+   * The provider authenticated the account, but with OIDC_USER_ROLES set its role claim holds none
+   * of OIDC_ADMIN_ROLES or OIDC_USER_ROLES, so no session was created. The record names the account,
+   * which the provider vouched for, so an operator can tell whose role assignment is missing.
+   */
+  | "oidc_no_role"
+  /**
+   * Under governance (docs/GOVERNANCE.md#sign-in), the provider authenticated the account, but the governance source
+   * revoked its subject's sessions at or after this second, so every request would refuse the session the callback
+   * was about to mint and none was minted. The record names the account, which the provider vouched for.
+   */
+  | "oidc_session_revoked"
+  /**
+   * A `POST /api/auth/login` under governance (docs/GOVERNANCE.md), where the identity provider is the only way in.
+   * Refused before the body is read, so the record names no submitted account and the actor is anonymous.
+   */
+  | "password_login_disabled"
+  /**
+   * Under governance (docs/GOVERNANCE.md), a request named a connection the session's identity provider subject holds
+   * no grant on: one that does not exist, one granted to someone else, an expired grant or a row Studio did not admit,
+   * which the 404 CONNECTION_NOT_FOUND it answers leaves indistinguishable. The record names the id that was asked for.
+   */
+  | "connection_not_granted"
   // Passkey sign-in and management (#785). Each code has one meaning, so an operator can tell a
   // cloned authenticator from a replay or a stale cookie without the export.
   /**
@@ -425,8 +448,11 @@ const AUDIT_SCHEMA = "libredb.audit.v1";
 export const MAX_AUDIT_FIELD_LENGTH = 254;
 /** The address derivation's "no usable signal" placeholder; never recorded as if it were one. */
 const UNKNOWN_ADDRESS = "unknown";
-/** Redaction marker for a URI's userinfo segment. Never a value real credentials could equal. */
-const CREDENTIAL_REDACTION = "[REDACTED]";
+/**
+ * Redaction marker for a URI's userinfo segment. Never a value real credentials could equal.
+ * Exported for the query event redactor, which writes the same marker for every credential it masks.
+ */
+export const CREDENTIAL_REDACTION = "[REDACTED]";
 /**
  * Where a connection string's userinfo can be collapsed before the value reaches either
  * destination. Once the `scheme://` boundary is found, everything to the end of the string is in
@@ -480,7 +506,8 @@ function isLetter(ch: string): boolean {
   return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z");
 }
 
-function redactUriCredentials(value: string): string {
+/** Exported for the query event redactor (`src/lib/query-events/redact.ts`), which applies the same rule to a statement. */
+export function redactUriCredentials(value: string): string {
   let searchFrom = 0;
   for (;;) {
     const delimiter = value.indexOf("://", searchFrom);

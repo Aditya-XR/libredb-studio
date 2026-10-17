@@ -149,6 +149,34 @@ describe("auth", () => {
   // --------------------------------------------------------------------------
 
   describe("login()", () => {
+    describe("session lifetime", () => {
+      const origTtl = process.env.AUTH_SESSION_TTL_SECONDS;
+
+      afterEach(() => {
+        if (origTtl === undefined) delete process.env.AUTH_SESSION_TTL_SECONDS;
+        else process.env.AUTH_SESSION_TTL_SECONDS = origTtl;
+      });
+
+      async function issuedLifetime(): Promise<{ tokenSeconds: number; cookieMaxAge: unknown }> {
+        await login("user", "user");
+        const claims = jose.decodeJwt(mockSetCalls[0].value);
+        return {
+          tokenSeconds: (claims.exp as number) - (claims.iat as number),
+          cookieMaxAge: (mockSetCalls[0].opts as { maxAge?: number }).maxAge,
+        };
+      }
+
+      test("with AUTH_SESSION_TTL_SECONDS unset the token and the cookie still last 24 hours", async () => {
+        delete process.env.AUTH_SESSION_TTL_SECONDS;
+        expect(await issuedLifetime()).toEqual({ tokenSeconds: 86400, cookieMaxAge: 86400 });
+      });
+
+      test("AUTH_SESSION_TTL_SECONDS=28800 gives exp minus iat of 28800 and a cookie Max-Age of 28800", async () => {
+        process.env.AUTH_SESSION_TTL_SECONDS = "28800";
+        expect(await issuedLifetime()).toEqual({ tokenSeconds: 28800, cookieMaxAge: 28800 });
+      });
+    });
+
     test("sets auth-token cookie with admin role", async () => {
       await login("admin", "admin");
       expect(mockSetCalls.length).toBeGreaterThan(0);
@@ -166,6 +194,36 @@ describe("auth", () => {
       const token = mockSetCalls[0].value;
       const payload = await verifyJWT(token);
       expect(payload!.role).toBe("user");
+    });
+
+    // Only the OIDC callback passes an identity (docs/GOVERNANCE.md#sign-in), so password, passkey and launch
+    // sessions keep signing exactly the claims they signed before.
+    test("login without an identity signs exactly role, username and sessionVersion", async () => {
+      await login("user", "member@example.com", 4);
+      const claims = jose.decodeJwt(mockSetCalls[0].value);
+      expect(claims).toEqual({
+        role: "user",
+        username: "member@example.com",
+        sessionVersion: 4,
+        iat: expect.any(Number),
+        exp: expect.any(Number),
+      });
+    });
+
+    test("login with an identity signs its subject and issuer as idpSubject and idpIssuer", async () => {
+      await login("admin", "ada@example.com", undefined, {
+        subject: "4f6a2c1e-8b7d-4e3a-9c5f-1a2b3c4d5e6f",
+        issuer: "https://sso.example.com/realms/libredb",
+      });
+      const claims = jose.decodeJwt(mockSetCalls[0].value);
+      expect(claims).toEqual({
+        role: "admin",
+        username: "ada@example.com",
+        idpSubject: "4f6a2c1e-8b7d-4e3a-9c5f-1a2b3c4d5e6f",
+        idpIssuer: "https://sso.example.com/realms/libredb",
+        iat: expect.any(Number),
+        exp: expect.any(Number),
+      });
     });
 
     // The Secure flag is what makes a session survive - or not - in the desktop

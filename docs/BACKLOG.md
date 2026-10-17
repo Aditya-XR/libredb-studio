@@ -28,13 +28,13 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
-- [Drivers and connections](#drivers-and-connections) — D1-D372, U17 · 270
+- [Drivers and connections](#drivers-and-connections) — D1-D374, U17 · 271
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U145 · 133
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U145 · 132
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC35 · 31
-- [Release pipeline](#release-pipeline) — REL1-REL8 · 8
+- [Release pipeline](#release-pipeline) — REL1-REL9 · 9
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H14 · 4
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 6
@@ -44,6 +44,7 @@ None of it is a GitHub issue.
 - [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B121 · 54
 - [Passkey deferrals (#785)](#passkey-deferrals-785) — PK1-PK9 · 8
 - [MCP server deferrals (#246)](#mcp-server-deferrals-246) — MCP1-MCP3 · 3
+- [Governance follow-ups](#governance-follow-ups) — GOV1-GOV23 · 23
 
 ---
 
@@ -1172,16 +1173,17 @@ test pins the behaviour that was chosen.
 
 ### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses four exports
 
-`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 54 hits, re-measured 2026-10-14.
-Nineteen of them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`, the agent routes' pattern).
-Thirty-two write out the same five-key object - `getSession`, `signJWT`, `verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token nothing reads, and one of those thirty-two is `tests/helpers/object-edit-route-harness.ts`, a shared harness that could have been the factory and copied the stub instead.
+`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 54 hits, re-measured 2026-10-17.
+Twenty of them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`, the agent routes' pattern).
+Thirty-one write out the same five-key object - `getSession`, `signJWT`, `verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token nothing reads, and one of those thirty-one is `tests/helpers/object-edit-route-harness.ts`, a shared harness that could have been the factory and copied the stub instead.
 The remaining three write a shorter stub of their own, two with two keys and one with a single `getSession`.
 The count moved from 53 to 54 between 2026-10-12 and 2026-10-14: `tests/api/db-test-connection-modbus.test.ts`, added by `1ab0d88ff`, is the fifty-fourth, and it is a five-key copy down to the `mock(async () => "mock-token")` for a token nothing reads. The copying this entry describes continued after the entry was written, which is the argument for the factory rather than against it.
 
-`src/lib/auth.ts` exports nine names. The four no hand-written stub carries are
+`src/lib/auth.ts` exports nine names. The four that all but one hand-written stub lack are
 `shouldMarkCookieSecure`, `resetCookieSecurityWarning`, `readCookieSecureOverride` and
-`isLoopbackHost`: `grep -rn 'shouldMarkCookieSecure' tests/` returns exactly one hit, and it is a
-sentence in a comment rather than a stub key. `resetCookieSecurityWarning` appears only in
+`isLoopbackHost`: `grep -rn 'shouldMarkCookieSecure' tests/` returns exactly 2 hits, a sentence in a
+comment and the one stub key, which `tests/security/auth-audit.test.ts` gained when the OIDC callback
+route started importing the function for its logout hint cookie. `resetCookieSecurityWarning` appears only in
 `tests/unit/lib/auth.test.ts`, which imports the real module, and in
 `tests/api/admin/discovery.test.ts`, which calls it on the real module it spreads.
 `readCookieSecureOverride` and `isLoopbackHost` appear in `tests/unit/lib/auth.test.ts` and
@@ -1836,7 +1838,7 @@ Not fixed there: the change is to the adapter's log-dir read, whose error table 
 
 ### D126. Concurrent first acquisitions of one connection and profile each open a provider
 
-`acquireExecutionProfileProvider` in `src/lib/db/factory.ts` checks the profiled cache, and on a miss constructs and connects a provider, then stores it.
+`acquireExecutionProfileProvider` in `src/lib/db/factory.ts` checks the profiled cache (`profiledProviderCache`), and on a miss constructs and connects a provider, then stores it there.
 Two callers that miss at the same time each construct one, and the later store overwrites the earlier entry, so the earlier provider stays connected with nothing left to close it.
 The editor and agent paths reach this function the same way.
 `/api/mcp` avoids it on its own side, with an in-flight map keyed on the exported `profiledCacheKey` (`src/lib/mcp/context.ts`).
@@ -3519,16 +3521,6 @@ PostgreSQL refuses a superuser seed under all three profiles the same way (`asse
 
 **Done when:** a plan run and an operations run on a SQL Server connection as `sa` read the schema, an Agent-mode run on it is still refused before its first statement with `PROFILE_PRIVILEGES_TOO_BROAD`, a provider test pins both, and `docs/providers/mssql.md` says where the check runs.
 
-### D346. A privilege refusal is reported as an authentication failure
-
-`mapDatabaseError` in `src/lib/db/errors.ts` returns an `AuthenticationError` ("Authentication failed: ...") for any message containing "access denied" or "permission denied".
-Those words also name refusals of a statement by a connected, authenticated session: MySQL's 1227 (`Access denied; you need (at least one of) the SUPER privilege`) and 1044 (`Access denied for user ... to database`), and PostgreSQL's `permission denied for table`.
-Measured 2026-10-13 through the MySQL agent read-only profile on MySQL 26.7.0 and MariaDB 12.3.2: `SET GLOBAL`, `GRANT` and `SELECT ... INTO OUTFILE` sent as `libredb_agent` came back as "Authentication failed: Access denied ...", which tells a user or a model that the login is wrong when the statement is what was refused.
-
-Found 2026-10-13 while reviewing #1629.
-
-**Done when:** a refusal that arrives on an open session maps to a query-class error that says the statement lacked a privilege, a failed login still maps to `AuthenticationError`, and `tests/unit/db/errors.test.ts` pins MySQL 1045, 1227 and 1044 and PostgreSQL's `permission denied for table` to their classes.
-
 ### D347. Percona Server is refused by the MySQL agent read-only profile
 
 `assertAgentEngineIsAdmissible` in `src/lib/db/providers/sql/mysql.ts` refuses a server whose `@@version_comment` names Percona Server with `PROFILE_UNSUPPORTED_TARGET`, because the profile's layers were measured on MySQL and MariaDB only.
@@ -3807,6 +3799,29 @@ The notice is the same on every engine an optimization run reaches, SQL and Mong
 Found 2026-10-17 in the review of #1790 (issue #1614); it is older than that change.
 
 **Done when:** the sentence says the recommendation cites no plan this run inspected, or names the plan the run holds by its artifact id, and a test drives a run that holds a plan, cites a read, and is told so.
+
+### D373. Providers that map their own errors answer a missing privilege as a refused credential or a statement error
+
+`mapDatabaseError` in `src/lib/db/errors.ts` answers a privilege the credential lacks with `PermissionDeniedError`, HTTP 403 `PERMISSION_DENIED`, read from the driver's code, and PostgreSQL, MySQL, SQL Server, Oracle, Db2 and MongoDB reach it.
+A provider that maps its own driver's errors decides that refusal itself, and the mappers read on 2026-10-15 decide it two other ways.
+
+- As a refused credential, `AuthenticationError` and 401 `AUTH_ERROR`, which tells a user whose credential is right to re-enter it: ClickHouse `ACCESS_DENIED` (`mapClickHouseError` in `src/lib/db/providers/sql/clickhouse/index.ts`), Druid `FORBIDDEN` (`src/lib/db/providers/sql/druid/index.ts`), Couchbase HTTP 403 (`mapCouchbaseError` in `src/lib/db/providers/document/couchbase/index.ts`, pinned by its integration test "a missing privilege becomes an AuthenticationError"), Trino `PERMISSION_DENIED` (`FAULT_CATEGORIES` in `src/lib/db/providers/sql/trino/http-transport.ts`), Elasticsearch and OpenSearch HTTP 403 (`responseFailure` in `src/lib/db/providers/sql/search/http-transport.ts`), Kafka's `authorization` category (`src/lib/db/providers/stream/kafka/errors.ts`) and RabbitMQ's `NOT_ALLOWED - access to vhost` (`amqpCloseError` in `src/lib/db/providers/stream/rabbitmq/errors.ts`); Qdrant `forbidden`, Firestore 403 and InfluxDB 403 only at connect.
+- As a statement error, `QueryError` and 400 `QUERY_ERROR`: Cassandra `Unauthorized` (`mapCassandraError` in `src/lib/db/providers/sql/cassandra/index.ts`), Snowflake `003001` (`src/lib/db/providers/sql/snowflake/errors.ts`), Milvus `permission-denied` (`src/lib/db/providers/vector/milvus/errors.ts`), Redis `NOPERM` (`RedisProvider.query` in `src/lib/db/providers/keyvalue/redis.ts`), RabbitMQ 403 on a channel, and Qdrant, Firestore and InfluxDB after connect.
+
+Redis is one of the six engines governance admits by default (`GOVERNANCE_ALLOWED_ENGINES`), so a write refused under a read grant answers 400 there and 403 on the other five.
+
+Found 2026-10-15 while separating the two refusals in `mapDatabaseError`; each provider's own mapper was left as it was, because each is a decision with measurements of its own.
+
+**Done when:** each provider above answers its authorization refusal with `PermissionDeniedError` and keeps its credential refusal an `AuthenticationError`, its provider doc names the code it reads, and its `tests/integration/db/<type-id>-provider.test.ts` pins both, each refusal measured on its engine.
+
+### D374. A test that dials a port it closed, expecting a refusal, can reach another process's listener
+
+Several test files take a port that nothing listens on by listening on an ephemeral port and closing it again, then dial that port and expect a refusal: `refusingOrigin` in `tests/unit/db/prometheus/request.test.ts`, `closedPort` in `tests/helpers/rabbitmq-fake-peer.ts`, and the copies and users in the gRPC, etcd, Kafka, Milvus, RabbitMQ, SSH tunnel and seed discovery tests (thirteen files under `tests/` name `closedPort` or `refusingOrigin`).
+The runner runs one file per CPU, and a port just freed is soon handed out again, so by the time a test dials it another file's server can be listening there.
+Measured 2026-10-16 with eight copies of the Prometheus request test at a time, after the TLS failures of that file were fixed: 5 of 300 runs failed this way, with a "refused" request answered by another copy's redirect server or reset, or with a redirect test's server receiving a request it never sent.
+The other side of the same race may be behind a failure seen once in a full run on a loaded machine, where `tests/unit/db/http/node-transport-runtimes.test.ts` counted 6 connections on its keep-alive listener for the 2 its child opened, in both children; 100 runs under load never repeated it.
+
+**Done when:** one helper in `tests/helpers/` reserves a refusing port for the life of a test by holding a connected socket, whose own local port nothing listens on (measured 2026-10-16: a connection to it is refused, and a listen on it fails with `EADDRINUSE` under Bun and under Node), every closed-port helper uses it, and eight copies of the Prometheus file at a time fail none of 300 runs.
 
 ## Value interpolation
 
@@ -4257,20 +4272,6 @@ Db2 declares `kinds` for the same reason: RUNSTATS and REORG are refused on a vi
 Found by the acceptance pass of the vector-family work; the menu entries predate it.
 
 **Done when:** PostgreSQL and SQLite declare `kinds` on the operations their row menus offer, naming the kinds each engine runs them on, measured on a PostgreSQL materialized view and on SQLite's `ANALYZE` of a view, and a test asserts that a view's row menu offers no maintenance entry its engine would not run.
-
-### X27. A query that reaches its deadline is answered HTTP 408, which Chromium resends, so the statement runs up to three times
-
-`createErrorResponse` in `src/lib/api/errors.ts` answers a `TimeoutError` with HTTP 408 and `retryable: true`.
-Chromium reads a 408 on a reused keep-alive connection as a server closing an idle socket and sends the POST again, up to twice, without telling the page.
-So one Run of a statement that reaches its query timeout reaches the database up to three times, and the editor shows "Query timed out" only after the last.
-Measured 2026-10-08 on the CI image of #1593 with a Databend connection whose query timeout was 3 seconds: the page sent one `POST /api/db/query`, Databend received the statement three times about 3 seconds apart, each with its own kill, and the server logged three "Query timeout" lines; a first Databend Cloud connect that met a resuming warehouse was answered 408 twice before its third attempt passed.
-Since #1593, Databend's resuming-warehouse case, Studio's own read that outlasts its deadline on a named warehouse, is answered with HTTP 503, which Chromium does not resend.
-Not measured with a write: a statement that a provider does not stop on the server, or one that commits before the deadline is noticed, would take effect once per attempt.
-The route has answered 408 since f59b44d5c (2026-03-12), for every engine.
-
-Found 2026-10-08 by the browser pass of the Databend provider (#1593); pre-existing.
-
-**Done when:** a statement deadline is answered with a status no browser resends (for example 504), `docs/API_DOCS.md` names it, and an e2e test that lets one statement reach its deadline shows the database received it once.
 
 ---
 
@@ -6016,8 +6017,8 @@ Reading CockroachDB sessions from `crdb_internal.cluster_sessions` instead of an
 
 ### DOC12. The FerretDB compatibility entry omits Check Collection, views and Compact, and a maintenance request has no deadline
 
-`src/lib/db/compatibility.ts:752-762` lists FerretDB as `tier: "full"` with three caveats, all about sign-in, version and deployment.
-Measured on FerretDB 2.7.0 (`ghcr.io/ferretdb/ferretdb:latest` over `postgres-documentdb`): Operations > Check Collection answers HTTP 500 `no such command: 'dbCheck'`; a view created in mongosh is listed and counted as an empty collection (count 0); and Run Compact never returns, a self-deadlock in FerretDB itself, so the button stays disabled because `/api/db/maintenance` (`src/app/api/db/maintenance/route.ts`, called from `src/hooks/use-monitoring-data.ts:222` and `:259`) sets no deadline on the operation.
+The FerretDB entry of `WIRE_COMPATIBLE_ENGINES` in `src/lib/db/compatibility.ts` lists it as `tier: "full"` with three caveats, all about sign-in, version and deployment.
+Measured on FerretDB 2.7.0 (`ghcr.io/ferretdb/ferretdb:latest` over `postgres-documentdb`): Operations > Check Collection answers HTTP 500 `no such command: 'dbCheck'`; a view created in mongosh is listed and counted as an empty collection (count 0); and Run Compact never returns, a self-deadlock in FerretDB itself, so the button stays disabled because `/api/db/maintenance` (`src/app/api/db/maintenance/route.ts`, called from `killSession` and `runMaintenanceOutcome` in `src/hooks/use-monitoring-data.ts`) sets no deadline on the operation.
 
 Found by the end-to-end test pass of 2026-10-03 and 2026-10-04.
 
@@ -6376,10 +6377,12 @@ Not fixed there: the etcd PR touches no other script.
 
 **Done when:** every command script decides that it runs as the program by comparing real paths, as `generate-etcd-descriptor.mjs` does, and one test runs a drift guard through a symlinked checkout and sees it check.
 
-### REL6. Five dynamic file reads make Turbopack trace the whole repository into the server output
+### REL6. Dynamic file reads make Turbopack trace the whole repository into the server output
 
 `bun run build` prints "Turbopack build encountered 5 warnings", each "Dynamic filesystem access causes tracing of the whole project", at `resolveAgentLedgerDirectory` in `src/lib/agent/config.ts`, `reservedStoragePaths` and `canonicalPath` in `src/lib/data-dir.ts`, `getDatabasePath` in `src/lib/db/providers/sql/sqlite.ts` and `kubernetesLogin` in `src/lib/seed/vault-client.ts`.
 Re-measured 2026-10-07 with the operator seed sources in place: the seed file read in `src/lib/seed/sources/file.ts` and DuckDB's `getDatabasePath` are no longer reported, and `src/lib/data-dir.ts` now is, twice.
+Re-measured 2026-10-16 on the governance branch (#1785) with `main` merged in: seven warnings, the five above, the read in `src/lib/data-dir.ts` reported once more as a file pattern that matches 14,846 files, and `readFileSync` of the application default credentials in `src/lib/db/providers/sql/bigquery/auth.ts`, which the BigQuery provider (#1672) added.
+No file of the governance mode is reported.
 The trace of `/api/db/query` then lists 2,662 project files outside `node_modules` and `.next`, `src/`, `tests/`, `operator/`, `research/` and `docs/` among them, and `scripts/lib/prune-standalone-payload.sh` removes only what its deny-list names, so a payload built from the committed tree still carries `operator/`, `CONTRIBUTORS.md` and the seven translated READMEs into the release tarball the `npx` launcher downloads.
 Measured 2026-10-01 on a build of the committed tree, when the five warnings were those reported before the re-measure above, the seed file read and DuckDB's `getDatabasePath` among them: marking those five calls `/*turbopackIgnore: true*/` in a scratch copy removed all five warnings and cut that trace to one project file, `seed-assets/sqlite/employee.db`.
 The warnings are printed on every run of the required check, where a sixth is easy to miss; `main`'s CI printed the same five on 2026-10-01.
@@ -6387,7 +6390,7 @@ The warnings are printed on every run of the required check, where a sixth is ea
 Found while building the etcd provider (#1089), whose diff touches none of the five files, and measured again by its review.
 Not fixed there: none of the five files reported on 2026-10-01 is an etcd file.
 
-**Done when:** `bun run build` prints no tracing warning, because each of the five reads tells Turbopack what it reaches or is marked as outside the trace, and a payload built from the committed tree holds at its root only what the server runs, `LICENSE` and `README.md`.
+**Done when:** `bun run build` prints no tracing warning, because each read it reports tells Turbopack what it reaches or is marked as outside the trace, and a payload built from the committed tree holds at its root only what the server runs, `LICENSE` and `README.md`.
 
 ### REL7. A local E2E run spends the shared account's query budget
 
@@ -6419,6 +6422,18 @@ Found 2026-10-04 while planning the platform integration in a checkout that hold
 Not fixed there: neither config is part of that work.
 
 **Done when:** `tsc --noEmit`, `next build` and `eslint .` leave the git-ignored draft directories alone, for example through an `exclude` in `tsconfig.json` and `files` on the rules object that names the React rules, and a working tree holding a `.ts` and a `.cjs` draft under `docs/superpowers/` passes all three as a clean checkout does.
+
+### REL9. The passkey E2E that ends another session can land on `/login` without its return path
+
+The test "a removed passkey is refused and ends the account's other sessions" in `e2e/passkey.spec.ts` signs a second browser context in with the password, removes the passkey in the first, and then expects the second, sent to `/`, to arrive at `/login?next=%2F`.
+That address comes only from the client: the proxy checks the cookie's signature alone and lets `/` through, the editor's `GET /api/auth/me` is refused, and `useAuth` in `src/hooks/use-auth.ts` sends the tab to `signInPath("/")`.
+But `getSession` in `src/lib/auth.ts` clears the cookie on the response that refuses a session.
+So if any request of the second context reaches the server after the removal and before the test's navigation, that navigation carries no cookie, and `signInRequired` in `src/proxy.ts` sends the bare root to `/login`, with no `next` by design.
+The test does not wait for the second context's editor to settle after its sign-in, so that editor's first requests (the managed connection list, the storage pull, the signed-in user), or a later poll, can land in that window.
+Seen once, on 2026-10-16, in a local run of the E2E Tests job's suite in CI mode on the governance branch (#1785): the first attempt read `http://localhost:3011/login`, and the first retry passed.
+The cause above is a reading of the code, not a measurement: the run kept no trace of the second context's requests.
+
+**Done when:** the second context makes no request between the removal and its own navigation, for example because it waits for its editor to settle and then stays on `about:blank` until the check, or the check accepts either redirect and asserts what both prove, that the session is refused; and the test passes 20 of 20 runs with `--repeat-each=20`.
 
 ## Chart configuration surface
 
@@ -6944,21 +6959,19 @@ decide the class, and the agent's repairable-versus-environment split inherits t
 driver's code fields (`isStatementFault` in `src/lib/db/errors.ts`: SQLSTATE classes `0A`, `21`, `22`,
 `23`, `42`, `44` from `pg`, `mysql2` and `db2-node`, SQL Server error numbers, Oracle `errorNum`,
 SQLite result codes) before the `timeout`, `cancel`, `pool` and `relation` substring branches, so
-`no such table: pooled_items` is a `QueryError` now, not a `PoolExhaustedError`. What is left runs
-BEFORE that check, on purpose, so that nothing it classified changed class in that PR:
+`no such table: pooled_items` is a `QueryError` now, not a `PoolExhaustedError`.
+The access refusals followed, read from the same fields before that check (`accessRefusalOf`): a privilege the credential lacks is a `PermissionDeniedError`, a refused credential an `AuthenticationError`, and their words decide only an error with no code, so `relation "user_passwords" does not exist` is a `QueryError` now.
+What is left:
 
-- `relation "user_passwords" does not exist` matches `password` → `AuthenticationError`. Harmless on the
-  agent path today only because a query-phase `AuthenticationError` is repairable there, which is a
-  coincidence rather than a design.
+- The connection branch still runs first and reads only words (`econnrefused`, `connection refused`,
+  `connect etimedout`, `getaddrinfo`), never SQLSTATE class `08`.
 - `Connection terminated unexpectedly` matches nothing → base `DatabaseError`. A dead socket is offered
   to a model as a statement it could rewrite (bounded at three attempts).
 - An error with no code field at all (RisingWave answers its parser errors as `XX000`, HTTP drivers
   carry none) still reaches the substring branches.
 
-**Done when:** the connection and authentication branches read the driver's code first too (SQLSTATE
-class `28` and `08`, MySQL `1045`, SQL Server `18456`, Oracle `1017`), so an identifier can no longer
-decide any class a code could, and the `permission denied` reading (`42501`, now an
-`AuthenticationError` and answered 401) is decided on purpose rather than inherited.
+**Done when:** the connection branch reads the driver's code first too (SQLSTATE class `08`), so an
+identifier can no longer decide any class a code could.
 
 ### B5. The agent run ledger cannot fence two writers, so single ownership has to be asserted above it
 
@@ -7819,3 +7832,240 @@ Found 2026-10-12 while designing the RabbitMQ provider.
 Found 2026-10-12 while designing the RabbitMQ provider.
 
 **Done when:** the chooser prefers an exact match and falls back to the case-insensitive one only when no exact match exists, for every provider, with a test on two names that differ by case.
+
+---
+
+## Governance follow-ups
+
+Defects and open questions found while designing and building the governance mode (`GOVERNANCE_SOURCE=postgres`), in that mode and in the modes it does not cover.
+GOV1 to GOV4 were re-verified against the code on 2026-10-15, and GOV5 to GOV23 on 2026-10-16.
+
+### GOV1. Resolving a seed id answers 403 for an existing id and 404 for an unknown one
+
+`resolveConnection` in `src/lib/seed/resolve-connection.ts:84-98` looks the id up again without the role filter when the filtered lookup misses.
+An id that exists but is not available to the caller's role answers 403 with "Access denied", and an id that does not exist answers 404 with "not found".
+So any signed-in user can learn which seed ids the operator configured, including ids no role of theirs may use.
+The connection's fields are not revealed, so the leak is the id alone.
+Governance mode answers a uniform 404 for every connection the caller is not granted; the other modes keep the two answers.
+
+**Done when:** an id the caller's role cannot use and an id that does not exist give the same status and body in every mode, the denial is still logged server-side, and a route test pins both answers as equal.
+
+### GOV2. `docs/STORAGE.md` says `sslmode=require` encrypts without verifying, but pg verifies it
+
+`docs/STORAGE.md` "SSL" tells operators to use `sslmode=require` for managed cloud PostgreSQL and says it encrypts but does not verify (`rejectUnauthorized: false`).
+`buildSSLConfig()` in `src/lib/storage/providers/postgres.ts` does return `{ rejectUnauthorized: false }` for `require`, but the pool is built with the `connectionString` too, and pg 8.23 parses the string after the explicit options, so the parsed `ssl` wins.
+pg-connection-string 2.x treats `prefer`, `require` and `verify-ca` as aliases of `verify-full` unless `uselibpqcompat=true` is set, and emits a security warning.
+Measured with pg 8.23.1 and pg-connection-string 2.14.1: `new ConnectionParameters({ connectionString: "...?sslmode=require", ssl: { rejectUnauthorized: false } }).ssl` is `{}`, which verifies the chain and the host name.
+So a storage database with a self-signed certificate fails with `sslmode=require`, the opposite of what the document promises, and the same holds for `prefer`, `verify-ca` and `verify-full`.
+
+**Done when:** the document states what each `sslmode` value really does with the pinned pg, and either the code keeps the documented non-verifying `require` (for example by removing `sslmode` from the string it hands to pg) or the document drops that promise, with a unit test on the options the pool receives.
+
+### GOV3. Arming the MSSQL and Oracle transaction timeout in every mode needs a design decision first
+
+PostgreSQL and MySQL roll back an editor transaction left open for five minutes (`TX_TIMEOUT_MS` in `src/lib/db/providers/sql/postgres.ts` and `src/lib/db/providers/sql/mysql.ts`).
+The MSSQL and Oracle providers have no such timer, so an abandoned transaction there holds its locks until the provider is torn down.
+Governance mode arms the same five-minute timer for MSSQL and Oracle only on providers created with an owner, so installs without governance keep today's transaction lifetime.
+Arming it in every mode would change behaviour for users who never enable governance, so it is a product decision and not a fix.
+
+This entry is a question for the product owner: should every mode get the five-minute limit on MSSQL and Oracle?
+The answer comes before any code changes.
+
+**Done when:** the product owner has decided, and either both providers arm the timer in every mode with a test that a transaction left open past the limit is rolled back, or this entry is deleted with the decision recorded in the provider docs.
+
+### GOV4. Pooled PostgreSQL editor clients are released without `DISCARD ALL`
+
+`PostgresProvider.query()` in `src/lib/db/providers/sql/postgres.ts` releases its pooled client with a plain `client.release()`, so session state a statement creates (`SET`, temporary tables, prepared statements, advisory locks held at session level) stays on the connection and reaches the next caller the pool hands it to.
+The severity is low: `providerCacheKey()` in `src/lib/db/provider-cache-key.ts` keys a pool by the connection id, the server, a digest of the credentials and the read-only mode, so only callers who already open the database as the same credential share a pool, and no database privilege boundary is crossed.
+Governance mode removes the cross-user path because each user gets their own provider; the other modes still share.
+
+**Done when:** a client released after a user statement carries no session state into the next checkout (by `DISCARD ALL` on release, or an equivalent reset where the statement left a session change), the reset does not run inside an open transaction, and a live test against PostgreSQL shows a `SET` and a temporary table from one call are gone in the next.
+
+### GOV5. Under governance the browser copy's owner is still the username, not the subject
+
+Under governance the server files a user's rows under the identity provider's subject (`storageOwnerKey` in `src/lib/storage/owner-key.ts`), but the browser copy keeps the username as its owner.
+`readSignedInUsername` in `src/lib/storage/workspace-owner.ts` reads `user.username` from `GET /api/auth/me`, `claimAccountWorkspace` in `src/lib/storage/local-storage.ts` compares it with the stored owner, every request names it in the `X-LibreDB-Workspace-Owner` header, and `src/proxy.ts` answers 409 `WORKSPACE_OWNER_MISMATCH` when it differs from the session's `username`.
+After an OIDC sign-in the username is the email, else `preferred_username`, else the subject (`src/app/api/auth/oidc/callback/route.ts`), so it can change while the subject stays, and another subject can take it over.
+An email change clears the browser copy at the next sign-in, editor tabs, drafts and unsynced collections with it, although the server rows belong to the same person.
+A username another subject takes over on a shared browser keeps the earlier person's copy, which `useStorageSync` in `src/hooks/use-storage-sync.ts` then pushes into the new person's rows before it pulls, and the 409 check cannot tell the two people apart.
+`docs/STORAGE.md` states the choice; this entry asks to change it.
+
+**Done when:** under governance the browser copy's owner, the header and the check in `src/proxy.ts` use the session's `idpSubject`, without governance they keep the username, and tests cover a changed email (the copy is kept) and a username another subject takes over (the copy is cleared).
+
+### GOV6. A governed MySQL, SQL Server or Db2 row without a database is admitted and can never open
+
+Admission skips a row without a `database` only where `OPENS_SERVER_LEVEL_WITHOUT_DATABASE` in `src/lib/db/compatibility.ts` is true (`src/lib/governance/admission.ts`), which is PostgreSQL alone.
+The MySQL, SQL Server and Db2 providers refuse to open without one: `validate()` in `src/lib/db/providers/sql/mysql.ts` (skipped when a `connectionString` is set) and in `src/lib/db/providers/sql/mssql.ts`, and `resolveTarget` in `src/lib/db/providers/sql/db2/connection.ts`.
+So such a row is admitted, every user it is granted to sees the connection, and every open fails with a configuration error, while the heartbeat's skipped rows and the admin status report nothing wrong.
+MySQL and SQL Server are among the engines governance admits by default (`GOVERNANCE_ALLOWED_ENGINES`), Db2 only when an operator lists it.
+No privilege boundary is crossed: on these engines the credential's grants bound what a session reaches, not its default database.
+
+**Done when:** admission skips a MySQL, SQL Server or Db2 row whose merged read record has no `database` (and, for MySQL and Db2, no `connectionString`) as `DEFINITION_INVALID` with path `database`, from a record kept beside `OPENS_SERVER_LEVEL_WITHOUT_DATABASE` that a test holds equal to each provider's own refusal, and `docs/GOVERNANCE.md`'s admission steps say so.
+
+### GOV7. A TLS panel without a mode means three different things, depending on the engine
+
+`SSLConfig` in `src/lib/types.ts` types `mode` as required, the seed schema in `src/lib/seed/types.ts` leaves it optional, and a cast in `src/lib/seed/connection-filter.ts` hides the difference from the compiler.
+Under governance a definition can carry `ssl.caCert` or `ssl.rejectUnauthorized` without `ssl.mode` (`DEFINITION_ALLOWLIST` in `src/lib/governance/contract.ts`), and a sealed client certificate pair alone builds a panel with no mode (`mergedRecord` in `src/lib/governance/admission.ts`).
+The providers read an absent mode three ways.
+PostgreSQL, MySQL, SQL Server, MongoDB, Redis and the shared HTTP and gRPC transports verify the chain and the host name.
+Oracle verifies the chain only (`buildTLSAttributes` in `src/lib/db/providers/sql/oracle.ts` sets `sslServerDNMatch` for `verify-full` and `verify-system` alone).
+Cassandra (`src/lib/db/providers/sql/cassandra/driver-transport.ts`) and MQTT connect without TLS, and Db2 refuses the connection.
+So the same `{"ssl":{"caCert":"<PEM>"}}` checks the host name on PostgreSQL, does not on Oracle, and sends a Cassandra password in cleartext.
+`docs/SEED_CONNECTIONS.md` documents `ssl.caCert` and the client pair but not `ssl.mode`.
+
+**Done when:** a panel without a mode means one thing, either because the schema and admission require `ssl.mode` whenever `ssl` is present (`DEFINITION_INVALID` with path `ssl.mode`) or because the type makes it optional and every provider reads its absence as `verify-full`, the cast is gone, and a test runs every provider's TLS mapping on a panel without a mode.
+
+### GOV8. MongoDB writes the database name into its connection string unencoded, and Oracle checks nothing in its Easy Connect string
+
+`buildConnectionString` in `src/lib/db/providers/document/mongodb.ts` builds `mongodb://user:password@host:port/database` from the fields, encoding the user, the password and `authSource` but not the database name or the host.
+The driver percent-decodes the path into the database name and also uses it as the default authentication database, so a name with `?` fails to parse, one with `#` loses its tail and the appended `?authSource=` with it, and one with `%` is decoded or throws, although MongoDB allows those characters in a database name.
+`getConnectString` in `src/lib/db/providers/sql/oracle.ts` writes `host:port/serviceName` as Easy Connect, which node-oracledb never percent-decodes, so encoding is not the fix there: a `?` in the service name starts Easy Connect parameters, `/` and `:` change the instance name or the server mode, and an IPv6 host without brackets does not parse.
+No privilege boundary is crossed, because whoever writes the fields chooses the target anyway.
+The cost is MongoDB databases that cannot be opened from the fields, and on Oracle connection settings that a field adds without saying so.
+
+**Done when:** MongoDB's builder encodes the database name and brackets an IPv6 host, Oracle refuses a host or service name outside the Easy Connect grammar before any socket, naming the field, and a test covers each character above.
+
+### GOV9. The conformance manifest lists the credential keys Studio reads, but not which engine reads which
+
+The manifest `scripts/generate-governance-manifest.ts` writes publishes one flat list of the keys a sealed credential may hold (`plaintext.keys`, from `PLAINTEXT_KEYS` in `src/lib/governance/contract.ts`), the same nine keys for every engine.
+Which of them an engine reads is decided only once a row is opened: the API key pair is accepted on Elasticsearch alone, `connectionString` is refused where `CONNECTION_STRING_ACCEPTED` in `src/lib/db/compatibility.ts` is false (SQL Server and Redis), and a key an engine ignores is admitted without a word.
+So a control plane that builds its credential form from the manifest can seal a `connectionString` for SQL Server or an API key pair for OpenSearch, and learns of the skip only from the heartbeat afterwards.
+This is an enhancement rather than a defect: the skip is reported, and nothing is opened with the wrong key.
+
+**Done when:** the manifest publishes, per engine, the credential and definition keys that engine's provider reads, from one exhaustive record a test holds equal to the providers' own rules, the manifest is regenerated, and `docs/GOVERNANCE.md` describes the new section.
+
+### GOV10. Studio's shutdown handler is registered by importing the provider factory, and Next's own SIGTERM handler exits first
+
+The only `SIGTERM` and `SIGINT` listeners in `src/` are added by `registerShutdownHandlers` in `src/lib/db/factory.ts` when the module loads, so the hooks that flush query events and close the governance pool (`onShutdown` in `src/lib/shutdown.ts`) run only in a process that has loaded the factory.
+Nothing on the boot path loads it: `register()` in `src/instrumentation.ts` never reaches it, and the production server's preload of every route at start hides that in `node server.js` soon after boot, but not in `next dev` or for a signal that arrives earlier.
+Next's own handler, which `next start` and the standalone server add unless `NEXT_MANUAL_SIG_HANDLE` is set, closes the HTTP server and calls `process.exit(143)` without waiting for Studio's, which awaits the hooks for up to 5 seconds before its own `process.exit(0)`.
+So a routine restart normally exits while the hooks are still inserting the query events Studio holds, and those rows are lost, although `docs/GOVERNANCE.md` says Studio inserts them before it exits.
+On a busy server the reverse can happen, and Studio's `exit(0)` cuts Next's drain of the requests in flight.
+
+**Done when:** one handler, registered at boot rather than by an import, owns the exit (for example with `NEXT_MANUAL_SIG_HANDLE=true` in the images and the chart), runs the shutdown hooks and lets Next drain, and a test that sends SIGTERM to the built server shows the queued query events inserted before the process exits.
+
+### GOV11. At shutdown the governance pool can close under the query event flush
+
+`runShutdownHooks` in `src/lib/shutdown.ts` starts every hook at once, so the query event flush (`flushQueryEvents` in `src/lib/query-events/sink.ts`, which writes through `withGovernanceClient` in `src/lib/governance/db.ts`) runs beside `stopGovernance` in `src/lib/governance/start.ts`, which awaits the listener's close and then `closeGovernancePool()` in `src/lib/governance/db.ts`.
+The flush's first batch takes its client before the pool closes, and `pool.end()` waits for it.
+A later batch, when more than 500 events are queued or when the flush first waits for one already in flight, finds the pool gone, and `governancePool()` in the same file builds a new one that nothing closes, connecting again inside the flush's 4 seconds.
+`docs/GOVERNANCE.md` says Studio first inserts the query events and then closes the pool, and nothing in the code orders the two.
+Alone this rarely loses a row (a connect queued on a full pool when `end()` runs is never served, so that batch dies at the deadline); the larger loss is GOV10's.
+
+**Done when:** the governance pool closes only after the query event hook has settled, `governancePool()` refuses to build a pool once shutdown has begun, and a test with more than 500 queued events shows every batch inserted through the original pool before it closes.
+
+### GOV12. The PostgreSQL and MySQL providers leave their transaction timer running through `disconnect()`
+
+Both providers arm a five-minute timer when an editor transaction begins (`TX_TIMEOUT_MS` and `expireTransaction` in `src/lib/db/providers/sql/postgres.ts`, the same in `src/lib/db/providers/sql/mysql.ts`), and neither `disconnect()` clears it or releases the transaction's client, where the SQL Server and Oracle providers start `disconnect()` with `clearTxTimeout()`.
+On PostgreSQL `pool.end()` waits for every checked-out client, so a `disconnect()` with a transaction open returns only when the timer releases the client, up to five minutes after `BEGIN`, and the transaction keeps its locks until then.
+A shared provider is disconnected without a rollback first, by `removeProvider`, by `clearProviderCache` at shutdown, and when a request names another query timeout (D115), so deleting a custom connection that has an open transaction leaves the request waiting.
+On MySQL `end()` closes the held connection, so `disconnect()` returns and the server rolls back, but `txActive` stays true, and five minutes later the timer logs a timeout that never happened and sends a `ROLLBACK` to a closed connection.
+An owned provider is rolled back before it is disconnected (`teardownProvider` in `src/lib/db/factory.ts`), so this is the shared providers' defect.
+On a server-level PostgreSQL connection the transaction lives on a catalog session, a provider of its own in `catalogSessions`, and the parent's `isInTransaction()` does not report it.
+So a fix inside `PostgresProvider.disconnect()` covers it, because `closeAll()` calls each session's own `disconnect()`, while a fix that checks only the parent's `isInTransaction()` would miss it.
+
+**Done when:** both providers' `disconnect()` roll back and release a held transaction and clear the timer before they end the pool, and a test per provider shows `disconnect()` resolving without the timer firing, `isInTransaction()` false and no timer left pending.
+
+### GOV13. The package exports `removeProvider` with a key scope that no embedder can build a key for
+
+`@libredb/studio` exports `removeProvider` (`src/exports/providers.ts`), whose public signature in `src/lib/db/factory.ts` takes either `{ owner }` or `{ key }`.
+The key is the cache key `editorCacheKey` in `src/lib/db/factory.ts` derives through `providerCacheKey` in `src/lib/db/provider-cache-key.ts`, a length-framed mix of the connection id, the server, a digest of the credentials, the mode, the file-access posture and the owner, and the package exports neither function, as `editorCacheKey`'s docblock says.
+An embedder who passes `{ key: connection.id }` removes nothing and gets no error.
+The owner scope does work, because `EditorExecutionContext` is exported.
+
+**Done when:** either `editorCacheKey` is exported and documented beside `removeProvider`, or the `{ key }` variant leaves the public type and stays on an internal function, and a type test pins the package's surface either way.
+
+### GOV14. Without governance, an edited custom connection keeps its old provider open until the idle sweep
+
+Saving an edit in the connection dialog (`handleConnect` in `src/components/Studio.tsx`) only stores the new record, and the browser calls `POST /api/db/disconnect` only when it deletes a connection.
+The edited record has a new cache key, and `getOrCreateProvider` in `src/lib/db/factory.ts` closes the other entries of the same id only for single-writer file engines and when nothing but the query timeout changed.
+So the old provider and its pool stay open until `evictIdleProviders` finds them idle, 30 minutes after their last use, swept every 5 minutes.
+After a host or password change, for example to rotate a leaked password, the old pool stays signed in with the old credential for up to 35 minutes and keeps its database connections.
+A seed connection is never closed by that route, which `docs/API_DOCS.md` documents under `POST /api/db/disconnect`, and the UI offers no edit or delete for it; under governance the loader removes a user's providers when a grant changes.
+
+**Done when:** saving an edit closes the providers of the record as it was before the edit, for example by posting that record to `POST /api/db/disconnect`, which removes only its key, and a test shows the old pool closed right after the edit.
+
+### GOV15. Under governance a disconnect with an open transaction records the transaction as `timed-out`
+
+The governed branch of `POST /api/db/disconnect` (`src/app/api/db/disconnect/route.ts`) calls `removeProvider(connectionId, { owner })`, and `teardownProvider` in `src/lib/db/factory.ts` rolls the caller's open transaction back, but the route records no terminal event and leaves the transaction's owner record in place.
+That record is closed later by `recordTimedOut` in `src/lib/api/transaction-ownership.ts`, from its watch timer about five minutes after `BEGIN`, the caller's next transaction request or the lapsed lease, which records `timed-out` with `status` `cancelled`.
+`docs/GOVERNANCE.md` reserves `timed-out` for the database driver rolling the transaction back at its five-minute limit, so the audit trail names the wrong cause at the wrong time, where the grant loader records `rolled-back` for the same rollback (`endRevokedTransactions` in `src/lib/governance/grant-diff.ts`).
+Only the API reaches it, since the UI disconnects only to delete a custom connection, which governance switches off, and at shutdown `clearProviderCache` rolls transactions back and records no terminal event at all.
+The loader's own `rolled-back` is recorded even when the rollback did not finish in time, because `teardownProvider` never rejects, so the rule in `docs/GOVERNANCE.md` that a close that fails records nothing does not hold there either; a fix here should not copy it.
+
+**Done when:** the governed disconnect records `rolled-back`, with `status` `error` when the rollback was not confirmed, and releases the owner record, and a test shows that a `begin` followed by a disconnect records exactly one `rolled-back` and no later `timed-out`.
+
+### GOV16. A request the admission gate refuses on the transaction route records no `refused` event
+
+With `queryLog.onSinkFailure` at `refuse`, `POST /api/db/transaction` (`src/app/api/db/transaction/route.ts`) calls `admitQueryExecution()` for `begin`, a statement, `commit` and `rollback`, and answers its refusal, 503 `AUDIT_UNAVAILABLE`, without recording anything.
+Every other gated route records one `refused` row for it (`recordRefusedRequest` in the query and multi-query routes, the maintenance and object edit routes, and `runRecorded` for profile and key scan), and `docs/GOVERNANCE.md` says a request the gate refuses records one `refused` row with its route's source.
+So an auditor sees refusals from every surface but interactive transactions, and `tests/api/db/transaction.test.ts` pins the gap by expecting no event after five refused requests.
+
+**Done when:** each refused statement action of the transaction route records one `refused` row with source `transaction`, the engine, the grant level, `AUDIT_UNAVAILABLE` and the statement or the `COMMIT` or `ROLLBACK` text, and that test expects them.
+
+### GOV17. Maintenance events carry no statement, no target and no error code
+
+`maintenanceEvent` in `src/app/api/db/maintenance/route.ts` records every maintenance action with `statement: null`, because the provider builds the statement inside `runMaintenance` and `MaintenanceResult` in `src/lib/db/types.ts` does not return it, and a failed action records no `error_code` either.
+The route holds the operation and its target (`type`, `target` and the requested container), but writes them only to Studio's local audit log.
+`docs/GOVERNANCE.md` documents the NULL statement, so this is a gap in what the control plane can see rather than a broken promise: it cannot tell a `kill` of another session from an `analyze`, see which object an action touched, or see why it failed.
+
+**Done when:** maintenance rows carry the operation and its target, as the statement the provider ran or as a descriptor the route builds, captured under `queryLog.statementCapture` like any statement, and the error code of a failure, and `docs/GOVERNANCE.md` and the route's tests say so.
+
+### GOV18. Each route builds its query events with its own copy of the same helpers, and the copies have drifted
+
+The principal, the connection fields and the error code of a query event are built in five places: `queryEventRequest` and `resolvedConnection` in `src/lib/query-events/route-events.ts`, `runRecorded` in `src/lib/query-events/recorded-run.ts`, `maintenanceEvent` in the maintenance route, `objectEditEvent` in the object edit apply route and `transactionEventScope` in the transaction route.
+They no longer agree.
+`errorCode` in `route-events.ts` records the driver's SQLSTATE first, while `codeOf` in `recorded-run.ts` and `eventError` in the transaction route read only the error's `code`, which for a PostgreSQL error is the API code, so the same failure records `42703` from the editor and `QUERY_ERROR` from a profile or a transaction.
+`runRecorded` sets no client address, so every profile and key scan row has `client_ip` NULL.
+The maintenance and transaction routes miss what GOV16 and GOV17 describe.
+
+**Done when:** one module under `src/lib/query-events/` builds the principal, the connection fields, the SQLSTATE-first error code, the row count, the client address and the admission step with its `refused` row, every route uses it, and one table-driven test checks those fields for every event source.
+
+### GOV19. A governed MTConnect, RabbitMQ or Kubernetes definition cannot set `apiPath`
+
+`DEFINITION_ALLOWLIST` in `src/lib/governance/contract.ts` has no `apiPath`, so `definitionFault` in `src/lib/governance/admission.ts` skips a definition that sets it as `DEFINITION_INVALID` with path `apiPath`, before any credential is opened.
+The MTConnect, RabbitMQ and Kubernetes providers read it (`connection-options.ts` under `src/lib/db/providers/industrial/mtconnect/`, `src/lib/db/providers/stream/rabbitmq/` and `src/lib/db/providers/platform/kubernetes/`), and the seed schema accepts it.
+So an agent behind a proxy path, a management API under a prefix or a cluster behind Rancher can be seeded but not governed: a row with the path is skipped, and one without it calls the proxy's root.
+Kubernetes `namespaces` and `tlsServerName` and RabbitMQ `amqpPort` are missing from the allowlist too, and a Snowflake row cannot carry the `role` that Studio's own load checks require, so it is always skipped.
+None of these engines is in the default `GOVERNANCE_ALLOWED_ENGINES`, so this applies once an operator lists one.
+
+**Done when:** `apiPath` and every other key a governed engine's provider reads join the allowlist and `docs/GOVERNANCE.md`'s table, the manifest is regenerated, an admission test admits an MTConnect, a RabbitMQ and a Kubernetes row that carry `apiPath`, and `docs/GOVERNANCE.md` says whether adding a definition key is allowed within contract v1, since an older Studio skips such a row.
+
+### GOV20. Before MCP and the agent run under governance, their call sites must pass the subject and the read credential
+
+Governance holds both off today: `isMcpHeldByGovernance` in `src/lib/mcp/config.ts` switches MCP off (the endpoint answers 404 and no token is minted), `isAgentHeldByGovernance` in `src/lib/agent/config.ts` switches the agent off, and the boot preflight in `src/lib/governance/preflight.ts` refuses `LIBREDB_MCP_ENABLED` and `LIBREDB_AGENT_ENABLED`.
+Their call sites are not ready for the hold to be lifted.
+`VisibilityOptions` in `src/lib/governance/visible.ts` takes `credential: "read"`, which `docs/GOVERNANCE.md` says the agent, MCP, classification and handover paths always use, and no call site passes it.
+MCP's `McpCaller` in `src/lib/mcp/context.ts` and the agent's `AgentRunActor` in `src/lib/agent/types.ts` carry no identity provider subject, so neither can resolve a governed connection or own a per-user provider, and MCP lists its connections through `getManagedConnections`, which answers none under governance.
+The agent runs route also opens the writable editor provider to check a run's catalog (`src/app/api/agent/runs/route.ts`).
+Lifted as it is, the paths without a subject would fail closed, but that check would open a provider with the write credential of any user who holds a write grant.
+
+**Done when:** MCP tokens and `AgentRunActor` keep the subject, every MCP, agent runtime, handover, runs and classify call resolves its connection with the subject and `{ credential: "read" }` and acquires its provider for that subject, the runs route no longer opens the writable provider, their query event sources and the admission gate are wired, and a governance test checks the read credential and the per-subject owner on each path before the hold predicates answer false.
+
+### GOV21. While the snapshot cannot be served, the revocations it already holds stop refusing sessions
+
+`governanceRevoked` in `src/lib/local-accounts.ts` answers false whenever `governanceServable()` is false, so `storedAccountAllows()` stops applying every revocation of the last snapshot once that snapshot is older than `GOVERNANCE_MAX_STALENESS_MS`, misconfigured or incompatible.
+Data routes answer 503 then, but routes that resolve no governed connection, such as `/api/storage`, `/api/auth/me`, the `/api/ai/*` routes and the admin routes, accept a revoked session again for the rest of its lifetime, `AUTH_SESSION_TTL_SECONDS`, which the installer sets to 28800.
+Measured on 2026-10-15 with one session: refused while the snapshot was `ok`, accepted once it was `unavailable`.
+`docs/GOVERNANCE.md#sign-in` states the behaviour on purpose, so an outage sends no wave of sign-ins, but a revocation only ever denies, so keeping the last snapshot's revocations would send back only sessions that were already revoked.
+
+**Done when:** the revocations of the last loaded snapshot keep refusing their sessions while the snapshot is not served, or the owner records the decision to keep today's behaviour; `docs/GOVERNANCE.md#sign-in` says which; and `tests/unit/lib/local-accounts-governance.test.ts` pins a revoked session refused under `unavailable` and `misconfigured`, with a session that was never revoked still accepted, so the outage still sends no one to sign in.
+
+### GOV22. One query event the database refuses outside SQLSTATE classes 22 and 23 holds every later event back
+
+`insertBatch` in `src/lib/query-events/postgres-sink.ts` splits a refused batch into single rows only when the SQLSTATE is in `PERMANENT_CLASSES`, classes 22 and 23.
+Any other refusal is thrown, so the sink backs off and sends the same head batch again, for ever, as `docs/GOVERNANCE.md#query-events` describes for a missing privilege (42501).
+When only one row is refused, for example by a trigger the control plane adds to `bridge.query_event` that raises P0001, or by 54000, the rows behind it never land: with `queryLog.onSinkFailure` set to `refuse` every execution answers 503 `AUDIT_UNAVAILABLE` until someone removes the cause, and with `continue` the queue fills to 10000 events and every newer one is dropped.
+Measured on 2026-10-15 with a fake governance database that refused one row of six with P0001: after 8.5 s the sink held all 6, backing off, with `lastSqlstate` P0001.
+Platform's v1 schema has no trigger, rule or row-level security on `bridge.query_event`, so nothing produces such a refusal today, and nothing in the contract forbids one either.
+
+**Done when:** a batch refused with a SQLSTATE outside classes 22 and 23 is retried row by row once, so rows the database accepts land and only the rows it refuses again hold the queue, while a refusal of every row, such as 42501, keeps today's backoff; `docs/GOVERNANCE.md#query-events` describes the rule, or the objects section forbids triggers and rules on `bridge.query_event` that refuse an insert; and a sink test with one P0001 row among six shows the five land.
+
+### GOV23. A timed-out MSSQL transaction with a statement still running keeps its connection and its locks
+
+`expireTransaction` in `src/lib/db/providers/sql/mssql.ts` clears `txTransaction` and `txActive` and then calls `rollback()`, and its docblock says `mssql` returns the connection to the pool either way.
+While a request of the transaction is still running, `Transaction.rollback` in `mssql` 12.7.4 (`lib/base/transaction.js`) answers `EREQINPROG` ("Can't rollback transaction. There is a request in progress.") before it releases anything.
+The provider then reports no transaction, the server keeps the transaction open with its locks, and the connection stays held by the dropped `Transaction` object until the provider is torn down, which costs the user one of the sessions of their governed pool, three by default.
+Measured on 2026-10-15 against the installed `mssql`: after the timer fired during a running request, the provider was out of transaction and the pool had released nothing.
+The timer is armed only on owned providers, so this is governance mode only; GOV3 is the question of arming it in every mode.
+
+**Done when:** `expireTransaction` cancels or waits for the running request before it rolls back, so the rollback runs and the connection always returns to the pool; the docblock states what happens; and a unit test with a fake `Transaction` that answers `EREQINPROG` while a request runs shows the rollback sent once the request settles and the connection released.

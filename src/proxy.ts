@@ -13,6 +13,8 @@ import { auditMcpDenial, authenticateMcpRequest } from "@/lib/mcp/bearer";
 import { MCP_PATH } from "@/lib/mcp/config";
 import { mcpOriginHostRefusal } from "@/lib/mcp/origin-policy";
 import { getJwtSecret } from "@/lib/config/auth-env";
+import { readOidcAutoRedirect } from "@/lib/config/oidc-auto-redirect";
+import { governanceEnabled } from "@/lib/governance/config";
 import { withSecurityHeaders } from "@/lib/security/config";
 import { RETURN_PATH_PARAM, safeReturnPath, sessionRequiredBody, signInPath } from "@/lib/api/session-ended";
 
@@ -41,6 +43,17 @@ const WORKSPACE_OWNER_MISMATCH_BODY = {
   error: "This page's workspace belongs to a different account than the one signed in. Reload the page.",
   code: ApiErrorCode.WORKSPACE_OWNER_MISMATCH,
 };
+
+/** The sentence POST /api/auth/launch answers while launch sign-in is off. */
+const LAUNCH_NOT_ENABLED = "Launch sign-in is not enabled on this server.";
+
+/** What the /launch page answers instead of loading: plain text, never cached. */
+function launchPageAnswer(text: string, status: number): NextResponse {
+  return new NextResponse(text, {
+    status,
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
 
 /** The account a workspace owner header names, or null when it is not a valid encoding. */
 function decodedOwner(value: string): string | null {
@@ -123,11 +136,10 @@ export async function proxy(request: NextRequest) {
       } catch {
         // Invalid token, allow access to login page
         logger.debug("Invalid token on login page, allowing access", { route: "proxy" });
-        return withSecurityHeaders(NextResponse.next());
       }
     }
-    // No token, allow access to login page
-    return withSecurityHeaders(NextResponse.next());
+    // No valid token: the identity provider when OIDC_AUTO_REDIRECT asks for it, else the login page
+    return withSecurityHeaders(oidcAutoRedirect(request) ?? NextResponse.next());
   }
 
   // The agent runtime's drive callback (#329). It is deliberately NOT on the public list
@@ -142,22 +154,17 @@ export async function proxy(request: NextRequest) {
     return withSecurityHeaders(NextResponse.next());
   }
 
-  // Under OIDC, or with a broken launch configuration, no launch can sign anyone in (docs/LAUNCH.md), so the
-  // page answers what POST /api/auth/launch answers instead of loading a form that can only fail. Kept above
-  // the public list, which tests/api/proxy.test.ts pins literal by literal. This answer leaves the token in the
-  // address bar and the history entry, which is harmless: the fragment never reaches a server, the token is
-  // unspent and refused here while this answer holds, it expires a minute after minting, and its audience
-  // names only this Studio.
+  // Under governance, under OIDC, or with a broken launch configuration, no launch can sign anyone in
+  // (docs/LAUNCH.md), so the page answers what POST /api/auth/launch answers instead of loading a form that can
+  // only fail. Governance mode has no launch sign-in at all, so it answers 404 before the launch configuration is
+  // read, as if launch sign-in did not exist. Kept above the public list, which tests/api/proxy.test.ts pins
+  // literal by literal. This answer leaves the token in the address bar and the history entry, which is harmless:
+  // the fragment never reaches a server, the token is unspent and refused here while this answer holds, it
+  // expires a minute after minting, and its audience names only this Studio.
   if (pathname === "/launch") {
+    if (governanceEnabled()) return withSecurityHeaders(launchPageAnswer(LAUNCH_NOT_ENABLED, 404));
     const launch = readLaunchConfig();
-    if (launch.state === "misconfigured") {
-      return withSecurityHeaders(
-        new NextResponse(launch.problem, {
-          status: 503,
-          headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
-        }),
-      );
-    }
+    if (launch.state === "misconfigured") return withSecurityHeaders(launchPageAnswer(launch.problem, 503));
   }
 
   // Allow public routes
@@ -173,6 +180,9 @@ export async function proxy(request: NextRequest) {
     pathname === "/health" ||
     pathname === "/api/health" ||
     pathname === "/api/db/health" ||
+    // Readiness (docs/GOVERNANCE.md#freshness-and-readiness): an orchestrator's probe carries no session, and the route
+    // reads only the in-process governance state.
+    pathname === "/api/ready" ||
     // Storage config endpoint (public, returns only mode info)
     pathname === "/api/storage/config" ||
     // The launch page (docs/LAUNCH.md) creates the session, so it cannot require one; it shows only a status
@@ -234,6 +244,21 @@ export async function proxy(request: NextRequest) {
     logger.warn("JWT verification failed, refusing the session", { route: "proxy" });
     return withSecurityHeaders(signInRequired(request, pathname, "Session expired. Sign in again."));
   }
+}
+
+/**
+ * The redirect a signed-out GET /login takes straight to the identity provider (OIDC_AUTO_REDIRECT,
+ * docs/OIDC.md), or null to render the login page. It carries `next` only when safeReturnPath
+ * accepts it, and it is skipped whenever `error` is present: every OIDC failure lands on
+ * /login?error=..., so a failing provider shows its error instead of looping.
+ */
+function oidcAutoRedirect(request: NextRequest): NextResponse | null {
+  if (request.method !== "GET" || process.env.NEXT_PUBLIC_AUTH_PROVIDER !== "oidc") return null;
+  const { searchParams } = request.nextUrl;
+  if (searchParams.has("error") || !readOidcAutoRedirect()) return null;
+  const returnPath = safeReturnPath(searchParams.get(RETURN_PATH_PARAM));
+  const query = returnPath === null ? "" : `?${new URLSearchParams({ [RETURN_PATH_PARAM]: returnPath })}`;
+  return NextResponse.redirect(new URL(withBasePath(`/api/auth/oidc/login${query}`), request.url));
 }
 
 /**
