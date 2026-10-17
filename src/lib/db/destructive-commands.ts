@@ -50,7 +50,7 @@ import { QDRANT_CONSOLE } from "@/lib/db/providers/vector/qdrant/routes";
  * Scope rule, and the reason this file is short: it names ONLY what each provider
  * can really run. Each was read before its table below was written -
  * `src/lib/db/providers/keyvalue/redis.ts`,
- * `src/lib/db/providers/document/mongodb.ts`,
+ * `src/lib/db/providers/document/mongodb/index.ts`,
  * `src/lib/db/providers/timeseries/prometheus/` and
  * `src/lib/db/providers/stream/kafka/` - and none was probed against a live
  * server for the rows here, so nothing here is claimed as measured behaviour. What

@@ -33,17 +33,18 @@ import * as path from "path";
  * @param options - Optional provider options (pooling, timeout, etc.)
  * @param execution - Server-injected execution context (#328, non-admin DuckDB file access). Never built
  *   from caller-supplied options. `acquireExecutionProfileProvider` passes the agent
- *   profile's context, and `getOrCreateProvider` and the routes that build their own
+ *   profile's context as `executionContextFor` builds it, and `getOrCreateProvider` and the routes that build their own
  *   provider pass the editor file-access posture `editorExecutionContext` derived from
- *   the verified session and the resolved connection. Providers whose read-only boundary
- *   is established at OPEN time read `readOnly` (SQLite); DuckDB additionally reads
+ *   the verified session and the resolved connection. What each provider establishes with `readOnly` and
+ *   `sendsStatements` is stated once, on `ProviderExecutionContext` (types.ts); DuckDB reads
  *   `allowExternalFileAccess` on its editor handle, and SQLite refuses to open at all when it is
- *   `false`, a profiled handle included; the rest establish theirs per statement and ignore both. ABSENT MEANS DENY: called without a context, as an
+ *   `false`, a profiled handle included. On DuckDB, ABSENT MEANS DENY: called without a context, as an
  *   embedder that predates the posture calls it, a DuckDB handle opens with
  *   `enable_external_access: 'false'`, so `read_csv`, `COPY`, `ATTACH` of a file and
  *   `INSTALL` are refused outside its private temp directory and its database's own file
  *   names (docs/providers/duckdb.md section 3.16) while the database stays writable; pass
- *   `{ allowExternalFileAccess: true }` for the full editor reach.
+ *   `{ allowExternalFileAccess: true }` for the full editor reach. SQLite refuses only an explicit
+ *   `false`, so called without a context it opens with the trusted reach.
  * @returns Promise<DatabaseProvider> instance
  * @throws DatabaseConfigError if connection type is not supported, or if its `readOnly` cannot be
  *   honoured (see assertReadOnlyHonoured)
@@ -267,10 +268,12 @@ export async function createDatabaseProvider(
       return new OpenSearchProvider(connection, options);
     }
 
-    // Document Databases - dynamically imported
+    // Document Databases - dynamically imported. The execution context reaches the
+    // MongoDB constructor like the SQL engines' and Kubernetes': its `readOnly` and
+    // `sendsStatements` together are what the connect-time verification keys on (issue #1614).
     case "mongodb": {
       const { MongoDBProvider } = await import("./providers/document/mongodb");
-      return new MongoDBProvider(connection, options);
+      return new MongoDBProvider(connection, options, execution);
     }
 
     case "couchbase": {
@@ -1016,7 +1019,8 @@ export async function getOrCreateProvider(
 
   // Create new provider (async - dynamically loads the provider module). Only the derived posture
   // is handed on, so the handle opens under exactly the posture its key frames; every provider but
-  // DuckDB ignores it (non-admin DuckDB file access).
+  // DuckDB and SQLite ignores it: DuckDB closes file access under a denied posture, and SQLite
+  // refuses to open under one.
   const provider = await createDatabaseProvider(effectiveConnection, options, { allowExternalFileAccess });
   try {
     await connectPhase(() => provider.connect());
@@ -1068,10 +1072,12 @@ export type ExecutionProfile = "agent-read-only" | "agent-operations" | "agent-h
  * Single source of truth for the profile list, so a new profile cannot be accepted
  * without stating both. The second field is the engine gate, and it is a PROPERTY OF
  * THE PROFILE rather than of the factory: `agent-read-only` sends model-authored
- * statements, so it is served only where the provider can bound one (the engine's own
- * read-only mechanism, or on Kubernetes the request allowlist plus the identity's RBAC),
- * and only the providers of AGENT_EXECUTION_ENGINES implement that: PostgreSQL, SQLite,
- * DuckDB, SQL Server, MySQL and Kubernetes (`src/lib/agent/engine-support.ts`). `agent-operations` sends no statement
+ * statements, so it is served only where the provider can bound one (in one of the three
+ * forms the `queryReadOnly` docblock in `src/lib/db/types.ts` names: the engine's own read-only
+ * handle or transaction, a least-privilege principal the server's own answers prove, or a
+ * Studio-enforced request allowlist plus the identity's own authorization), and only the
+ * providers of AGENT_EXECUTION_ENGINES implement that: PostgreSQL, SQLite,
+ * DuckDB, SQL Server, MySQL, Kubernetes and MongoDB (`src/lib/agent/engine-support.ts`). `agent-operations` sends no statement
  * at all — it calls the curated reporting methods every provider implements — so
  * requiring a read-only STATEMENT path of it would refuse an engine over a capability
  * the profile never uses. `agent-handover` sends a statement too — the one a run
@@ -1080,15 +1086,22 @@ export type ExecutionProfile = "agent-read-only" | "agent-operations" | "agent-h
  * (`AGENT_HANDOVER_BUDGET`), and a shared row would have made a later change to one
  * path silently move the other.
  *
- * What all three profiles share is everything that makes the acquisition safe: the
- * same `readOnly: true` execution context (on PostgreSQL that still verifies the role
- * is unprivileged at open), the same `agentUser` credential resolution, and the same
- * profiled cache — so neither an operations run nor an editor replay is ever handed
- * the editor's writable pool.
+ * What all three profiles share is what keeps an acquisition apart from the editor: the
+ * same `readOnly: true` (on PostgreSQL and SQL Server that still verifies the role or
+ * principal at open, under every profile), the same `agentUser` credential resolution, and
+ * the same profiled cache, so neither an operations run nor an editor replay is ever handed
+ * the editor's writable pool. What they need not share is a proof a provider keys on
+ * `sendsStatements`, the flag `executionContextFor` derives from the second field: such a
+ * provider (MongoDB) proves its statement boundary at open for `agent-read-only` and
+ * `agent-handover`, and opens `agent-operations`, which sends no statement, with neither the
+ * proof nor its refusal.
  */
 interface ProfileAcquisition {
   readonly context: ProviderExecutionContext;
-  /** Refuse the provider unless it exposes a database-native read-only statement path. */
+  /**
+   * Refuse the provider unless it implements a read-only statement path (`queryReadOnly`). Also
+   * the source of the context's `sendsStatements`.
+   */
   readonly requiresReadOnlyStatements: boolean;
 }
 
@@ -1099,6 +1112,35 @@ const PROFILE_ACQUISITION: Record<ExecutionProfile, ProfileAcquisition> = {
 };
 
 const EXECUTION_PROFILES: ReadonlySet<string> = new Set(Object.keys(PROFILE_ACQUISITION));
+
+/**
+ * The execution context a provider is opened with under `profile`, for the requester the acquisition serves.
+ *
+ * `sendsStatements` is derived from the profile's `requiresReadOnlyStatements` rather than declared in a second column,
+ * so the proof a provider runs at open and the engine gate below cannot come to disagree: a profile the gate serves
+ * without a read-only statement path is one that sends no statement, and a provider that proves its statement
+ * boundary at open does not prove it there. `allowExternalFileAccess` is the requester's posture, absent read as
+ * denied.
+ *
+ * An unknown profile is refused here, never defaulted: the table is a plain object, so a name such as `toString`
+ * would read an inherited member and answer a context with no `readOnly` in it. This is the acquisition's refusal:
+ * `acquireExecutionProfileProvider`, the one caller, calls this ahead of its cache key and has no check of its own.
+ * Exported for the tests.
+ */
+export function executionContextFor(
+  profile: ExecutionProfile,
+  requester: EditorExecutionContext = {},
+): ProviderExecutionContext {
+  if (!EXECUTION_PROFILES.has(profile)) {
+    throw new ExecutionProfileError(`Unknown execution profile: ${String(profile)}`, "UNSUPPORTED_PROFILE");
+  }
+  const acquisition = PROFILE_ACQUISITION[profile];
+  return {
+    ...acquisition.context,
+    sendsStatements: acquisition.requiresReadOnlyStatements,
+    allowExternalFileAccess: requester.allowExternalFileAccess === true,
+  };
+}
 
 /**
  * Resolves the optional least-privilege agent credential from the connection
@@ -1171,7 +1213,7 @@ function assertAgentCredentialForm(connection: DatabaseConnection, provider: Dat
  * editor's fully-privileged pool, and an editor request can never be handed a
  * read-only one.
  *
- * Whether a provider without a database-native read-only wrapper is refused is the
+ * Whether a provider without a read-only statement path is refused is the
  * PROFILE's decision, not this function's: under `agent-read-only` it is refused
  * rather than silently served `query()` (fail closed), and under `agent-operations`
  * it is served, because that profile sends no statement for a read-only wrapper to
@@ -1197,9 +1239,8 @@ export async function acquireExecutionProfileProvider(
   // The id refusal shares the place for the same reason: the profiled key frames connection.id (#1539).
   assertConnectionIdPresent(connection);
   assertReadOnlyHonoured(connection);
-  if (!EXECUTION_PROFILES.has(profile)) {
-    throw new ExecutionProfileError(`Unknown execution profile: ${String(profile)}`, "UNSUPPORTED_PROFILE");
-  }
+  // Refuses an unknown profile ahead of the cache key, which frames the profile.
+  const execution = executionContextFor(profile, requester);
 
   const cacheKey = await profiledCacheKey(connection, profile, requester);
   const cached = profiledProviderCache.get(cacheKey);
@@ -1281,10 +1322,7 @@ export async function acquireExecutionProfileProvider(
     if (tunnel && !tunnelPreexisted) await tunnel.close().catch(() => {});
   };
 
-  const provider = await createDatabaseProvider(effectiveConnection, options, {
-    ...acquisition.context,
-    allowExternalFileAccess: requester.allowExternalFileAccess === true,
-  });
+  const provider = await createDatabaseProvider(effectiveConnection, options, execution);
   if (credential !== null) {
     try {
       assertAgentCredentialForm(connection, provider);
@@ -1296,7 +1334,7 @@ export async function acquireExecutionProfileProvider(
   if (acquisition.requiresReadOnlyStatements && typeof provider.queryReadOnly !== "function") {
     await closeFreshTunnel();
     throw new ExecutionProfileError(
-      `Provider type "${connection.type}" has no database-native read-only execution profile`,
+      `Provider type "${connection.type}" implements no read-only statement path (queryReadOnly)`,
       "PROFILE_UNSUPPORTED_BY_PROVIDER",
     );
   }

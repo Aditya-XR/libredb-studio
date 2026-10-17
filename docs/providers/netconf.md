@@ -350,8 +350,8 @@ query.
 Not declared, each for a measured reason: `connectionStringSupport` (4.1), `explainFormat` (no
 engine-side plan exists), `credentialWarnings` (4.3), and no entry in `ENGINE_URI_SCHEMES` (4.1).
 This engine is in none of `AGENT_EXECUTION_ENGINES`, `ESTIMATE_BUILDERS` or `CATALOG_PLANS`: the
-first takes an engine with a database-native read-only execution profile, which NETCONF has no
-notion of; the second and third take an engine that answers catalog statistics through SQL, and
+first takes an engine whose provider implements a read-only statement path (`queryReadOnly`), which
+this one does not; the second and third take an engine that answers catalog statistics through SQL, and
 this engine answers no SQL at all.
 
 ## 10. Error handling

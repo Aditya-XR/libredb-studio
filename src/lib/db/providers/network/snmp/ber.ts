@@ -27,8 +27,8 @@ export interface BerField {
  *
  * Measured on 13 October 2026 against `origin/main`: a count that fails is turned into
  * `{ unavailable: error.message }` only for `QueryError` and `TimeoutError`
- * (`providers/platform/kubernetes/objects.ts:348`), and `isQueryError` at `errors.ts:244` is the
- * same test. A refusal thrown as a plain `Error` therefore passes as an unexpected failure and
+ * (`providers/platform/kubernetes/objects.ts:348`), and `isQueryError` in `src/lib/db/errors.ts` is
+ * the same test. A refusal thrown as a plain `Error` therefore passes as an unexpected failure and
  * ITS SENTENCE NEVER REACHES THE USER. Every refusal in this provider exists for its sentence,
  * so a plain `Error` would have thrown away the whole point of refusing. The first version of
  * this file did exactly that; this is the correction, not a precaution.

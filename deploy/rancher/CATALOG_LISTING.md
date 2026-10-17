@@ -62,8 +62,10 @@ What gets mailed is `pcsc-listing.html` beside this file, not the sections below
 > probe instead of writing a literal, which is why `DECLARES_EXPLAIN_FORMAT` in
 > `tests/unit/marketplace-copy.test.ts` carries a second alternative for them. Alongside it is the read-only agent rail
 > ([`docs/AGENT.md`](https://github.com/libredb/libredb-studio/blob/main/docs/AGENT.md)),
-> which executes statements on PostgreSQL, SQLite, DuckDB, SQL Server and MySQL only (`queryReadOnly`
-> exists on those five providers alone), with the database and not the IDE refusing the write. Do
+> which executes statements on PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB only (`queryReadOnly`
+> exists on those providers alone), each under the read-only boundary `docs/AGENT.md` documents for it.
+> Do NOT write that the database itself refuses the write: on Kubernetes Studio's request allowlist and the identity's
+> RBAC are the boundary, and on MongoDB the connection's user, proven at open. Do
 > NOT write "in a read-only session": that is true of PostgreSQL, SQLite and DuckDB only. SQL
 > Server has no read-only transaction and no session-level read-only switch, and bounds the run by
 > a principal verified to be unable to write plus an optimizer admission per statement
@@ -164,8 +166,8 @@ mutation (`DELETE`) is off by default, and Druid SQL has no `UPDATE`, no `DELETE
 model) writes up a query in plain English from the engine's own EXPLAIN plan, on
 PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Trino,
 Databend, BigQuery, Snowflake and Apache Spark, the engines that return one. It also runs a read-only investigation agent on PostgreSQL,
-SQLite, DuckDB, SQL Server and MySQL whose every claim cites the result it came from, and that never writes:
-the database, not the IDE, is what refuses writes and DDL. It stays off unless
+SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB whose every claim cites the result it came from, and that never writes,
+under the read-only boundary documented for each engine. It stays off unless
 configured.
 
 The Helm chart installs from the Rancher Apps catalog with default values: first-run
@@ -186,8 +188,8 @@ versions are documented and validated for every release.
 - Optional AI assistance (Gemini, OpenAI, or a self-hosted model; off by default):
   plain-English query explanation on the engines that return an EXPLAIN plan (PostgreSQL,
   MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Trino, Databend, BigQuery, Snowflake, Apache Spark). Plus a
-  read-only investigation agent on PostgreSQL, SQLite, DuckDB, SQL Server and MySQL that never writes — the
-  database, not the IDE, is what refuses the write
+  read-only investigation agent on PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB that never writes,
+  under the read-only boundary documented for each engine
 - Hardened chart defaults: non-root, read-only root filesystem, NetworkPolicy, PDB,
   HPA, Ingress/TLS
 - Self-hosted and air-gap friendly: no external services required to operate the IDE

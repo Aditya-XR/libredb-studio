@@ -288,7 +288,7 @@ is kept in sync with its per-provider doc). Don't copy a skeleton from this guid
 | Embedded / file SQL | `SQLBaseProvider` | `sqlite.ts` | [sqlite.md](./providers/sqlite.md) |
 | SQL database reached over HTTP (no driver) | `SQLBaseProvider` | `sql/clickhouse/`, `sql/druid/` or `sql/trino/` | [clickhouse.md](./providers/clickhouse.md) · [druid.md](./providers/druid.md) · [trino.md](./providers/trino.md) |
 | SQL over HTTP where a **second product** speaks the same protocol | `SQLBaseProvider` | `sql/search/` (two ids, one module) or `sql/trino/` (one id, a dialect descriptor ready for the second) | [elasticsearch.md](./providers/elasticsearch.md) · [trino.md](./providers/trino.md) |
-| Document store | `BaseDatabaseProvider` | `mongodb.ts` | [mongodb.md](./providers/mongodb.md) |
+| Document store | `BaseDatabaseProvider` | `document/mongodb/` | [mongodb.md](./providers/mongodb.md) |
 | Document store reached over HTTP/REST (no driver) | `BaseDatabaseProvider` | `document/couchbase/` | [couchbase.md](./providers/couchbase.md) |
 | Key-value store | `BaseDatabaseProvider` | `redis.ts` | [redis.md](./providers/redis.md) |
 | Embedded (in-process, no wire protocol) | `BaseDatabaseProvider` | `embedded/libredb.ts` | [libredb.md](./providers/libredb.md) |

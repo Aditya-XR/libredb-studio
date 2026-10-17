@@ -83,7 +83,7 @@ src/lib/db/
 │   │       ├── objects.ts      #   system.tables tree + SHOW CREATE source
 │   │       └── introspect.ts   #   system.* monitoring, sessions and the kill (decode.ts, errors.ts, ... session.ts)
 │   ├── document/               # Document Database Providers
-│   │   ├── mongodb.ts          # MongoDB Strategy
+│   │   ├── mongodb/            # MongoDB Strategy (index.ts, values.ts, extended-json.ts, envelope.ts, agent-boundary.ts, agent-read.ts)
 │   │   └── couchbase/          # Couchbase Strategy (SQL++ over REST, no driver)
 │   │       ├── index.ts        #   CouchbaseProvider
 │   │       ├── transport.ts    #   CouchbaseTransport seam + neutral result types

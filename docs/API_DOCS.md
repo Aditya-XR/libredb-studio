@@ -1820,7 +1820,7 @@ could arrive twice.
 { "error": "previousRunId must be a non-empty string when provided" }
 { "error": "This connection reaches every database on its server: name the database the run reads in catalog" }
 {
-  "error": "Agent mode executes only where the provider implements a database-native read-only statement path — PostgreSQL, SQLite, DuckDB, SQL Server and MySQL. On Oracle a run whose workflow sends a statement is refused when it is started, before a run is opened. The operations workflow still runs here, because it sends no statement at all: it calls the curated reporting methods every provider implements. Plan mode drafts on every engine.",
+  "error": "Agent mode executes only where the provider implements a read-only statement path under a boundary it declares: PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB. On Oracle a run whose workflow sends a statement is refused when it is started, before a run is opened. The operations workflow still runs here, because it sends no statement at all: it calls the curated reporting methods every provider implements. Plan mode drafts on every engine.",
   "refused": "engine-unsupported"
 }
 
@@ -1837,9 +1837,9 @@ could arrive twice.
 
 > **The engine refusal is a `400`, and it changed this contract.** Since #512 an `agent` run whose
 > `workflowType` sends a statement — every workflow but `operations` — is refused here when the
-> connection's engine implements no database-native read-only statement path, and `error` carries the
+> connection's provider implements no read-only statement path, and `error` carries the
 > posture's whole paragraph. It is refused **before a run id exists**: a client that used to receive
-> `202` for `investigation` on MySQL and then read `engine-unsupported` off the run receives `400`
+> `202` for `investigation` on Oracle and then read `engine-unsupported` off the run receives `400`
 > and no run. `operations` is admitted on every engine because it sends no statement at all, and a
 > `planning` run is never refused this way — it executes nothing anywhere. The refusal reads the
 > same fact the provider factory does (`typeof provider.queryReadOnly`), so the two cannot disagree.

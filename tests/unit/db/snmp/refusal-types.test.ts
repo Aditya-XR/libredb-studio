@@ -4,7 +4,7 @@
  * Measured on 2026-10-13 against `origin/main`: a failed count becomes `{ unavailable:
  * error.message }` only for a `QueryError` or a `TimeoutError`
  * (`src/lib/db/providers/platform/kubernetes/objects.ts:348`), and `isQueryError`
- * (`src/lib/db/errors.ts:244`) is the same test. A refusal thrown as a plain `Error` passes as
+ * (`src/lib/db/errors.ts`) is the same test. A refusal thrown as a plain `Error` passes as
  * an unexpected failure and its sentence is never shown.
  *
  * That matters more here than almost anywhere, because this provider's refusals ARE their

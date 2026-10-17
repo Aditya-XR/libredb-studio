@@ -1921,8 +1921,6 @@ describe("docs/providers/s3.md: the servers it was verified on", () => {
 
 describe("the agent docs count the type-ids and name S3 where they list engines", () => {
   const ids = SHIPPED_DATABASE_TYPES.length;
-  /** Ids an agent run cannot read through: every id outside AGENT_EXECUTION_ENGINES. */
-  const refused = ids - AGENT_EXECUTION_ENGINES.length;
   /** Ids grounded through their own provider: every id but the two CATALOG_PLANS dialects, postgres and sqlite. */
   const provided = ids - 2;
   /** Ids with no statistics this run reads: every id but the three ESTIMATE_BUILDERS serves, postgres, sqlite and mssql. */
@@ -1931,8 +1929,9 @@ describe("the agent docs count the type-ids and name S3 where they list engines"
   test("61. AGENT.md", () => {
     const agent = read("docs/AGENT.md");
     const prose = flat(agent);
-    expect(prose).toContain(`reach the ${word(refused)} the read-only profile refuses`);
-    expect(prose).toContain(`including the ${word(refused)} where an agent run cannot read anything at all`);
+    // The engines an agent run cannot read through are named by the rule, never counted (issue #1614).
+    expect(prose).toContain("reach every engine the read-only profile refuses");
+    expect(prose).toContain("including every engine where an agent run cannot read anything at all");
     expect(prose).toContain(`on the other ${word(noStatistics)} \`readSchemaStatistics\` answers`);
     expect(prose).toContain(`On the other ${word(provided)} it is **one**`);
     expect(prose).toContain(`the other ${word(noStatistics)} hold no statistics this run`);
@@ -1951,8 +1950,9 @@ describe("the agent docs count the type-ids and name S3 where they list engines"
     expect(guide).toContain(
       "On S3-compatible object storage that is one AWS CLI read command, or Studio's own `preview`, in a block tagged `s3`, which the run never executes.",
     );
-    expect(guide).toContain(`So on the other ${word(refused)} ids in the \`DatabaseType\` union`);
-    expect(guide).toContain("Qdrant, Oxia, Databend, S3-compatible object storage and LibreDB. That");
+    expect(guide).toContain(
+      "So on every other id in the `DatabaseType` union (`src/lib/types.ts`) an Agent-mode run cannot read anything.",
+    );
     expect(guide).toContain(`no longer takes this path at all on the other ${word(provided)}:`);
     expect(guide).toContain(`on the other ${word(noStatistics)} the plan is told that this engine holds none`);
     const flow = flat(read("docs/AGENT_DATA_FLOW.md"));

@@ -233,7 +233,7 @@ const NAMED_CITATIONS = [
   },
   {
     doc: "docs/providers/mongodb.md",
-    source: "src/lib/db/providers/document/mongodb.ts",
+    source: "src/lib/db/providers/document/mongodb/index.ts",
     methods: [
       "getCapabilities",
       "getLabels",
@@ -244,6 +244,8 @@ const NAMED_CITATIONS = [
       "buildConnectionString",
       "getDatabaseName",
       "query",
+      "queryReadOnly",
+      "readCatalogReadOnly",
       "parseQuery",
       "serializeDocument",
       "getHealth",

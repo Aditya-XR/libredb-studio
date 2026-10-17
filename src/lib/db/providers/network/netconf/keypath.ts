@@ -28,9 +28,9 @@ import { QueryError } from "@/lib/db/errors";
  *
  * MEASURED on `origin/main`: only a `QueryError` or a `TimeoutError` is turned into a stated
  * refusal by the surfaces that catch one (`providers/platform/kubernetes/objects.ts:348`,
- * `errors.ts:244`). A refusal thrown as a plain `Error` passes as an unexpected failure and the
- * sentence it carries never reaches the user, which for this file means a key value the user typed
- * is rejected with no explanation of what is wrong with it.
+ * `isQueryError` in `src/lib/db/errors.ts`). A refusal thrown as a plain `Error` passes as an
+ * unexpected failure and the sentence it carries never reaches the user, which for this file means
+ * a key value the user typed is rejected with no explanation of what is wrong with it.
  *
  * It is not a subclass either: the shared error constructors end with
  * `Object.setPrototypeOf(this, <Base>.prototype)`, so a class extending one is not an instance of

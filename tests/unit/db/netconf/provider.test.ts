@@ -312,9 +312,10 @@ test("nothing answers before connect", async () => {
  *
  * MEASURED on `origin/main`: the surfaces that turn a failure into a stated refusal check
  * `error instanceof QueryError` (`providers/platform/kubernetes/objects.ts:348`,
- * `errors.ts:244`). A refusal thrown as a plain `Error` is not converted: it passes as an
- * unexpected failure and the sentence it carries never reaches the user. The first version of this
- * provider had three such refusals, in `keypath.ts`, `yangkeys.ts` and `requests.ts`.
+ * `isQueryError` in `src/lib/db/errors.ts`). A refusal thrown as a plain `Error` is not
+ * converted: it passes as an unexpected failure and the sentence it carries never reaches the
+ * user. The first version of this provider had three such refusals, in `keypath.ts`,
+ * `yangkeys.ts` and `requests.ts`.
  */
 test("every refusal a user can reach is a QueryError, measured by type and not by message", async () => {
   const provider = await open();

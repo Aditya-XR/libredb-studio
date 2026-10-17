@@ -82,7 +82,7 @@ const ENGINES = [
   // One level, the agent's devices, and the check runs in `deviceOf` (#1722).
   "src/lib/db/providers/industrial/mtconnect/index.ts",
   "src/lib/db/providers/industrial/modbus/index.ts",
-  "src/lib/db/providers/document/mongodb.ts",
+  "src/lib/db/providers/document/mongodb/index.ts",
   "src/lib/db/providers/embedded/libredb.ts",
   "src/lib/db/providers/keyvalue/redis.ts",
   "src/lib/db/providers/sql/bigquery/index.ts",

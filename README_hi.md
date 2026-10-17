@@ -216,15 +216,16 @@ PostgreSQL · MySQL · Oracle · Db2 LUW · SQL Server · SQLite · libSQL · Du
   Writes और DDL डेटाबेस तक पहुँचने से पहले ही मना कर दिए जाते हैं। `EXPLAIN ANALYZE` statement को सच में चलाता है,
   इसलिए default रूप से बंद है। यह pipeline सिर्फ़ Agent के लिए है: एडिटर में आप जो statements ख़ुद चलाते हैं वे सीधे
   provider को जाते हैं (`src/app/api/db/query/route.ts:44`), यहाँ की policy से नहीं गुज़रते, और ऐसा audit record नहीं बनाते।
-- **Agent mode सिर्फ़ PostgreSQL, SQLite, DuckDB, SQL Server और MySQL पर**: read-only profile डेटाबेस के native तरीक़े से लागू होता है,
-  इसलिए यह सिर्फ़ उन providers पर है जिन्होंने इसे implement किया है: `postgres.ts`, `sqlite.ts`, `duckdb/index.ts`, `mssql.ts` और `mysql.ts`
-  का `queryReadOnly`, और कोई नहीं। बाक़ी engines पर, statements भेजने वाला Agent-mode workflow शुरू होते ही मना कर दिया जाता है,
+- **Agent mode सिर्फ़ PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes और MongoDB पर**: read-only profile सिर्फ़ उन providers पर है
+  जिन्होंने इसे implement किया है: `postgres.ts`, `sqlite.ts`, `duckdb/index.ts`, `mssql.ts`, `mysql.ts`, `kubernetes/index.ts` और `mongodb/index.ts`
+  का `queryReadOnly`, और कोई नहीं। हर engine की read-only सीमा अलग है, और वह उस engine के docs में लिखी है।
+  बाक़ी engines पर, statements भेजने वाला Agent-mode workflow शुरू होते ही मना कर दिया जाता है,
   run बनने से पहले; और जो अनुरोध provider factory तक पहुँच जाए वह `engine-unsupported` के साथ ख़त्म होता है।
   **Plan** mode हर connection पर खुलता है: वहाँ का model कोई tool इस्तेमाल नहीं करता, आपका कोई statement नहीं चलाता, कुछ लिखता नहीं,
   और सिर्फ़ एक statement का मसौदा देता है जिसे आप ख़ुद चलाते हैं। उसकी GROUNDING हर engine तक पहुँचती है: PostgreSQL और SQLite पर
   server ख़ुद catalog statements बनाता है, और बाक़ी हर connection पर उसी connection के provider से schema का ब्यौरा माँगा जाता है,
   यानी वही read जो sidebar पहले से करता है, जिसके लिए read-only statement path चाहिए ही नहीं। इसलिए दोनों सीमाएँ अलग हैं:
-  Agent mode यही चार engines हैं, GROUNDING सारे engines, और जिस run की reading नाकाम रहे वह tables गढ़ने के बजाय यह साफ़ कह देता है।
+  Agent mode ऊपर लिखे engines तक सीमित है, GROUNDING सारे engines, और जिस run की reading नाकाम रहे वह tables गढ़ने के बजाय यह साफ़ कह देता है।
 - **तीन workflows**: **Investigate** (सवाल का जवाब), **Optimize** (अनुमानित execution plans की तुलना, index या rewrite का सुझाव),
   **Assess** (table profiling: सिर्फ़ counts, कभी भी असली values नहीं)।
 - **अपने-आप कुछ नहीं करता**: Agent आपकी जगह run शुरू नहीं करता, एडिटर में नहीं लिखता, और अपने सुझाए statements नहीं चलाता।

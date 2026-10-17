@@ -22,7 +22,9 @@ It is off by default.
     On Apache Spark it lists the tables and views of one namespace, read with SHOW and DESCRIBE statements that start no Spark job on Studio's own session; a namespace is named in Spark's spelling, its parts joined by dots.
   - `run_read_query` runs one read-only statement: a `SELECT` (a `WITH` is fine), `VALUES`, `TABLE`, or `EXPLAIN` without `ANALYZE`.
     Runs on PostgreSQL, SQLite, DuckDB, SQL Server and MySQL; other engines refuse it, so use inspect_schema there.
-    Kubernetes is executed by agent mode and is not offered to MCP.
+    It refuses every engine outside that list as soon as the connection resolves, before anything is acquired, answering "this tool does not serve <engine>; use inspect_schema there".
+    MongoDB is one of them although agent mode executes on it, because its statement is a JSON command and this tool takes SQL (issue #1614); the MCP arm it lacks is `docs/BACKLOG.md` B117.
+    Kubernetes is executed by agent mode too and is not offered to MCP at all.
 - Read-only is the database's own enforcement, not a filter over SQL text: `run_read_query` takes the connection under Studio's agent read-only execution profile and runs through the provider's read-only statement path, which PostgreSQL enforces with a read-only transaction, SQLite and DuckDB with a read-only open, SQL Server by verifying the principal cannot write, and MySQL and MariaDB by a least-privilege principal beside a read-only transaction.
   A statement check runs first as defence in depth.
 - A result that carries database content starts with a text block telling the model to treat what follows as untrusted data.
@@ -105,7 +107,8 @@ An empty `list_connections` answer means no connection is opted in for your toke
 On PostgreSQL the seed's role must not be a superuser and must not hold `pg_read_server_files`, `pg_write_server_files` or `pg_execute_server_program`.
 On SQL Server the login must hold no fixed server role, neither `CONTROL SERVER` nor `ADMINISTER BULK OPERATIONS`, and none of `db_owner`, `db_accessadmin`, `db_securityadmin`, `db_ddladmin`, `db_backupoperator` or `db_datawriter`, and it must be granted `SHOWPLAN`.
 A seed entry cannot carry a separate agent credential, so the fix is the seed's own login.
-`inspect_schema` acquires its connection under the same read-only execution context as `run_read_query` (both verify the principal at open, not per statement), so the same least-privilege requirement applies there too: a superuser PostgreSQL role or a privileged SQL Server login refuses `inspect_schema` as well.
+`inspect_schema` acquires its connection read-only too, under `agent-operations` where `run_read_query` takes `agent-read-only`, and on PostgreSQL and SQL Server both profiles verify the principal at open, not per statement, so the same least-privilege requirement applies there too: a superuser PostgreSQL role or a privileged SQL Server login refuses `inspect_schema` as well.
+MongoDB proves its principal only for a connection that sends statements, so `inspect_schema` opens a MongoDB connection unverified, as the editor does, and no principal check refuses it there (`tests/integration/mcp/inspect-schema.test.ts` lists the collections of the admin seed, of a server without authorization and of FerretDB).
 
 A PostgreSQL seed with an empty `database` reaches every database its role can CONNECT to (#1530, [`docs/providers/postgres.md` §4.1.1](providers/postgres.md#411-server-level-connections-an-empty-database-1530)).
 On such a connection both `inspect_schema` and `run_read_query` take a `database` argument naming the one to read, and a call without it is answered, in Studio's words, with the databases it could name (at most fifty), rather than run in whichever came first.
