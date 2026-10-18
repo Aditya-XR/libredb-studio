@@ -2,8 +2,9 @@
  * The shape of a statement language's pack (#1821). Types only: nothing here is evaluated, so every tier may read it.
  */
 import type { PlanStatementIdentifiers } from "../plan-statement";
-import type { AgentToolDefinition, AgentToolName } from "../tools";
-import type { AgentInventory, AgentRunWorkflowType } from "../types";
+import type { z } from "zod";
+import type { AgentRecommendationOutcome, AgentToolDefinition, AgentToolName } from "../tools";
+import type { AgentEvidenceReference, AgentInventory, AgentRunEvent, AgentRunWorkflowType } from "../types";
 
 export interface AgentLanguageServerAdapter {
   /** The descriptor this language's model-written reads are evaluated under. */
@@ -37,6 +38,22 @@ export interface AgentLanguageServerAdapter {
   readonly planDraftIdentifiers?: (text: string, inventory: AgentInventory | null) => PlanStatementIdentifiers;
 }
 
+/**
+ * A `recommend_change` card a language offers in place of the statement card: a change stated as data, for a
+ * language whose change is no statement an editor runs. `recommendChangeTool` in `tools.ts` parses the call with the
+ * offered definition's schema, and where that schema is this card's, it checks every evidence reference against the
+ * run's ledger and refuses an unverifiable one before the card is read, so `record` only ever sees verified evidence.
+ */
+export interface AgentRecommendationCard<
+  Card extends { readonly evidence: readonly AgentEvidenceReference[] } = {
+    readonly evidence: readonly AgentEvidenceReference[];
+  },
+> {
+  readonly inputSchema: z.ZodType<Card>;
+  /** Called after the core verified the card's evidence; returns the outcome verbatim. */
+  record(events: readonly AgentRunEvent[], card: Card): AgentRecommendationOutcome;
+}
+
 /** What a language does on the server, below `tools.ts`. Reached through `languageServerPack` in `server.ts`. */
 export interface AgentLanguageServerPack {
   readonly adapter: AgentLanguageServerAdapter;
@@ -64,4 +81,6 @@ export interface AgentLanguageServerPack {
    * connection is, or undefined when the message names no foreign catalog. Absent for a language with no such mistake.
    */
   readonly catalogAdvice?: (message: string, engine: string) => string | undefined;
+  /** The card this language's `recommend_change` offers instead of the statement card. Absent for SQL. */
+  readonly recommendationCard?: AgentRecommendationCard;
 }

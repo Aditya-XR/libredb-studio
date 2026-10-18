@@ -3,15 +3,20 @@
  * plan and profile arms, the index card and the answer, each in this engine's own words.
  */
 import { z } from "zod";
+import { resolveProfileTarget } from "../../inventory-address";
 import {
   AGENT_ANSWER_CONTRACT,
   AGENT_EVIDENCE_CONTRACT,
+  capturedSnapshot,
   catalogSelectorSchema,
   evidenceSchema,
   presentAnswerSchema,
+  unavailable,
 } from "../../tool-contracts";
 import type { AgentToolDefinition, AgentToolName } from "../../tools";
-import type { AgentLanguageServerPack } from "../pack";
+import type { AgentEvidenceReference, AgentRunEvent } from "../../types";
+import { fenceUntrustedContent } from "../../untrusted-content";
+import type { AgentLanguageServerPack, AgentRecommendationCard } from "../pack";
 
 /**
  * A MongoDB profile names a COLLECTION, as the SQL selector names a table, and is composed the same way from the run's
@@ -110,7 +115,7 @@ const MONGO_PROFILE_TABLE: AgentToolDefinition = Object.freeze({
  * stated as data rather than as a command the editor would refuse. Its own `change`, so every reader of the event
  * tells it from the statement card by that one field.
  */
-export const mongoIndexRecommendationSchema = z.strictObject({
+const mongoIndexRecommendationSchema = z.strictObject({
   change: z.literal("document-index"),
   /** The collection the index belongs to: its bare name, or the inventory's own spelling of it. */
   collection: z.string().min(1),
@@ -134,6 +139,87 @@ const MONGO_RECOMMEND_CHANGE: AgentToolDefinition = Object.freeze({
   name: "recommend_change",
   description: `Propose one index for the user to create themselves: "change" is "document-index", and you state the collection by its bare name, the keys and any options. Nothing is applied by this run and nothing here changes the database: the recommendation is data the user reads, not a command this editor runs. State what the inspected plan showed about how the collection is reached, and cite it. ${AGENT_EVIDENCE_CONTRACT}`,
   inputSchema: mongoIndexRecommendationSchema,
+});
+
+/**
+ * The collection a document-index card names, and the database it is in, read off the run's own captured inventory.
+ *
+ * The inventory spells a collection with its database in front (`app.orders`), and a model may copy that spelling or
+ * write the bare name; either resolves, by the address rule every inventory reader shares, to the entry's own address,
+ * so the card names the collection the run read and the database it read it in. A spelling the inventory does not
+ * resolve is kept whole and never split on a dot (a collection may be named `fs.files`), in the session's own
+ * database where the capture knew it, and with no database at all where it did not: the card then names none rather
+ * than one nobody established.
+ */
+function documentIndexTarget(
+  events: readonly AgentRunEvent[],
+  spelling: string,
+): { readonly collection: string; readonly database?: string } {
+  const snapshot = capturedSnapshot(events);
+  const resolution =
+    snapshot === null ? null : resolveProfileTarget(snapshot.objects, undefined, spelling, snapshot.defaultContainer);
+  if (resolution?.kind === "resolved") {
+    const { schema, table } = resolution.target;
+    return schema === undefined ? { collection: table } : { collection: table, database: schema };
+  }
+  const database = snapshot?.defaultContainer?.[0];
+  return database === undefined ? { collection: spelling } : { collection: spelling, database };
+}
+
+/**
+ * Whether the captured inventory already lists an index on exactly `keys`, in that order, for the collection a
+ * document-index card resolved to. The inventory records an index's fields and not their directions, so the order of
+ * the fields is what is compared: `{a: 1, b: -1}` and `{a: -1, b: 1}` read as the same index here, which can only make
+ * this refuse a recommendation that differs in direction alone, never accept a duplicate.
+ */
+function indexExists(
+  events: readonly AgentRunEvent[],
+  collection: string,
+  database: string | undefined,
+  keys: readonly string[],
+): boolean {
+  const snapshot = capturedSnapshot(events);
+  if (snapshot === null) return false;
+  const target = snapshot.objects.find(
+    (object) => object.path?.at(-1) === collection && (database === undefined || object.path?.at(-2) === database),
+  );
+  return (
+    target?.indexes.some(
+      (index) => index.columns.length === keys.length && index.columns.every((column, at) => column === keys[at]),
+    ) ?? false
+  );
+}
+
+/**
+ * The document-index card's record, once the core has verified its evidence.
+ *
+ * A change stated as data - the collection, the keys, the options - rather than as a statement, because the editor's
+ * envelope runs reads and writes on documents and creates no index. The collection's name is untrusted database
+ * content, so it is fenced rather than spliced into the sentence the model reads as the server speaking, exactly as the
+ * SQL card's statement would be.
+ */
+export const MONGO_DOCUMENT_INDEX_CARD = Object.freeze<
+  AgentRecommendationCard<z.infer<typeof mongoIndexRecommendationSchema>>
+>({
+  inputSchema: mongoIndexRecommendationSchema,
+  record(events, card) {
+    const { collection, database } = documentIndexTarget(events, card.collection);
+    if (indexExists(events, collection, database, Object.keys(card.keys))) return unavailable("INDEX_ALREADY_EXISTS");
+    return {
+      kind: "recommended",
+      recommendation: {
+        change: "document-index",
+        collection,
+        ...(database === undefined ? {} : { database }),
+        keys: card.keys,
+        ...(card.options === undefined ? {} : { options: card.options }),
+        ...(card.rationale === undefined ? {} : { rationale: card.rationale }),
+        // Carried by the schema's `.min(1)`, as on the statement card.
+        evidence: card.evidence as [AgentEvidenceReference, ...AgentEvidenceReference[]],
+      },
+      modelText: `Recommendation recorded: one index, offered to the user and not created. It is theirs to apply, in their own tool. ${fenceUntrustedContent(`collection: ${collection}`, { label: "indexed collection name", operationId: "mongo.plan.estimate", reference: "recommendation" })}`,
+    };
+  },
 });
 
 /**

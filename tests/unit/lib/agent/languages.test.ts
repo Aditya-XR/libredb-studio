@@ -165,4 +165,22 @@ describe("the definitions the packs register", () => {
     expect(languageServerPack("kubectl").catalogAdvice).toBeUndefined();
     expect(languageServerPack("mongo").catalogAdvice).toBeUndefined();
   });
+
+  test("a language's recommendation card is the schema its recommend_change offer parses with", () => {
+    expect(languageServerPack("sql").recommendationCard).toBeUndefined();
+    const resources = languageServerPack("kubectl").recommendationCard;
+    expect(Object.isFrozen(resources)).toBe(true);
+    expect(resources?.inputSchema as unknown).toBe(
+      agentToolDefinition("kubectl", "query-optimization", "recommend_change").inputSchema,
+    );
+    const documentIndex = languageServerPack("mongo").recommendationCard;
+    expect(Object.isFrozen(documentIndex)).toBe(true);
+    expect(documentIndex?.inputSchema as unknown).toBe(
+      agentToolDefinition("mongo", "query-optimization", "recommend_change").inputSchema,
+    );
+    // A kubectl workflow that proposes no resources change is offered the statement card, which no pack holds.
+    expect(agentToolDefinition("kubectl", "investigation", "recommend_change").inputSchema).not.toBe(
+      resources?.inputSchema,
+    );
+  });
 });

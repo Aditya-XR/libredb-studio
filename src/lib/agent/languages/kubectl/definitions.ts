@@ -7,7 +7,8 @@ import { clusterUsageReadInput, clusterWorkloadsReadInput } from "@/lib/db/opera
 import { parseQuantity } from "@/lib/db/providers/platform/kubernetes/console/top";
 import { AGENT_EVIDENCE_CONTRACT, evidenceSchema } from "../../tool-contracts";
 import type { AgentToolDefinition, AgentToolName } from "../../tools";
-import type { AgentLanguageServerPack } from "../pack";
+import type { AgentEvidenceReference } from "../../types";
+import type { AgentLanguageServerPack, AgentRecommendationCard } from "../pack";
 
 /**
  * A Kubernetes quantity as a manifest states one: `250m`, `0.5`, `512Mi`, `1Gi`. Read by the same parser that reads
@@ -28,7 +29,7 @@ const resourceSettings = z.strictObject({ requests: resourceQuantities, limits: 
  * nothing to hand over. The owner is named so the user knows which manifest holds the container. `rationale` and
  * `evidence` are declared as `recommendationSchema` declares them, against the same evidence schema.
  */
-export const resourcesRecommendationSchema = z.strictObject({
+const resourcesRecommendationSchema = z.strictObject({
   change: z.literal("resources"),
   namespace: z.string().min(1),
   // Any kind `inspect_usage` reports: a database operator's custom resource owns pods as a Deployment does.
@@ -39,6 +40,27 @@ export const resourcesRecommendationSchema = z.strictObject({
   proposed: resourceSettings,
   rationale: z.string().min(1),
   evidence: z.array(evidenceSchema).min(1),
+});
+
+/** The resources card's record, once the core has verified its evidence: the container's new settings, as proposed. */
+export const KUBECTL_RESOURCES_CARD = Object.freeze<
+  AgentRecommendationCard<z.infer<typeof resourcesRecommendationSchema>>
+>({
+  inputSchema: resourcesRecommendationSchema,
+  record(_events, card) {
+    const { container, ownerKind, ownerName } = card;
+    return {
+      kind: "recommended",
+      recommendation: {
+        ...card,
+        // Carried by the schema's `.min(1)`, as on the statement card.
+        evidence: card.evidence as [AgentEvidenceReference, ...AgentEvidenceReference[]],
+      },
+      // The container and the owner are text the model itself sent in this call, so quoting them back adds no
+      // untrusted content.
+      modelText: `Recommendation recorded: new requests and limits for container ${container} of ${ownerKind}/${ownerName}, offered to the user and not applied. It is theirs to apply.`,
+    };
+  },
 });
 
 const readKubectlStatementSchema = z.strictObject({

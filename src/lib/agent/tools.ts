@@ -154,8 +154,6 @@ import {
 } from "./execution-policy";
 import type { AgentRepairDenyCode, AgentRepairLedger } from "./repair-ledger";
 import { fingerprintStatement } from "./repair-ledger";
-import type { resourcesRecommendationSchema } from "./languages/kubectl/definitions";
-import type { mongoIndexRecommendationSchema } from "./languages/mongo/definitions";
 import { LANGUAGE_BASE_DEFINITIONS, languageServer, languageServerPack } from "./languages/server";
 import { evaluateAutoExecute } from "./auto-execute";
 import { summarisePlan } from "./plan-summary";
@@ -905,11 +903,11 @@ const recommendationSchema = z.strictObject({
   evidence: z.array(evidenceSchema).min(1),
 });
 
-/** What a `recommend_change` call parses to, on whichever card the run's language offers. */
-type RecommendationInput =
-  | z.infer<typeof recommendationSchema>
-  | z.infer<typeof resourcesRecommendationSchema>
-  | z.infer<typeof mongoIndexRecommendationSchema>;
+/**
+ * What a `recommend_change` call parses to on the statement card. A language's own card parses to its own shape, and
+ * `recommendChangeTool` hands that to the card rather than reading it here.
+ */
+type RecommendationInput = z.infer<typeof recommendationSchema>;
 
 /** The four keys `recommendationSchema` accepts, for the lone-rename reading below. */
 const RECOMMENDATION_KEYS = ["change", "statement", "rationale", "evidence"] as const;
@@ -4221,52 +4219,17 @@ export function recommendChangeTool(
           : undefined,
     );
   }
-  if (parsed.value.change === "resources") {
-    const { container, ownerKind, ownerName } = parsed.value;
+  const card = languageServerPack(context.statementLanguage ?? "sql").recommendationCard;
+  if (card !== undefined && definition.inputSchema === card.inputSchema) {
+    // A language's own card: its evidence is checked here, exactly as the statement card's is below, before the card
+    // reads anything else, so every card refuses an unverifiable citation first and in the same words.
     if (!parsed.value.evidence.every((reference) => verifiedAgainst(run.events, reference))) {
       return unavailable(
         "UNVERIFIABLE_EVIDENCE",
         unverifiableCitation(run.events, [{ evidence: parsed.value.evidence }]),
       );
     }
-    return {
-      kind: "recommended",
-      recommendation: {
-        ...parsed.value,
-        // Carried by the schema's `.min(1)`, as on the statement card.
-        evidence: parsed.value.evidence as [AgentEvidenceReference, ...AgentEvidenceReference[]],
-      },
-      // The container and the owner are text the model itself sent in this call, so quoting them back adds no
-      // untrusted content.
-      modelText: `Recommendation recorded: new requests and limits for container ${container} of ${ownerKind}/${ownerName}, offered to the user and not applied. It is theirs to apply.`,
-    };
-  }
-  if (parsed.value.change === "document-index") {
-    // The document-index card: a change stated as data - the collection, the keys, the options - rather than as a
-    // statement, because the editor's envelope runs reads and writes on documents and creates no index. The
-    // collection's name is untrusted database content, so it is fenced rather than spliced into the sentence the
-    // model reads as the server speaking, exactly as the SQL card's statement would be.
-    const card = parsed.value;
-    if (!card.evidence.every((reference) => verifiedAgainst(run.events, reference))) {
-      return unavailable("UNVERIFIABLE_EVIDENCE", unverifiableCitation(run.events, [{ evidence: card.evidence }]));
-    }
-    const { collection, database } = documentIndexTarget(run.events, card.collection);
-    if (indexExists(run.events, collection, database, Object.keys(card.keys)))
-      return unavailable("INDEX_ALREADY_EXISTS");
-    return {
-      kind: "recommended",
-      recommendation: {
-        change: "document-index",
-        collection,
-        ...(database === undefined ? {} : { database }),
-        keys: card.keys,
-        ...(card.options === undefined ? {} : { options: card.options }),
-        ...(card.rationale === undefined ? {} : { rationale: card.rationale }),
-        // Carried by the schema's `.min(1)`, as on the statement card.
-        evidence: card.evidence as [AgentEvidenceReference, ...AgentEvidenceReference[]],
-      },
-      modelText: `Recommendation recorded: one index, offered to the user and not created. It is theirs to apply, in their own tool. ${fenceUntrustedContent(`collection: ${collection}`, { label: "indexed collection name", operationId: "mongo.plan.estimate", reference: "recommendation" })}`,
-    };
+    return card.record(run.events, parsed.value);
   }
   if (!matchesCard(parsed.value.change, parsed.value.statement)) {
     /*
@@ -4302,55 +4265,6 @@ export function recommendChangeTool(
     },
     modelText: `Recommendation recorded: one ${parsed.value.change}, offered to the user and not executed. It is theirs to apply.`,
   };
-}
-
-/**
- * The collection a document-index card names, and the database it is in, read off the run's own captured inventory.
- *
- * The inventory spells a collection with its database in front (`app.orders`), and a model may copy that spelling or
- * write the bare name; either resolves, by the address rule every inventory reader shares, to the entry's own address,
- * so the card names the collection the run read and the database it read it in. A spelling the inventory does not
- * resolve is kept whole and never split on a dot (a collection may be named `fs.files`), in the session's own
- * database where the capture knew it, and with no database at all where it did not: the card then names none rather
- * than one nobody established.
- */
-function documentIndexTarget(
-  events: readonly AgentRunEvent[],
-  spelling: string,
-): { readonly collection: string; readonly database?: string } {
-  const snapshot = capturedSnapshot(events);
-  const resolution =
-    snapshot === null ? null : resolveProfileTarget(snapshot.objects, undefined, spelling, snapshot.defaultContainer);
-  if (resolution?.kind === "resolved") {
-    const { schema, table } = resolution.target;
-    return schema === undefined ? { collection: table } : { collection: table, database: schema };
-  }
-  const database = snapshot?.defaultContainer?.[0];
-  return database === undefined ? { collection: spelling } : { collection: spelling, database };
-}
-
-/**
- * Whether the captured inventory already lists an index on exactly `keys`, in that order, for the collection a
- * document-index card resolved to. The inventory records an index's fields and not their directions, so the order of
- * the fields is what is compared: `{a: 1, b: -1}` and `{a: -1, b: 1}` read as the same index here, which can only make
- * this refuse a recommendation that differs in direction alone, never accept a duplicate.
- */
-function indexExists(
-  events: readonly AgentRunEvent[],
-  collection: string,
-  database: string | undefined,
-  keys: readonly string[],
-): boolean {
-  const snapshot = capturedSnapshot(events);
-  if (snapshot === null) return false;
-  const target = snapshot.objects.find(
-    (object) => object.path?.at(-1) === collection && (database === undefined || object.path?.at(-2) === database),
-  );
-  return (
-    target?.indexes.some(
-      (index) => index.columns.length === keys.length && index.columns.every((column, at) => column === keys[at]),
-    ) ?? false
-  );
 }
 
 const CREATE_INDEX_STATEMENT = /^\s*CREATE\s+(UNIQUE\s+)?INDEX\b/i;
