@@ -37,6 +37,8 @@ import { promptedToolContract } from "@/lib/agent/prompted-tools";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import { AgentRunService } from "@/lib/agent/run-service";
 import { AgentRunStore } from "@/lib/agent/run-store";
+import { inspectUsageTool, profileWorkloadsTool } from "@/lib/agent/languages/kubectl/tools";
+import { planMongoProfile, runMongoProfile } from "@/lib/agent/languages/mongo/tools";
 import { languageServer, WORKFLOW_TOOL_RULES } from "@/lib/agent/languages/server";
 import { type AgentToolContext, presentAnswerTool, recommendChangeTool, selectAgentTools } from "@/lib/agent/tools";
 import type {
@@ -708,6 +710,103 @@ async function mongoCatalogRefusals() {
   };
 }
 
+/** `value` with each correlation id written as its order of first appearance, as `laterTurns` writes them. */
+function withArtifactOrder(value: unknown): unknown {
+  const text = JSON.stringify(value);
+  const ids = correlationIdsIn(text);
+  return JSON.parse(ids.reduce((written, id, index) => written.replaceAll(id, `<artifact-${index + 1}>`), text));
+}
+
+/** A reading of one row wider than any run's byte budget, so it is refused by bytes under the row ceiling. */
+const OVER_BYTES: QueryResult = {
+  rows: [{ wide: "x".repeat(300_000) }],
+  fields: ["wide"],
+  rowCount: 1,
+  executionTime: 1,
+};
+
+/**
+ * The refusals and notes a kubectl or MongoDB tool gives on one input and that no other value here carries: both
+ * cluster readings past their row ceiling and past the byte budget, a resources card with a quantity Kubernetes does
+ * not parse, a document-index card with its keys among the options, an empty MongoDB plan command, and a collection
+ * profile over more fields than one call covers.
+ */
+async function toolRefusals() {
+  const kubectl = (answers: DoubleAnswers) => toolContext("kubernetes", "query-optimization", answers);
+  const shop = { namespace: "shop" };
+  const resources = recommendChangeTool(
+    await kubectl({}),
+    { runId: "run_g", events: [completed("step_1", usage), usageRead(usage)] },
+    {
+      change: "resources",
+      namespace: "shop",
+      ownerKind: "Deployment",
+      ownerName: "web",
+      container: "web",
+      current: { requests: { cpu: "500m" }, limits: { cpu: "1" } },
+      proposed: { requests: { cpu: "a lot" }, limits: { cpu: "1" } },
+      rationale: "The web container needs less CPU.",
+      evidence: [cite("cid_usage")],
+    },
+  );
+  const mongo = await toolContext("mongodb", "query-optimization");
+  const keysInOptions = recommendChangeTool(
+    mongo,
+    { runId: "run_g", events: [captured([ordersCollection()]), completed("step_1", mongoPlan)] },
+    {
+      change: "document-index",
+      collection: "orders",
+      keys: { customer: 1 },
+      options: { key: { total: 1 } },
+      rationale: "The plan reads every order to find one customer's.",
+      evidence: [cite("cid_mongo_plan")],
+    },
+  );
+  const wide = {
+    ...ordersCollection(),
+    columns: Array.from({ length: 20 }, (_, index) => ({
+      name: `field_${String(index).padStart(2, "0")}`,
+      type: "string",
+      nullable: true,
+      isPrimary: false,
+    })),
+  };
+  const profiling = await toolContext("mongodb", "data-analysis");
+  const planned = planMongoProfile(
+    profiling,
+    { runId: "run_g", events: [captured([wide])] },
+    { table: "orders", depth: "basic" },
+  );
+  return {
+    kubectl: {
+      "usage over its row ceiling": await inspectUsageTool(
+        await kubectl({ usage: async () => ({ kind: "over-ceiling" }) }),
+        shop,
+      ),
+      "usage over the byte budget": await inspectUsageTool(
+        await kubectl({ usage: async () => ({ kind: "rows", result: OVER_BYTES }) }),
+        shop,
+      ),
+      "workloads over their row ceiling": await profileWorkloadsTool(
+        await kubectl({ workloads: async () => ({ kind: "over-ceiling" }) }),
+        shop,
+      ),
+      "workloads over the byte budget": await profileWorkloadsTool(
+        await kubectl({ workloads: async () => ({ kind: "rows", result: OVER_BYTES }) }),
+        shop,
+      ),
+      "a resources card with a quantity that does not parse": resources,
+    },
+    mongo: {
+      "a document-index card with its keys among the options": keysInOptions,
+      "an empty plan command": await DATABASE_TOOL_HANDLERS.inspect_plan(mongo, { command: {} }, null),
+      "a profile over more fields than one call covers": withArtifactOrder(
+        planned.kind === "planned" ? await runMongoProfile(profiling, planned.plan) : planned,
+      ),
+    },
+  };
+}
+
 /** One statement per command that has row-cap advice of its own, and one that has none. */
 const ADVICE_STATEMENTS = {
   kubectl: (key: string) =>
@@ -873,6 +972,7 @@ export async function goldenLanguageAgentSurface(): Promise<string> {
         cards: await cards(),
         answerNotADataRead: await answerNotADataRead(),
         mongoCatalogRefusals: await mongoCatalogRefusals(),
+        toolRefusals: await toolRefusals(),
         statementAdvice: statementAdvice(),
         workflowToolRules: WORKFLOW_TOOL_RULES,
       },
