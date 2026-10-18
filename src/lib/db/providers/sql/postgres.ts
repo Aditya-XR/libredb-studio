@@ -2799,6 +2799,10 @@ export class PostgresProvider extends SQLBaseProvider {
       supportsExplain: this.measuredExplainFormat !== undefined,
       ...(this.measuredExplainFormat === undefined ? {} : { explainFormat: this.measuredExplainFormat }),
       supportsConnectionString: true,
+      // NAMEDATALEN-1 at the default build: a longer identifier is truncated with only a NOTICE
+      // (#1435). Declared, not measured: `/api/db/provider-meta` reads capabilities off a provider
+      // it never connects, so a value probed at connect would never reach the Create Table form.
+      maxIdentifierBytes: 63,
       supportsInlineRowEdit: true,
       // The Generate Test Data dialog's multi-row `INSERT INTO ... VALUES` (#1468).
       supportsTestDataGeneration: true,

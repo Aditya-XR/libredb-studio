@@ -8,6 +8,7 @@ import {
   shouldRefreshSchema,
   quoteIdentifier,
   quoteObjectPath,
+  quoteTypedName,
 } from "@/lib/query-generators";
 // The whole module, for the one assertion that is about what it does NOT export.
 import * as generators from "@/lib/query-generators";
@@ -1094,6 +1095,35 @@ describe("Apache Cassandra (port 9042) generation", () => {
 // ============================================================================
 // quoteIdentifier (dialect-aware, quote-only-when-needed)
 // ============================================================================
+
+describe("quoteTypedName (#1435)", () => {
+  /** A name the user typed is written the way the SQL editor would read the same text. */
+  test("a regular ASCII name stays bare in every dialect, so the engine folds it as it would in the editor", () => {
+    for (const caps of [
+      makeCaps({ defaultPort: 5432 }),
+      makeCaps({ defaultPort: 3306 }),
+      makeCaps({ defaultPort: 1433 }),
+      makeCaps({ defaultPort: 1521 }),
+      makeCaps({ identifierQuoting: "double" }),
+      makeCaps({ identifierQuoting: "double-always" }),
+    ]) {
+      // Oracle folds the bare `orders` to ORDERS, which is what `SELECT * FROM orders` reads.
+      expect(quoteTypedName("orders", caps)).toBe("orders");
+      expect(quoteTypedName("MyTable_2", caps)).toBe("MyTable_2");
+      expect(quoteTypedName("_x", caps)).toBe("_x");
+    }
+  });
+
+  test("any other name is quoted exactly, in the dialect's own style", () => {
+    expect(quoteTypedName("Ürün Tablo", makeCaps({ defaultPort: 5432 }))).toBe('"Ürün Tablo"');
+    expect(quoteTypedName("başlık", makeCaps({ defaultPort: 3306 }))).toBe("`başlık`");
+    expect(quoteTypedName("weird name", makeCaps({ defaultPort: 1433 }))).toBe("[weird name]");
+    // `quoteIdentifier` alone would leave this bare on Oracle; the typed name keeps its case only quoted.
+    expect(quoteTypedName("A$B", makeCaps({ defaultPort: 1521 }))).toBe('"A$B"');
+    expect(quoteTypedName("2fast", makeCaps({ defaultPort: 5432 }))).toBe('"2fast"');
+    expect(quoteTypedName('A"B', makeCaps({ identifierQuoting: "double" }))).toBe('"A""B"');
+  });
+});
 
 describe("quoteIdentifier", () => {
   /** A lowercase reserved word passes every bare test, so only `always` quotes it (#1396). */
@@ -2434,6 +2464,8 @@ describe("PromQL Generate Query (#1085)", () => {
  * manager's `runRowAction`, which only a row menu item reaches, and the menu offers one only for a kind
  * the provider names in `rowActions`; Prometheus declares none (its capability object is pinned in
  * tests/unit/db/prometheus/provider.test.ts), and the function raises for a dialect with no `rowAction`.
+ * `quoteTypedName` writes a name typed into the Create Table form, which a PromQL connection never opens:
+ * Prometheus declares `supportsCreateTable: false` and the modal throws when opened without a dialect.
  * `containerSpellingOf` answers nothing for an engine that does not declare `containerNameSpelling`, and a
  * PromQL connection declares none (the second test below), so completion reads no spelled name there.
  * An export added later has no classification, so this list fails until somebody writes one for it.
@@ -2452,6 +2484,7 @@ describe("the module's exports, for a PromQL connection (#1085)", () => {
       "outermostFieldPaths",
       "quoteIdentifier",
       "quoteObjectPath",
+      "quoteTypedName",
       "shouldRefreshSchema",
     ]);
   });

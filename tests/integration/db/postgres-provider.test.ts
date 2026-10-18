@@ -3935,6 +3935,12 @@ describe("PostgresProvider", () => {
       expect(Object.keys(specs ?? {}).sort()).toEqual([...provider.getCapabilities().maintenanceOperations].sort());
     });
 
+    // PostgreSQL shortens a longer identifier to NAMEDATALEN-1 bytes with only a NOTICE, so a
+    // Create Table name past it would land as a different name than the one typed (#1435).
+    test("declares the 63-byte identifier limit the engine truncates at", () => {
+      expect(new PostgresProvider(makePgConfig()).getCapabilities().maxIdentifierBytes).toBe(63);
+    });
+
     test("the vacuum label really means vacuum here", () => {
       // Absent is the default, so the four engines whose vacuum wording names
       // something else are the ones that have to say so (#496).

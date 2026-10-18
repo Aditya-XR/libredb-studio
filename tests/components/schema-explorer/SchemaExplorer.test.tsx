@@ -190,6 +190,14 @@ describe("SchemaExplorer", () => {
     expect(createButton?.textContent).toContain("Create Collection");
   });
 
+  test("empty state offers no create-table action before the capabilities load (#1435)", () => {
+    const props = createDefaultProps({ schema: emptySchema, metadata: null });
+    const { container } = render(<SchemaExplorer {...props} />);
+
+    expect(container.textContent).toContain("No structures found");
+    expect(container.querySelector('button[title="Create Table"]')).toBeNull();
+  });
+
   // A read that FAILED says nothing about whether the engine takes DDL, so the error branch offers
   // no action at all - deliberately, and not as a side effect of the empty branch owning the button.
   test("a failed read offers no create-table action", () => {
@@ -560,9 +568,9 @@ describe("SchemaExplorer", () => {
 
     // Default search placeholder
     expect(view.getByPlaceholderText("Search tables or columns...")).not.toBeNull();
-    // Default create button title
-    const createButton = container.querySelector('button[title="Create Table"]');
-    expect(createButton).not.toBeNull();
+    // No create action before the capabilities load: the Create Table form quotes every name in
+    // the connection's own dialect and refuses to open without them (#1435).
+    expect(container.querySelector('button[title="Create Table"]')).toBeNull();
     // Tables should still render
     expect(container.querySelector('[data-testid="table-users"]')).not.toBeNull();
   });

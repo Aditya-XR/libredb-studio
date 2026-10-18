@@ -48,6 +48,8 @@ export const SchemaExplorer = React.memo(function SchemaExplorer({
   onGenerateTestData,
 }: SchemaExplorerProps) {
   const labels = metadata?.labels;
+  // Create Table is offered only once these have loaded: the form writes every typed name in the
+  // connection's own quoting and refuses to open without it (#1435).
   const capabilities = metadata?.capabilities;
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
@@ -118,7 +120,7 @@ export const SchemaExplorer = React.memo(function SchemaExplorer({
         <p className="text-xs text-muted-foreground leading-relaxed">
           We couldn&apos;t find any tables or views in this connection.
         </p>
-        {capabilities?.supportsCreateTable !== false && (
+        {capabilities?.supportsCreateTable === true && (
           <button
             className="mt-3 flex items-center gap-1.5 rounded-md bg-brand-solid hover:bg-brand-solid-hover text-white px-3 py-1.5 text-xs font-medium transition-colors"
             onClick={onCreateTableClick}
@@ -150,7 +152,7 @@ export const SchemaExplorer = React.memo(function SchemaExplorer({
                 <Settings strokeWidth={1.5} className="w-3.5 h-3.5" />
               </button>
             )}
-            {capabilities?.supportsCreateTable !== false && (
+            {capabilities?.supportsCreateTable === true && (
               <button
                 className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-brand transition-colors"
                 onClick={onCreateTableClick}

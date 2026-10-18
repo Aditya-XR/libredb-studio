@@ -1455,6 +1455,21 @@ export interface ProviderCapabilities {
    */
   identifierQuoting?: "double" | "backtick" | "double-always" | "backtick-always";
   /**
+   * The longest identifier, in UTF-8 bytes, this engine keeps whole, declared only by an engine
+   * that SHORTENS a longer one instead of refusing it (#1435).
+   *
+   * PostgreSQL truncates an identifier to NAMEDATALEN-1 bytes, 63 by default, and says so only
+   * in a NOTICE, so a Create Table name one byte longer lands under a name nobody typed. The
+   * form reads this and refuses such a name under its field. An engine that refuses an
+   * over-long name with an error of its own declares nothing: that error already reaches the
+   * user through the normal execute path.
+   *
+   * Absent means no client-side limit. Optional for the same published-interface reason as
+   * `supportsInlineRowEdit` (`src/exports/types.ts`): a required field added after the fact
+   * stops every external implementer compiling.
+   */
+  maxIdentifierBytes?: number;
+  /**
    * Whether a statement this product runs may end with `;`.
    *
    * Absent means it may, which is every engine that shipped before #424 Phase 1 and

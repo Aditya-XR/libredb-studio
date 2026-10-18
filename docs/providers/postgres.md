@@ -17,6 +17,7 @@
 | **Connection string** | Supported (`postgres://` / `postgresql://`) |
 | **Transactions** | Yes — explicit `BEGIN`/`COMMIT`/`ROLLBACK` with auto-rollback timeout |
 | **Query cancellation** | Yes: PID tracking + `pg_cancel_backend`, then the wire-protocol CancelRequest where that is refused ([§5.3](#53-query-cancellation)) |
+| **Identifier length** | 63 bytes, declared as `maxIdentifierBytes` ([§3.4.2](#342-identifier-length-63-bytes-1435)) |
 | **Agent read-only profile** | Yes — `BEGIN READ ONLY` + extended-protocol single statement (#328, §12) |
 | **Source** | [`src/lib/db/providers/sql/postgres.ts`](../../src/lib/db/providers/sql/postgres.ts) |
 | **Base** | [`src/lib/db/providers/sql/sql-base.ts`](../../src/lib/db/providers/sql/sql-base.ts) |
@@ -1226,6 +1227,13 @@ rule strips `public` unconditionally while the tie-breaker follows `current_sche
 whose `search_path` puts another schema first therefore spells `public.orders` qualified while the
 join prefers that other schema, and a bare name would then be read in the wrong place. Nothing in
 the fixture reaches it, because the seeded connection's default IS `public`.
+
+### 3.4.2 Identifier length: 63 bytes (#1435)
+
+PostgreSQL keeps NAMEDATALEN-1 bytes of an identifier, 63 at the default build, and truncates a longer one with only a NOTICE.
+A Create Table name one byte longer would land under a name nobody typed, so the capabilities declare `maxIdentifierBytes: 63` and the Create Table form refuses a longer table or column name under its field, counting UTF-8 bytes rather than characters.
+It is declared rather than probed at connect: `/api/db/provider-meta` reads capabilities off a provider it never connects, so a measured value would never reach the form.
+The `postgres` type-id is the only one built on `PostgresProvider`, but a wire-compatible relative connected under it (CockroachDB, for one) gets the same limit: where that engine keeps longer names, the form refuses one it would have taken, and never lets one be shortened.
 
 ### 3.5 Resilient monitoring
 

@@ -160,6 +160,29 @@ export function quoteIdentifier(
   return !always && /^[a-z_][a-z0-9_$]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`;
 }
 
+/** A regular identifier in the subset every SQL dialect reads bare: ASCII letters, digits and `_`, no leading digit. */
+const PORTABLE_BARE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Write a name the USER TYPED, as opposed to a catalog name read back from the engine, the way
+ * the SQL editor would read the same text (#1435).
+ *
+ * A name in the portable bare subset is written bare, so the engine folds it exactly as it
+ * folds that text typed in the editor: on Oracle `orders` becomes `ORDERS`, and a later
+ * `SELECT * FROM orders` finds it. `quoteIdentifier` would quote it there, because it keeps a
+ * catalog name exact, and the result would be a lowercase table that query cannot see. Any
+ * other name, `Ürün Tablo` or `a-b`, has no bare spelling at all, so it is quoted in the
+ * connection's own dialect and kept exactly as typed.
+ *
+ * A reserved word passes the bare test and reaches the engine bare, where it is refused with
+ * the engine's own error, as it would be from the editor. There is no per-engine reserved-word
+ * list to consult: the one reserved-word list in the repo is PostgreSQL's alone
+ * (`src/lib/editor/postgres-identifiers.ts`).
+ */
+export function quoteTypedName(name: string, capabilities: ProviderCapabilities): string {
+  return PORTABLE_BARE_NAME.test(name) ? name : quoteIdentifier(name, capabilities, { always: true });
+}
+
 /** The quote character of each declared quoting, which an engine-spelled segment is read with. */
 const DECLARED_QUOTE_CHARACTER: Record<NonNullable<ProviderCapabilities["identifierQuoting"]>, '"' | "`"> = {
   double: '"',
