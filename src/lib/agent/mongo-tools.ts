@@ -34,7 +34,7 @@ import type { ColumnSchema } from "@/lib/types";
 import { AGENT_EXECUTION_PROFILE } from "./execution-policy";
 import { resolveProfileTarget } from "./inventory-address";
 import { addressableObjects } from "./inventory-objects";
-import { languageServer } from "./statement-languages";
+import { languageServer } from "./languages/server";
 import { DIGIT_RUN_LENGTH, MAX_PROFILE_COLUMNS, type AgentTableProfile, readTableProfile } from "./table-profile";
 import {
   type AgentTableProfileOutcome,

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { mergeDisjoint } from "@/lib/agent/disjoint-merge";
+import { languageServer, languageServerPack } from "@/lib/agent/languages/server";
 import { READING_REFUSAL_TEXT, UNAVAILABLE_TEXT } from "@/lib/agent/tool-contracts";
 import type { AgentToolUnavailableCode } from "@/lib/agent/tools";
 import type { AgentReadingDenyCode } from "@/lib/agent/types";
@@ -79,5 +81,26 @@ describe("the refusal tables", () => {
     expect(Object.keys(table).sort()).toEqual(Object.keys(codes).sort());
     for (const sentence of Object.values(table)) expect(sentence.length).toBeGreaterThan(0);
     expect(Object.isFrozen(table)).toBe(true);
+  });
+});
+
+/* Total over the language ids, so the compiler fails here when a language is added without a row. */
+const LANGUAGE_IDS: Readonly<Record<AgentStatementLanguageId, true>> = { sql: true, kubectl: true, mongo: true };
+
+describe("the server packs", () => {
+  test.each(Object.keys(LANGUAGE_IDS) as AgentStatementLanguageId[])(
+    "%s resolves to a frozen pack whose adapter is the one languageServer returns",
+    (id) => {
+      const pack = languageServerPack(id);
+      expect(Object.isFrozen(pack)).toBe(true);
+      expect(Object.isFrozen(pack.adapter)).toBe(true);
+      expect(languageServer(id)).toBe(pack.adapter);
+    },
+  );
+
+  test.each(["cypher", "toString"])("an id no pack holds (%s) is the same named error from both accessors", (id) => {
+    const unknown = id as AgentStatementLanguageId;
+    expect(() => languageServerPack(unknown)).toThrow(new Error(`no server adapter for ${id}`));
+    expect(() => languageServer(unknown)).toThrow(new Error(`no server adapter for ${id}`));
   });
 });

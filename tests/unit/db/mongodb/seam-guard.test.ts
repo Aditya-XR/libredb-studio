@@ -210,7 +210,7 @@ describe("the registries load no module of the driver", () => {
   test("importing the operations and language registries, the agent tools and the runs route loads none", () => {
     const entries = [
       "src/lib/db/operations/descriptors.ts",
-      "src/lib/agent/statement-languages.ts",
+      "src/lib/agent/languages/server.ts",
       "src/lib/agent/tools.ts",
       "src/app/api/agent/runs/route.ts",
     ];

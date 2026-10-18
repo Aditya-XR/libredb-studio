@@ -410,7 +410,7 @@ export function validatePlanStatement(
   draftIdentifiers?: (text: string, inventory: AgentInventory | null) => PlanStatementIdentifiers,
 ): PlanStatementValidation {
   if (draftIdentifiers !== undefined) {
-    // The run's statement language reads its own drafts' names (`planDraftIdentifiers` in `statement-languages.ts`).
+    // The run's statement language reads its own drafts' names (`planDraftIdentifiers` in `languages/pack.ts`).
     // The guard still reads only SQL, so it stays unapplied.
     return { readOnly: false, guardApplicable: false, identifiers: draftIdentifiers(sql, inventory) };
   }

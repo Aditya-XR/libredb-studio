@@ -37,7 +37,7 @@ import { promptedToolContract } from "@/lib/agent/prompted-tools";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import { AgentRunService } from "@/lib/agent/run-service";
 import { AgentRunStore } from "@/lib/agent/run-store";
-import { languageServer } from "@/lib/agent/statement-languages";
+import { languageServer } from "@/lib/agent/languages/server";
 import { type AgentToolContext, presentAnswerTool, recommendChangeTool, selectAgentTools } from "@/lib/agent/tools";
 import type {
   AgentArtifactReference,

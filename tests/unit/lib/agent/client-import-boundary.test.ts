@@ -48,7 +48,10 @@ const DRIVERS = [
 const SERVER = [
   /^node:/,
   /^bun:/,
-  /src\/lib\/agent\/(tools|investigation|statement-languages|repair-ledger|run-store|run-service|runtime)\.ts$/,
+  /src\/lib\/agent\/(tools|investigation|repair-ledger|run-store|run-service|runtime)\.ts$/,
+  /src\/lib\/agent\/(tool-contracts)\.ts$/,
+  /src\/lib\/agent\/languages\/(server|index|verifiers)\.ts$/,
+  /src\/lib\/agent\/languages\/[^/]+\/(adapter|definitions|verifiers|server|tools|index|inventory-check)\.ts$/,
   /src\/lib\/db\/factory\.ts$/,
   /src\/lib\/db\/providers\/.*\/index\.tsx?$/,
   new RegExp(`^(${DRIVERS.map((name) => name.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|")})(/|$)`),

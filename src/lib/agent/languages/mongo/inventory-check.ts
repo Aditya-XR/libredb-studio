@@ -18,8 +18,8 @@
  * the filters that address the collection's own documents: a find, findOne, count or distinct filter, and the `$match`
  * stages a pipeline opens with, before any stage reshapes the documents.
  */
-import { addressableObjects } from "./inventory-objects";
-import type { AgentInventory, AgentInventoryObject } from "./types";
+import { addressableObjects } from "../../inventory-objects";
+import type { AgentInventory, AgentInventoryObject } from "../../types";
 
 type JsonObject = Readonly<Record<string, unknown>>;
 

@@ -142,7 +142,7 @@ import {
   handoverText,
 } from "./tool-contracts";
 import { languageArms } from "./language-arms";
-import { languageServer } from "./statement-languages";
+import { languageServer } from "./languages/server";
 import {
   AGENT_WORKFLOW_PRESENTS_ANSWER,
   AGENT_WORKFLOW_SENDS_STATEMENTS,

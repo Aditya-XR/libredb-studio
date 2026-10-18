@@ -4,7 +4,7 @@
  *
  * Client-safe on purpose, like `engine-support.ts`: it imports types and nothing else, because the rail, the safety
  * strip and the posture read it, and a provider module or `node:crypto` here would reach a browser bundle. What a
- * language DOES (its fingerprint, its advice, its admission) is server code and lives in `statement-languages.ts`.
+ * language DOES (its fingerprint, its advice, its admission) is server code and lives in `languages/server.ts`.
  *
  * `AGENT_STATEMENT_LANGUAGE` is the list of engines agent mode reads statements on, keyed by type-id so no dialect
  * comparison is written anywhere. `tests/unit/lib/agent/agent-manifest.test.ts` holds it to every provider: an engine
@@ -109,9 +109,9 @@ export const AGENT_LANGUAGE_COPY: Readonly<Record<AgentStatementLanguageId, Agen
   /**
    * MongoDB's words. The noun is COMMAND because that is what MongoDB calls what the envelope carries, and the
    * argument is `command` because the model writes it as a JSON object rather than as text. The server turns it into
-   * text once, in the order the model wrote it (the language adapter's `canonicalize` in `statement-languages.ts`),
-   * so the fence, the provider, the ledger and the repair identity read one text, and a sort or an embedded-document
-   * match runs in the order it was written.
+   * text once, in the order the model wrote it (the language adapter's `canonicalize` in
+   * `languages/mongo/adapter.ts`), so the fence, the provider, the ledger and the repair identity read one text, and a
+   * sort or an embedded-document match runs in the order it was written.
    */
   mongo: Object.freeze({
     subject: "a MongoDB database",

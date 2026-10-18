@@ -1,12 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { AGENT_LANGUAGE_COPY } from "@/lib/agent/agent-manifest";
-import {
-  fingerprintKubectl,
-  kubectlRowCapAdvice,
-  fingerprintMongo,
-  mongoRowCapAdvice,
-  languageServer,
-} from "@/lib/agent/statement-languages";
+import { fingerprintKubectl, kubectlRowCapAdvice } from "@/lib/agent/languages/kubectl/adapter";
+import { fingerprintMongo, mongoRowCapAdvice } from "@/lib/agent/languages/mongo/adapter";
+import { languageServer } from "@/lib/agent/languages/server";
 import { admitMongoStatement } from "@/lib/db/operations/mongo-admission";
 
 /**
