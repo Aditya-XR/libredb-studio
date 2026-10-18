@@ -3,7 +3,7 @@
  */
 import type { ClusterUsageInput } from "@/lib/db/types";
 import type { AgentStatementLanguageId } from "../agent-manifest";
-import type { AgentGoalShortfall } from "../goal-verifier";
+import type { AgentGoalShortfall, VerifiableAgentRun } from "../goal-verifier";
 import type { AgentInventoryNoun } from "../inventory-noun";
 import type { PlanStatementIdentifiers } from "../plan-statement";
 import type { AgentProfileDepth } from "../table-profile";
@@ -260,6 +260,13 @@ export interface AgentEvidenceTool {
    */
   readonly event: Extract<AgentRunEvent["kind"], "usage-read" | "workloads-profiled">;
 }
+
+/**
+ * One verifier id's rule. A language's rules live in `<id>/verifiers.ts` and reach `goal-verifier.ts` only through
+ * `LANGUAGE_GOAL_RULES` in `verifiers.ts`, keyed by the persisted id, so a resumed run is judged by its own id whatever
+ * its language.
+ */
+export type AgentGoalRule = (run: VerifiableAgentRun) => readonly AgentGoalShortfall[];
 
 /** What a language executes, above `tools.ts`. Reached through `agentLanguagePack` in `index.ts`. */
 export interface AgentLanguageExecutionPack {

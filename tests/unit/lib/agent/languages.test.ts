@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
+import { AGENT_WORKFLOW_VARIANTS, type AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { mergeDisjoint } from "@/lib/agent/disjoint-merge";
+import { verifyRunGoal } from "@/lib/agent/goal-verifier";
 import { AGENT_EVIDENCE_TOOLS, LANGUAGE_TOOL_ARMS, agentLanguagePack } from "@/lib/agent/languages/index";
 import {
   LANGUAGE_BASE_DEFINITIONS,
@@ -11,6 +12,7 @@ import {
   languageServerPack,
 } from "@/lib/agent/languages/server";
 import { OPERATIONS_TOOL_RULE } from "@/lib/agent/languages/shared";
+import { LANGUAGE_GOAL_RULES } from "@/lib/agent/languages/verifiers";
 import { READING_REFUSAL_TEXT, UNAVAILABLE_TEXT } from "@/lib/agent/tool-contracts";
 import { AGENT_TOOL_DEFINITIONS, type AgentToolUnavailableCode, agentToolDefinition } from "@/lib/agent/tools";
 import type { AgentReadingDenyCode } from "@/lib/agent/types";
@@ -270,5 +272,46 @@ describe("the prompt tables the packs hold", () => {
     expect(languageServerPack("kubectl").grounding.planningRules).toBeUndefined();
     const [collectionRule] = languageServerPack("mongo").grounding.planningRules ?? [];
     expect(WORKFLOW_TOOL_RULES.mongo.investigation).toContain(collectionRule as string);
+  });
+});
+
+describe("the goal rules the packs register", () => {
+  const ids = Object.keys(LANGUAGE_IDS) as AgentStatementLanguageId[];
+
+  test("the language rules are kubectl's two and MongoDB's one, and no SQL variant names any of them", () => {
+    expect(Object.keys(LANGUAGE_GOAL_RULES)).toEqual([
+      "agent-query-optimization-kubectl.1",
+      "agent-database-assessment-kubectl.1",
+      "agent-query-optimization-mongo.1",
+    ]);
+    expect(Object.isFrozen(LANGUAGE_GOAL_RULES)).toBe(true);
+    for (const variant of Object.values(AGENT_WORKFLOW_VARIANTS.sql)) {
+      expect(Object.hasOwn(LANGUAGE_GOAL_RULES, variant.verifier)).toBe(false);
+    }
+  });
+
+  test("every variant's verifier has a rule, and a verdict names the id it was measured against", () => {
+    for (const id of ids) {
+      for (const [workflowType, variant] of Object.entries(AGENT_WORKFLOW_VARIANTS[id])) {
+        const verdict = verifyRunGoal({
+          mode: "agent",
+          workflowType: workflowType as keyof typeof AGENT_WORKFLOW_VARIANTS.sql,
+          status: "succeeded",
+          events: [],
+          statementLanguage: id,
+          verifier: variant.verifier,
+        });
+        expect(verdict.verifier).toBe(variant.verifier);
+      }
+    }
+  });
+
+  test("goal-verifier.ts loads alone in a fresh process", () => {
+    const run = Bun.spawnSync(
+      [process.execPath, "-e", `await import(${JSON.stringify(`${process.cwd()}/src/lib/agent/goal-verifier.ts`)})`],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(run.stderr.toString()).toBe("");
+    expect(run.exitCode).toBe(0);
   });
 });

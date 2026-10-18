@@ -87,7 +87,8 @@ import {
 } from "./models";
 import { mergeDisjoint } from "./disjoint-merge";
 import { erDetailForWorkflow, renderErDiagram } from "./er-diagram";
-import { type AgentGoalShortfall, recommendsIndex, verifyRunGoal } from "./goal-verifier";
+import { recommendsIndex } from "./goal-claims";
+import { type AgentGoalShortfall, verifyRunGoal } from "./goal-verifier";
 import { type AgentInventoryNoun, inventoryNoun } from "./inventory-noun";
 import {
   CALL_NAMING_KEYS,
