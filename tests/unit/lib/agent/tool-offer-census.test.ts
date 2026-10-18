@@ -1,10 +1,10 @@
 /**
  * What a run is offered against what it is held to, over every statement language at once.
  *
- * Each language registers its own records (`AGENT_LANGUAGE_SERVER`, `TOOL_OVERRIDES`, `LANGUAGE_TOOL_ARMS`, the tool
- * rules), and nothing in any one of them can see the others. So the agreements between them are asserted here, as
- * censuses over the language ids rather than as cases per language: a language added later joins every one of these
- * by being registered, and fails the one it does not keep.
+ * Each language registers its own records (its pack's server adapter, tool overrides and tool arms, under
+ * `src/lib/agent/languages/`, and the tool rules), and nothing in any one of them can see the others. So the agreements
+ * between them are asserted here, as censuses over the language ids rather than as cases per language: a language added
+ * later joins every one of these by being registered, and fails the one it does not keep.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -13,7 +13,7 @@ import {
   type AgentStatementLanguageId,
 } from "@/lib/agent/agent-manifest";
 import { WORKFLOW_TOOL_RULES } from "@/lib/agent/investigation";
-import { LANGUAGE_TOOL_ARMS } from "@/lib/agent/language-arms";
+import { LANGUAGE_TOOL_ARMS } from "@/lib/agent/languages/index";
 import { languageServer } from "@/lib/agent/languages/server";
 import { AGENT_TOOL_DEFINITIONS, type AgentToolName, agentToolDefinition } from "@/lib/agent/tools";
 import type { AgentRunWorkflowType } from "@/lib/agent/types";

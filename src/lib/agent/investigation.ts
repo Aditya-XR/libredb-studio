@@ -126,9 +126,7 @@ import {
   comparePlansTool,
   composeReportTool,
   inspectOperationsTool,
-  inspectUsageTool,
   presentAnswerTool,
-  profileWorkloadsTool,
   recommendChangeTool,
   runReadQueryTool,
   selectAgentTools,
@@ -141,7 +139,8 @@ import {
   citeSnapshot,
   handoverText,
 } from "./tool-contracts";
-import { languageArms } from "./language-arms";
+import { AGENT_EVIDENCE_TOOLS, agentLanguagePack } from "./languages/index";
+import type { EvidenceToolName } from "./languages/pack";
 import { languageServer } from "./languages/server";
 import {
   AGENT_WORKFLOW_PRESENTS_ANSWER,
@@ -164,12 +163,8 @@ import {
   neutraliseToolInput,
   neutraliseUntrustedMarkers,
 } from "./untrusted-content";
-import {
-  clusterUsageReadInput,
-  clusterWorkloadsReadInput,
-  isStatementReadOperation,
-} from "@/lib/db/operations/descriptors";
-import type { ClusterUsageInput, ProviderCapabilities } from "@/lib/db/types";
+import { isStatementReadOperation } from "@/lib/db/operations/descriptors";
+import type { ProviderCapabilities } from "@/lib/db/types";
 import { editorLanguageForTabType, resolveTabType } from "@/lib/editor/tab-language";
 import type { DatabaseType } from "@/lib/types";
 
@@ -233,41 +228,6 @@ export type AgentInvestigationResult =
  * tool means deciding, here, which side it is on.
  */
 type DatabaseToolName = Exclude<AgentToolName, LedgerOnlyToolName | EvidenceToolName>;
-
-/**
- * The curated cluster readings whose result is EVIDENCE of a kind a verdict asks for, so the drive writes an event of
- * that kind beside the settled step. They reach the cluster through `service.runStep` like any database tool and are
- * handled apart only because of that event; see `readEvidence`.
- */
-type EvidenceToolName = "inspect_usage" | "profile_workloads";
-
-/**
- * The event each evidence tool writes when it completes. Typed through the event union, so a kind the ledger does not
- * admit cannot be named here.
- */
-const AGENT_EVIDENCE_EVENT: Readonly<
-  Record<EvidenceToolName, Extract<AgentRunEvent["kind"], "usage-read" | "workloads-profiled">>
-> = Object.freeze({
-  inspect_usage: "usage-read",
-  profile_workloads: "workloads-profiled",
-});
-
-/**
- * Each evidence tool's argument schema, which names the namespace its event records, and the tool itself. Typed as
- * the usage reading's input because it is the wider of the two: a profile's namespace alone is one with no selector.
- */
-const EVIDENCE_TOOLS: Readonly<
-  Record<
-    EvidenceToolName,
-    {
-      readonly input: z.ZodType<ClusterUsageInput>;
-      readonly run: (context: AgentToolContext, input: unknown) => Promise<AgentToolOutcome>;
-    }
-  >
-> = Object.freeze({
-  inspect_usage: { input: clusterUsageReadInput, run: inspectUsageTool },
-  profile_workloads: { input: clusterWorkloadsReadInput, run: profileWorkloadsTool },
-});
 
 /**
  * Tools that do NOT go through `invokeDatabaseTool`.
@@ -2594,7 +2554,7 @@ function missingArm(context: AgentToolContext, tool: AgentToolName): never {
  * outcome rather than a throw.
  *
  * The two tools whose execution differs by language run their language's arm
- * (`LANGUAGE_TOOL_ARMS`), chosen by the run's own persisted language, never by
+ * (`agentLanguagePack`), chosen by the run's own persisted language, never by
  * connection type: the same key the tool definitions are offered by
  * (`agentToolDefinition`), so the offer and the execution cannot disagree about which
  * arm serves a call. `snapshot` is the inventory the run captured, which a catalog arm
@@ -2607,18 +2567,16 @@ export const DATABASE_TOOL_HANDLERS: Readonly<
   >
 > = Object.freeze({
   inspect_schema: (context, input, snapshot) =>
-    (languageArms(context.statementLanguage ?? "sql").inspect_schema ?? missingArm(context, "inspect_schema")).run(
-      context,
-      input,
-      snapshot,
-    ),
+    (
+      agentLanguagePack(context.statementLanguage ?? "sql").execution.arms.inspect_schema ??
+      missingArm(context, "inspect_schema")
+    ).run(context, input, snapshot),
   run_read_query: (context, input, snapshot) => runReadQueryTool(context, input, snapshot),
   inspect_plan: (context, input, snapshot) =>
-    (languageArms(context.statementLanguage ?? "sql").inspect_plan ?? missingArm(context, "inspect_plan")).run(
-      context,
-      input,
-      snapshot,
-    ),
+    (
+      agentLanguagePack(context.statementLanguage ?? "sql").execution.arms.inspect_plan ??
+      missingArm(context, "inspect_plan")
+    ).run(context, input, snapshot),
   inspect_operations: (context, input) => inspectOperationsTool(context, input),
 });
 
@@ -4727,7 +4685,7 @@ async function handleCall(input: {
   // the table and depth it names. Handled here, where the run record is in hand.
   if (call.toolName === "profile_table") return profileTable(service, context, call, known);
   // An evidence reading reaches the cluster as a database tool does, and writes its own event beside the step.
-  if (Object.hasOwn(EVIDENCE_TOOLS, call.toolName)) {
+  if (Object.hasOwn(AGENT_EVIDENCE_TOOLS, call.toolName)) {
     return readEvidence(service, context, call, known, call.toolName as EvidenceToolName);
   }
 
@@ -4784,7 +4742,7 @@ async function handleCall(input: {
 
 /**
  * One table profiled, recorded and NOT terminal, on the arm of whichever language the run speaks
- * (`LANGUAGE_TOOL_ARMS`): a SQL table's catalog-composed aggregates, or a MongoDB collection's `$group`.
+ * (`agentLanguagePack`): a SQL table's catalog-composed aggregates, or a MongoDB collection's `$group`.
  *
  * It reaches the database through `executeAgentOperation`, like every other reach, and so through the run's deadline,
  * its repair ledger, its budgets and the audit trail; and it settles a step through `runStep`, like every database
@@ -4802,7 +4760,9 @@ export async function profileTable(
   known: Set<string>,
 ): Promise<CallResult> {
   const { record } = await service.resume(context.runId);
-  const arm = languageArms(context.statementLanguage ?? "sql").profile_table ?? missingArm(context, "profile_table");
+  const arm =
+    agentLanguagePack(context.statementLanguage ?? "sql").execution.arms.profile_table ??
+    missingArm(context, "profile_table");
   // Resolution and composition first, and they reach nothing: the step's identity
   // has to come from what the profile RESOLVED to, so that two requests naming the
   // same table settle as one step rather than executing twice.
@@ -4858,7 +4818,7 @@ export async function profileTable(
  *
  * Modelled on `profileTable`: the step settles through `service.runStep`, so a replay, a cancellation and the audit
  * trail treat it as every other reach, and the event is written inside the settled step, so a reader never sees
- * evidence whose read was not also recorded. A completed reading writes `AGENT_EVIDENCE_EVENT[tool]` with its
+ * evidence whose read was not also recorded. A completed reading writes `AGENT_EVIDENCE_TOOLS[tool].event` with its
  * artifact and what it covered. A cluster that serves no usage metrics writes `usage-unavailable`: the refusal alone
  * cannot tell the verdict that the cluster, not the run, is why usage was never measured.
  *
@@ -4872,7 +4832,7 @@ async function readEvidence(
   known: Set<string>,
   tool: EvidenceToolName,
 ): Promise<CallResult> {
-  const parsed = EVIDENCE_TOOLS[tool].input.safeParse(call.input);
+  const parsed = AGENT_EVIDENCE_TOOLS[tool].input.safeParse(call.input);
   const covered = parsed.success ? parsed.data : undefined;
   const stepId = deriveStepId(tool, covered ?? call.input);
   known.add(stepId);
@@ -4883,11 +4843,11 @@ async function readEvidence(
     context.runId,
     { stepId, tool, ...(operationId === undefined ? {} : { operationId }) },
     async () => {
-      const outcome = await EVIDENCE_TOOLS[tool].run(context, call.input);
+      const outcome = await AGENT_EVIDENCE_TOOLS[tool].run(context, call.input);
       modelText = outcome.modelText;
       if (outcome.kind === "completed" && covered !== undefined) {
         await service.recordEvent(context.runId, {
-          kind: AGENT_EVIDENCE_EVENT[tool],
+          kind: AGENT_EVIDENCE_TOOLS[tool].event,
           artifact: outcome.artifact,
           namespace: covered.namespace,
           ...(covered.selector === undefined ? {} : { selector: covered.selector }),

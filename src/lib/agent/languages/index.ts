@@ -1,0 +1,46 @@
+/**
+ * The statement language packs, whole (#1821): the resolver the run loop (`investigation.ts`) reads.
+ *
+ * Execution tier. A pack's execution facet runs through the audited call in `tools.ts`, so this module sits above
+ * `tools.ts`, and only the run loop imports it. `tools.ts` reads the server facet alone, through `languageServerPack`
+ * in `server.ts`, which returns the very object a pack here holds.
+ *
+ * The record is total over `AgentStatementLanguageId`, so a later language does not compile until it registers its
+ * pack here. A language id the record does not hold can still arrive from a ledger, and reaching one is a named error
+ * rather than a quiet fall back to SQL.
+ */
+import type { AgentStatementLanguageId } from "../agent-manifest";
+import { mergeDisjoint } from "../disjoint-merge";
+import { KUBECTL_PACK } from "./kubectl/index";
+import { MONGO_PACK } from "./mongo/index";
+import type { AgentEvidenceTool, AgentLanguagePack, EvidenceToolName, LanguageToolArms } from "./pack";
+import { SQL_PACK } from "./sql/index";
+
+const PACKS: Readonly<Record<AgentStatementLanguageId, AgentLanguagePack>> = Object.freeze({
+  sql: SQL_PACK,
+  kubectl: KUBECTL_PACK,
+  mongo: MONGO_PACK,
+} satisfies Record<AgentStatementLanguageId, AgentLanguagePack>);
+
+/** The pack for `language`, or a named error when the id is not a language this server knows. */
+export function agentLanguagePack(language: AgentStatementLanguageId): AgentLanguagePack {
+  const pack = Object.hasOwn(PACKS, language) ? PACKS[language] : undefined;
+  if (pack === undefined) throw new Error(`no language pack for ${language}`);
+  return pack;
+}
+
+/** Every pack's tool arms by language, the same objects the packs hold. Read by the offer census. */
+export const LANGUAGE_TOOL_ARMS: Readonly<Record<AgentStatementLanguageId, LanguageToolArms>> = Object.freeze({
+  sql: SQL_PACK.execution.arms,
+  kubectl: KUBECTL_PACK.execution.arms,
+  mongo: MONGO_PACK.execution.arms,
+} satisfies Record<AgentStatementLanguageId, LanguageToolArms>);
+
+/**
+ * Every pack's evidence tools. Global by tool name, because the run loop dispatches a call by its name before it
+ * reads the run's language, and a name two packs both hold fails at load.
+ */
+export const AGENT_EVIDENCE_TOOLS: Readonly<Record<EvidenceToolName, AgentEvidenceTool>> = mergeDisjoint(
+  [SQL_PACK.execution.evidenceTools, KUBECTL_PACK.execution.evidenceTools, MONGO_PACK.execution.evidenceTools],
+  "AGENT_EVIDENCE_TOOLS",
+);

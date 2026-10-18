@@ -435,8 +435,9 @@ export const mongoPlanEstimateDescriptor: RegistrableOperationDescriptor = {
 };
 
 /**
- * The longest command Studio composes for a run, the collection profile's (`mongo-tools.ts`): room for a batch of
- * `MAX_PROFILE_COLUMNS` fields with long nested paths, since a field name has no length bound of its own.
+ * The longest command Studio composes for a run, the collection profile's (`agent/languages/mongo/tools.ts`): room
+ * for a batch of `MAX_PROFILE_COLUMNS` fields with long nested paths, since a field name has no length bound of its
+ * own.
  */
 const MONGO_COMPOSED_MAX_STATEMENT_CHARS = 65_536;
 
@@ -464,9 +465,9 @@ const MONGO_PROFILE_BOUNDARY =
 /**
  * One MongoDB collection profile, composed as an aggregation and run under the profile's bounds.
  *
- * R1 `data-read` on the same boundary the model's own command reads take. The composition is server-authored from
- * the captured inventory (`mongo-tools.ts`), so what the pipeline validates and the engine runs is the COMPOSED
- * COMMAND - read by the same reader every model command meets, under a length bound of its own
+ * R1 `data-read` on the same boundary the model's own command reads take. The composition is server-authored from the
+ * captured inventory (`agent/languages/mongo/tools.ts`), so what the pipeline validates and the engine runs is the
+ * COMPOSED COMMAND - read by the same reader every model command meets, under a length bound of its own
  * (`mongoComposedReadInput`) - and never a word the model wrote: the selector it named was resolved against the run's
  * own inventory before this descriptor saw anything. Not a statement read (`modelStatement` unset), for the reason
  * `sql.table.profile` is not one: its statement is the server's. Its own id for the reason that one has its own: the

@@ -30,7 +30,7 @@ import {
   mongoInspectSchemaTool,
   mongoProfileTablePlan,
   planMongoProfile,
-} from "@/lib/agent/mongo-tools";
+} from "@/lib/agent/languages/mongo/tools";
 import { draftedStatement, profileTable } from "@/lib/agent/investigation";
 import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";

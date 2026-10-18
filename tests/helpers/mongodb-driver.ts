@@ -381,7 +381,7 @@ const holds = (value: unknown): boolean => value !== false && value !== null && 
 
 /**
  * One aggregation expression evaluated against one document: the operators the agent's collection profile composes
- * (`mongo-tools.ts`), and nothing else. An operator outside them is refused by name, so a change to what the
+ * (`languages/mongo/tools.ts`), and nothing else. An operator outside them is refused by name, so a change to what the
  * composition sends fails the test that drives it rather than counting nothing. `$and` stops at its first false
  * operand, as the server's does, and `$regexMatch` answers false for a null or missing input and refuses any other input
  * that is not a string, as the server's does.

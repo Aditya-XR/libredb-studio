@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { mergeDisjoint } from "@/lib/agent/disjoint-merge";
+import { AGENT_EVIDENCE_TOOLS, LANGUAGE_TOOL_ARMS, agentLanguagePack } from "@/lib/agent/languages/index";
 import { LANGUAGE_BASE_DEFINITIONS, languageServer, languageServerPack } from "@/lib/agent/languages/server";
 import { READING_REFUSAL_TEXT, UNAVAILABLE_TEXT } from "@/lib/agent/tool-contracts";
 import { AGENT_TOOL_DEFINITIONS, type AgentToolUnavailableCode, agentToolDefinition } from "@/lib/agent/tools";
@@ -182,5 +183,42 @@ describe("the definitions the packs register", () => {
     expect(agentToolDefinition("kubectl", "investigation", "recommend_change").inputSchema).not.toBe(
       resources?.inputSchema,
     );
+  });
+});
+
+describe("the language packs", () => {
+  test.each(Object.keys(LANGUAGE_IDS) as AgentStatementLanguageId[])(
+    "%s resolves to one frozen pack whose facets are the ones the tier accessors return",
+    (id) => {
+      const pack = agentLanguagePack(id);
+      expect(pack.id).toBe(id);
+      expect(Object.isFrozen(pack)).toBe(true);
+      expect(Object.isFrozen(pack.execution)).toBe(true);
+      expect(Object.isFrozen(pack.execution.arms)).toBe(true);
+      expect(Object.isFrozen(pack.execution.evidenceTools)).toBe(true);
+      expect(pack.server).toBe(languageServerPack(id));
+      expect(LANGUAGE_TOOL_ARMS[id]).toBe(pack.execution.arms);
+    },
+  );
+
+  test("the arms projection holds every language, in the order the packs are declared", () => {
+    expect(Object.keys(LANGUAGE_TOOL_ARMS)).toEqual(["sql", "kubectl", "mongo"]);
+    expect(Object.isFrozen(LANGUAGE_TOOL_ARMS)).toBe(true);
+  });
+
+  test.each(["cypher", "toString"])("an id no pack holds (%s) is a named error", (id) => {
+    expect(() => agentLanguagePack(id as AgentStatementLanguageId)).toThrow(new Error(`no language pack for ${id}`));
+  });
+
+  test("the evidence tools are kubectl's two readings, each with the event its verdict reads", () => {
+    expect(Object.keys(AGENT_EVIDENCE_TOOLS)).toEqual(["inspect_usage", "profile_workloads"]);
+    expect(Object.isFrozen(AGENT_EVIDENCE_TOOLS)).toBe(true);
+    expect(AGENT_EVIDENCE_TOOLS.inspect_usage).toBe(
+      agentLanguagePack("kubectl").execution.evidenceTools.inspect_usage as NonNullable<
+        typeof AGENT_EVIDENCE_TOOLS.inspect_usage
+      >,
+    );
+    expect(AGENT_EVIDENCE_TOOLS.inspect_usage.event).toBe("usage-read");
+    expect(AGENT_EVIDENCE_TOOLS.profile_workloads.event).toBe("workloads-profiled");
   });
 });

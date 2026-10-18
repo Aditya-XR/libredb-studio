@@ -1,8 +1,8 @@
 /**
  * The MongoDB arms of the agent tools (issue #1614): what `inspect_schema`, `inspect_plan` and `profile_table` do on
  * the `mongo` statement language, beside the `run_read_query` arm that lives in `tools.ts` because it is the
- * language's statement path. The run loop reaches them through the language's record in `language-arms.ts`, never by
- * testing the language itself.
+ * language's statement path. The run loop reaches them through the language's pack (`languages/mongo/index.ts`), never
+ * by testing the language itself.
  *
  * A module of its own beside `tools.ts`'s 5,500 lines, which is the lesson of #1744's D348 applied at birth: the
  * SQL arms are one file's history, and a second language's arms are a second file rather than a second thousand
@@ -31,22 +31,28 @@
 import type { z } from "zod";
 import type { ReadOnlyCatalogReading, ReadOnlyCatalogSelector } from "@/lib/db/types";
 import type { ColumnSchema } from "@/lib/types";
-import { AGENT_EXECUTION_PROFILE } from "./execution-policy";
-import { resolveProfileTarget } from "./inventory-address";
-import { addressableObjects } from "./inventory-objects";
-import { mongoPlanCommandSchema, mongoProfileSelectorSchema } from "./languages/mongo/definitions";
-import { languageServer } from "./languages/server";
-import { DIGIT_RUN_LENGTH, MAX_PROFILE_COLUMNS, type AgentTableProfile, readTableProfile } from "./table-profile";
+import { AGENT_EXECUTION_PROFILE } from "../../execution-policy";
+import { resolveProfileTarget } from "../../inventory-address";
+import { addressableObjects } from "../../inventory-objects";
+import { MONGO_ADAPTER } from "./adapter";
+import { mongoPlanCommandSchema, mongoProfileSelectorSchema } from "./definitions";
+import { DIGIT_RUN_LENGTH, MAX_PROFILE_COLUMNS, type AgentTableProfile, readTableProfile } from "../../table-profile";
 import {
   type AgentTableProfileOutcome,
   type AgentToolContext,
   type AgentToolOutcome,
   executeAgentOperation,
   runAuditedAgentCall,
-} from "./tools";
-import { capturedSnapshot, catalogSelectorSchema, describeFindings, handoverText, unavailable } from "./tool-contracts";
-import type { AgentArtifactReference, AgentContextSnapshot, AgentInventoryObject, AgentRunRecord } from "./types";
-import { fenceUntrustedContent } from "./untrusted-content";
+} from "../../tools";
+import {
+  capturedSnapshot,
+  catalogSelectorSchema,
+  describeFindings,
+  handoverText,
+  unavailable,
+} from "../../tool-contracts";
+import type { AgentArtifactReference, AgentContextSnapshot, AgentInventoryObject, AgentRunRecord } from "../../types";
+import { fenceUntrustedContent } from "../../untrusted-content";
 
 /** One schema's problems on one line, the rendering this layer's refusals carry elsewhere. */
 function issueText(error: z.ZodError): string {
@@ -198,7 +204,7 @@ export async function mongoInspectPlanTool(
 ): Promise<AgentToolOutcome> {
   const parsed = mongoPlanCommandSchema.safeParse(input);
   if (!parsed.success) return unavailable("INVALID_TOOL_INPUT", issueText(parsed.error));
-  const server = languageServer("mongo");
+  const server = MONGO_ADAPTER;
   const statement = server.canonicalize(parsed.data.command);
   if (statement === null) return unavailable("INVALID_TOOL_INPUT", "The command is empty, and nothing was planned.");
   // The read path's inventory check, on a command the reader admits; one it does not admit goes on to the pipeline,

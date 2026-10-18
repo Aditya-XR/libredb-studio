@@ -20,7 +20,7 @@ import type { AgentLanguageServerPack, AgentRecommendationCard } from "../pack";
 
 /**
  * A MongoDB profile names a COLLECTION, as the SQL selector names a table, and is composed the same way from the run's
- * own inventory (`mongo-tools.ts`). Its own selector because its depths are not SQL's: `distribution` would need one
+ * own inventory (`./tools.ts`). Its own selector because its depths are not SQL's: `distribution` would need one
  * `$group` per field or a set materialised in memory (`$addToSet`), so it is not composed and not offered, and a
  * selector that offered it would be one the arm then refused.
  */
@@ -84,7 +84,7 @@ const MONGO_INSPECT_SCHEMA: AgentToolDefinition = Object.freeze({
 
 /**
  * The estimating plan: the command wrapped in the explain the engine itself plans with. Exported because the mongo
- * arm (`mongo-tools.ts`) parses with this same object, so what the run is offered and what it is held to are one.
+ * arm (`./tools.ts`) parses with this same object, so what the run is offered and what it is held to are one.
  */
 export const mongoPlanCommandSchema = z.strictObject({
   command: z.record(z.string(), z.unknown()),
