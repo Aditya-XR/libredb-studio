@@ -17,7 +17,10 @@
  *   `index.ts`, `verifiers.ts` and `refusals.ts`, matched by full path.
  * - R3: the tiers, each finding the first forbidden module a chain meets, not every module past it. The server modules never reach the execution tier; the client packs never reach a server module, an
  *   execution module or a `node:`/`bun:` builtin; the language verifiers and `goal-claims.ts` never reach
- *   `goal-verifier.ts`; and no runtime cycle among the agent modules passes through `languages/` or a shared module.
+ *   `goal-verifier.ts`; `goal-verifier.ts`, `goal-claims.ts` and every verifier module never reach `tools.ts` or a
+ *   server, adapter or definitions module; and no runtime cycle among the agent modules passes through `languages/` or
+ *   a shared module. A dynamic `import("x")` or `require("x")` with a literal specifier counts as an import, for R2
+ *   and R3 alike.
  * - R4: the allowlist is exact. A key found more often than it is listed fails, and so does a listed key found less
  *   often, so the list can only shrink.
  *
@@ -96,9 +99,28 @@ function resolve(specifier: string, file: string): string {
 const parse = (file: string, text: string): ts.SourceFile =>
   ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith(".tsx") ? ts.ScriptKind.TSX : undefined);
 
-/** Every static `import` and `export ... from` specifier, type-only ones included, as written. */
-function importSpecifiers(source: ts.SourceFile): string[] {
+/** Every `import("x")` and `require("x")` with a literal specifier, anywhere in the file, as written. */
+function dynamicSpecifiers(source: ts.SourceFile): string[] {
   const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) && node.expression.text === "require")) &&
+      node.arguments[0] !== undefined &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      found.push(node.arguments[0].text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
+/** Every static `import` and `export ... from` specifier, type-only ones included, and every dynamic one, as written. */
+function importSpecifiers(source: ts.SourceFile): string[] {
+  const found = dynamicSpecifiers(source);
   for (const statement of source.statements) {
     if (
       (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) &&
@@ -111,9 +133,9 @@ function importSpecifiers(source: ts.SourceFile): string[] {
   return found;
 }
 
-/** The specifiers a file loads at run time: value imports, value re-exports, and side-effect imports. */
+/** The specifiers a file loads at run time: value imports, value re-exports, side-effect imports and dynamic loads. */
 function runtimeSpecifiers(source: ts.SourceFile): string[] {
-  const found: string[] = [];
+  const found = dynamicSpecifiers(source);
   for (const statement of source.statements) {
     if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
       const clause = statement.importClause;
@@ -274,6 +296,11 @@ const SERVER_SIDE = [
 ];
 const isExecution = (file: string): boolean =>
   file === `${LANGUAGES}/index.ts` || new RegExp(`^${LANGUAGES}/[^/]+/(index|tools)\\.ts$`).test(file);
+/** What the verifiers never load: the server facet and the tool runtime, so verifying a goal loads no adapter. */
+const isServerFacet = (file: string): boolean =>
+  file === `${AGENT}/tools.ts` ||
+  file === `${LANGUAGES}/server.ts` ||
+  new RegExp(`^${LANGUAGES}/[^/]+/(adapter|server|definitions)\\.ts$`).test(file);
 const CLIENT_FORBIDDEN = new Set([
   `${AGENT}/tools.ts`,
   `${AGENT}/investigation.ts`,
@@ -340,6 +367,13 @@ function layeringFindings(planted: Planted = {}): string[] {
   ]) {
     forbid(file, (target) => target === `${AGENT}/goal-verifier.ts`, "verifier");
   }
+  for (const file of [
+    `${AGENT}/goal-verifier.ts`,
+    `${AGENT}/goal-claims.ts`,
+    ...files.filter((path) => new RegExp(`^${LANGUAGES}/([^/]+/)?verifiers\\.ts$`).test(path)),
+  ]) {
+    forbid(file, isServerFacet, "verifier");
+  }
   const graph = agentGraph(planted);
   for (const file of files.filter((path) => path.startsWith(`${LANGUAGES}/`) || SHARED_MODULES.has(path))) {
     const cycle = shortestCycle(graph, file);
@@ -400,7 +434,7 @@ describe("the agent core names no language a pack owns", () => {
   });
 });
 
-// A test that walks the import graph of the whole repository (these two and the four tier plants below) takes
+// A test that walks the import graph of the whole repository (these two and the tier plants below) takes
 // about a second alone under coverage and exceeded the default 5 s in a loaded coverage run, so each gets the
 // seam guard's 60 s budget.
 describe("the language modules load in tiers", () => {
@@ -450,6 +484,17 @@ describe("planted violations yield exactly their findings", () => {
     expect(boundaryFindings(planted)).toEqual([`${INVESTIGATION}#<module>: R2 ${LANGUAGES}/mongo/server.ts`]);
   });
 
+  test("a pack module loaded by a dynamic import or a require fails R2", () => {
+    const dynamic = plantInFunction(INVESTIGATION, "workflowToolRules", 'void import("./languages/mongo/tools");');
+    expect(boundaryFindings(dynamic)).toEqual([`${INVESTIGATION}#<module>: R2 ${LANGUAGES}/mongo/tools.ts`]);
+    const required = plantInFunction(
+      INVESTIGATION,
+      "workflowToolRules",
+      'void require("./languages/kubectl/adapter");',
+    );
+    expect(boundaryFindings(required)).toEqual([`${INVESTIGATION}#<module>: R2 ${LANGUAGES}/kubectl/adapter.ts`]);
+  });
+
   test("a MongoDB plan stage in a sentence fails R1d", () => {
     const planted = plantInFunction(GOAL_VERIFIER, "goalFor", 'void "the plan reads a COLLSCAN";');
     expect(boundaryFindings(planted)).toEqual([`${GOAL_VERIFIER}#goalFor: R1d "the plan reads a COLLSCAN"`]);
@@ -482,15 +527,34 @@ describe("planted violations yield exactly their findings", () => {
     ]);
   }, 60_000);
 
+  test("the execution tier loaded by a dynamic import in tools.ts fails the server tier and closes the same cycles", () => {
+    const planted = plantInFunction(TOOLS, "agentToolDefinition", 'void import("./languages/index");');
+    const index = `${LANGUAGES}/index.ts`;
+    expect(layeringFindings(planted)).toEqual([
+      `R3 cycle: ${index} -> ${LANGUAGES}/kubectl/index.ts -> ${LANGUAGES}/kubectl/tools.ts -> ${TOOLS} -> ${index}`,
+      `R3 cycle: ${index} -> ${LANGUAGES}/mongo/index.ts -> ${LANGUAGES}/mongo/tools.ts -> ${TOOLS} -> ${index}`,
+      `R3 cycle: ${index} -> ${LANGUAGES}/sql/index.ts -> ${TOOLS} -> ${index}`,
+      `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${index}`,
+    ]);
+  }, 60_000);
+
   test("tools.ts imported by a client pack fails the client tier", () => {
     const client = `${LANGUAGES}/kubectl/client.ts`;
     const planted = prepend(client, 'import { executeAgentOperation } from "../../tools";');
     const clients = `${LANGUAGES}/client.ts`;
     const manifest = `${AGENT}/agent-manifest.ts`;
+    const claims = `${AGENT}/goal-claims.ts`;
+    const toTools = `${manifest} -> ${clients} -> ${client} -> ${TOOLS}`;
+    // The manifest loads the client packs, and the verifiers load the manifest, so the verifier closure fails too.
     expect(layeringFindings(planted)).toEqual([
       `R3 client: ${clients} reaches ${TOOLS} through ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${client} reaches ${TOOLS} through ${client} -> ${TOOLS}`,
       `R3 cycle: ${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
+      `R3 verifier: ${claims} reaches ${TOOLS} through ${claims} -> ${toTools}`,
+      `R3 verifier: ${GOAL_VERIFIER} reaches ${TOOLS} through ${GOAL_VERIFIER} -> ${toTools}`,
+      `R3 verifier: ${LANGUAGES}/kubectl/verifiers.ts reaches ${TOOLS} through ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toTools}`,
+      `R3 verifier: ${LANGUAGES}/mongo/verifiers.ts reaches ${TOOLS} through ${LANGUAGES}/mongo/verifiers.ts -> ${claims} -> ${toTools}`,
+      `R3 verifier: ${LANGUAGES}/verifiers.ts reaches ${TOOLS} through ${LANGUAGES}/verifiers.ts -> ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toTools}`,
     ]);
   }, 60_000);
 
@@ -512,5 +576,16 @@ describe("planted violations yield exactly their findings", () => {
     ]);
     // A type-only import loads nothing.
     expect(layeringFindings(prepend(verifiers, 'import type { AgentGoalRule } from "../pack";'))).toEqual([]);
+  }, 60_000);
+
+  test("tools.ts imported at run time by a language verifier fails the verifier closure", () => {
+    const verifiers = `${LANGUAGES}/mongo/verifiers.ts`;
+    const all = `${LANGUAGES}/verifiers.ts`;
+    const planted = prepend(verifiers, 'import "../../tools";');
+    expect(layeringFindings(planted)).toEqual([
+      `R3 verifier: ${GOAL_VERIFIER} reaches ${TOOLS} through ${GOAL_VERIFIER} -> ${all} -> ${verifiers} -> ${TOOLS}`,
+      `R3 verifier: ${verifiers} reaches ${TOOLS} through ${verifiers} -> ${TOOLS}`,
+      `R3 verifier: ${all} reaches ${TOOLS} through ${all} -> ${verifiers} -> ${TOOLS}`,
+    ]);
   }, 60_000);
 });
