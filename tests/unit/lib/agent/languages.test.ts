@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { AGENT_WORKFLOW_VARIANTS, type AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
+import {
+  AGENT_LANGUAGE_COPY,
+  AGENT_PLAN_ESTIMATE_OPERATION,
+  AGENT_WORKFLOW_VARIANTS,
+  type AgentStatementLanguageId,
+} from "@/lib/agent/agent-manifest";
 import { mergeDisjoint } from "@/lib/agent/disjoint-merge";
 import { verifyRunGoal } from "@/lib/agent/goal-verifier";
+import { languageClientPack, projectClientPacks } from "@/lib/agent/languages/client";
 import { AGENT_EVIDENCE_TOOLS, LANGUAGE_TOOL_ARMS, agentLanguagePack } from "@/lib/agent/languages/index";
 import {
   LANGUAGE_BASE_DEFINITIONS,
@@ -15,6 +21,7 @@ import { OPERATIONS_TOOL_RULE } from "@/lib/agent/languages/shared";
 import { LANGUAGE_GOAL_RULES } from "@/lib/agent/languages/verifiers";
 import { READING_REFUSAL_TEXT, UNAVAILABLE_TEXT } from "@/lib/agent/tool-contracts";
 import { AGENT_TOOL_DEFINITIONS, type AgentToolUnavailableCode, agentToolDefinition } from "@/lib/agent/tools";
+import { OPERATIONS_VARIANT, READ_CLASS_TOOLS } from "@/lib/agent/workflow-tool-sets";
 import type { AgentReadingDenyCode } from "@/lib/agent/types";
 
 /**
@@ -309,6 +316,52 @@ describe("the goal rules the packs register", () => {
   test("goal-verifier.ts loads alone in a fresh process", () => {
     const run = Bun.spawnSync(
       [process.execPath, "-e", `await import(${JSON.stringify(`${process.cwd()}/src/lib/agent/goal-verifier.ts`)})`],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(run.stderr.toString()).toBe("");
+    expect(run.exitCode).toBe(0);
+  });
+});
+
+describe("the client packs", () => {
+  test.each(Object.keys(LANGUAGE_IDS) as AgentStatementLanguageId[])(
+    "%s resolves to one frozen client pack, the very object the whole pack holds",
+    (id) => {
+      const client = languageClientPack(id);
+      expect(Object.isFrozen(client)).toBe(true);
+      expect(Object.isFrozen(client.posture)).toBe(true);
+      expect(client).toBe(agentLanguagePack(id).client);
+      expect(AGENT_LANGUAGE_COPY[id]).toBe(client.copy);
+      expect(AGENT_WORKFLOW_VARIANTS[id]).toBe(client.variants);
+      expect(AGENT_PLAN_ESTIMATE_OPERATION[id]).toBe(client.planEstimateOperation);
+    },
+  );
+
+  test("each projection is frozen and keyed by every language, in the order the packs are declared", () => {
+    for (const projection of [AGENT_LANGUAGE_COPY, AGENT_PLAN_ESTIMATE_OPERATION, AGENT_WORKFLOW_VARIANTS]) {
+      expect(Object.isFrozen(projection)).toBe(true);
+      expect(Object.keys(projection)).toEqual(["sql", "kubectl", "mongo"]);
+    }
+  });
+
+  test("a language with no plan keeps its key in the plan projection, with null as its value", () => {
+    expect(Object.hasOwn(AGENT_PLAN_ESTIMATE_OPERATION, "kubectl")).toBe(true);
+    expect(AGENT_PLAN_ESTIMATE_OPERATION.kubectl).toBeNull();
+    expect(projectClientPacks(() => null)).toEqual({ sql: null, kubectl: null, mongo: null });
+  });
+
+  test("every language's operations variant is the one shared variant, and the read-class four are frozen", () => {
+    for (const id of Object.keys(LANGUAGE_IDS) as AgentStatementLanguageId[]) {
+      expect(languageClientPack(id).variants.operations).toBe(OPERATIONS_VARIANT);
+    }
+    expect(Object.isFrozen(OPERATIONS_VARIANT)).toBe(true);
+    expect(Object.isFrozen(READ_CLASS_TOOLS)).toBe(true);
+    expect(READ_CLASS_TOOLS).toEqual(["inspect_schema", "run_read_query", "inspect_plan", "compose_report"]);
+  });
+
+  test("agent-manifest.ts loads alone in a fresh process", () => {
+    const run = Bun.spawnSync(
+      [process.execPath, "-e", `await import(${JSON.stringify(`${process.cwd()}/src/lib/agent/agent-manifest.ts`)})`],
       { stdout: "pipe", stderr: "pipe" },
     );
     expect(run.stderr.toString()).toBe("");

@@ -1,15 +1,17 @@
 /**
- * MongoDB as one pack (#1821): its server facet and the arms the run loop executes (`./tools.ts`). Execution tier,
- * above `tools.ts`.
+ * MongoDB as one pack (#1821): its client and server facets and the arms the run loop executes (`./tools.ts`).
+ * Execution tier, above `tools.ts`.
  */
 import { catalogSelectorSchema } from "../../tool-contracts";
 import type { AgentLanguagePack } from "../pack";
+import { MONGO_CLIENT_PACK } from "./client";
 import { mongoPlanCommandSchema, mongoProfileSelectorSchema } from "./definitions";
 import { MONGO_SERVER_PACK } from "./server";
 import { mongoInspectPlanTool, mongoInspectSchemaTool, planMongoProfile, runMongoProfile } from "./tools";
 
 export const MONGO_PACK = Object.freeze({
   id: "mongo",
+  client: MONGO_CLIENT_PACK,
   server: MONGO_SERVER_PACK,
   execution: Object.freeze({
     arms: Object.freeze({

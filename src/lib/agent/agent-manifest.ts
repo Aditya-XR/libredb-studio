@@ -2,8 +2,9 @@
  * What agent mode knows about each engine's STATEMENT LANGUAGE, and what each workflow is on each language, as data a
  * browser bundle may hold.
  *
- * Client-safe on purpose, like `engine-support.ts`: it imports types and nothing else, because the rail, the safety
- * strip and the posture read it, and a provider module or `node:crypto` here would reach a browser bundle. What a
+ * Client-safe on purpose, like `engine-support.ts`: besides types it imports only the language packs' client facets
+ * (`languages/client.ts`) and the leaf `workflow-tool-sets.ts`, which are client-safe themselves, because the rail, the
+ * safety strip and the posture read it, and a provider module or `node:crypto` here would reach a browser bundle. What a
  * language DOES (its fingerprint, its advice, its admission) is server code and lives in `languages/server.ts`.
  *
  * `AGENT_STATEMENT_LANGUAGE` is the list of engines agent mode reads statements on, keyed by type-id so no dialect
@@ -12,8 +13,10 @@
  */
 import type { DatabaseType } from "@/lib/types";
 import type { AgentGoalVerifierId } from "./goal-verifier";
+import { projectClientPacks } from "./languages/client";
 import type { AgentOperationId, AgentToolName } from "./tools";
 import type { AgentRunMode, AgentRunWorkflowType } from "./types";
+import { OPERATIONS_VARIANT } from "./workflow-tool-sets";
 
 /** The statement languages agent mode can send. A later engine reuses one or registers a new id here. */
 export type AgentStatementLanguageId = "sql" | "kubectl" | "mongo";
@@ -87,42 +90,10 @@ export interface AgentLanguageCopy {
   readonly adviceKeys: readonly string[];
 }
 
-export const AGENT_LANGUAGE_COPY: Readonly<Record<AgentStatementLanguageId, AgentLanguageCopy>> = Object.freeze({
-  sql: Object.freeze({
-    subject: "a database",
-    noun: "statement",
-    argument: "sql",
-    writes: "writes and DDL",
-    reached: "the database",
-    defect: "your SQL",
-    adviceKeys: Object.freeze([]),
-  }),
-  kubectl: Object.freeze({
-    subject: "a Kubernetes cluster",
-    noun: "statement",
-    argument: "statement",
-    writes: "writes, exec, port-forward, proxy and watches",
-    reached: "the cluster",
-    defect: "your kubectl statement",
-    adviceKeys: Object.freeze(["get", "top", "logs", "events"]),
-  }),
-  /**
-   * MongoDB's words. The noun is COMMAND because that is what MongoDB calls what the envelope carries, and the
-   * argument is `command` because the model writes it as a JSON object rather than as text. The server turns it into
-   * text once, in the order the model wrote it (the language adapter's `canonicalize` in
-   * `languages/mongo/adapter.ts`), so the fence, the provider, the ledger and the repair identity read one text, and a
-   * sort or an embedded-document match runs in the order it was written.
-   */
-  mongo: Object.freeze({
-    subject: "a MongoDB database",
-    noun: "command",
-    argument: "command",
-    writes: "writes and pipeline stages that write",
-    reached: "the database",
-    defect: "your MongoDB command",
-    adviceKeys: Object.freeze(["find", "aggregate", "count", "distinct"]),
-  }),
-} satisfies Record<AgentStatementLanguageId, AgentLanguageCopy>);
+/** Each language's copy, the entry its client pack (`languages/<id>/client.ts`) holds. */
+export const AGENT_LANGUAGE_COPY: Readonly<Record<AgentStatementLanguageId, AgentLanguageCopy>> = projectClientPacks(
+  (pack) => pack.copy,
+);
 
 /**
  * The operation each language's `inspect_plan` drives, which is the id a run's plan artifacts are recorded under;
@@ -132,11 +103,7 @@ export const AGENT_LANGUAGE_COPY: Readonly<Record<AgentStatementLanguageId, Agen
  * `inspect_plan` definition the run is offered.
  */
 export const AGENT_PLAN_ESTIMATE_OPERATION: Readonly<Record<AgentStatementLanguageId, AgentOperationId | null>> =
-  Object.freeze({
-    sql: "sql.explain.estimate",
-    kubectl: null,
-    mongo: "mongo.plan.estimate",
-  } satisfies Record<AgentStatementLanguageId, AgentOperationId | null>);
+  projectClientPacks((pack) => pack.planEstimateOperation);
 
 /** Every language's plan-estimate operation: the question "is this artifact a plan", asked of any language. */
 export const PLAN_ESTIMATE_OPERATIONS: ReadonlySet<string> = new Set(
@@ -219,286 +186,16 @@ export interface AgentWorkflowVariant {
   readonly verifier: AgentGoalVerifierId;
 }
 
-/** The read-class four every SQL statement workflow starts from, and every MongoDB one offers whole. */
-const READ_CLASS_TOOLS: readonly AgentToolName[] = [
-  "inspect_schema",
-  "run_read_query",
-  "inspect_plan",
-  "compose_report",
-];
-
-/**
- * The operations workflow, one variant for every language because it sends no statement at all.
- *
- * Its tools are not built on the read-class four. All three of the read-class tools it leaves out,
- * `inspect_schema`, `run_read_query` and `inspect_plan`, reach the database under the `agent-read-only` profile,
- * which the factory grants only to a provider with `queryReadOnly`, and only the engines `AGENT_EXECUTION_ENGINES`
- * (`engine-support.ts`) names implement it. Offering any of them here would reintroduce, tool by tool, the exact
- * engine restriction this workflow exists to escape: the run would open on an engine with no read-only statement
- * path, be offered a tool, call it, and be answered by an acquisition that refuses the engine. `inspect_schema` was
- * checked rather than assumed: it is answered under that profile too (a composed catalog statement through
- * `provider.queryReadOnly` on a SQL engine, the provider's own inventory on MongoDB), so it is left out.
- *
- * `recommend_change` is here and `compare_plans` is not: a comparison names two `inspect_plan` artifacts this run
- * cannot produce, so offering it would be offering a tool that can only ever refuse.
- */
-const OPERATIONS_VARIANT: AgentWorkflowVariant = Object.freeze({
-  tools: Object.freeze<AgentToolName[]>(["inspect_operations", "recommend_change", "compose_report"]),
-  narrowedExtras: Object.freeze<AgentToolName[]>([]),
-  classifierDescription: "how the database is RUNNING right now: connections, waits, blocking, space and index usage",
-  objective:
-    "Your objective is how this database is RUNNING right now: what is connected to it, what it is spending its time on, what is blocked, and where its space and its indexes are going.",
-  planDeliverable: Object.freeze({ kind: "prose" }),
-  canAutoExecute: false,
-  requires: Object.freeze<AgentVariantRequirement[]>([]),
-  verifier: "agent-operations.2",
-});
-
 /**
  * Every workflow on every language. A language with no entry for a workflow cannot run it in agent mode; a plan of it
  * reads the SQL variant's objective and deliverable instead, because planning is never gated by a language.
  *
  * The SQL record is total over `AgentRunWorkflowType`, in the union's order, which is the order the classifier
- * lists the workflows in.
+ * lists the workflows in. Each language's record is the one its client pack (`languages/<id>/client.ts`) holds.
  */
 export const AGENT_WORKFLOW_VARIANTS: Readonly<
   Record<AgentStatementLanguageId, Readonly<Partial<Record<AgentRunWorkflowType, AgentWorkflowVariant>>>>
-> = Object.freeze({
-  sql: Object.freeze({
-    investigation: Object.freeze({
-      tools: Object.freeze([...READ_CLASS_TOOLS]),
-      narrowedExtras: Object.freeze<AgentToolName[]>([]),
-      classifierDescription: "a question about the database that is answered from what the run establishes",
-      objective: "Your objective is a question about this database. Answer it from what you establish.",
-      planDeliverable: Object.freeze({ kind: "statement", noun: "the statement that answers the question" }),
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>(["sql-composers"]),
-      verifier: "agent-investigation.1",
-    }),
-    /**
-     * The optimization template's own two tools on top of the read-class four, offered to this workflow alone, which
-     * is what makes the axis load-bearing: an investigation that calls `compare_plans` is told there is no such
-     * tool, because for that run there is not.
-     */
-    "query-optimization": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>([...READ_CLASS_TOOLS, "compare_plans", "recommend_change"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["compare_plans", "recommend_change"]),
-      classifierDescription: "a specific statement that is too slow, and how the engine reaches its rows",
-      objective:
-        "Your objective is a statement that is too slow. What matters is HOW the engine reaches its rows, and what change would make it reach them differently.",
-      planDeliverable: Object.freeze({ kind: "statement", noun: "the rewritten statement" }),
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>(["sql-composers"]),
-      verifier: "agent-query-optimization.3",
-    }),
-    /** The assessment template's own tool, on top of the read-class four. */
-    "database-assessment": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>([...READ_CLASS_TOOLS, "profile_table"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["profile_table"]),
-      classifierDescription: "the state of the data itself: where it is incomplete, inconsistent or surprising",
-      objective:
-        "Your objective is the state of this database itself: where its data is incomplete, inconsistent or surprising.",
-      planDeliverable: Object.freeze({ kind: "statement", noun: "the statement that measures the quality concern" }),
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>(["sql-composers"]),
-      verifier: "agent-database-assessment.1",
-    }),
-    operations: OPERATIONS_VARIANT,
-    /**
-     * The analysis template's two tools on top of the read-class four.
-     *
-     * `present_answer` is the one this workflow's verdict requires, and it is offered HERE and nowhere else for
-     * exactly that reason: a tool a run's bar never asks for is a tool that can only distract it. A narrowed run
-     * keeps it because the verdict scores the answer separately from the report.
-     *
-     * `profile_table` is borrowed from the assessment template at basic depth. The schema carries no row counts, so
-     * a 400 M-row fact table and a 12-row lookup table are indistinguishable in the inventory, and a `shipped_at`
-     * that is 80% null beside a fully populated `placed_at` says which date column the business actually fills.
-     * Basic depth answers both, costs one statement per table, and reads no value out of any column, which is what
-     * makes pointing it at a table of personal data acceptable at all.
-     */
-    "data-analysis": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>([...READ_CLASS_TOOLS, "profile_table", "present_answer"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["present_answer"]),
-      classifierDescription: "a question about the data whose answer is a result the user wants to see",
-      objective:
-        "Your objective is a question about the data in this database. Establish the answer from the data and produce something to show for it.",
-      planDeliverable: Object.freeze({ kind: "statement", noun: "the statement that produces the answer" }),
-      canAutoExecute: true,
-      requires: Object.freeze<AgentVariantRequirement[]>(["sql-composers"]),
-      verifier: "agent-data-analysis.1",
-    }),
-  } satisfies Record<AgentRunWorkflowType, AgentWorkflowVariant>),
-  kubectl: Object.freeze({
-    /**
-     * Reads alone: there is no catalog composer and no plan on a cluster, so `inspect_schema` and `inspect_plan`
-     * could only refuse. What the run establishes, it establishes with `run_read_query`, and it is judged by the
-     * same bar as an SQL investigation, so the verifier is the SQL one and a plan of it asks for what that one does.
-     */
-    investigation: Object.freeze({
-      tools: Object.freeze<AgentToolName[]>(["run_read_query", "compose_report"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>([]),
-      classifierDescription: "a question about the cluster that is answered from what the run establishes",
-      objective: "Your objective is a question about this Kubernetes cluster. Answer it from what you establish.",
-      planDeliverable: "inherits",
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>([]),
-      verifier: "agent-investigation.1",
-    }),
-    /**
-     * Resource efficiency: the cluster's optimization is not a slow statement but a container sized for what it does
-     * not use, so the run reads usage against requests and limits and may recommend new ones.
-     *
-     * `inspect_usage` and `recommend_change` are kept on a narrowed run because the verdict accepts either a resources
-     * recommendation citing a usage reading or a report citing one, and both need the reading first. It requires the
-     * usage reading of the engine, without which every tool the verdict asks for could only refuse.
-     */
-    "query-optimization": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>(["run_read_query", "inspect_usage", "recommend_change", "compose_report"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["inspect_usage", "recommend_change"]),
-      classifierDescription:
-        "which workloads are over- or under-provisioned: the CPU and memory their containers use against their requests and limits",
-      objective:
-        "Your objective is resource efficiency: which containers use far less, or far more, CPU and memory than they request, and what requests and limits would fit what they use.",
-      planDeliverable: Object.freeze({
-        kind: "statement",
-        noun: "the kubectl read that measures usage against requests",
-      }),
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>(["cluster-usage-reading"]),
-      verifier: "agent-query-optimization-kubectl.1",
-    }),
-    /**
-     * Cluster health: the cluster's assessment is not the state of its data but the state of its workloads, so the
-     * run profiles a namespace and grades what it finds.
-     *
-     * `profile_workloads` is kept on a narrowed run because the verdict asks for a profile, and nothing else the run
-     * can do establishes one. It requires the workload reading of the engine, without which that tool could only
-     * refuse.
-     */
-    "database-assessment": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>(["run_read_query", "profile_workloads", "compose_report"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["profile_workloads"]),
-      classifierDescription:
-        "the health of a namespace's workloads: replicas not ready, restarts, missing requests, limits or probes, warning events",
-      objective:
-        "Your objective is the health of this cluster's workloads in a namespace: what is not ready, what restarts, what runs without requests, limits or probes, and what the Warning events say.",
-      planDeliverable: Object.freeze({
-        kind: "statement",
-        noun: "the kubectl read that establishes each workload's state",
-      }),
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>(["cluster-workload-reading"]),
-      verifier: "agent-database-assessment-kubectl.1",
-    }),
-    operations: OPERATIONS_VARIANT,
-    /**
-     * A read presented as the answer, the SQL analysis without its profile: a cluster has no table to count.
-     *
-     * It is judged by the SQL analysis verdict, so `present_answer` is kept on a narrowed run for the same reason. It
-     * never auto-executes: the hand-over replays the answer's statement in the user's editor, and a kubectl answer is
-     * never run on the editor's terms.
-     */
-    "data-analysis": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>(["run_read_query", "present_answer", "compose_report"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["present_answer"]),
-      classifierDescription: "a question about the cluster whose answer is a result the user wants to see",
-      objective:
-        "Your objective is a question about this cluster's objects. Establish the answer from what you read and produce something to show for it.",
-      planDeliverable: "inherits",
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>([]),
-      verifier: "agent-data-analysis.1",
-    }),
-  }),
-  /**
-   * The MongoDB variants (issue #1614). Every statement workflow is offered the read-class four whole, as the SQL
-   * variants are, because the engine answers each of them: the catalog from the provider's own inventory, the plan
-   * from the `explain` command at `queryPlanner` verbosity, and the read through the command envelope. So no tool
-   * here can only refuse. That differs from kubectl's deliberate narrowing, which exists because a cluster has
-   * neither a catalog nor a plan.
-   *
-   * `requires` is empty by a different argument than kubectl's: there, the requirements gate cluster readings only
-   * that engine family has. Here the language is the gate: the server code chooses each tool's arm by the language,
-   * so an engine holds this variant's tools by holding the language, and a later engine reusing the `mongo` id
-   * holds the same arms.
-   *
-   * No variant here auto-executes; `data-analysis` says why.
-   */
-  mongo: Object.freeze({
-    investigation: Object.freeze({
-      tools: Object.freeze([...READ_CLASS_TOOLS]),
-      narrowedExtras: Object.freeze<AgentToolName[]>([]),
-      classifierDescription: "a question about the database that is answered from what the run establishes",
-      objective: "Your objective is a question about this MongoDB database. Answer it from what you establish.",
-      planDeliverable: "inherits",
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>([]),
-      verifier: "agent-investigation.1",
-    }),
-    /**
-     * The optimization template without `compare_plans`, and that absence is a refusal to overclaim rather than a
-     * gap: a comparison's whole value is the structural access reading (`plan-summary.ts`), which reads only the
-     * plan formats it was verified against and every other one as `unknown` by design, so a mongo comparison would
-     * state that two plans differ in a way nobody has read. Its bar is `agent-query-optimization-mongo.1`: an index
-     * recommendation grounded in an inspected plan, as `agent-query-optimization.3`'s other arm, or a report citing a
-     * plan that already reaches its documents through an index and recommending nothing. `inspect_plan` here
-     * runs the `explain` command at `queryPlanner` verbosity, which returns the plan and no result rows, although
-     * with several candidate plans the server runs each for a bounded trial: the estimate the SQL engines take from
-     * `EXPLAIN`, in this engine's own word.
-     */
-    "query-optimization": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>([
-        "inspect_schema",
-        "run_read_query",
-        "inspect_plan",
-        "recommend_change",
-        "compose_report",
-      ]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["recommend_change"]),
-      classifierDescription: "a specific command that is too slow, and how the engine reaches its documents",
-      objective:
-        "Your objective is a command that is too slow. What matters is HOW the engine reaches its documents, and what change would make it reach them differently.",
-      planDeliverable: Object.freeze({ kind: "statement", noun: "the rewritten command" }),
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>([]),
-      verifier: "agent-query-optimization-mongo.1",
-    }),
-    /** The assessment template's own tool, on top of the read-class four: the profile counts through aggregation. */
-    "database-assessment": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>([...READ_CLASS_TOOLS, "profile_table"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["profile_table"]),
-      classifierDescription: "the state of the data itself: where it is incomplete, inconsistent or surprising",
-      objective:
-        "Your objective is the state of this MongoDB database itself: where its documents are incomplete, inconsistent or surprising.",
-      planDeliverable: Object.freeze({ kind: "statement", noun: "the command that measures the quality concern" }),
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>([]),
-      verifier: "agent-database-assessment.1",
-    }),
-    operations: OPERATIONS_VARIANT,
-    /**
-     * The analysis template, with the auto-execute hand-over not offered, as on a cluster. The gate that would run
-     * the answer in the editor weighs the answer's own plan by a reading of the engine's explain format
-     * (`planRefusal` in `auto-execute.ts`). No `ExplainFormat` names a MongoDB plan and `plan-summary.ts` has no
-     * reading of one, so every ticked run would be declined, and the hand-over's replay of a MongoDB command has never
-     * been verified end to end either. A setting that can only ever be declined is a consent it cannot honour, so the
-     * route refuses it and the rail raises no consent step. What would turn it on is one change, recorded as
-     * `docs/BACKLOG.md` B118: a MongoDB plan reading, its rule in the gate and a verified replay, together.
-     */
-    "data-analysis": Object.freeze({
-      tools: Object.freeze<AgentToolName[]>([...READ_CLASS_TOOLS, "profile_table", "present_answer"]),
-      narrowedExtras: Object.freeze<AgentToolName[]>(["present_answer"]),
-      classifierDescription: "a question about the data whose answer is a result the user wants to see",
-      objective:
-        "Your objective is a question about the data in this MongoDB database. Establish the answer from the data and produce something to show for it.",
-      planDeliverable: Object.freeze({ kind: "statement", noun: "the command that produces the answer" }),
-      canAutoExecute: false,
-      requires: Object.freeze<AgentVariantRequirement[]>([]),
-      verifier: "agent-data-analysis.1",
-    }),
-  }),
-} satisfies Record<AgentStatementLanguageId, Partial<Record<AgentRunWorkflowType, AgentWorkflowVariant>>>);
+> = projectClientPacks((pack) => pack.variants);
 
 /**
  * The variant of one workflow on one language, or undefined when the language has none. An absent language reads as

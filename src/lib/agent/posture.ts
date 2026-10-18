@@ -16,7 +16,8 @@
  * Three properties are load-bearing and easy to lose:
  *
  *  - **Client-safe imports only** - types, `AGENT_EXECUTION_ENGINES`, the manifest's
- *    `AGENT_STATEMENT_LANGUAGE`, `getDBConfig` and the policy constants. A provider module here would drag `oracledb`/`mssql` toward a bundle
+ *    `AGENT_STATEMENT_LANGUAGE`, the language packs' client facets (`languages/client.ts`, where each
+ *    language's reads, widened and hand-over sentences live), `getDBConfig` and the policy constants. A provider module here would drag `oracledb`/`mssql` toward a bundle
  *    that must not have them, which is the rule `engine-support.ts` records in its header.
  *  - **Every engine name and every number is DERIVED.** Not one is typed as a literal, and
  *    not one is a count. The point of #425 is that "7+" was written when the answer was 7
@@ -31,7 +32,9 @@
 
 import { AGENT_STATEMENT_LANGUAGE, type AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { AGENT_EXECUTION_ENGINES, namedList } from "@/lib/agent/engine-support";
-import { AGENT_HANDOVER_BUDGET, AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
+import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
+import { languageClientPack } from "@/lib/agent/languages/client";
+import type { StatementBudgets } from "@/lib/agent/languages/pack";
 import type { AgentRunMode, AgentRunWorkflowType } from "@/lib/agent/types";
 import { getDBConfig } from "@/lib/db-ui-config";
 import type { DatabaseType } from "@/lib/types";
@@ -111,28 +114,9 @@ export function autoExecuteTerms(workflowType: AgentRunWorkflowType, language: A
   return handoverTerms(AGENT_WORKFLOW_BUDGETS[workflowType].policy.budgets, language);
 }
 
-type StatementBudgets = { readonly maxResultRows: number; readonly statementTimeoutMs: number };
-
 /** The consent sentence itself, over whichever row named it, in the language's own terms. */
 function handoverTerms(budgets: StatementBudgets, language: AgentStatementLanguageId): string {
-  return HANDOVER_TERMS[language](budgets);
-}
-
-/**
- * One consent sentence per statement language, keyed rather than compared, so a language
- * registered in the manifest does not compile until it says what its hand-over is.
- */
-const HANDOVER_TERMS: Readonly<Record<AgentStatementLanguageId, (budgets: StatementBudgets) => string>> = {
-  sql: sqlHandoverTerms,
-  kubectl: () =>
-    "A kubectl answer is never run in your editor: the hand-over is not offered on this engine, so the run produces its answer on its own read-only path only.",
-  mongo: () =>
-    "A MongoDB answer is never run in your editor: the hand-over is not offered on this engine, so the run produces its answer on its own read-only path only.",
-};
-
-/** The SQL consent sentence: the database's own read-only session bounds both paths. */
-function sqlHandoverTerms(budgets: StatementBudgets): string {
-  return `The run always produces its answer on its own read-only path, bounded to ${budgets.maxResultRows} rows and ${budgets.statementTimeoutMs / 1000} seconds. Tick this and it will also put that statement in your editor and run it there — on the connection the run was opened on, at the editor's ${AGENT_HANDOVER_BUDGET.maxResultRows}-row limit and with no time limit. It is the same database-enforced read-only session either way, so writes and DDL are refused by the engine rather than by reading the statement. Statements whose plan reads as expensive, or which the run measured as slow, are put in the editor without being run.`;
+  return languageClientPack(language).posture.handoverTerms(budgets);
 }
 
 /** Plan mode, on every engine, with or without the hand-over ticked. */
@@ -211,97 +195,14 @@ function unresolvedPosture(): AgentPosture {
   };
 }
 
-/**
- * Agent mode with the editor hand-over consented: still read-only, and one statement wider.
- *
- * Only SQL has a widened reading. On a cluster and on MongoDB no workflow variant offers the
- * hand-over, so a tick there consents to nothing and the posture stays the reads one: a
- * "widened" pill would claim an editor run the engine never performs.
- */
-const WIDENED_POSTURE: Readonly<Record<AgentStatementLanguageId, () => AgentPosture>> = {
-  sql: () => ({
-    tone: "widened",
-    headline: "Reads only, and one statement in your editor",
-    qualifier: `${AGENT_HANDOVER_BUDGET.maxResultRows} rows, no time limit, same read-only session`,
-    title: "Reads only, and one statement lands in your editor",
-    body: handoverTerms(STATEMENT_BOUNDS, "sql"),
-  }),
-  kubectl: () => kubectlReadsPosture(),
-  mongo: () => mongoReadsPosture(),
-};
-
+/** Agent mode with the editor hand-over consented, in the language's own terms (its client pack's `widened`). */
 function widenedPosture(language: AgentStatementLanguageId): AgentPosture {
-  return WIDENED_POSTURE[language]();
+  return languageClientPack(language).posture.widened(STATEMENT_BOUNDS);
 }
 
-/**
- * Agent mode, executing on its own path and nowhere else, under the boundary its language
- * declares. Keyed by language rather than compared, like the hand-over terms.
- */
-const READS_POSTURE: Readonly<Record<AgentStatementLanguageId, () => AgentPosture>> = {
-  sql: sqlReadsPosture,
-  kubectl: kubectlReadsPosture,
-  mongo: mongoReadsPosture,
-};
-
-/**
- * Agent mode on MongoDB: the boundary is a user the server holds to read privileges on this
- * one database, which the profile reads and tests before the first model turn of a run that
- * sends commands, with the fence in front of the engine.
- *
- * The qualifier names the same numbers the SQL arm does, because the budgets are the same
- * budgets; what differs is who holds them, and the body says so in the engine's own terms:
- * `maxTimeMS` and the privilege read, not a read-only transaction, because MongoDB has none
- * to name. It says "per command" because that is what the language calls one unit.
- */
-function mongoReadsPosture(): AgentPosture {
-  const rows = STATEMENT_BOUNDS.maxResultRows;
-  const seconds = STATEMENT_BOUNDS.statementTimeoutMs / 1000;
-  return {
-    tone: "reads",
-    headline: "Reads only",
-    qualifier: `${rows} rows and ${seconds} s per command, enforced by the server`,
-    title: "Agent mode reads, under a boundary the server enforces",
-    body: `Agent mode runs commands it wrote itself, bounded to ${rows} rows and ${seconds} seconds each: maxTimeMS is the server's own deadline, and Studio ends a command the server does not. On the server, find and aggregate stop one row past the budget. Before the first model turn of a run that sends commands, the server must report that this connection's user holds only read privileges on this database and must refuse a write from it: a user that can write, a server without authentication, or a server that is not MongoDB ends that run there. The fence refuses writes, write stages, server-side JavaScript and diagnostic stages before the engine is reached. Nothing reaches your editor.`,
-  };
-}
-
+/** Agent mode, executing on its own path and nowhere else, in the language's own terms (its client pack's `reads`). */
 function readsPosture(language: AgentStatementLanguageId): AgentPosture {
-  return READS_POSTURE[language]();
-}
-
-/** Agent mode on a SQL engine: the database's read-only session is the boundary. */
-function sqlReadsPosture(): AgentPosture {
-  const rows = STATEMENT_BOUNDS.maxResultRows;
-  const seconds = STATEMENT_BOUNDS.statementTimeoutMs / 1000;
-  return {
-    tone: "reads",
-    headline: "Reads only",
-    qualifier: `${rows} rows and ${seconds} s per statement, enforced by the engine`,
-    title: "Agent mode reads, under a boundary the engine enforces",
-    body: `Agent mode runs statements it wrote itself, in a read-only session the database enforces, bounded to ${rows} rows and ${seconds} seconds each. Writes and DDL are refused by the engine rather than by reading the statement. Nothing reaches your editor unless you tick the hand-over when the run opens.`,
-  };
-}
-
-/**
- * Agent mode on a cluster: Studio's allowlist and the identity's RBAC bound it, not the engine.
- *
- * The body names BOTH identities the agent may run as, the connection's agent token and its
- * own token, rather than the one in use. That is not hedging: the rail is handed a
- * connection id and a type, never the connection's credential fields, so it cannot know
- * whether an agent token is set. Naming both, and recommending a token bound to `view`, is
- * the most this panel can say truthfully.
- */
-function kubectlReadsPosture(): AgentPosture {
-  const rows = STATEMENT_BOUNDS.maxResultRows;
-  const seconds = STATEMENT_BOUNDS.statementTimeoutMs / 1000;
-  return {
-    tone: "reads",
-    headline: "Reads only",
-    qualifier: `${rows} rows and ${seconds} s per statement, enforced by Studio's request allowlist`,
-    title: "Agent mode reads, under a boundary Studio enforces",
-    body: `Agent mode runs kubectl reads it wrote itself, bounded to ${rows} rows and ${seconds} seconds each. Studio's request allowlist admits reads only, checked on the final request before it is sent, and the identity's RBAC decides what is visible: the agent runs on the connection's agent token when one is set, and on the connection's own token otherwise, so give it a token bound to view. Values Studio masks, such as env values, annotation values, ConfigMap data and Secret names and values, never reach the model. Nothing reaches your editor.`,
-  };
+  return languageClientPack(language).posture.reads(STATEMENT_BOUNDS);
 }
 
 /**

@@ -2,13 +2,15 @@
  * The shape of a statement language's pack (#1821). Types only: nothing here is evaluated, so every tier may read it.
  */
 import type { ClusterUsageInput } from "@/lib/db/types";
-import type { AgentStatementLanguageId } from "../agent-manifest";
+import type { AgentLanguageCopy, AgentStatementLanguageId, AgentWorkflowVariant } from "../agent-manifest";
 import type { AgentGoalShortfall, VerifiableAgentRun } from "../goal-verifier";
 import type { AgentInventoryNoun } from "../inventory-noun";
 import type { PlanStatementIdentifiers } from "../plan-statement";
+import type { AgentPosture } from "../posture";
 import type { AgentProfileDepth } from "../table-profile";
 import type { z } from "zod";
 import type {
+  AgentOperationId,
   AgentRecommendationOutcome,
   AgentTableProfileOutcome,
   AgentToolContext,
@@ -275,13 +277,52 @@ export interface AgentLanguageExecutionPack {
   readonly evidenceTools: Readonly<Partial<Record<EvidenceToolName, AgentEvidenceTool>>>;
 }
 
+/** The per-statement bounds a posture or a consent sentence names: rows and seconds, from one policy row. */
+export type StatementBudgets = { readonly maxResultRows: number; readonly statementTimeoutMs: number };
+
+/**
+ * What a language contributes to the browser: data a client bundle may hold, with no server code behind it. Reached
+ * through `languageClientPack` in `client.ts`, and read whole by `agent-manifest.ts` through its projections.
+ */
+export interface AgentLanguageClientPack {
+  /** The words the run's sentences use: `AGENT_LANGUAGE_COPY` in `agent-manifest.ts` projects it. */
+  readonly copy: AgentLanguageCopy;
+  /** The language's workflow variants: `AGENT_WORKFLOW_VARIANTS` in `agent-manifest.ts` projects it. */
+  readonly variants: Readonly<Partial<Record<AgentRunWorkflowType, AgentWorkflowVariant>>>;
+  /** The operation the language's `inspect_plan` drives, or null with no plan to read: `AGENT_PLAN_ESTIMATE_OPERATION`. */
+  readonly planEstimateOperation: AgentOperationId | null;
+  /** What `posture.ts` says of an agent-mode run in this language. */
+  readonly posture: {
+    /**
+     * Agent mode, executing on its own path and nowhere else, under the boundary its language declares. Keyed by
+     * language rather than compared, like the hand-over terms.
+     */
+    readonly reads: (bounds: StatementBudgets) => AgentPosture;
+    /**
+     * Agent mode with the editor hand-over consented: still read-only, and one statement wider.
+     *
+     * Only SQL has a widened reading. On a cluster and on MongoDB no workflow variant offers the
+     * hand-over, so a tick there consents to nothing and the posture stays the reads one: a
+     * "widened" pill would claim an editor run the engine never performs.
+     */
+    readonly widened: (bounds: StatementBudgets) => AgentPosture;
+    /**
+     * One consent sentence per statement language, keyed rather than compared, so a language
+     * registered in the manifest does not compile until it says what its hand-over is.
+     */
+    readonly handoverTerms: (budgets: StatementBudgets) => string;
+  };
+}
+
 /**
  * One statement language, whole. Each facet is reachable alone through its tier's accessor, which returns the very
- * object the pack holds: `languageServerPack` in `server.ts` for the server facet, which `tools.ts` reads below the
- * execution tier, and `agentLanguagePack` in `index.ts` for the whole pack, which only the run loop reads.
+ * object the pack holds: `languageClientPack` in `client.ts` for the client facet, which the browser modules read,
+ * `languageServerPack` in `server.ts` for the server facet, which `tools.ts` reads below the execution tier, and
+ * `agentLanguagePack` in `index.ts` for the whole pack, which only the run loop reads.
  */
 export interface AgentLanguagePack {
   readonly id: AgentStatementLanguageId;
+  readonly client: AgentLanguageClientPack;
   readonly server: AgentLanguageServerPack;
   readonly execution: AgentLanguageExecutionPack;
 }
