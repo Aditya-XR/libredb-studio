@@ -40,16 +40,12 @@ import {
   type AgentTableProfileOutcome,
   type AgentToolContext,
   type AgentToolOutcome,
-  capturedSnapshot,
-  catalogSelectorSchema,
-  describeFindings,
   executeAgentOperation,
-  handoverText,
   mongoPlanCommandSchema,
   mongoProfileSelectorSchema,
   runAuditedAgentCall,
-  unavailable,
 } from "./tools";
+import { capturedSnapshot, catalogSelectorSchema, describeFindings, handoverText, unavailable } from "./tool-contracts";
 import type { AgentArtifactReference, AgentContextSnapshot, AgentInventoryObject, AgentRunRecord } from "./types";
 import { fenceUntrustedContent } from "./untrusted-content";
 

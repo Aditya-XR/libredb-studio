@@ -13,7 +13,6 @@ import { AgentRunDeadline } from "@/lib/agent/deadline";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import {
-  AGENT_ANSWER_CONTRACT,
   AGENT_TOOL_DEFINITIONS,
   type AgentToolContext,
   type AgentToolName,
@@ -25,6 +24,7 @@ import {
   runReadQueryTool,
   selectAgentTools,
 } from "@/lib/agent/tools";
+import { AGENT_ANSWER_CONTRACT } from "@/lib/agent/tool-contracts";
 import {
   mongoInspectPlanTool,
   mongoInspectSchemaTool,

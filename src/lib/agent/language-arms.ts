@@ -25,7 +25,6 @@ import {
   type AgentTableProfileOutcome,
   type AgentToolContext,
   type AgentToolOutcome,
-  catalogSelectorSchema,
   inspectPlanTool,
   inspectSchemaTool,
   mongoPlanCommandSchema,
@@ -35,6 +34,7 @@ import {
   profileSelectorSchema,
   profileTableTool,
 } from "./tools";
+import { catalogSelectorSchema } from "./tool-contracts";
 import type { AgentContextSnapshot, AgentRunRecord } from "./types";
 
 /** A catalog arm: the selector it parses, and the read. `snapshot` is the inventory this run captured, or null. */

@@ -10,7 +10,6 @@ import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { AgentRunDeadline } from "@/lib/agent/deadline";
 import { AgentRepairLedger, fingerprintStatement } from "@/lib/agent/repair-ledger";
 import {
-  AGENT_ANSWER_CONTRACT,
   AGENT_TOOL_DEFINITIONS,
   type AgentToolContext,
   agentToolDefinition,
@@ -29,6 +28,7 @@ import {
   runReadQueryTool,
   selectAgentTools,
 } from "@/lib/agent/tools";
+import { AGENT_ANSWER_CONTRACT } from "@/lib/agent/tool-contracts";
 import { UNTRUSTED_CONTENT_BEGIN, UNTRUSTED_CONTENT_END } from "@/lib/agent/untrusted-content";
 import {
   AGENT_WORKFLOW_PRESENTS_ANSWER,
