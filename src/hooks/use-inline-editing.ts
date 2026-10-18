@@ -11,6 +11,14 @@ import { positionalPlaceholder, quoteLiteral } from "@/lib/sql/values";
 import { appFetch } from "@/lib/config/base-path";
 import { buildConnectionPayload } from "@/hooks/use-connection-payload";
 import { asBytes } from "@/lib/export/binary";
+import {
+  ISO_INSTANT_TEXT,
+  ORACLE_BC_DATE_MASK,
+  ORACLE_DATE_MASK,
+  ORACLE_TIMESTAMP_TYPE,
+  ORACLE_ZONED_TIMESTAMP_TYPE,
+  ORACLE_ZONELESS_TEXT,
+} from "@/lib/export/result-export";
 import { MSSQL_DATETIME_TEXT } from "@/lib/export/typed-literals";
 import { generatedFieldNames } from "@/components/results-grid/utils";
 
@@ -840,6 +848,61 @@ function boundEditText(text: string, declaredType: string | undefined, dialect: 
     : text;
 }
 
+/**
+ * An Oracle `DATE`, `TIMESTAMP` or `TIMESTAMP WITH [LOCAL] TIME ZONE` edit wrapped around its
+ * `:n` bind placeholder, or `undefined` when the column or text is not one (#1807).
+ *
+ * The Oracle provider reads `DATE` and `TIMESTAMP` as their wall clock (`YYYY-MM-DD HH24:MI:SS[.FF]`,
+ * #1131) and `TIMESTAMP WITH [LOCAL] TIME ZONE` arrives over HTTP as its `Date#toISOString` text
+ * (`YYYY-MM-DDTHH:MM:SS.sssZ`, #1224). `oracledb` binds a string parameter as `DB_TYPE_VARCHAR`, which
+ * Oracle reads into a date or timestamp column through the session's `NLS_DATE_FORMAT` (`DD-MON-RR`),
+ * `NLS_TIMESTAMP_FORMAT` (`DD-MON-RR HH.MI.SSXFF AM`), or `NLS_TIMESTAMP_TZ_FORMAT`
+ * (`DD-MON-RR HH.MI.SSXFF AM TZR`). MEASURED 2026-10-18 on Oracle AI Database 26ai Free 23.26.3.0.0
+ * (`gvenzl/oracle-free:slim`, `oracledb` 26.0.0, `TZ=Europe/Istanbul`): a bare `:1` bind was refused
+ * with `ORA-01861: literal does not match format string` on `DATE` and `ORA-01843: An invalid month
+ * was specified.` on `TIMESTAMP`, `TIMESTAMP WITH TIME ZONE`, and `TIMESTAMP WITH LOCAL TIME ZONE`,
+ * while `:1` wrapped in `TO_DATE(:1, '[S]YYYY-MM-DD HH24:MI:SS')`, `TO_TIMESTAMP(:1,
+ * '[S]YYYY-MM-DD HH24:MI:SS[.FF]')`, or `FROM_TZ(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS.FF3'), 'UTC')`
+ * stored each value equal on the server, BC dates included. Matched by the same regexes and masks the
+ * SQL INSERT export uses (`result-export.ts`). Everything else returns `undefined` and binds as `:n`.
+ */
+function oracleBoundEdit(
+  text: string,
+  declaredType: string | undefined,
+  emit: (value: string | number) => string,
+): string | undefined {
+  const bare = declaredType?.trim().toUpperCase() ?? "";
+  if (bare === "DATE" || ORACLE_TIMESTAMP_TYPE.test(bare)) {
+    const match = ORACLE_ZONELESS_TEXT.exec(text);
+    if (match === null) return undefined;
+    const [, sign, fraction] = match;
+    const mask = sign === "" ? ORACLE_DATE_MASK : ORACLE_BC_DATE_MASK;
+    if (bare === "DATE") return fraction === undefined ? `TO_DATE(${emit(text)}, '${mask}')` : undefined;
+    return `TO_TIMESTAMP(${emit(text)}, '${mask}${fraction === undefined ? "" : ".FF"}')`;
+  }
+  if (ORACLE_ZONED_TIMESTAMP_TYPE.test(bare) && ISO_INSTANT_TEXT.test(text)) {
+    const instant = new Date(text);
+    if (!Number.isNaN(instant.getTime()) && instant.toISOString() === text) {
+      return `FROM_TZ(TO_TIMESTAMP(${emit(text.slice(0, -1).replace("T", " "))}, '${ORACLE_DATE_MASK}.FF3'), 'UTC')`;
+    }
+  }
+  return undefined;
+}
+
+/** The SET rhs for one non-NULL edit. */
+function boundEditValue(
+  text: string,
+  declaredType: string | undefined,
+  dialect: DatabaseConnection["type"],
+  emit: (value: string | number) => string,
+): string {
+  if (dialect === "oracle") {
+    const temporal = oracleBoundEdit(text, declaredType, emit);
+    if (temporal !== undefined) return temporal;
+  }
+  return emit(boundEditText(text, declaredType, dialect));
+}
+
 export function useInlineEditing({
   activeConnection,
   currentTab,
@@ -1022,7 +1085,7 @@ export function useInlineEditing({
         // what the engine reports and can be quoted: that keeps a name holding a
         // space or a reserved word legal, and keeps one that spells SQL inert.
         // NULL stays a keyword: it is not a value, so it takes no parameter.
-        const value = isNull ? "NULL" : emit(boundEditText(c.newValue, declaredTypeOf(result, c.columnId), dialect));
+        const value = isNull ? "NULL" : boundEditValue(c.newValue, declaredTypeOf(result, c.columnId), dialect, emit);
         return `${quote(c.columnId)} = ${value}`;
       });
       // The key keeps the number/text split it always had — a number goes to the

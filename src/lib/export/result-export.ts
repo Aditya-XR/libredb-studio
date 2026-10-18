@@ -973,14 +973,18 @@ interface OracleDateColumn {
   text?: "date" | "timestamp" | "zoned";
 }
 
+/** The declared types the Oracle provider reads as wall-clock text (#1131) or an instant (#1224). */
+export const ORACLE_TIMESTAMP_TYPE = /^TIMESTAMP\s*(\(\d\))?$/;
+export const ORACLE_ZONED_TIMESTAMP_TYPE = /^TIMESTAMP\s*(\(\d\))?\s+WITH\s+(LOCAL\s+)?TIME\s+ZONE$/;
+
 function oracleDateColumn(declared: string | undefined): OracleDateColumn {
   const bare = declared?.trim().toUpperCase() ?? "";
   const text =
     bare === "DATE"
       ? "date"
-      : /^TIMESTAMP\s*(\(\d\))?$/.test(bare)
+      : ORACLE_TIMESTAMP_TYPE.test(bare)
         ? "timestamp"
-        : /^TIMESTAMP\s*(\(\d\))?\s+WITH\s+(LOCAL\s+)?TIME\s+ZONE$/.test(bare)
+        : ORACLE_ZONED_TIMESTAMP_TYPE.test(bare)
           ? "zoned"
           : undefined;
   return { shape: oracleDateShape(declared), ...(text === undefined ? {} : { text }) };
@@ -998,6 +1002,10 @@ function declaredTypeOf(source: ResultExportSource, column: string): string | un
 function pad(value: number, width = 2): string {
   return String(value).padStart(width, "0");
 }
+
+/** The masks `TO_DATE` and `TO_TIMESTAMP` read the provider's text and the `Date` fields through (#1131, #1498). */
+export const ORACLE_DATE_MASK = "YYYY-MM-DD HH24:MI:SS";
+export const ORACLE_BC_DATE_MASK = "SYYYY-MM-DD HH24:MI:SS";
 
 /**
  * An Oracle date literal, from the LOCAL fields for a naive column and the UTC ones for
@@ -1017,9 +1025,9 @@ function oracleDateLiteral(value: Date, shape: OracleDateShape): string {
   const bc = year < 0;
   const date = `${bc ? "-" : ""}${pad(Math.abs(year), 4)}-${pad((utc ? value.getUTCMonth() : value.getMonth()) + 1)}-${pad(utc ? value.getUTCDate() : value.getDate())}`;
   const time = `${pad(utc ? value.getUTCHours() : value.getHours())}:${pad(utc ? value.getUTCMinutes() : value.getMinutes())}:${pad(utc ? value.getUTCSeconds() : value.getSeconds())}`;
-  const yearMask = bc ? "SYYYY" : "YYYY";
-  if (shape === "date") return `TO_DATE('${date} ${time}', '${yearMask}-MM-DD HH24:MI:SS')`;
-  const stamp = `TO_TIMESTAMP('${date} ${time}.${pad(utc ? value.getUTCMilliseconds() : value.getMilliseconds(), 3)}', '${yearMask}-MM-DD HH24:MI:SS.FF3')`;
+  const mask = bc ? ORACLE_BC_DATE_MASK : ORACLE_DATE_MASK;
+  if (shape === "date") return `TO_DATE('${date} ${time}', '${mask}')`;
+  const stamp = `TO_TIMESTAMP('${date} ${time}.${pad(utc ? value.getUTCMilliseconds() : value.getMilliseconds(), 3)}', '${mask}.FF3')`;
   return utc ? `FROM_TZ(${stamp}, 'UTC')` : stamp;
 }
 
@@ -1027,7 +1035,7 @@ function oracleDateLiteral(value: Date, shape: OracleDateShape): string {
  * The text the Oracle provider reads a DATE and a TIMESTAMP as (#1131): the wall clock,
  * a leading `-` on a BC year, and a fraction only where there is one.
  */
-const ORACLE_ZONELESS_TEXT = /^(-?)\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,9})?$/;
+export const ORACLE_ZONELESS_TEXT = /^(-?)\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,9})?$/;
 
 /**
  * That text as the literal of the declared type, or `undefined` when it is not in that form.
@@ -1043,7 +1051,7 @@ function oracleTextLiteral(text: string, type: "date" | "timestamp"): string | u
   const match = ORACLE_ZONELESS_TEXT.exec(text);
   if (match === null) return undefined;
   const [, sign, fraction] = match;
-  const mask = `${sign === "" ? "YYYY" : "SYYYY"}-MM-DD HH24:MI:SS`;
+  const mask = sign === "" ? ORACLE_DATE_MASK : ORACLE_BC_DATE_MASK;
   if (type === "date") return fraction === undefined ? `TO_DATE('${text}', '${mask}')` : undefined;
   return `TO_TIMESTAMP('${text}', '${mask}${fraction === undefined ? "" : ".FF"}')`;
 }
@@ -1054,7 +1062,7 @@ function oracleTextLiteral(text: string, type: "date" | "timestamp"): string | u
  * match: Oracle has no year after 9999, and a BC year's text is left for a separate change
  * (the `Date` path itself writes one as `SYYYY`, #1498), so that text stays quoted.
  */
-const ISO_INSTANT_TEXT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+export const ISO_INSTANT_TEXT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
  * A zoned column's cell as it arrives over HTTP (#1224), as the literal the `Date` of that
