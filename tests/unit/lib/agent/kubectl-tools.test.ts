@@ -7,13 +7,12 @@ import {
   AGENT_TOOL_DEFINITIONS,
   type AgentToolContext,
   agentToolDefinition,
-  inspectUsageTool,
   presentAnswerTool,
-  profileWorkloadsTool,
   recommendChangeTool,
   runReadQueryTool,
   selectAgentTools,
 } from "@/lib/agent/tools";
+import { inspectUsageTool, profileWorkloadsTool } from "@/lib/agent/languages/kubectl/tools";
 import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
 import { createCanonicalOperationRegistry } from "@/lib/db/operations/descriptors";

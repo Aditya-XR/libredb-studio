@@ -92,8 +92,8 @@ describe("what a MongoDB run is not offered is not offered, and the backlog says
     for (const variant of Object.values(AGENT_WORKFLOW_VARIANTS.mongo)) expect(variant?.canAutoExecute).toBe(false);
     const id = citedFor(/[Aa]uto-execute/);
     expect(m2Title(id)).toContain("auto-execute");
-    // The manifest's docblock names the change that would turn it on by the same entry.
-    expect(read("src/lib/agent/agent-manifest.ts")).toMatch(new RegExp(`BACKLOG\\.md\`?[\\s*]+${id}\\b`));
+    // The mongo client pack's docblock names the change that would turn it on by the same entry.
+    expect(read("src/lib/agent/languages/mongo/client.ts")).toMatch(new RegExp(`BACKLOG\\.md\`?[\\s*]+${id}\\b`));
   });
 
   test("MCP: the section cites the entry run_read_query names by its title", () => {

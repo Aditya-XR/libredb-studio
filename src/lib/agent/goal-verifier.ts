@@ -41,16 +41,13 @@
  * claims RESTED on, which is a fact about the run.
  */
 
-import { PLAN_ESTIMATE_OPERATIONS, requiredVariant } from "./agent-manifest";
+import { requiredVariant } from "./agent-manifest";
+import { mergeDisjoint } from "./disjoint-merge";
+import { composedClaims, planArtifacts, recommendsIndex, verifyInvestigationGoal } from "./goal-claims";
+import type { AgentGoalRule } from "./languages/pack";
+import { LANGUAGE_GOAL_RULES } from "./languages/verifiers";
 import { readPlanStatement } from "./plan-draft";
-import type {
-  AgentEvidenceReference,
-  AgentReportClaim,
-  AgentRunEvent,
-  AgentRunMode,
-  AgentRunRecord,
-  AgentRunWorkflowType,
-} from "./types";
+import type { AgentRunMode, AgentRunRecord, AgentRunWorkflowType } from "./types";
 
 /**
  * Which rule judged a run. Versioned in the value, like the execution policy: a
@@ -311,61 +308,6 @@ export type VerifiableAgentRun = Pick<
 >;
 
 /**
- * Every claim the run composed, across every report entry it wrote.
- *
- * More than one is possible: `composeReport` is idempotent in its VERIFICATION but
- * not in its appending, so a run resumed after a death between the append and the
- * finish can add a second (`investigation.ts` says so). Reading all of them means
- * the verdict does not depend on which one a reader picked.
- */
-function composedClaims(events: readonly AgentRunEvent[]): readonly AgentReportClaim[] {
-  return events.flatMap((event) => (event.kind === "report-composed" ? event.claims : []));
-}
-
-/** Correlation id → how many rows that read actually returned. */
-function rowCountsByArtifact(events: readonly AgentRunEvent[]): ReadonlyMap<string, number> {
-  const counts = new Map<string, number>();
-  for (const event of events) {
-    if (event.kind === "tool-completed") counts.set(event.artifact.correlationId, event.artifact.summary.rowCount);
-  }
-  return counts;
-}
-
-/**
- * True when the report cited results, and every result it cited was empty.
- *
- * A citation the ledger cannot resolve is skipped rather than assumed empty:
- * `composeReportTool` refuses an invented correlation id, so this only arises from
- * a hand-written or older ledger, and calling a result empty when nobody has seen
- * it would be the verifier inventing the very evidence it is checking for.
- *
- * `unbounded` is the set of artifacts whose row count says nothing about whether the
- * question was answered, and it is skipped for the same reason: a count that cannot
- * be read is not a count of zero. The caller names them, because which artifacts
- * those are is a fact about a WORKFLOW's evidence and not about arithmetic — only the
- * optimization rule passes any (B45).
- */
-function restsOnlyOnEmptyResults(
-  claims: readonly AgentReportClaim[],
-  events: readonly AgentRunEvent[],
-  unbounded: ReadonlySet<string>,
-): boolean {
-  const counts = rowCountsByArtifact(events);
-  const cited: number[] = [];
-  for (const claim of claims) {
-    for (const reference of claim.evidence) {
-      if (reference.source !== "artifact" || unbounded.has(reference.correlationId)) continue;
-      const rowCount = counts.get(reference.correlationId);
-      if (rowCount !== undefined) cited.push(rowCount);
-    }
-  }
-  return cited.length > 0 && cited.every((rowCount) => rowCount === 0);
-}
-
-/** No artifact is exempt from the emptiness census, which is every rule but one. */
-const EVERY_COUNT_MEANS_SOMETHING: ReadonlySet<string> = Object.freeze(new Set<string>());
-
-/**
  * The plan bar: the run spoke, and what it said was its deliverable rather than a
  * lecture about how one would find it.
  *
@@ -410,50 +352,6 @@ function verifyPlanningGoal(run: VerifiableAgentRun): readonly AgentGoalShortfal
   if (run.events.some((event) => event.kind === "plan-statement-drafted")) return [];
   if (closing.some((text) => readPlanStatement(text).kind === "refusal")) return [];
   return run.status === "cancelled" ? ["cancelled"] : ["no-statement"];
-}
-
-/**
- * An investigation answered when it composed claims that rest on something it read.
- *
- * `unbounded` is the composing rules' seam and defaults to empty, so `agent-investigation.1`
- * means exactly what it meant: a workflow that has an artifact whose row count is not a
- * measure of its answer says so at the call, and nothing is exempt by default.
- */
-function verifyInvestigationGoal(
-  run: VerifiableAgentRun,
-  unbounded: ReadonlySet<string> = EVERY_COUNT_MEANS_SOMETHING,
-): readonly AgentGoalShortfall[] {
-  const claims = composedClaims(run.events);
-  if (claims.length === 0) return run.status === "cancelled" ? ["cancelled"] : ["no-report"];
-  return restsOnlyOnEmptyResults(claims, run.events, unbounded) ? ["empty-evidence"] : [];
-}
-
-type GoalRule = (run: VerifiableAgentRun) => readonly AgentGoalShortfall[];
-
-/**
- * Every plan THIS run read from the engine, by the id a citation would name: an artifact recorded under any
- * language's plan-estimate operation (`PLAN_ESTIMATE_OPERATIONS`), so a language's plans count here by being
- * registered there.
- */
-function planArtifacts(events: readonly AgentRunEvent[]): ReadonlySet<string> {
-  const ids = new Set<string>();
-  for (const event of events) {
-    if (event.kind === "tool-completed" && PLAN_ESTIMATE_OPERATIONS.has(event.artifact.operationId)) {
-      ids.add(event.artifact.correlationId);
-    }
-  }
-  return ids;
-}
-
-/**
- * Whether an event recommends an INDEX, in any language: a statement's `CREATE INDEX` card or a document-index card.
- * The index arm of `agent-query-optimization.3` accepts either, and the drive's compare-before-report hold reads it
- * the same way, so the two cannot come to disagree about what an index recommendation is.
- */
-export function recommendsIndex(
-  event: AgentRunEvent,
-): event is Extract<AgentRunEvent, { kind: "recommendation"; change: "index" | "document-index" }> {
-  return event.kind === "recommendation" && (event.change === "index" || event.change === "document-index");
 }
 
 /**
@@ -509,62 +407,6 @@ function verifyQueryOptimizationGoal(run: VerifiableAgentRun): readonly AgentGoa
     event.evidence.some((reference) => reference.source === "artifact" && plans.has(reference.correlationId)),
   );
   return grounded ? [] : ["no-plan-evidence"];
-}
-
-/**
- * The optimization bar where plans cannot be compared: the baseline with plans exempt from its emptiness census, as
- * in `verifyQueryOptimizationGoal`; then an index recommendation citing a plan of this run, or, with no index
- * recommended, a report citing one, which is how "the plan already uses an index, nothing needs to change" answers.
- */
-function verifyQueryOptimizationMongoGoal(run: VerifiableAgentRun): readonly AgentGoalShortfall[] {
-  const plans = planArtifacts(run.events);
-  const baseline = verifyInvestigationGoal(run, plans);
-  if (baseline.length > 0) return baseline;
-  const cites = (evidence: readonly AgentEvidenceReference[]) =>
-    evidence.some((reference) => reference.source === "artifact" && plans.has(reference.correlationId));
-  const indexes = run.events.filter(recommendsIndex);
-  if (indexes.length > 0) return indexes.some((event) => cites(event.evidence)) ? [] : ["no-plan-evidence"];
-  return composedClaims(run.events).some((claim) => cites(claim.evidence)) ? [] : ["no-plan-cited"];
-}
-
-/** Every usage reading THIS run took, by the id a citation would name. */
-function usageArtifacts(events: readonly AgentRunEvent[]): ReadonlySet<string> {
-  return new Set(events.flatMap((event) => (event.kind === "usage-read" ? [event.artifact.correlationId] : [])));
-}
-
-/**
- * Resource efficiency on a cluster: the investigation baseline over the run's own artifacts, with a usage reading
- * counted as meaningful even when empty (a namespace with nothing running is an answer); then either a resources
- * recommendation citing a usage reading of this run, or a report citing one and recommending nothing, because a
- * well-sized namespace must not force an invented change. A run whose only reading was "metrics unavailable" stays
- * unanswered under its own name, so the rail can say metrics-server is missing rather than that the model failed.
- */
-function verifyQueryOptimizationKubectlGoal(run: VerifiableAgentRun): readonly AgentGoalShortfall[] {
-  const usage = usageArtifacts(run.events);
-  const baseline = verifyInvestigationGoal(run, usage);
-  if (baseline.length > 0) return baseline;
-  if (usage.size === 0)
-    return run.events.some((event) => event.kind === "usage-unavailable") ? ["no-usage-metrics"] : ["no-usage-reading"];
-  const cites = (evidence: readonly AgentEvidenceReference[]) =>
-    evidence.some((reference) => reference.source === "artifact" && usage.has(reference.correlationId));
-  const resources = run.events.flatMap((event) =>
-    event.kind === "recommendation" && event.change === "resources" ? [event] : [],
-  );
-  if (resources.length > 0) return resources.some((event) => cites(event.evidence)) ? [] : ["no-usage-evidence"];
-  return composedClaims(run.events).some((claim) => cites(claim.evidence)) ? [] : ["no-usage-evidence"];
-}
-
-/**
- * Cluster health: the investigation baseline over the run's own artifacts, with a workload profile counted as
- * meaningful even when empty (an empty namespace is an answer), then at least one profile.
- */
-function verifyDatabaseAssessmentKubectlGoal(run: VerifiableAgentRun): readonly AgentGoalShortfall[] {
-  const profiles = new Set(
-    run.events.flatMap((event) => (event.kind === "workloads-profiled" ? [event.artifact.correlationId] : [])),
-  );
-  const baseline = verifyInvestigationGoal(run, profiles);
-  if (baseline.length > 0) return baseline;
-  return profiles.size > 0 ? [] : ["no-workload-profile"];
 }
 
 /**
@@ -626,7 +468,8 @@ function verifyDatabaseAssessmentGoal(run: VerifiableAgentRun): readonly AgentGo
  *    workflow's rules ask for exactly that order. No valid answer is excluded: whatever
  *    the presentation, whatever the hand-over, and whether the answer is a chart, a
  *    table, one row or one number, the claim about it can cite it.
- *  - **Told (#350).** Stated in `WORKFLOW_TOOL_RULES["data-analysis"]`, in
+ *  - **Told (#350).** Stated in every language's `data-analysis` rules (`WORKFLOW_TOOL_RULES`
+ *    in `languages/server.ts`), in
  *    `present_answer`'s own description, and again in what that tool says back when it
  *    records the answer — where it can name the very id to cite.
  *
@@ -638,7 +481,7 @@ function verifyDataAnalysisGoal(run: VerifiableAgentRun): readonly AgentGoalShor
   if (baseline.length > 0) return baseline;
   // Every answer this run presented, though a run may present only one
   // (`ANSWER_ALREADY_RECORDED`): read as a fold over the ledger rather than as a
-  // lookup of the entry a reader happened to pick, like `composedClaims` above.
+  // lookup of the entry a reader happened to pick, like `composedClaims` in `goal-claims.ts`.
   const answered = run.events.flatMap((event) =>
     event.kind === "answer-composed" ? [event.artifact.correlationId] : [],
   );
@@ -686,7 +529,7 @@ function verifyDataAnalysisGoal(run: VerifiableAgentRun): readonly AgentGoalShor
  * citation form for it as the preface to its own inventory. So a report resting on the
  * inventory alone composed, verified and scored `answered` without a single reading
  * behind it — on the workflow whose entire subject is what the engine says about itself,
- * and against a bar the model is told in `WORKFLOW_TOOL_RULES` in those very words. The
+ * and against a bar the model is told in `OPERATIONS_TOOL_RULE` in those very words. The
  * arm is no longer dead, so the objection to writing it has expired and the arm is
  * written. `agent-operations` moved to `.2` with it: the rule the id names changed
  * meaning, and two runs' verdicts sharing one id under two different rules is exactly
@@ -708,6 +551,15 @@ function verifyOperationsGoal(run: VerifiableAgentRun): readonly AgentGoalShortf
   return citesReading ? [] : ["no-reading"];
 }
 
+/** The rules every language shares; each language's own are `LANGUAGE_GOAL_RULES` in `languages/verifiers.ts`. */
+const CORE_GOAL_RULES: Readonly<Partial<Record<AgentGoalVerifierId, AgentGoalRule>>> = Object.freeze({
+  "agent-investigation.1": (run: VerifiableAgentRun) => verifyInvestigationGoal(run),
+  "agent-query-optimization.3": verifyQueryOptimizationGoal,
+  "agent-database-assessment.1": verifyDatabaseAssessmentGoal,
+  "agent-operations.2": verifyOperationsGoal,
+  "agent-data-analysis.1": verifyDataAnalysisGoal,
+});
+
 /**
  * Verifier id → the rule it names, for every id a run can still be judged under.
  *
@@ -716,16 +568,10 @@ function verifyOperationsGoal(run: VerifiableAgentRun): readonly AgentGoalShortf
  * stays in the union for the ledgers that carry it, but no new verdict is ever
  * measured against it, so it has no entry here and asking for one is an error.
  */
-const AGENT_GOAL_RULES: Readonly<Partial<Record<AgentGoalVerifierId, GoalRule>>> = Object.freeze({
-  "agent-investigation.1": (run: VerifiableAgentRun) => verifyInvestigationGoal(run),
-  "agent-query-optimization.3": verifyQueryOptimizationGoal,
-  "agent-query-optimization-kubectl.1": verifyQueryOptimizationKubectlGoal,
-  "agent-query-optimization-mongo.1": verifyQueryOptimizationMongoGoal,
-  "agent-database-assessment.1": verifyDatabaseAssessmentGoal,
-  "agent-database-assessment-kubectl.1": verifyDatabaseAssessmentKubectlGoal,
-  "agent-operations.2": verifyOperationsGoal,
-  "agent-data-analysis.1": verifyDataAnalysisGoal,
-});
+const AGENT_GOAL_RULES: Readonly<Partial<Record<AgentGoalVerifierId, AgentGoalRule>>> = mergeDisjoint(
+  [CORE_GOAL_RULES, LANGUAGE_GOAL_RULES],
+  "AGENT_GOAL_RULES",
+);
 
 /** A verifier id with no rule: a retired id, or a ledger this build never wrote. */
 class AgentGoalVerifierError extends Error {

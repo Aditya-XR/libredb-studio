@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PLAN_NO_STATEMENT_MARKER, readPlanStatement } from "@/lib/agent/plan-draft";
 import { readStatementTables, validatePlanStatement } from "@/lib/agent/plan-statement";
-import { languageServer } from "@/lib/agent/statement-languages";
+import { languageServer } from "@/lib/agent/languages/server";
 import type { AgentInventory } from "@/lib/agent/types";
 
 /**

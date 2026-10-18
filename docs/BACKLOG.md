@@ -41,7 +41,7 @@ None of it is a GitHub issue.
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4-K8 · 5
 - [Security scanner triage](#security-scanner-triage) — SCAN1-SCAN2 · 2
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A2–A8 · 5
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B121 · 54
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B123 · 56
 - [Passkey deferrals (#785)](#passkey-deferrals-785) — PK1-PK9 · 8
 - [MCP server deferrals (#246)](#mcp-server-deferrals-246) — MCP1-MCP3 · 3
 - [Governance follow-ups](#governance-follow-ups) — GOV1-GOV30 · 30
@@ -400,7 +400,7 @@ Making it optional the way `activeConnections` already is touches every provider
 
 **The other path swallows instead of fabricating, and that is not better.**
 On the `slow-queries` reading the agent actually uses, `getSlowQueries()` in `src/lib/db/providers/keyvalue/redis.ts` and `getSlowQueries()` in `src/lib/db/providers/document/mongodb/index.ts` `return []` from their catch where MySQL now rejects.
-So a denied grant reaches the model as an empty reading, and the run prompt tells it `"A reading that comes back EMPTY is an answer, not a failure - no blocked session, no slow query, no unused index is what a healthy server looks like"` (`WORKFLOW_TOOL_RULES` in `src/lib/agent/investigation.ts`).
+So a denied grant reaches the model as an empty reading, and the run prompt tells it `"A reading that comes back EMPTY is an answer, not a failure - no blocked session, no slow query, no unused index is what a healthy server looks like"` (`OPERATIONS_TOOL_RULE` in `src/lib/agent/languages/shared.ts`).
 It also costs the operator the reason: `getMonitoringData()` in `src/lib/db/base-provider.ts` records `errors.slowQueries` from a REJECTION, and a resolved `[]` records nothing, so the panel says "no slow queries" where the truth is that the profiler is off.
 
 **Done when:** a slow-query source that could not be read is absent-with-a-reason on both paths - no
@@ -7677,7 +7677,7 @@ Found 2026-10-14 while building the statement-language layer.
 ### B112. A run's persisted workflow type is never checked when the ledger is read
 
 `foldLedger` in `src/lib/agent/run-store.ts` takes `workflowType` from the ledger as written, defaulting only a missing one, and no check asks whether the value is a workflow Studio knows.
-Five plain-object tables are then indexed with it: `WORKFLOW_TOOL_RULES` (`src/lib/agent/investigation.ts`), `AGENT_WORKFLOW_PRESENTS_ANSWER` (`src/lib/agent/types.ts`), `AGENT_WORKFLOW_BUDGETS` (`src/lib/agent/execution-policy.ts`), `WORKFLOW_DETAIL` (`src/lib/agent/er-diagram.ts`) and `AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION` (`src/lib/agent/tools.ts`).
+Five plain-object tables are then indexed with it: `WORKFLOW_TOOL_RULES` (`src/lib/agent/languages/server.ts`), `AGENT_WORKFLOW_PRESENTS_ANSWER` (`src/lib/agent/types.ts`), `AGENT_WORKFLOW_BUDGETS` (`src/lib/agent/execution-policy.ts`), `WORKFLOW_DETAIL` (`src/lib/agent/er-diagram.ts`) and `AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION` (`src/lib/agent/tools.ts`).
 A ledger carrying an unknown or renamed workflow reads `undefined` from each: the boolean tables take it for false, and a budget read such as `runDeadlineMs` fails as a `TypeError` with no name for the cause.
 The workflow-variant lookup (`agentVariant` in `src/lib/agent/agent-manifest.ts`) guards its own index against an inherited name such as `toString`; these five tables do not.
 Found 2026-10-14 while building agent execution on Kubernetes.
@@ -7768,6 +7768,27 @@ Found 2026-10-16 in the review of #1790 (issue #1614).
 Found 2026-10-16 in the review of #1790 (issue #1614).
 
 **Done when:** a `mongodb` preset serves the mongo variants' catalog, plan and profile answers, the real-model runner drives the four statement workflows on it, and a measured result for at least one model is recorded; cited in `docs/AGENT.md`.
+
+### B122. `tools.ts` and `context-snapshot.ts` import each other at runtime
+
+`src/lib/agent/tools.ts` imports `connectionIdentity` and `heldSnapshotForConnection` from `src/lib/agent/context-snapshot.ts`, which imports `readCatalogForGrounding` and `readObjectInventoryForGrounding` back from `tools.ts`.
+Both directions are runtime values, so which module finishes evaluating first depends on which one a process loads first, and a top-level read of the other's export would meet it uninitialised.
+Nothing reads across the cycle at module scope today, so it works; the language boundary guard (`tests/unit/lib/agent/language-boundary.test.ts`) passes it on purpose, because it runs through no language pack.
+
+Found 2026-10-19 while splitting the agent core into language packs (#1821).
+
+**Done when:** one of the two directions is gone, for example by moving the two grounding reads into a module that imports neither, a test proves that `tools.ts` and `context-snapshot.ts` each load alone in a fresh process, and the language boundary guard no longer names the cycle in its non-vacuity test; cited in `docs/AGENT.md`.
+
+### B123. Per-language agent tables live in UI components, outside the language packs
+
+Two per-language decisions sit in `src/components/agent` rather than in a language's client pack (`src/lib/agent/languages/<id>/client.ts`).
+`HANDOVER_CHIPS` in `ConsentCard.tsx` is keyed by `AgentStatementLanguageId` and holds the SQL hand-over terms as chips, with empty entries for `kubectl` and `mongo`.
+`handOverLanguage` in `AgentRail.tsx` answers `"sql"` when the rail has no connection type, so a language default is decided by a component.
+A new language must therefore edit both components, and the language boundary guard reads only `src/lib/agent`, so it cannot see either.
+
+Found 2026-10-19 while splitting the agent core into language packs (#1821).
+
+**Done when:** the hand-over chips are a member of each language's client pack and `ConsentCard.tsx` reads them through `languageClientPack`, the no-connection default in `AgentRail.tsx` is named in the client tier rather than written as a literal, and the existing ConsentCard and AgentRail tests pass unchanged; cited in `docs/AGENT.md`.
 
 ## Passkey deferrals (#785)
 

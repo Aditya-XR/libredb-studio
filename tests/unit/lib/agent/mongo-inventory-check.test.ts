@@ -1,5 +1,5 @@
 /**
- * `mongo-inventory-check.ts`: a MongoDB command read against the run's captured inventory before anything is sent.
+ * `languages/mongo/inventory-check.ts`: a MongoDB command read against the run's captured inventory before anything is sent.
  *
  * The two mistakes it catches are the ones MongoDB answers with an empty result instead of an error, measured live on
  * 2026-10-17: a collection named with the inventory's `shop.` prefix (3 of 10 plan drafts), and a date or ObjectId
@@ -11,7 +11,7 @@ import {
   mongoCollectionsNamed,
   mongoInventoryProblem,
   unknownMongoCollections,
-} from "@/lib/agent/mongo-inventory-check";
+} from "@/lib/agent/languages/mongo/inventory-check";
 import type { AgentInventory, AgentInventoryObject } from "@/lib/agent/types";
 
 const column = (name: string, type: string) => ({ name, type, nullable: true, isPrimary: name === "_id" });

@@ -234,7 +234,7 @@ function workflowBudget(input: {
  * A total `Record` over `AgentRunWorkflowType`, which is the fourth of exactly this
  * shape: the workflow axis already decides the tool set (each variant's `tools` in
  * `agent-manifest.ts`), what the model is told (the variant's `objective` and
- * `WORKFLOW_TOOL_RULES`) and the verdict rule
+ * its language pack's `workflowToolRules`) and the verdict rule
  * (`AGENT_WORKFLOW_GOALS`). A new workflow therefore stops the build until somebody
  * decides what it may spend, rather than inheriting a ceiling meant for another
  * workload.
