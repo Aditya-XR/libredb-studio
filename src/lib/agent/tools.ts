@@ -73,7 +73,6 @@ import {
   isStatementReadOperation,
 } from "@/lib/db/operations/descriptors";
 import { measureResultBytes } from "@/lib/db/providers/sql/read-only-budget";
-import { parseQuantity } from "@/lib/db/providers/platform/kubernetes/console/top";
 import { actorLabel, executeAuditedOperation } from "@/lib/db/operations/execution";
 import { inspectAgentStatement } from "@/lib/db/operations/statement-guard";
 import type { ExecutionActor, ExecutionPolicy, PolicyDenyCode, TargetScope } from "@/lib/db/operations/policy";
@@ -155,7 +154,9 @@ import {
 } from "./execution-policy";
 import type { AgentRepairDenyCode, AgentRepairLedger } from "./repair-ledger";
 import { fingerprintStatement } from "./repair-ledger";
-import { languageServer } from "./languages/server";
+import type { resourcesRecommendationSchema } from "./languages/kubectl/definitions";
+import type { mongoIndexRecommendationSchema } from "./languages/mongo/definitions";
+import { LANGUAGE_BASE_DEFINITIONS, languageServer, languageServerPack } from "./languages/server";
 import { evaluateAutoExecute } from "./auto-execute";
 import { summarisePlan } from "./plan-summary";
 import {
@@ -645,32 +646,6 @@ export const profileSelectorSchema = z.strictObject({
   fromColumn: z.number().int().min(0).optional(),
 });
 
-/**
- * A MongoDB profile names a COLLECTION, as the SQL selector names a table, and is composed the same way from the run's
- * own inventory (`mongo-tools.ts`). Its own selector because its depths are not SQL's: `distribution` would need one
- * `$group` per field or a set materialised in memory (`$addToSet`), so it is not composed and not offered, and a
- * selector that offered it would be one the arm then refused.
- */
-export const mongoProfileSelectorSchema = z.strictObject({
-  schema: z
-    .string()
-    .describe(
-      "Omit this unless the inventory qualifies the collection as database.collection. It is a database name, never an artifact id or a snapshot fingerprint.",
-    )
-    .optional(),
-  table: z.string().min(1).describe("The collection, spelled as the inventory spells it or by its bare name."),
-  depth: z
-    .enum(["basic", "pattern"])
-    .default("basic")
-    .describe("basic counts documents and missing values; pattern adds a shape test for personal data."),
-  fromColumn: z
-    .number()
-    .int()
-    .min(0)
-    .describe("Where in the collection's field list to start. The server bounds how many follow.")
-    .optional(),
-});
-
 const planComparisonSchema = z.strictObject({
   before: z.string().min(1),
   after: z.string().min(1),
@@ -930,38 +905,6 @@ const recommendationSchema = z.strictObject({
   evidence: z.array(evidenceSchema).min(1),
 });
 
-/**
- * A Kubernetes quantity as a manifest states one: `250m`, `0.5`, `512Mi`, `1Gi`. Read by the same parser that reads
- * the cluster's own figures, so a value this accepts is one the API server would accept too.
- */
-const resourceQuantity = z
-  .string()
-  .min(1)
-  .max(32)
-  .refine((text) => parseQuantity(text) !== undefined, "not a Kubernetes quantity, such as 250m, 0.5, 512Mi or 1Gi");
-const resourceQuantities = z.strictObject({ cpu: resourceQuantity.optional(), memory: resourceQuantity.optional() });
-const resourceSettings = z.strictObject({ requests: resourceQuantities, limits: resourceQuantities });
-
-/**
- * The resource-efficiency card: one container's requests and limits, as they are and as the run proposes them.
- *
- * No `statement`: the change is to a workload's manifest, which nothing here writes and no editor runs, so there is
- * nothing to hand over. The owner is named so the user knows which manifest holds the container. `rationale` and
- * `evidence` are declared as `recommendationSchema` declares them, against the same evidence schema.
- */
-const resourcesRecommendationSchema = z.strictObject({
-  change: z.literal("resources"),
-  namespace: z.string().min(1),
-  // Any kind `inspect_usage` reports: a database operator's custom resource owns pods as a Deployment does.
-  ownerKind: z.string().min(1),
-  ownerName: z.string().min(1),
-  container: z.string().min(1),
-  current: resourceSettings,
-  proposed: resourceSettings,
-  rationale: z.string().min(1),
-  evidence: z.array(evidenceSchema).min(1),
-});
-
 /** What a `recommend_change` call parses to, on whichever card the run's language offers. */
 type RecommendationInput =
   | z.infer<typeof recommendationSchema>
@@ -1189,20 +1132,7 @@ export const AGENT_TOOL_DEFINITIONS: Readonly<Record<AgentToolName, AgentToolDef
     inputSchema: agentCuratedReadInput,
     operationId: "db.operations.read",
   },
-  inspect_usage: {
-    name: "inspect_usage",
-    description:
-      "Read how much CPU and memory each container in one namespace uses right now, against its requests and limits. Pass namespace, and a label selector to narrow it. One row per container: its pod and owning workload, CPU in millicores and memory in bytes as numbers, its requests and limits, and usage divided by request. The figures are metrics-server's latest sample over its window, a moment and not a history. More than 500 containers are refused: narrow by selector.",
-    inputSchema: clusterUsageReadInput,
-    operationId: "cluster.usage.read",
-  },
-  profile_workloads: {
-    name: "profile_workloads",
-    description:
-      "Profile the workloads of one namespace: one row per Deployment, StatefulSet, DaemonSet, Job, CronJob and bare Pod, and one per other controller that owns a pod there (an operator's custom resource, a Rollout, an orphan ReplicaSet) with no desired count, with desired and ready counts in the kind's own terms, pods not ready, cumulative restarts with the latest termination's reason and time, how many containers run without requests, limits, a readiness probe or a liveness probe, and the Warning events by reason. Pass namespace. More than 500 workloads are refused.",
-    inputSchema: clusterWorkloadsReadInput,
-    operationId: "cluster.workloads.read",
-  },
+  ...LANGUAGE_BASE_DEFINITIONS,
   present_answer: {
     name: "present_answer",
     description: `Record that one result you have already read IS the answer, and how it should be shown. Only a result of a run_read_query you drafted can be the answer: a plan describes a statement without running it and a profile returns counts about a table, so neither may be presented — both may still be cited as evidence. Pass the artifact id that read reported; the statement behind it comes from this run's own ledger, so you do not supply it. The columns a chart names are checked against that result's real columns and refused if they do not match. Your report must then cite this same artifact in at least one claim: the presentation shows the result and the claims say what it means, so a report resting on other evidence entirely leaves the run scored as not having answered. ${AGENT_ANSWER_CONTRACT}`,
@@ -1214,195 +1144,6 @@ export const AGENT_TOOL_DEFINITIONS: Readonly<Record<AgentToolName, AgentToolDef
     inputSchema: reportSchema,
   },
 } satisfies Record<AgentToolName, AgentToolDefinition>);
-
-const readKubectlStatementSchema = z.strictObject({
-  statement: z.string().min(1),
-  /** Why the model wrote this read; accepted and not recorded, as `readStatementSchema`'s rationale. */
-  rationale: z.string().optional(),
-});
-
-const KUBECTL_RUN_READ_QUERY: AgentToolDefinition = Object.freeze({
-  name: "run_read_query",
-  description:
-    "Run one bounded read-only kubectl statement: get, describe, logs, top, events, api-resources, api-versions, explain, auth can-i, auth whoami or version, with or without the kubectl word. Writes, exec, port-forward, proxy, watches and Studio's paging line are refused before the cluster is reached, and you are told why.",
-  inputSchema: readKubectlStatementSchema,
-  operationId: "kubectl.query.read",
-});
-
-/** The kubectl overrides every kubectl workflow that sends a statement shares. */
-const KUBECTL_STATEMENT_TOOLS: Readonly<Partial<Record<AgentToolName, AgentToolDefinition>>> = Object.freeze({
-  run_read_query: KUBECTL_RUN_READ_QUERY,
-});
-
-const KUBECTL_RECOMMEND_CHANGE: AgentToolDefinition = Object.freeze({
-  name: "recommend_change",
-  description: `Propose one change to one container's CPU and memory requests and limits, for the user to apply themselves. Nothing is applied by this run and nothing here changes the cluster. State the current and the proposed values as Kubernetes quantities, and cite the inspect_usage reading the change rests on. ${AGENT_EVIDENCE_CONTRACT}`,
-  inputSchema: resourcesRecommendationSchema,
-});
-
-/**
- * Resource efficiency, the kubectl query-optimization: the statement tools plus the resources card. Only this variant
- * proposes a change to a container's resources, so only it replaces `recommend_change`.
- */
-const KUBECTL_RESOURCE_EFFICIENCY_TOOLS: Readonly<Partial<Record<AgentToolName, AgentToolDefinition>>> = Object.freeze({
-  ...KUBECTL_STATEMENT_TOOLS,
-  recommend_change: KUBECTL_RECOMMEND_CHANGE,
-});
-
-// ─── MongoDB (issue #1614) ───────────────────────────────────────────────────
-
-/**
- * The command the MODEL writes: a JSON object, not escaped text. Writing an envelope as a string inside JSON is the
- * one shape a model reliably gets wrong, so the schema takes the object and the language's `canonicalize` writes it
- * out, in the order the model wrote it, as the text every server layer reads - one parse, one form, no double
- * encoding to fail.
- */
-const readMongoCommandSchema = z.strictObject({
-  command: z.record(z.string(), z.unknown()),
-  /** Why the model wrote this read; accepted and not recorded, as `readStatementSchema`'s rationale. */
-  rationale: z.string().optional(),
-});
-
-/**
- * The read: the editor's command envelope, with the collection by its bare name. No `database` key is offered: the run
- * reads the database its connection is bound to, and the provider refuses a command that names another one.
- */
-const MONGO_RUN_READ_QUERY: AgentToolDefinition = Object.freeze({
-  name: "run_read_query",
-  description:
-    'Run one bounded read-only command envelope as JSON, with the keys its operation takes and no others: find takes "filter" and "options" ("projection", "sort", "skip", "limit"); findOne takes "filter" and "options" ("projection" only); aggregate takes "pipeline" only, so its filter, sort and limit are $match, $sort and $limit stages; count takes "filter"; distinct takes "field" and "filter". For example {"collection": "orders", "operation": "aggregate", "pipeline": [{"$match": {"status": "paid"}}, {"$group": {"_id": "$status", "n": {"$sum": 1}}}]}. Write the collection by its bare name, as in "orders" for an inventory entry app.orders: the run reads the database its connection is bound to. Write a date as {"$date": "2026-03-01T00:00:00Z"} and an ObjectId as {"$oid": "<24 hex digits>"}: a plain string never equals either, and a read shows both as plain strings. Writes and the write stages of a pipeline ($out, $merge) are refused before the database is reached, and you are told why.',
-  inputSchema: readMongoCommandSchema,
-  operationId: "mongo.query.read",
-});
-
-/**
- * The catalog arm: the selector the SQL tool takes, answered by the provider's catalog read for the agent, in the
- * database the connection is bound to. The two bounds are stated apart because they differ: a listing past the row
- * budget is refused, while one collection's fields are inferred from a sample and cut at the provider's own bound, so
- * no complete field list is promised. The bound is the provider's, so no number is named here.
- */
-const MONGO_INSPECT_SCHEMA: AgentToolDefinition = Object.freeze({
-  name: "inspect_schema",
-  description:
-    "Read the database's own catalog, optionally narrowed to one collection. Pass kind to choose the inventory: columns (the default: the collections, or one collection's fields, inferred from a sample of its documents) or indexes (the indexes one collection declares). MongoDB declares no foreign keys, so a relations read is refused rather than answered empty. A collection listing past the row budget is refused, not truncated. One collection's fields are listed up to a fixed bound, _id first and the rest in sorted order, so a field missing from a very wide collection's list may still exist.",
-  inputSchema: catalogSelectorSchema,
-  operationId: "mongo.schema.read",
-});
-
-/**
- * The estimating plan: the command wrapped in the explain the engine itself plans with. Exported because the mongo
- * arm (`mongo-tools.ts`) parses with this same object, so what the run is offered and what it is held to are one.
- */
-export const mongoPlanCommandSchema = z.strictObject({
-  command: z.record(z.string(), z.unknown()),
-  rationale: z.string().optional(),
-});
-
-const MONGO_INSPECT_PLAN: AgentToolDefinition = Object.freeze({
-  name: "inspect_plan",
-  description:
-    "Ask the engine for the ESTIMATED plan of one read-only command envelope, the same JSON shape run_read_query takes, with dates and ObjectIds written the same way: a range over a date field written with strings plans an index scan over strings, which matches no document. The engine plans the command with the explain command at queryPlanner verbosity and returns no result rows; where several plans are candidates it tries each for a bounded trial, under the same deadline your reads have. No timings are produced.",
-  inputSchema: mongoPlanCommandSchema,
-  operationId: "mongo.plan.estimate",
-});
-
-/** The profile arm: a collection selector, composed into an aggregation instead of SQL, at the depths it composes. */
-const MONGO_PROFILE_TABLE: AgentToolDefinition = Object.freeze({
-  name: "profile_table",
-  description:
-    "Profile one collection the run has already inventoried. The server chooses the fields from the captured inventory and composes the aggregation; you supply only the collection and how deep to go. Depth basic counts documents and missing values, and pattern adds a shape test for personal data. Only COUNTS are returned: no value is ever read out of any field.",
-  inputSchema: mongoProfileSelectorSchema,
-  operationId: "mongo.table.profile",
-});
-
-/**
- * The index card, the mongo recommendation: a change the run PROPOSES and the user applies in their own tool. The
- * editor's envelope runs reads and writes on documents, but creates no index, so unlike the SQL card there is no
- * statement here to hand the editor - the collection, the keys and the options are the recommendation, and they are
- * stated as data rather than as a command the editor would refuse. Its own `change`, so every reader of the event
- * tells it from the statement card by that one field.
- */
-const mongoIndexRecommendationSchema = z.strictObject({
-  change: z.literal("document-index"),
-  /** The collection the index belongs to: its bare name, or the inventory's own spelling of it. */
-  collection: z.string().min(1),
-  /** The index keys, in the MongoDB form: {"field": 1} or {"field": -1} or {"field": "text"}. */
-  keys: z.record(z.string(), z.union([z.number(), z.string()])),
-  /**
-   * Index options, in the engine's own form: {"name": "...", "unique": true} and their kind. Never `key`: the keys
-   * are stated above, and a `key` among the options would replace them in the index the user creates.
-   */
-  options: z
-    .record(z.string(), z.unknown())
-    .refine((options) => !Object.hasOwn(options, "key"), {
-      message: "the index keys go in keys, never in options",
-    })
-    .optional(),
-  rationale: z.string().optional(),
-  evidence: z.array(evidenceSchema).min(1),
-});
-
-const MONGO_RECOMMEND_CHANGE: AgentToolDefinition = Object.freeze({
-  name: "recommend_change",
-  description: `Propose one index for the user to create themselves: "change" is "document-index", and you state the collection by its bare name, the keys and any options. Nothing is applied by this run and nothing here changes the database: the recommendation is data the user reads, not a command this editor runs. State what the inspected plan showed about how the collection is reached, and cite it. ${AGENT_EVIDENCE_CONTRACT}`,
-  inputSchema: mongoIndexRecommendationSchema,
-});
-
-/**
- * The answer, in this engine's words. A plan here is not a description that runs nothing: with several candidate
- * plans the engine tries each for a bounded trial (`MONGO_INSPECT_PLAN`), so what keeps one from being the answer is
- * that it returns none of the command's documents. The schema is the shared tool's, since what is presented is an
- * artifact id and a presentation in every language; `ANSWER_NOT_A_DATA_READ_TEXT` says the same when a plan is
- * presented anyway.
- */
-const MONGO_PRESENT_ANSWER: AgentToolDefinition = Object.freeze({
-  name: "present_answer",
-  description: `Record that one result you have already read IS the answer, and how it should be shown. Only a result of a run_read_query you drafted can be the answer: a plan returns none of the command's documents and a profile returns counts about a collection, so neither may be presented; both may still be cited as evidence. Pass the artifact id that read reported; the command behind it comes from this run's own ledger, so you do not supply it. The columns a chart names are checked against that result's real columns and refused if they do not match. Your report must then cite this same artifact in at least one claim: the presentation shows the result and the claims say what it means, so a report resting on other evidence entirely leaves the run scored as not having answered. ${AGENT_ANSWER_CONTRACT}`,
-  inputSchema: presentAnswerSchema,
-});
-
-/**
- * The tool definitions a MongoDB workflow replaces: the statement tool for its command argument, the catalog and
- * plan tools for their mongo arms, the profile for its aggregation, the recommendation for its index card, and the
- * answer for what a plan and a profile are on this engine. `compare_plans` is replaced by NOTHING - the variant does
- * not offer it, for the reason its manifest entry states.
- */
-const MONGO_STATEMENT_TOOLS: Readonly<Partial<Record<AgentToolName, AgentToolDefinition>>> = Object.freeze({
-  run_read_query: MONGO_RUN_READ_QUERY,
-  inspect_schema: MONGO_INSPECT_SCHEMA,
-  inspect_plan: MONGO_INSPECT_PLAN,
-  profile_table: MONGO_PROFILE_TABLE,
-  recommend_change: MONGO_RECOMMEND_CHANGE,
-  present_answer: MONGO_PRESENT_ANSWER,
-});
-
-/**
- * The tool definitions a workflow on a language replaces, keyed by language and then by workflow, because a
- * language's tools are not uniform across its workflows: one kubectl workflow may be offered a schema another is not.
- * Keyed rather than compared, so a later language or workflow registers its own row and no call site changes. SQL
- * replaces nothing: its definitions are `AGENT_TOOL_DEFINITIONS`. Kubectl `operations` sends no statement, so it
- * replaces nothing either.
- */
-const TOOL_OVERRIDES: Readonly<
-  Record<
-    AgentStatementLanguageId,
-    Readonly<Partial<Record<AgentRunWorkflowType, Readonly<Partial<Record<AgentToolName, AgentToolDefinition>>>>>>
-  >
-> = Object.freeze({
-  sql: Object.freeze({}),
-  kubectl: Object.freeze({
-    investigation: KUBECTL_STATEMENT_TOOLS,
-    "query-optimization": KUBECTL_RESOURCE_EFFICIENCY_TOOLS,
-    "database-assessment": KUBECTL_STATEMENT_TOOLS,
-    "data-analysis": KUBECTL_STATEMENT_TOOLS,
-  }),
-  mongo: Object.freeze({
-    investigation: MONGO_STATEMENT_TOOLS,
-    "query-optimization": MONGO_STATEMENT_TOOLS,
-    "database-assessment": MONGO_STATEMENT_TOOLS,
-    "data-analysis": MONGO_STATEMENT_TOOLS,
-  }),
-});
 
 /**
  * The definition a run of `workflow` in `language` is offered for the tool `name`.
@@ -1416,7 +1157,7 @@ export function agentToolDefinition(
   workflow: AgentRunWorkflowType,
   name: AgentToolName,
 ): AgentToolDefinition {
-  return TOOL_OVERRIDES[language ?? "sql"][workflow]?.[name] ?? AGENT_TOOL_DEFINITIONS[name];
+  return languageServerPack(language ?? "sql").toolOverrides[workflow]?.[name] ?? AGENT_TOOL_DEFINITIONS[name];
 }
 
 /** Planning is toolless. Not "filtered to nothing" — there is nothing to filter. */
@@ -1467,19 +1208,6 @@ export function selectAgentTools(
 // ============================================================================
 // Model-facing text
 // ============================================================================
-
-/**
- * `ANSWER_NOT_A_DATA_READ` in the words of the run's language, the refusal a run meets when it presents a plan or a
- * profile. MongoDB's says what its `present_answer` description says (`MONGO_PRESENT_ANSWER`), since the shared
- * sentence, that a plan describes a statement without running it, is not true of a plan whose candidates are each
- * tried for a bounded trial.
- */
-const ANSWER_NOT_A_DATA_READ_TEXT: Readonly<Record<AgentStatementLanguageId, string>> = Object.freeze({
-  sql: UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ,
-  kubectl: UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ,
-  mongo:
-    "That result is this run's, and it holds none of the documents a read returns, so it cannot be the answer: a plan returns none of the command's documents, and a profile returns counts the server composed about a collection. Present the result of a run_read_query you drafted, and run the read first if you have not. A plan or a profile can still be cited as evidence in your report.",
-});
 
 /**
  * What a denial tells the model it may try next. Three answers, because the codes
@@ -2215,7 +1943,8 @@ function columnsThatExist(message: string, connection: DatabaseConnection): stri
  * engine's message and from the engine this connection IS, which is why neither can be free.
  *
  * The row-budget sentence is the statement language's own, since the way to ask for fewer rows is
- * written in that language. The catalog branch is SQL's alone: a foreign catalog is a SQL mistake.
+ * written in that language. The catalog branch is the language's own too, and only SQL has one (its pack's
+ * `catalogAdvice`): a foreign catalog is a SQL mistake.
  */
 function otherStatementAdvice(
   message: string,
@@ -2225,11 +1954,7 @@ function otherStatementAdvice(
 ): string | undefined {
   const overBudget = /row budget: \d+ rows > (\d+) allowed/.exec(message);
   if (overBudget !== null) return languageServer(language).rowCapAdvice(statement, overBudget[1]);
-  const foreignCatalog = /information_schema|pg_catalog/i.test(message) || /no such table: \w+\./i.test(message);
-  if (language === "sql" && foreignCatalog) {
-    return `That catalog belongs to another engine — this connection is ${engine}. Call inspect_schema for this database's tables and columns rather than querying a catalog directly.`;
-  }
-  return undefined;
+  return languageServerPack(language).catalogAdvice?.(message, engine);
 }
 
 export async function runAuditedAgentCall(
@@ -5210,7 +4935,7 @@ export function presentAnswerTool(
     // existed, or the named alternative was ignored - call for opposite fixes. The cited operation
     // and whether an alternative was offered are what tell them apart.
     const detail = instead === undefined ? undefined : `this run already read ${instead}, present that`;
-    const reason = ANSWER_NOT_A_DATA_READ_TEXT[context.statementLanguage ?? "sql"];
+    const reason = languageServerPack(context.statementLanguage ?? "sql").answerNotADataRead;
     return {
       ...unavailable("ANSWER_NOT_A_DATA_READ", detail),
       modelText: detail === undefined ? reason : `${reason} (${detail})`,

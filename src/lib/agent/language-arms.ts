@@ -2,13 +2,13 @@
  * What each statement language does when a run calls one of the tools whose execution differs by language:
  * `inspect_schema`, `inspect_plan` and `profile_table`.
  *
- * The execution half of what `TOOL_OVERRIDES` (`tools.ts`) is for the offer, keyed the same way, by language: a run
- * is offered a language's definition of a tool and executed by that language's arm of it, so the two cannot come to
- * disagree, and nothing anywhere tests a language id to choose between them. Each arm declares as its input the
- * exported schema its tool parses with, and `tests/unit/lib/agent/tool-offer-census.test.ts` holds that declaration
- * equal to the schema the definition offers, so what a run is offered is what it is held to. The operation a step is
- * recorded under is the definition's own (`agentToolDefinition`), as it is for every database tool, so an arm does
- * not declare a second one.
+ * The execution half of what a pack's `toolOverrides` (`languages/pack.ts`) is for the offer, keyed the same way, by
+ * language: a run is offered a language's definition of a tool and executed by that language's arm of it, so the two
+ * cannot come to disagree, and nothing anywhere tests a language id to choose between them. Each arm declares as its
+ * input the exported schema its tool parses with, and `tests/unit/lib/agent/tool-offer-census.test.ts` holds that
+ * declaration equal to the schema the definition offers, so what a run is offered is what it is held to. The operation
+ * a step is recorded under is the definition's own (`agentToolDefinition`), as it is for every database tool, so an arm
+ * does not declare a second one.
  *
  * Total over `AgentStatementLanguageId`, so a later language does not compile until it says which arms it has. A
  * language that offers none of these tools has none (kubectl, whose variants offer reads and curated readings only);
@@ -19,6 +19,7 @@
  */
 import type { z } from "zod";
 import type { AgentStatementLanguageId } from "./agent-manifest";
+import { mongoPlanCommandSchema, mongoProfileSelectorSchema } from "./languages/mongo/definitions";
 import { mongoInspectPlanTool, mongoInspectSchemaTool, planMongoProfile, runMongoProfile } from "./mongo-tools";
 import type { AgentProfileDepth } from "./table-profile";
 import {
@@ -27,8 +28,6 @@ import {
   type AgentToolOutcome,
   inspectPlanTool,
   inspectSchemaTool,
-  mongoPlanCommandSchema,
-  mongoProfileSelectorSchema,
   planStatementSchema,
   planTableProfile,
   profileSelectorSchema,

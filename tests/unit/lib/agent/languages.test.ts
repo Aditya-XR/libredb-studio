@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { mergeDisjoint } from "@/lib/agent/disjoint-merge";
-import { languageServer, languageServerPack } from "@/lib/agent/languages/server";
+import { LANGUAGE_BASE_DEFINITIONS, languageServer, languageServerPack } from "@/lib/agent/languages/server";
 import { READING_REFUSAL_TEXT, UNAVAILABLE_TEXT } from "@/lib/agent/tool-contracts";
-import type { AgentToolUnavailableCode } from "@/lib/agent/tools";
+import { AGENT_TOOL_DEFINITIONS, type AgentToolUnavailableCode, agentToolDefinition } from "@/lib/agent/tools";
 import type { AgentReadingDenyCode } from "@/lib/agent/types";
 
 /**
@@ -95,6 +95,9 @@ describe("the server packs", () => {
       expect(Object.isFrozen(pack)).toBe(true);
       expect(Object.isFrozen(pack.adapter)).toBe(true);
       expect(languageServer(id)).toBe(pack.adapter);
+      expect(Object.isFrozen(pack.toolOverrides)).toBe(true);
+      expect(Object.isFrozen(pack.baseDefinitions)).toBe(true);
+      expect(pack.answerNotADataRead.length).toBeGreaterThan(0);
     },
   );
 
@@ -102,5 +105,64 @@ describe("the server packs", () => {
     const unknown = id as AgentStatementLanguageId;
     expect(() => languageServerPack(unknown)).toThrow(new Error(`no server adapter for ${id}`));
     expect(() => languageServer(unknown)).toThrow(new Error(`no server adapter for ${id}`));
+  });
+});
+
+describe("the definitions the packs register", () => {
+  test("the base definitions are kubectl's two readings, spread into the core record where they always stood", () => {
+    expect(Object.keys(LANGUAGE_BASE_DEFINITIONS)).toEqual(["inspect_usage", "profile_workloads"]);
+    expect(Object.isFrozen(LANGUAGE_BASE_DEFINITIONS)).toBe(true);
+    expect(Object.keys(AGENT_TOOL_DEFINITIONS)).toEqual([
+      "inspect_schema",
+      "run_read_query",
+      "inspect_plan",
+      "profile_table",
+      "compare_plans",
+      "recommend_change",
+      "inspect_operations",
+      "inspect_usage",
+      "profile_workloads",
+      "present_answer",
+      "compose_report",
+    ]);
+    expect(AGENT_TOOL_DEFINITIONS.inspect_usage).toBe(LANGUAGE_BASE_DEFINITIONS.inspect_usage);
+    expect(AGENT_TOOL_DEFINITIONS.profile_workloads).toBe(LANGUAGE_BASE_DEFINITIONS.profile_workloads);
+  });
+
+  test("a workflow's offer is its pack's override where one exists, and the core definition otherwise", () => {
+    const mongoRead = languageServerPack("mongo").toolOverrides.investigation?.run_read_query;
+    expect(mongoRead).toBeDefined();
+    expect(agentToolDefinition("mongo", "investigation", "run_read_query")).toBe(
+      mongoRead as NonNullable<typeof mongoRead>,
+    );
+    expect(agentToolDefinition("kubectl", "operations", "inspect_operations")).toBe(
+      AGENT_TOOL_DEFINITIONS.inspect_operations,
+    );
+    expect(agentToolDefinition(undefined, "investigation", "run_read_query")).toBe(
+      AGENT_TOOL_DEFINITIONS.run_read_query,
+    );
+  });
+
+  test("an offer on an id no pack holds is the named error, not a fall back to SQL", () => {
+    expect(() => agentToolDefinition("cypher" as AgentStatementLanguageId, "investigation", "run_read_query")).toThrow(
+      new Error("no server adapter for cypher"),
+    );
+  });
+
+  test("SQL and kubectl refuse a plan as the answer in the shared words, MongoDB in its own", () => {
+    expect(languageServerPack("sql").answerNotADataRead).toBe(UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ);
+    expect(languageServerPack("kubectl").answerNotADataRead).toBe(UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ);
+    expect(languageServerPack("mongo").answerNotADataRead).not.toBe(UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ);
+  });
+
+  test("only SQL advises on a foreign catalog, and only when the message names one", () => {
+    const advice = languageServerPack("sql").catalogAdvice;
+    expect(advice?.("no such table: information_schema.tables", "sqlite")).toBe(
+      "That catalog belongs to another engine \u2014 this connection is sqlite. Call inspect_schema for this database's tables and columns rather than querying a catalog directly.",
+    );
+    expect(advice?.("no such table: main.orders", "sqlite")).toStartWith("That catalog belongs to another engine");
+    expect(advice?.('relation "orders" does not exist', "postgres")).toBeUndefined();
+    expect(languageServerPack("kubectl").catalogAdvice).toBeUndefined();
+    expect(languageServerPack("mongo").catalogAdvice).toBeUndefined();
   });
 });

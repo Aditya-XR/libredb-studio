@@ -13,6 +13,7 @@
  * wrong answer that looks like a right one.
  */
 import type { AgentStatementLanguageId } from "../agent-manifest";
+import { mergeDisjoint } from "../disjoint-merge";
 import { KUBECTL_SERVER_PACK } from "./kubectl/server";
 import { MONGO_SERVER_PACK } from "./mongo/server";
 import type { AgentLanguageServerAdapter, AgentLanguageServerPack } from "./pack";
@@ -35,3 +36,12 @@ export function languageServerPack(language: AgentStatementLanguageId): AgentLan
 export function languageServer(language: AgentStatementLanguageId): AgentLanguageServerAdapter {
   return languageServerPack(language).adapter;
 }
+
+/**
+ * Every pack's base definitions, the tools only one language offers. Global by tool name, because
+ * `AGENT_TOOL_DEFINITIONS` spreads it where those tools always stood, and a name two packs both define fails at load.
+ */
+export const LANGUAGE_BASE_DEFINITIONS = mergeDisjoint(
+  [SQL_SERVER_PACK.baseDefinitions, KUBECTL_SERVER_PACK.baseDefinitions, MONGO_SERVER_PACK.baseDefinitions],
+  "LANGUAGE_BASE_DEFINITIONS",
+);

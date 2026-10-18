@@ -34,6 +34,7 @@ import type { ColumnSchema } from "@/lib/types";
 import { AGENT_EXECUTION_PROFILE } from "./execution-policy";
 import { resolveProfileTarget } from "./inventory-address";
 import { addressableObjects } from "./inventory-objects";
+import { mongoPlanCommandSchema, mongoProfileSelectorSchema } from "./languages/mongo/definitions";
 import { languageServer } from "./languages/server";
 import { DIGIT_RUN_LENGTH, MAX_PROFILE_COLUMNS, type AgentTableProfile, readTableProfile } from "./table-profile";
 import {
@@ -41,8 +42,6 @@ import {
   type AgentToolContext,
   type AgentToolOutcome,
   executeAgentOperation,
-  mongoPlanCommandSchema,
-  mongoProfileSelectorSchema,
   runAuditedAgentCall,
 } from "./tools";
 import { capturedSnapshot, catalogSelectorSchema, describeFindings, handoverText, unavailable } from "./tool-contracts";
