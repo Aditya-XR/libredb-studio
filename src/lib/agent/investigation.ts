@@ -108,6 +108,7 @@ import {
   AGENT_WORKFLOW_BUDGETS,
 } from "./execution-policy";
 import { type AgentModel, mapAgentModelError } from "./model-adapter";
+import { modelToolSchema } from "./model-tool-schema";
 import {
   type AgentRunInvocation,
   type AgentRunService,
@@ -121,6 +122,7 @@ import {
   type AgentToolContext,
   type AgentToolDefinition,
   type AgentToolName,
+  type AgentTableProfileOutcome,
   type AgentToolOutcome,
   agentToolDefinition,
   citeSnapshot,
@@ -421,6 +423,13 @@ interface PlanningEngine {
    * none — which is all but the two search products. See the contract below.
    */
   readonly statementLanguage?: string;
+  /**
+   * The run's own statement language, where it has one, whose `GROUNDING_COPY` entry may carry planning rules. A
+   * MongoDB plan draft names a collection the way a command does, so plan mode is told the collection rule agent mode
+   * is told (`MONGO_COLLECTION_RULE`): without it, three of ten live plan drafts on 2026-10-17 named
+   * `"collection": "shop.orders"`, which the editor reads as a collection that does not exist and answers with no rows.
+   */
+  readonly agentLanguage?: AgentStatementLanguageId;
 }
 
 /** The engine facts a run's prose needs, taken from what its provider declared. */
@@ -431,6 +440,7 @@ function planningEngine(context: AgentToolContext): PlanningEngine {
     noun: inventoryNoun(context.labels),
     derivedGroupings: context.capabilities.tablesAreDerivedGroupings === true,
     ...(context.labels.statementLanguage === undefined ? {} : { statementLanguage: context.labels.statementLanguage }),
+    ...(context.statementLanguage === undefined ? {} : { agentLanguage: context.statementLanguage }),
   };
 }
 
@@ -798,6 +808,32 @@ function shortfallNotice(
       said: [
         "This workflow is scored on what the ENGINE reports about itself, and this run has taken no reading: the schema inventory in this conversation was captured for you before your first turn and citing it establishes nothing about what the engine is doing.",
         "Your compose_report call was not run. Call inspect_operations first — sessions, slow-queries, table-stats, index-stats, storage or health — then cite the artifact id it returns in a claim, and then call compose_report.",
+      ].join(" "),
+      narrow: false,
+    };
+  }
+  /*
+    The MongoDB optimization's shortfall (`agent-query-optimization-mongo.1`): no `compare_plans`, so its two routes are
+    an index recommended because of a plan, or a report citing the plan when it already reaches its documents through an
+    index. Both routes are named, because naming only the first is what had a live run on 2026-10-17 recommend the
+    index its plan was already using. With a plan in hand the sentence names it and narrows, keeping `recommend_change`
+    and `compose_report`, the two tools these routes need; without one it sends the run to `inspect_plan` unnarrowed.
+  */
+  if (shortfall === "no-plan-cited") {
+    const latest = plans.at(-1);
+    if (latest !== undefined) {
+      return {
+        said: [
+          "This workflow answers with how the engine reaches its documents, and this run holds a plan that neither an index recommendation nor the report cites, so the report would be scored as having established nothing.",
+          `Your compose_report call was not run. If plan "${latest}" scans the whole collection (COLLSCAN), call recommend_change for an index citing it; if it already uses an index (IXSCAN), nothing needs to change: cite "${latest}" in a claim that says so. Then call compose_report.`,
+        ].join(" "),
+        narrow: true,
+      };
+    }
+    return {
+      said: [
+        "This workflow is judged on plans: a report is scored on whether it shows HOW the engine reaches its documents, and this run has inspected none, so it would be scored as having established nothing.",
+        `Your compose_report call was not run. Call inspect_plan on the ${noun} in question, then either recommend_change for an index citing that plan's artifact id, or, if the plan already uses an index, cite it in a claim that nothing needs to change, and then call compose_report.`,
       ].join(" "),
       narrow: false,
     };
@@ -1275,6 +1311,7 @@ const planningStatementContract = (deliverable: { readonly noun: string }, engin
     // message is the #350 failure — and it names what the language is NOT, because
     // naming only what it is did not survive contact with the model's prior.
     ...(engine.statementLanguage === undefined ? [] : [`Write it in ${engine.statementLanguage}.`]),
+    ...(engine.agentLanguage === undefined ? [] : (GROUNDING_COPY[engine.agentLanguage].planningRules ?? [])),
     `Put it in a single fenced block tagged \`${engine.type}\` — three backticks, that tag, the statement, three backticks — and put nothing else inside that block.`,
     `Put the rationale AFTER the statement, and keep it brief: which ${engine.noun.plural} it reads, which joins it makes, and why that answers the objective.`,
     engine.language === "sql"
@@ -1864,12 +1901,13 @@ export const WORKFLOW_TOOL_RULES: Readonly<
       "The schema inventory was sampled from documents, not declared: a field the sample never saw is absent from it, so say what you read rather than what the schema implies.",
       "Report what the evidence supports, and nothing further.",
     ].join(" "),
-    // Built around the arm of `agent-query-optimization.3` this variant can reach: an index recommended because of a
-    // plan it inspected. It names no comparison, because the variant offers none (`agent-manifest.ts` says why).
+    // Built around the two routes `agent-query-optimization-mongo.1` accepts: an index recommended because of a plan
+    // it inspected, or a report citing a plan that already uses an index. It names no comparison, because the variant
+    // offers none (`agent-manifest.ts` says why).
     "query-optimization": [
       "inspect_plan runs the explain command at queryPlanner verbosity: it answers with the plan the engine would choose for a command and returns none of its documents, and where several plans are candidates the engine tries each for a bounded trial, under the same deadline your reads have.",
       "What a plan names is this engine's own vocabulary - COLLSCAN, IXSCAN, the index it chose - and that is what an index changes.",
-      "One plan on its own answers nothing: before you report, call recommend_change for an index citing the inspect_plan artifact whose access path it would change. A different filter or a different shape of the command is a finding for your report, not a card.",
+      "Before you report, read the plan: if it scans the whole collection (COLLSCAN), call recommend_change for an index citing the inspect_plan artifact whose access path it would change; if it already reaches its documents through an index (IXSCAN), nothing needs to change, so recommend nothing and cite that inspect_plan artifact in a claim that says so. Never recommend an index the collection already has. A different filter or a different shape of the command is a finding for your report, not a card.",
       "Every plan you can obtain is an estimate with no timings in it. Say so rather than implying a measurement.",
       "recommend_change offers the index to the user and never creates it: this run is read-only by construction.",
       MONGO_COLLECTION_RULE,
@@ -2042,6 +2080,13 @@ const GROUNDING_COPY: Readonly<
       readonly omissionAdvice: string;
       readonly relations: boolean;
       readonly ungrounded?: (detail: string, noun: AgentInventoryNoun) => string;
+      /**
+       * The language's engine declares no fields, so its inventory's are inferred from sampled documents and a field
+       * every sample held is no constraint: the packing then states no NOT NULL (`packContextForTask`).
+       */
+      readonly sampledFields?: boolean;
+      /** What a plan-mode draft in this language is told on top of the shared contract (`planningStatementContract`). */
+      readonly planningRules?: readonly string[];
     }
   >
 > = Object.freeze({
@@ -2060,6 +2105,8 @@ const GROUNDING_COPY: Readonly<
   mongo: {
     omissionAdvice: "Ask inspect_schema for the collection to list its fields.",
     relations: false,
+    sampledFields: true,
+    planningRules: [MONGO_COLLECTION_RULE],
   },
 });
 
@@ -2077,12 +2124,13 @@ function packSnapshotMessage(
   snapshot: AgentContextSnapshot,
   objective: string,
   noun: AgentInventoryNoun,
-  omissionAdvice: string,
+  grounding: { readonly omissionAdvice: string; readonly sampledFields?: boolean },
 ): string {
   return packContextForTask(snapshot, objective, {
     preface: snapshotHandoverText(snapshot.fingerprint),
-    omissionAdvice,
+    omissionAdvice: grounding.omissionAdvice,
     noun,
+    ...(grounding.sampledFields === true ? { sampledFields: true } : {}),
   });
 }
 
@@ -2164,8 +2212,13 @@ function packPlanningSnapshotMessage(
   objective: string,
   readBy: PlanningGrounding["readBy"],
   noun: AgentInventoryNoun,
+  sampledFields: boolean,
 ): string {
-  return packContextForTask(snapshot, objective, { preface: planningSnapshotPreface(snapshot, readBy, noun), noun });
+  return packContextForTask(snapshot, objective, {
+    preface: planningSnapshotPreface(snapshot, readBy, noun),
+    noun,
+    ...(sampledFields ? { sampledFields: true } : {}),
+  });
 }
 
 /**
@@ -2247,6 +2300,10 @@ function describeSettled(event: AgentSettledStepEvent, toolName: string): string
   }
   if (refusal.class === "approval-required") {
     return `Step ${event.stepId} (${toolName}) needs a human approval that this run does not have: operation ${refusal.operationId}.`;
+  }
+  if (refusal.class === "not-sent") {
+    const reason = /[.!?]$/.test(refusal.detail) ? refusal.detail : `${refusal.detail}.`;
+    return `Step ${event.stepId} (${toolName}) was refused before the database was reached, so nothing ran: ${reason} That exact call will not be sent again — change the arguments if you still need what it would have produced.`;
   }
   if (refusal.class === "reading-refused") {
     // The reading was TAKEN — the run spent a statement on it — and the server
@@ -2423,19 +2480,6 @@ function describeThreadContext(record: AgentRunRecord): string | null {
 const indeterminateText = (stepId: string, toolName: string): string =>
   `Step ${stepId} (${toolName}) was started before this run was interrupted and its outcome was never recorded, so whether it reached the database cannot be known. It will not be repeated. Draft a different call if you still need what it would have produced.`;
 
-/**
- * The same UNSETTLED ledger shape, said honestly for the other way it arises.
- *
- * A call the server refused before any database was reached — invalid arguments, a
- * spent deadline, a repair ledger declining a fingerprint — settles nothing, so it
- * is indistinguishable from a mid-flight death by ledger shape alone. It is not the
- * same thing to a model: nothing was attempted, so telling it the outcome "cannot
- * be known" would be false. The run loop knows which of the two happened in THIS
- * drive, and says so.
- */
-const refusedBeforeDatabaseText = (stepId: string, toolName: string): string =>
-  `Step ${stepId} (${toolName}) was refused before the database was reached, so nothing ran and nothing was recorded. That exact call will not be sent again — change the arguments if you still need what it would have produced.`;
-
 // ============================================================================
 // Steps
 // ============================================================================
@@ -2566,11 +2610,12 @@ export const DATABASE_TOOL_HANDLERS: Readonly<
       input,
       snapshot,
     ),
-  run_read_query: (context, input) => runReadQueryTool(context, input),
-  inspect_plan: (context, input) =>
+  run_read_query: (context, input, snapshot) => runReadQueryTool(context, input, snapshot),
+  inspect_plan: (context, input, snapshot) =>
     (languageArms(context.statementLanguage ?? "sql").inspect_plan ?? missingArm(context, "inspect_plan")).run(
       context,
       input,
+      snapshot,
     ),
   inspect_operations: (context, input) => inspectOperationsTool(context, input),
 });
@@ -2585,12 +2630,18 @@ function invokeDatabaseTool(
   return DATABASE_TOOL_HANDLERS[name](context, input, snapshot);
 }
 
-function settlementOf(outcome: AgentToolOutcome): AgentRunStepSettlement {
+function settlementOf(
+  outcome: AgentToolOutcome | Exclude<AgentTableProfileOutcome, { readonly kind: "profiled" }>,
+): AgentRunStepSettlement {
   if (outcome.kind === "completed") return { kind: "completed", artifact: outcome.artifact };
   if (outcome.kind === "refused") return { kind: "refused", refusal: outcome.refusal };
-  // Nothing was attempted at the database, so nothing settles in the ledger. The
-  // step stays unsettled, which is why the same call may not be sent again.
-  return { kind: "not-attempted" };
+  // Refused by the tool before anything was sent. Settled as a refusal of its own class, so the timeline says it was
+  // refused and why, a replay is answered from the ledger, and a resumed run is not told the outcome is unknowable;
+  // the same call is still never sent again, because its step is settled.
+  return {
+    kind: "refused",
+    refusal: { class: "not-sent", reasonCode: outcome.reasonCode, detail: outcome.detail ?? outcome.modelText },
+  };
 }
 
 /** Collapses and bounds a tool name the model invented before it is quoted back. */
@@ -2757,7 +2808,7 @@ function toolSetOf(definitions: readonly AgentToolDefinition[]): ToolSet | undef
   return Object.fromEntries(
     definitions.map((definition) => [
       definition.name,
-      tool({ description: definition.description, inputSchema: definition.inputSchema }),
+      tool({ description: definition.description, inputSchema: modelToolSchema(definition.inputSchema) }),
     ]),
   );
 }
@@ -3275,10 +3326,6 @@ export async function runInvestigation(
     // Step ids the ledger already knows, so a draft is recorded once per step and a
     // resumed run does not narrate work the dead process already narrated.
     const known = new Set<string>([...resumed.settledStepIds, ...resumed.indeterminateStepIds]);
-    // Steps this drive refused before reaching a database. Deliberately NOT seeded from
-    // the ledger: a step inherited as unsettled is genuinely indeterminate, because the
-    // dead process never recorded which of the two it was.
-    const notAttempted = new Set<string>();
 
     let contextEstablished = false;
     /**
@@ -3462,7 +3509,13 @@ export async function runInvestigation(
       } else {
         messages.push({
           role: "user",
-          content: packPlanningSnapshotMessage(snapshot, record.objective, readBy, engine.noun),
+          content: packPlanningSnapshotMessage(
+            snapshot,
+            record.objective,
+            readBy,
+            engine.noun,
+            GROUNDING_COPY[record.statementLanguage ?? "sql"].sampledFields === true,
+          ),
         });
         messages.push({
           role: "user",
@@ -3567,7 +3620,7 @@ export async function runInvestigation(
         }
         messages.push({
           role: "user",
-          content: packSnapshotMessage(snapshot, record.objective, engine.noun, languageGrounding.omissionAdvice),
+          content: packSnapshotMessage(snapshot, record.objective, engine.noun, languageGrounding),
         });
         if (!languageGrounding.relations) return;
         messages.push({
@@ -3938,7 +3991,14 @@ export async function runInvestigation(
         // classified as a read, and the identifier check affirming an inventory it never
         // consulted. It declines to judge instead, and the rail says which check could
         // not reach this draft rather than what it found.
-        ...validatePlanStatement(draft.sql, planningInventory, context.capabilities.queryLanguage),
+        ...validatePlanStatement(
+          draft.sql,
+          planningInventory,
+          context.capabilities.queryLanguage,
+          context.statementLanguage === undefined
+            ? undefined
+            : languageServer(context.statementLanguage).planDraftIdentifiers,
+        ),
       });
     };
 
@@ -4553,7 +4613,6 @@ export async function runInvestigation(
           record: ledger,
           call,
           known,
-          notAttempted,
           narrowed,
           narrowedAtEvent,
         });
@@ -4636,8 +4695,6 @@ async function handleCall(input: {
   readonly record: AgentRunRecord;
   readonly call: { readonly toolCallId: string; readonly toolName: string; readonly input: unknown };
   readonly known: Set<string>;
-  /** Steps THIS drive refused before any database reach; see `refusedBeforeDatabaseText`. */
-  readonly notAttempted: Set<string>;
   /**
    * Whether the run has been narrowed. Declaration and dispatch are ONE decision, and
    * this is the half a review caught missing: narrowing only what the model was told
@@ -4649,7 +4706,7 @@ async function handleCall(input: {
   /** Where the ledger stood at the narrowing; see `AGENT_NARROWED_INSTRUMENT_USES`. */
   readonly narrowedAtEvent: number;
 }): Promise<CallResult> {
-  const { service, context, record, call, known, notAttempted, narrowed, narrowedAtEvent } = input;
+  const { service, context, record, call, known, narrowed, narrowedAtEvent } = input;
   const offered = narrowed
     ? narrowedToolNames(record, narrowedAtEvent)
     : new Set(selectAgentTools(record).map((definition) => definition.name));
@@ -4666,10 +4723,10 @@ async function handleCall(input: {
   // Profiling DOES reach a database, but its statement is composed from the run's
   // own inventory rather than from the model's arguments, so its step identity is
   // the table and depth it names. Handled here, where the run record is in hand.
-  if (call.toolName === "profile_table") return profileTable(service, context, call, known, notAttempted);
+  if (call.toolName === "profile_table") return profileTable(service, context, call, known);
   // An evidence reading reaches the cluster as a database tool does, and writes its own event beside the step.
   if (Object.hasOwn(EVIDENCE_TOOLS, call.toolName)) {
-    return readEvidence(service, context, call, known, notAttempted, call.toolName as EvidenceToolName);
+    return readEvidence(service, context, call, known, call.toolName as EvidenceToolName);
   }
 
   const name = call.toolName as DatabaseToolName;
@@ -4708,9 +4765,7 @@ async function handleCall(input: {
   const result = await service.runStep(record.runId, invocation, async () => {
     const outcome = await invokeDatabaseTool(context, name, call.input, snapshot);
     modelText = outcome.modelText;
-    const settlement = settlementOf(outcome);
-    if (settlement.kind === "not-attempted") notAttempted.add(stepId);
-    return settlement;
+    return settlementOf(outcome);
   });
 
   if (result.kind === "cancelled") return { kind: "cancelled" };
@@ -4722,12 +4777,7 @@ async function handleCall(input: {
       text: `This exact call was already made in this run. ${describeSettled(result.event, name)}`,
     };
   }
-  return {
-    kind: "answered",
-    text: notAttempted.has(result.stepId)
-      ? refusedBeforeDatabaseText(result.stepId, name)
-      : indeterminateText(result.stepId, name),
-  };
+  return { kind: "answered", text: indeterminateText(result.stepId, name) };
 }
 
 /**
@@ -4748,7 +4798,6 @@ export async function profileTable(
   context: AgentToolContext,
   call: { readonly input: unknown },
   known: Set<string>,
-  notAttempted: Set<string>,
 ): Promise<CallResult> {
   const { record } = await service.resume(context.runId);
   const arm = languageArms(context.statementLanguage ?? "sql").profile_table ?? missingArm(context, "profile_table");
@@ -4776,11 +4825,7 @@ export async function profileTable(
     async () => {
       const outcome = await arm.run(context, plan);
       modelText = outcome.modelText;
-      if (outcome.kind !== "profiled") {
-        if (outcome.kind === "refused") return { kind: "refused", refusal: outcome.refusal };
-        notAttempted.add(stepId);
-        return { kind: "not-attempted" };
-      }
+      if (outcome.kind !== "profiled") return settlementOf(outcome);
       // Written inside the settled step, so a reader never sees a profile whose
       // read was not also recorded.
       await service.recordEvent(record.runId, {
@@ -4803,12 +4848,7 @@ export async function profileTable(
       text: `That exact profile was already taken in this run. ${describeSettled(result.event, "profile_table")}`,
     };
   }
-  return {
-    kind: "answered",
-    text: notAttempted.has(result.stepId)
-      ? refusedBeforeDatabaseText(result.stepId, "profile_table")
-      : indeterminateText(result.stepId, "profile_table"),
-  };
+  return { kind: "answered", text: indeterminateText(result.stepId, "profile_table") };
 }
 
 /**
@@ -4828,7 +4868,6 @@ async function readEvidence(
   context: AgentToolContext,
   call: { readonly input: unknown },
   known: Set<string>,
-  notAttempted: Set<string>,
   tool: EvidenceToolName,
 ): Promise<CallResult> {
   const parsed = EVIDENCE_TOOLS[tool].input.safeParse(call.input);
@@ -4859,9 +4898,7 @@ async function readEvidence(
       ) {
         await service.recordEvent(context.runId, { kind: "usage-unavailable", namespace: covered.namespace });
       }
-      const settlement = settlementOf(outcome);
-      if (settlement.kind === "not-attempted") notAttempted.add(stepId);
-      return settlement;
+      return settlementOf(outcome);
     },
   );
 
@@ -4874,12 +4911,7 @@ async function readEvidence(
       text: `This exact call was already made in this run. ${describeSettled(result.event, tool)}`,
     };
   }
-  return {
-    kind: "answered",
-    text: notAttempted.has(result.stepId)
-      ? refusedBeforeDatabaseText(result.stepId, tool)
-      : indeterminateText(result.stepId, tool),
-  };
+  return { kind: "answered", text: indeterminateText(result.stepId, tool) };
 }
 
 /**

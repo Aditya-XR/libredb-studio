@@ -449,6 +449,7 @@ It is one of the readings below and not a mood, and the qualifier beside the pil
 | *Reads only* | *200 rows and 10 s per command, enforced by the server* | **Agent** mode on MongoDB, where auto-execute is not offered, so there is nothing to widen |
 | *Cannot execute on `<engine>`* | *plan mode drafts here, and the operations workflow still runs* | **Agent** mode on any other engine. A run whose workflow sends a statement is refused when it is started, before a run is opened |
 | *Cannot execute yet* | *no connection is resolved, so no engine has been established* | **Agent** mode with no connection resolved. Nothing has been read, so the panel does not claim to know which engine you are on |
+| *Refused on this connection* | *plan mode drafts here, and the operations workflow still runs* | **Agent** mode after a run on this connection was refused for the connection itself, for example a user that holds writes or a server with authorization off. The popover says why; switch to another connection and the strip goes back to what its engine does |
 
 Those two figures are the ones the server is enforcing, and they are the same on every workflow — the
 strip is shown before a run has one, so it states the pair every workflow row shares rather than
@@ -710,6 +711,7 @@ whole vocabulary (`SHORTFALL_SENTENCES`, `timeline.ts:633-645`):
 | `no-statement` | "The run described how it would approach the question and never wrote the statement, and it did not say what was missing either." |
 | `no-plan-comparison` | "No before-and-after plan comparison was recorded, and no index was recommended: a query optimization rests on one or the other." |
 | `no-plan-evidence` | "The index was recommended without citing a plan this run read, so nothing the engine said backs it." |
+| `no-plan-cited` | "No index was recommended and the report cites no plan this run read: a query optimization rests on how the engine reaches its documents." |
 | `no-table-profile` | "No table was profiled, so the state of the data was never established." |
 | `no-reading` | "The report rests only on this database's list of tables, and on no reading of what the engine is doing, so nothing it says was measured on this server." |
 | `no-answer` | "The run reported what it found but never produced an answer to show, so there is nothing to put in front of you." |

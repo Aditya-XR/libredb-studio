@@ -440,8 +440,9 @@ export const AGENT_WORKFLOW_VARIANTS: Readonly<
      * The optimization template without `compare_plans`, and that absence is a refusal to overclaim rather than a
      * gap: a comparison's whole value is the structural access reading (`plan-summary.ts`), which reads only the
      * plan formats it was verified against and every other one as `unknown` by design, so a mongo comparison would
-     * state that two plans differ in a way nobody has read. `agent-query-optimization.3`'s other arm (an index
-     * recommendation grounded in an inspected plan) is the bar this variant is built to reach. `inspect_plan` here
+     * state that two plans differ in a way nobody has read. Its bar is `agent-query-optimization-mongo.1`: an index
+     * recommendation grounded in an inspected plan, as `agent-query-optimization.3`'s other arm, or a report citing a
+     * plan that already reaches its documents through an index and recommending nothing. `inspect_plan` here
      * runs the `explain` command at `queryPlanner` verbosity, which returns the plan and no result rows, although
      * with several candidate plans the server runs each for a bounded trial: the estimate the SQL engines take from
      * `EXPLAIN`, in this engine's own word.
@@ -461,7 +462,7 @@ export const AGENT_WORKFLOW_VARIANTS: Readonly<
       planDeliverable: Object.freeze({ kind: "statement", noun: "the rewritten command" }),
       canAutoExecute: false,
       requires: Object.freeze<AgentVariantRequirement[]>([]),
-      verifier: "agent-query-optimization.3",
+      verifier: "agent-query-optimization-mongo.1",
     }),
     /** The assessment template's own tool, on top of the read-class four: the profile counts through aggregation. */
     "database-assessment": Object.freeze({

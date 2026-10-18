@@ -474,7 +474,10 @@ describe("the streamed read", () => {
     const { client, opened } = fakeClient({ documents });
     const error = await rejection(read(client, FIND));
     expect(error).toBeInstanceOf(QueryError);
-    expect((error as Error).message).toBe("Read-only execution exceeded the row budget: 11 rows > 10 allowed");
+    // A cursor read stops one row past the budget, so the count is that bound and the sentence says the total is unknown.
+    expect((error as Error).message).toBe(
+      'Read-only execution exceeded the row budget: 11 rows > 10 allowed; the read stops one row past the budget, so at least 11 documents match and the total is not known (count it with "operation": "count", or narrow the read)',
+    );
     // The sentence round-trips through the reader the run uses for its row-budget advice.
     expect(rowBudgetIn((error as Error).message)).toEqual({ projected: 11, allowed: 10 });
     expect(opened[0].pulled).toBe(11);

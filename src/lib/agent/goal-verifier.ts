@@ -94,6 +94,16 @@ export type AgentGoalVerifierId =
    * a statement and a container are different subjects, and both rules stay live side by side.
    */
   | "agent-query-optimization-kubectl.1"
+  /**
+   * The MongoDB query optimization, which has no `compare_plans`: an index recommendation citing a plan of this run,
+   * as `.3`'s index arm, or a report citing a plan of this run and recommending nothing, because a command whose plan
+   * already reaches its documents through an index needs no change. Under `.3` such a run was held until it
+   * recommended something, and a live run on 2026-10-17 recommended the index its plan was already using.
+   *
+   * Its own id, as the kubectl rule has one: `.3` judged MongoDB runs before this existed, and a ledger opened under
+   * it keeps that rule, while this one judges the runs opened since.
+   */
+  | "agent-query-optimization-mongo.1"
   | "agent-database-assessment.1"
   /**
    * Cluster health, the kubectl database assessment: the investigation baseline, with a workload profile counted as
@@ -183,6 +193,14 @@ export type AgentGoalShortfall =
    * neither.
    */
   | "no-plan-evidence"
+  /**
+   * A query-optimization run that cannot compare plans recommended no index, and its report cites no plan it read.
+   *
+   * The MongoDB rule's own shortfall (`agent-query-optimization-mongo.1`). Kept apart from `no-plan-comparison`,
+   * which names an artifact this run could never produce: what it can produce is a plan, cited either by an index
+   * recommendation or by a finding that nothing needs to change.
+   */
+  | "no-plan-cited"
   /**
    * A database-assessment run never profiled a table.
    *
@@ -493,6 +511,22 @@ function verifyQueryOptimizationGoal(run: VerifiableAgentRun): readonly AgentGoa
   return grounded ? [] : ["no-plan-evidence"];
 }
 
+/**
+ * The optimization bar where plans cannot be compared: the baseline with plans exempt from its emptiness census, as
+ * in `verifyQueryOptimizationGoal`; then an index recommendation citing a plan of this run, or, with no index
+ * recommended, a report citing one, which is how "the plan already uses an index, nothing needs to change" answers.
+ */
+function verifyQueryOptimizationMongoGoal(run: VerifiableAgentRun): readonly AgentGoalShortfall[] {
+  const plans = planArtifacts(run.events);
+  const baseline = verifyInvestigationGoal(run, plans);
+  if (baseline.length > 0) return baseline;
+  const cites = (evidence: readonly AgentEvidenceReference[]) =>
+    evidence.some((reference) => reference.source === "artifact" && plans.has(reference.correlationId));
+  const indexes = run.events.filter(recommendsIndex);
+  if (indexes.length > 0) return indexes.some((event) => cites(event.evidence)) ? [] : ["no-plan-evidence"];
+  return composedClaims(run.events).some((claim) => cites(claim.evidence)) ? [] : ["no-plan-cited"];
+}
+
 /** Every usage reading THIS run took, by the id a citation would name. */
 function usageArtifacts(events: readonly AgentRunEvent[]): ReadonlySet<string> {
   return new Set(events.flatMap((event) => (event.kind === "usage-read" ? [event.artifact.correlationId] : [])));
@@ -686,6 +720,7 @@ const AGENT_GOAL_RULES: Readonly<Partial<Record<AgentGoalVerifierId, GoalRule>>>
   "agent-investigation.1": (run: VerifiableAgentRun) => verifyInvestigationGoal(run),
   "agent-query-optimization.3": verifyQueryOptimizationGoal,
   "agent-query-optimization-kubectl.1": verifyQueryOptimizationKubectlGoal,
+  "agent-query-optimization-mongo.1": verifyQueryOptimizationMongoGoal,
   "agent-database-assessment.1": verifyDatabaseAssessmentGoal,
   "agent-database-assessment-kubectl.1": verifyDatabaseAssessmentKubectlGoal,
   "agent-operations.2": verifyOperationsGoal,

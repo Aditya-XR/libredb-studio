@@ -229,8 +229,9 @@ describe("the panel's documentation describes the rail in the words it renders",
 
   test("the guide's strip table has one row for each reading the posture renders, and no other", () => {
     // Every reading the strip can show, from the module that writes it: plan mode, agent mode with no connection
-    // resolved, and agent mode on every engine with the hand-over consented and not. The engine is labelled the way
-    // the guide names one, so the arm that names it renders the guide's own placeholder.
+    // resolved, agent mode on every engine with the hand-over consented and not, and agent mode on every engine after
+    // a run on the connection was refused for the connection itself. The engine is labelled the way the guide names
+    // one, so the arm that names it renders the guide's own placeholder.
     const label = "`<engine>`";
     const engines = Object.keys(AGENT_STATEMENT_LANGUAGE) as DatabaseType[];
     const postures = [
@@ -238,6 +239,9 @@ describe("the panel's documentation describes the rail in the words it renders",
       agentPosture({ mode: "agent", engine: null, engineLabel: label, handover: false }),
       ...engines.flatMap((engine) =>
         [false, true].map((handover) => agentPosture({ mode: "agent", engine, engineLabel: label, handover })),
+      ),
+      ...engines.map((engine) =>
+        agentPosture({ mode: "agent", engine, engineLabel: label, handover: false, refusedHere: "Refused." }),
       ),
     ];
     const readings = [...new Set(postures.map((posture) => `*${posture.headline}* | *${posture.qualifier}*`))].sort();

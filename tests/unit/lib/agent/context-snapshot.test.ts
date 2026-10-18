@@ -1605,6 +1605,15 @@ describe("packContextForTask", () => {
     expect(packed).toContain("orders_pkey unique (id)");
   });
 
+  test("states no NOT NULL for fields inferred from sampled documents, and says why once", async () => {
+    // Measured 2026-10-17: a MongoDB run was shown `email string NOT NULL` for a field six of 1000 documents hold null.
+    const sampled = packContextForTask(await captured("postgres"), "orders", { sampledFields: true });
+    expect(sampled).not.toContain("NOT NULL ");
+    expect(sampled).toContain("id integer PK");
+    expect(sampled).toContain("These fields were inferred from sampled documents, not declared: none is NOT NULL");
+    expect(packContextForTask(await captured("postgres"), "orders")).not.toContain("inferred from sampled documents");
+  });
+
   test("is fenced as untrusted database content, because the names come from the database", async () => {
     const packed = packContextForTask(await captured("postgres"), "orders");
 

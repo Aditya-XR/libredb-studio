@@ -50,6 +50,8 @@ export interface SafetyStripProps {
   readonly engineLabel: string;
   /** Whether the editor hand-over is consented for the run this strip describes. */
   readonly handover: boolean;
+  /** The refusal the last run on this connection met for the connection itself (`connectionRefusalSentence`). */
+  readonly refusedHere?: string | null;
 }
 
 /**
@@ -74,8 +76,8 @@ const TONE_PILL: Readonly<Record<AgentPostureTone, string>> = Object.freeze({
   blocked: "text-fg-muted bg-fill",
 } satisfies Record<AgentPostureTone, string>);
 
-export function SafetyStrip({ mode, engine, engineLabel, handover }: SafetyStripProps) {
-  const posture = agentPosture({ mode, engine, engineLabel, handover });
+export function SafetyStrip({ mode, engine, engineLabel, handover, refusedHere = null }: SafetyStripProps) {
+  const posture = agentPosture({ mode, engine, engineLabel, handover, refusedHere });
   const [open, setOpen] = useState(false);
   /*
     The description's id, and the ⓘ's `aria-controls` target. From `useId` rather than a

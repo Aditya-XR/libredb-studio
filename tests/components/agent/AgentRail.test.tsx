@@ -1719,6 +1719,35 @@ describe("AgentRail", () => {
     );
   });
 
+  test("a run refused for the connection's own user turns the strip to that refusal, on that connection only", async () => {
+    // Measured 2026-10-17 on an admin MongoDB seed: before Start the strip said "Reads only, enforced by the server",
+    // and Start then refused the run. After a refusal of the connection itself, its strip says so.
+    const refusedLine = `${JSON.stringify({
+      kind: "event",
+      event: { kind: "run-finished", atMs: 1_002, status: "failed", reason: "agent-principal-refused" },
+    })}\n`;
+    mockAgentFetch([OPENED_LINE, refusedLine], { runId: "arun_1", status: "queued", mode: "agent" });
+    const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="mongodb" />);
+    fireEvent.click(view.getByTestId("agent-mode-agent"));
+    expect(view.getByTestId("agent-safety-headline").textContent).toBe("Reads only");
+
+    fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "how many orders" } });
+    await act(async () => {
+      fireEvent.click(view.getByTestId("agent-start"));
+    });
+    expect((await view.findByTestId("agent-run-status")).textContent).toBe("failed");
+
+    expect(view.getByTestId("agent-safety-strip").getAttribute("data-tone")).toBe("blocked");
+    expect(view.getByTestId("agent-safety-headline").textContent).toBe("Refused on this connection");
+    expect(view.getByTestId("agent-safety-claim").textContent).toContain(
+      "holds privileges the read-only boundary cannot contain",
+    );
+
+    // Another connection has not been refused, so its strip says what its engine does.
+    view.rerender(<AgentRail {...DEFAULT_PROPS} connectionId={{ id: "seed:other" }} connectionType="mongodb" />);
+    expect(view.getByTestId("agent-safety-headline").textContent).toBe("Reads only");
+  });
+
   /**
    * The failure this state must NOT swallow (#331 T4). A quota is not a verdict about
    * what the model can do: the run opened, the drive classified it, and the ledger says

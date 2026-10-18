@@ -624,6 +624,8 @@ describe("a fresh run drives the investigation arc", () => {
     expect(messages.filter((message) => message.role === "user").map((message) => message.content)).toContain(
       OBJECTIVE,
     );
+    // A SQL inventory is declared, not sampled, so it carries no sampling note.
+    expect(JSON.stringify(messages)).not.toContain("inferred from sampled documents");
   });
 });
 
@@ -5340,6 +5342,7 @@ describe("a MongoDB run is told only what its own tools can do", () => {
     b: Boot,
     workflowType: AgentRunWorkflowType,
     autoExecute = false,
+    verifier?: "agent-query-optimization.3",
   ): Promise<AgentRunRecord> {
     const availability = workflowAvailability("agent", workflowType, "mongodb");
     if (!availability.open) throw new Error(`${workflowType} does not open on mongodb`);
@@ -5348,15 +5351,114 @@ describe("a MongoDB run is told only what its own tools can do", () => {
       workflowType,
       autoExecute,
       ...persistedRunFacts("agent", workflowType, availability),
+      // A ledger opened before `agent-query-optimization-mongo.1` existed carries `.3`, and keeps its rule.
+      ...(verifier === undefined ? {} : { verifier }),
       actor: ACTOR,
       connectionId: "conn_1",
       objective: OBJECTIVE,
     });
   }
 
-  test("a run that inspected one plan and reports is asked for an index citing that plan, never told it has none", async () => {
+  /** A report whose one claim cites only the captured inventory, never an artifact the run read. */
+  const reportOnTheInventory =
+    (claim: string) =>
+    (turn: Turn): Response =>
+      chatToolCallStream(
+        "compose_report",
+        JSON.stringify({
+          claims: [
+            {
+              claim,
+              evidence: [{ source: "context-snapshot", fingerprint: /ctx_[0-9a-f]+/.exec(turn.transcript)?.[0] }],
+            },
+          ],
+        }),
+        "call_report",
+      );
+
+  test("a run whose plan already uses an index answers by citing that plan and recommending nothing", async () => {
     const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
     const run = await startMongoRun(b, "query-optimization");
+    const script = scriptedModel(
+      callsTool("inspect_plan", { command: { collection: "orders", operation: "find", filter: { customerId: 7 } } }),
+      reportOn("The plan already reaches the orders through an index, so nothing needs to change."),
+    );
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    });
+
+    const events = await eventsOf(b.store, run.runId);
+    expect(events.find((event) => event.kind === "call-held")).toBeUndefined();
+    expect(events.find((event) => event.kind === "recommendation")).toBeUndefined();
+    expect(events.find((event) => event.kind === "run-finished")).toMatchObject({
+      goalVerdict: { outcome: "answered", verifier: "agent-query-optimization-mongo.1" },
+    });
+  });
+
+  test("a run that holds a plan and reports off the inventory is told both routes, naming the plan, and narrowed to them", async () => {
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "query-optimization");
+    const script = scriptedModel(
+      callsTool("inspect_plan", { command: { collection: "orders", operation: "find", filter: { customerId: 7 } } }),
+      reportOnTheInventory("The orders collection holds a customerId field."),
+      answersProse("No report."),
+      answersProse("No report."),
+    );
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    }).catch(() => undefined);
+
+    const events = await eventsOf(b.store, run.runId);
+    const plan = events.find(
+      (event) => event.kind === "tool-completed" && event.artifact.operationId === "mongo.plan.estimate",
+    );
+    if (plan?.kind !== "tool-completed") throw new Error("the run took no plan");
+    const held = events.find((event) => event.kind === "call-held");
+    if (held?.kind !== "call-held") throw new Error("the report was not held");
+    expect(held).toMatchObject({ tool: "compose_report", shortfall: "no-plan-cited" });
+    expect(held.reason).toContain(`call recommend_change for an index citing it`);
+    expect(held.reason).toContain("nothing needs to change");
+    expect(held.reason).toContain(plan.artifact.correlationId);
+    expect(held.reason).not.toContain("compare_plans");
+    const declared = (script.turns[2]?.body.tools ?? []) as { function?: { name?: string } }[];
+    expect(declared.map((entry) => entry.function?.name)).toEqual(["recommend_change", "compose_report"]);
+  });
+
+  test("a run that reports holding no plan is sent to plan its command, then to either route", async () => {
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "query-optimization");
+    const script = scriptedModel(
+      callsTool("run_read_query", {
+        command: { collection: "orders", operation: "find", filter: { customerId: 7 }, options: { limit: 5 } },
+      }),
+      reportOn("The orders read returns few documents."),
+      answersProse("No report."),
+      answersProse("No report."),
+    );
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    }).catch(() => undefined);
+
+    const held = (await eventsOf(b.store, run.runId)).find((event) => event.kind === "call-held");
+    if (held?.kind !== "call-held") throw new Error("the report was not held");
+    expect(held).toMatchObject({ tool: "compose_report", shortfall: "no-plan-cited" });
+    expect(held.reason).toContain(
+      "Call inspect_plan on the command in question, then either recommend_change for an index citing that plan's artifact id, or, if the plan already uses an index, cite it in a claim that nothing needs to change",
+    );
+  });
+
+  test("a run opened under agent-query-optimization.3 that inspected one plan is asked for an index citing that plan, never told it has none", async () => {
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "query-optimization", false, "agent-query-optimization.3");
     const script = scriptedModel(
       callsTool("inspect_plan", { command: { collection: "orders", operation: "find", filter: { customerId: 7 } } }),
       reportOn("The orders read scans the whole collection."),
@@ -5429,9 +5531,9 @@ describe("a MongoDB run is told only what its own tools can do", () => {
     expect(held.reason).toContain("Call inspect_plan on the slow command, then call recommend_change again");
   });
 
-  test("a run that reports holding no plan is sent to plan its command and recommend an index, never to compare", async () => {
+  test("a run opened under agent-query-optimization.3 that reports holding no plan is sent to plan its command and recommend an index, never to compare", async () => {
     const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
-    const run = await startMongoRun(b, "query-optimization");
+    const run = await startMongoRun(b, "query-optimization", false, "agent-query-optimization.3");
     const script = scriptedModel(
       callsTool("run_read_query", {
         command: { collection: "orders", operation: "find", filter: { customerId: 7 }, options: { limit: 5 } },

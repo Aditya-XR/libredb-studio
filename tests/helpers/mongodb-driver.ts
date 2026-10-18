@@ -158,6 +158,8 @@ function initialState() {
       { name: "orders", type: "collection" },
     ] as MockCollectionInfo[],
     currentOps: [] as Doc[],
+    /** What `currentOp` rejects with, when set: the server refusing it to a user holding only `read`. */
+    currentOpError: undefined as Error | undefined,
     /** Every `killOp` command the admin database received (#1424). */
     killOpCommands: [] as Doc[],
     /** What `listDatabases` answers. */
@@ -714,7 +716,10 @@ function createMockDb(database = "testdb") {
       serverStatus: async () => mongoDriver.serverStatus(),
       command: async (command: Doc) => {
         mongoDriver.commands.push({ database: "admin", command });
-        if (command.currentOp) return { inprog: mongoDriver.currentOps };
+        if (command.currentOp) {
+          if (mongoDriver.currentOpError !== undefined) throw mongoDriver.currentOpError;
+          return { inprog: mongoDriver.currentOps };
+        }
         if (command.killOp) {
           mongoDriver.killOpCommands.push(command);
           return { info: "attempting to kill op", ok: 1 };

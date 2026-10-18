@@ -183,6 +183,14 @@ describe("the findings, derived from the numbers", () => {
     expect(profile?.findings[0]?.detail).toMatch(/% of \d+ rows have no value/);
   });
 
+  test("a column with one value in a thousand rows is never called 100% empty", () => {
+    // A live assessment on 2026-10-17 was told "100% of 1000 rows have no value here" while the profile counted one.
+    const almost = readTableProfile("t", "basic", [column("note")], [{ row_count: 1000, present_0: 1 }]);
+    expect(almost?.findings[0]?.detail).toBe("over 99% of 1000 rows have no value here.");
+    const empty = readTableProfile("t", "basic", [column("note")], [{ row_count: 1000, present_0: 0 }]);
+    expect(empty?.findings[0]?.detail).toBe("100% of 1000 rows have no value here.");
+  });
+
   test("a sparse column in a tiny table is not reported, because the ratio would say more about the sample", () => {
     const profile = readTableProfile("t", "basic", [column("note")], [{ row_count: 4, present_0: 0 }]);
 

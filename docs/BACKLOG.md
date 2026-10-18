@@ -7714,7 +7714,7 @@ Filed 2026-10-17 with agent execution on MongoDB (#1790), which turned the setti
 
 The mongo `query-optimization` variant offers `inspect_plan` and no `compare_plans` (`AGENT_WORKFLOW_VARIANTS.mongo` in `src/lib/agent/agent-manifest.ts`).
 A comparison's whole value is the structural access reading of `summarisePlan` (`src/lib/agent/plan-summary.ts`), which reads only the plan formats it was verified against and every other plan as `unknown`, so a MongoDB comparison would state that two plans differ in a way nobody has read.
-A run that optimizes a command recommends an index from one inspected plan instead, which `agent-query-optimization.3` accepts.
+A run that optimizes a command answers from one inspected plan instead, under `agent-query-optimization-mongo.1`: an index recommended because of the plan, or a report citing a plan that already uses an index.
 
 Filed 2026-10-17 with agent execution on MongoDB (#1790).
 

@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { foldLedgerEntries, parseLedgerLine } from "@/components/agent/timeline";
+import { connectionRefusalSentence, foldLedgerEntries, parseLedgerLine } from "@/components/agent/timeline";
 import { AGENT_MAX_REPAIR_ATTEMPTS, AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { PLAN_NO_STATEMENT_MARKER } from "@/lib/agent/plan-draft";
 import { nextStatus, type AgentLedgerEntry } from "@/lib/agent/run-store";
@@ -1424,6 +1424,34 @@ describe("foldLedgerEntries", () => {
 
     expect(view.items[0].headline).toBe("Approval required");
     expect(view.items[0].detail).toBe("sql.plan.analyze");
+  });
+
+  test("a call refused before the database says so, with the tool's own reason, and counts no statement", () => {
+    const view = foldLedgerEntries([
+      OPENED,
+      event({ kind: "event", event: { kind: "tool-invoked", atMs: 8, stepId: "s1", tool: "run_read_query" } }),
+      event({
+        kind: "event",
+        event: {
+          kind: "tool-refused",
+          atMs: 9,
+          stepId: "s1",
+          refusal: {
+            class: "not-sent",
+            reasonCode: "STATEMENT_NOT_ADMITTED",
+            detail: 'An aggregate takes no "filter". Nothing was sent.',
+          },
+        },
+      }),
+    ]);
+
+    const refused = view.items.find((item) => item.tone === "refused");
+    expect(refused?.headline).toBe("Refused before the database");
+    expect(refused?.detail).toBe('An aggregate takes no "filter". Nothing was sent.');
+    expect(refused?.quoted).toBeUndefined();
+    // Nothing reached a database, so neither a statement nor a repair attempt is counted for it.
+    expect(view.budget.find((meter) => meter.id === "statements")?.used).toBe(0);
+    expect(view.budget.find((meter) => meter.id === "repairs")?.used).toBe(0);
   });
 
   test("an engine error carries the engine's own text as quoted content", () => {
@@ -3406,5 +3434,31 @@ describe("an answer reads as the app's decision, with the model's caption quoted
 
     expect(view.items[1]?.detail).not.toContain("net_total");
     expect(view.items[1]?.detail).not.toContain("region");
+  });
+});
+
+describe("a refusal of the connection itself", () => {
+  const ended = (reason: string) =>
+    foldLedgerEntries([
+      OPENED,
+      event({ kind: "event", event: { kind: "run-finished", atMs: 5, status: "failed", reason } as never }),
+    ]);
+
+  test("is named for the five reasons a run on that connection meets again until it is changed", () => {
+    for (const reason of [
+      "agent-credential-unusable",
+      "agent-principal-refused",
+      "agent-principal-underprivileged",
+      "server-authorization-off",
+      "profile-target-unsupported",
+    ]) {
+      expect(connectionRefusalSentence(ended(reason)), reason).not.toBeNull();
+    }
+    expect(connectionRefusalSentence(ended("agent-principal-refused"))).toContain("holds privileges");
+  });
+
+  test("is not every failure, and not a run with none", () => {
+    expect(connectionRefusalSentence(ended("model-unavailable"))).toBeNull();
+    expect(connectionRefusalSentence(foldLedgerEntries([OPENED]))).toBeNull();
   });
 });

@@ -379,6 +379,16 @@ A run emits a closed set of **semantic events**, and they are the whole of what 
 `run-finished`, plus the four a single workflow's own tool writes — `plan-comparison`,
 `recommendation`, `table-profiled` and `answer-composed`.
 
+**A tool call refused before anything was sent settles as `tool-refused` with class `not-sent`**,
+carrying the tool's reason code and the sentence the model was told: arguments that do not parse, a
+command the language's reader or the run's inventory refuses, a spent deadline, a repair ledger
+declining a fingerprint. These used to settle nothing, which left a lone `tool-invoked` on the
+timeline with no outcome and no reason, so the model was told why and the user was not; measured on
+2026-10-17, MongoDB runs met 19 of their 21 refusals there, because a command envelope is checked
+before the engine. The rail shows it as "Refused before the database", it counts no statement and no
+repair attempt, and a repeat of the call is answered from the ledger with the same reason. A step a
+dead process left with no outcome is still told apart: its outcome is unknowable, and it is said so.
+
 **`driver-resolved` says what drove the run**, and it exists because a finished run used to say
 nothing about that: no event and no record field carried the model id, so "these settings were
 measured" — the product's whole claim about a model — was not checkable from the run that used them.
@@ -1063,7 +1073,7 @@ A narrowed run keeps `compose_report` and the extras below.
 | `data-analysis` | `inspect_schema`, `run_read_query`, `inspect_plan`, `compose_report`, `profile_table`, `present_answer` | `present_answer` |
 
 Every statement workflow is offered the read-class four whole, because the engine answers each of them: a cluster has neither a catalog nor a plan, and a MongoDB database has both.
-`compare_plans` is the one tool left out (B119): a comparison's whole value is the structural access reading of `summarisePlan` (`src/lib/agent/plan-summary.ts`), which reads a MongoDB plan as `unknown`, so a comparison would state that two plans differ in a way nobody has read; an optimization run recommends an index from one inspected plan instead, which `agent-query-optimization.3` accepts.
+`compare_plans` is the one tool left out (B119): a comparison's whole value is the structural access reading of `summarisePlan` (`src/lib/agent/plan-summary.ts`), which reads a MongoDB plan as `unknown`, so a comparison would state that two plans differ in a way nobody has read; an optimization run answers from one inspected plan instead, under `agent-query-optimization-mongo.1`: an index recommended because of that plan, or a report citing a plan that already reaches its documents through an index and recommending nothing, and an index the collection already has is refused (`INDEX_ALREADY_EXISTS`).
 Auto-execute is not offered on any mongo variant (B118): its gate has no reading of a MongoDB plan to weigh and the replay of a MongoDB answer is not verified, so the run route refuses `autoExecute` on a MongoDB connection, the rail raises no consent step, the run's rules never mention it, and a MongoDB answer is never run in the editor.
 MCP clients reach a MongoDB connection through `inspect_schema` alone (B117): `run_read_query` takes SQL, so it refuses a MongoDB connection as soon as the connection resolves, before anything is acquired ([`docs/MCP.md`](./MCP.md)).
 
@@ -2140,6 +2150,7 @@ An agent run persists its verifier's id when it opens, so a run reopened later, 
 | `planning` | The run left non-empty closing prose, **and** that prose was its deliverable: a drafted statement on the ledger, or an explicit `NO STATEMENT:` refusal. That mode is toolless and can never cite evidence, so judging it by the investigation rule would fail every planning run that did its job — but prose alone was how a generic lecture scored `answered` for as long as it did. `operations` planning is exempt: its plan deliverable is prose by decision, and the exemption survives that workflow's rules welcoming a fenced reading — welcome is not required, and a run that produced no block may have answered its objective perfectly, so a bar asking for one would fail it. Which engines can express a reading as a statement is deliberately not the basis: a Redis Operate plan was observed writing `INFO memory` into a block its editor runs. | `no-plan`, `no-statement` |
 | `agent` (investigation) | The run composed at least one claim, **and** the claims do not rest entirely on empty results. | `no-report`, `empty-evidence` |
 | `agent` (query-optimization) | The baseline above with **plans exempt from its emptiness clause** (a plan's row count measures nothing), **and** either a plan comparison on the ledger or an index recommendation citing a plan this run read. `agent-query-optimization.3`. | the above, plus `no-plan-comparison`, `no-plan-evidence` |
+| `agent` (query-optimization on MongoDB) | The baseline above with plans exempt from its emptiness clause, **and** either an index recommendation citing a plan this run read, or, with no index recommended, a report citing one: the variant holds no `compare_plans` (B119), and a plan that already uses an index needs no change. `agent-query-optimization-mongo.1`; a run opened before it existed keeps `.3`. | the above, plus `no-plan-evidence`, `no-plan-cited` |
 | `agent` (database-assessment) | The baseline above, **and** a table profiled. `agent-database-assessment.1`. | the above, plus `no-table-profile` |
 | `agent` (query-optimization on Kubernetes) | The baseline above, with a usage reading counted as meaningful even when empty, **and** either a `resources` recommendation citing a usage reading of this run or a report citing one and recommending nothing. `agent-query-optimization-kubectl.1`. | the above, plus `no-usage-reading`, `no-usage-evidence`, `no-usage-metrics` |
 | `agent` (database-assessment on Kubernetes) | The baseline above, with a workload profile counted as meaningful even when empty, **and** a namespace's workloads profiled. `agent-database-assessment-kubectl.1`. | the above, plus `no-workload-profile` |
@@ -2406,8 +2417,10 @@ own.
 | `widened` | *Reads only, and one statement in your editor* | `AGENT_HANDOVER_BUDGET`'s row cap, *no time limit, same read-only session* | The same, with the hand-over consented for the run being opened |
 | `blocked` | *Cannot execute on `<engine>`* | *plan mode drafts here, and the operations workflow still runs* | Agent mode on any other engine |
 | `blocked` | *Cannot execute yet* | *no connection is resolved, so no engine has been established* | Agent mode with no connection resolved |
+| `blocked` | *Refused on this connection* | *plan mode drafts here, and the operations workflow still runs* | Agent mode on an engine it executes on, after a run on this connection was refused for the connection itself (principal too broad or too narrow, authorization off, unsupported target, unusable credential); the popover carries the refusal's own sentence, and a connection the shell has moved to since goes back to its engine's reading |
 
-Four levels, one reading per row above: `blocked` covers both arms that execute nothing and have no bound to state, and they stay separate arms because "has no read-only statement path" is a claim about an engine, which a panel that has resolved no connection has not seen.
+Four levels, one reading per row above: `blocked` covers the three arms that execute nothing and have no bound to state.
+They stay separate arms because "has no read-only statement path" is a claim about an engine, which a panel that has resolved no connection has not seen, and "refused on this connection" is a claim about one connection's user, which says nothing about the engine.
 Not one engine name and not one
 figure is typed in the module — the names come from `AGENT_EXECUTION_ENGINES` through
 `getDBConfig().label` and the figures from the policy rows, which is the rule `hero-proof.tsx`

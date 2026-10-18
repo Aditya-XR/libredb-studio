@@ -269,6 +269,10 @@ export function readMongoCommand(
     );
   }
   for (const key of keys) {
+    // An empty "options" asks for nothing, so it is no option an aggregate, a count or a distinct would have to refuse:
+    // live runs on 2026-10-17 wrote `"options": {}` on aggregates and spent a turn on each refusal. One that asks for
+    // something is still refused with its sentence, and `shapeEnvelope` reads options only where an operation has them.
+    if (key === "options" && isEmptyJsonObject(own(parsed, "options"))) continue;
     const sentence = untakenKeySentence(operation, key);
     if (sentence !== null) return refuse("unknown-key", sentence);
   }
@@ -325,6 +329,11 @@ function isReadOperation(operation: string): operation is MongoReadOperation {
 /** `object`'s own value at `key`, or undefined when it holds none: never a value its prototype answers. */
 function own(object: MongoJsonObject, key: string): MongoJsonValue | undefined {
   return Object.hasOwn(object, key) ? object[key] : undefined;
+}
+
+/** An object with no key, which asks for nothing. */
+function isEmptyJsonObject(value: MongoJsonValue | undefined): boolean {
+  return value !== undefined && isJsonObject(value) && Object.keys(value).length === 0;
 }
 
 /** A whole number a cursor reads as written: a plain JSON number, a safe integer, at least `least`. */

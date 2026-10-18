@@ -411,6 +411,8 @@ export type AgentToolUnavailableCode =
   | "IDENTICAL_PLANS"
   /** The statement does not match the card it is offered under. */
   | "RECOMMENDATION_SHAPE_MISMATCH"
+  /** A document index whose keys the captured inventory already lists for that collection. */
+  | "INDEX_ALREADY_EXISTS"
   /** The plan was this run's, and its rows are no longer held to be read. */
   | "PLAN_RESULT_RELEASED"
   /** This run has already recorded an answer, and a run answers once. */
@@ -788,10 +790,10 @@ const presentAnswerSchema = z.strictObject({
  *
  * At the CALL BOUNDARY rather than inside the schema, and that placement is the whole of what
  * makes it safe. Wrapping the field in `z.preprocess` instead would produce a `ZodPipe`, and the
- * SDK derives the model's copy of the contract from this same object with
+ * model's copy of the contract is derived from this same object with
  * `toJSONSchema(schema, { target: 'draft-7', io: 'input' })`
- * (`zod4Schema()` in node_modules/@ai-sdk/provider-utils/src/schema.ts, reached from
- * `declaredTools()` in src/lib/agent/investigation.ts) — where a `ZodPipe` is not counted as a
+ * (`modelToolJsonSchema()` in src/lib/agent/model-tool-schema.ts, the SDK's own `zod4Schema()`
+ * conversion reached from `declaredTools()` in src/lib/agent/investigation.ts) — where a `ZodPipe` is not counted as a
  * required key. Measured over every entry of `AGENT_TOOL_DEFINITIONS` with that wrapper in place,
  * `present_answer` was the ONLY tool whose two contracts disagreed: runtime
  * `[artifact, presentation]` against advertised `[artifact]`, while all eight others matched
@@ -1397,7 +1399,7 @@ const readMongoCommandSchema = z.strictObject({
 const MONGO_RUN_READ_QUERY: AgentToolDefinition = Object.freeze({
   name: "run_read_query",
   description:
-    'Run one bounded read-only command envelope as JSON: {"collection": "<name>", "operation": "find" | "findOne" | "aggregate" | "count" | "distinct", "filter": {...}, "pipeline": [...], "field": "<name>" (distinct only), "options": {"limit": N}}. Write the collection by its bare name, as in "orders" for an inventory entry app.orders: the run reads the database its connection is bound to. Writes and the write stages of a pipeline ($out, $merge) are refused before the database is reached, and you are told why.',
+    'Run one bounded read-only command envelope as JSON, with the keys its operation takes and no others: find takes "filter" and "options" ("projection", "sort", "skip", "limit"); findOne takes "filter" and "options" ("projection" only); aggregate takes "pipeline" only, so its filter, sort and limit are $match, $sort and $limit stages; count takes "filter"; distinct takes "field" and "filter". For example {"collection": "orders", "operation": "aggregate", "pipeline": [{"$match": {"status": "paid"}}, {"$group": {"_id": "$status", "n": {"$sum": 1}}}]}. Write the collection by its bare name, as in "orders" for an inventory entry app.orders: the run reads the database its connection is bound to. Write a date as {"$date": "2026-03-01T00:00:00Z"} and an ObjectId as {"$oid": "<24 hex digits>"}: a plain string never equals either, and a read shows both as plain strings. Writes and the write stages of a pipeline ($out, $merge) are refused before the database is reached, and you are told why.',
   inputSchema: readMongoCommandSchema,
   operationId: "mongo.query.read",
 });
@@ -1428,7 +1430,7 @@ export const mongoPlanCommandSchema = z.strictObject({
 const MONGO_INSPECT_PLAN: AgentToolDefinition = Object.freeze({
   name: "inspect_plan",
   description:
-    "Ask the engine for the ESTIMATED plan of one read-only command envelope, the same JSON shape run_read_query takes. The engine plans the command with the explain command at queryPlanner verbosity and returns no result rows; where several plans are candidates it tries each for a bounded trial, under the same deadline your reads have. No timings are produced.",
+    "Ask the engine for the ESTIMATED plan of one read-only command envelope, the same JSON shape run_read_query takes, with dates and ObjectIds written the same way: a range over a date field written with strings plans an index scan over strings, which matches no document. The engine plans the command with the explain command at queryPlanner verbosity and returns no result rows; where several plans are candidates it tries each for a bounded trial, under the same deadline your reads have. No timings are produced.",
   inputSchema: mongoPlanCommandSchema,
   operationId: "mongo.plan.estimate",
 });
@@ -1682,6 +1684,10 @@ const UNAVAILABLE_TEXT: Readonly<Record<AgentToolUnavailableCode, string>> = Obj
     "Both sides of that comparison name the same plan, so there is no before and no after. Inspect the plan of your rewrite as well, then compare the two.",
   RECOMMENDATION_SHAPE_MISMATCH:
     "That statement is not the kind of change the card claims. An index recommendation must be one CREATE INDEX statement; a rewrite must be one bounded read.",
+  // Said instead of recording an index that exists. A live MongoDB Optimize run on 2026-10-17 recommended the very
+  // index its plan was already using, because nothing told it that "no change" was an answer this workflow accepts.
+  INDEX_ALREADY_EXISTS:
+    "An index on exactly those keys already exists on that collection, so recommending it changes nothing. If the plan already reaches its documents through it, nothing needs to change: say so in the report, citing the plan.",
   PLAN_RESULT_RELEASED:
     "That plan was this run's, but its rows are no longer held and cannot be read again. Inspect the plan once more if the comparison still matters.",
   // The answer refusals each restate the half of the contract they enforce, and each
@@ -3901,7 +3907,11 @@ async function readCatalog(
  * The input is unknown because it is re-validated here against the definition the run was offered, whose argument
  * the language names (`sql`, `statement` or `command`).
  */
-export async function runReadQueryTool(context: AgentToolContext, input: unknown): Promise<AgentToolOutcome> {
+export async function runReadQueryTool(
+  context: AgentToolContext,
+  input: unknown,
+  snapshot: AgentContextSnapshot | null = null,
+): Promise<AgentToolOutcome> {
   const language = context.statementLanguage ?? "sql";
   const definition = agentToolDefinition(language, context.workflowType, "run_read_query");
   const parsed = parseToolInput(definition.inputSchema, input);
@@ -3919,6 +3929,10 @@ export async function runReadQueryTool(context: AgentToolContext, input: unknown
   // shape advice (no `admit`), which the golden snapshot holds.
   const refusal = server.admit?.(statement) ?? null;
   if (refusal !== null) return unavailable("STATEMENT_NOT_ADMITTED", refusal.message);
+  // After the reader, so a malformed command meets the reader's sentence first; before the pipeline, because what it
+  // catches the engine would answer with an empty result rather than an error.
+  const problem = server.inventoryProblem?.(statement, snapshot) ?? null;
+  if (problem !== null) return unavailable("STATEMENT_NOT_ADMITTED", problem);
   return executeAgentOperation(context, {
     operationId: server.readOperation,
     sql: statement,
@@ -4850,6 +4864,8 @@ export function recommendChangeTool(
       return unavailable("UNVERIFIABLE_EVIDENCE", unverifiableCitation(run.events, [{ evidence: card.evidence }]));
     }
     const { collection, database } = documentIndexTarget(run.events, card.collection);
+    if (indexExists(run.events, collection, database, Object.keys(card.keys)))
+      return unavailable("INDEX_ALREADY_EXISTS");
     return {
       kind: "recommended",
       recommendation: {
@@ -4924,6 +4940,30 @@ function documentIndexTarget(
   }
   const database = snapshot?.defaultContainer?.[0];
   return database === undefined ? { collection: spelling } : { collection: spelling, database };
+}
+
+/**
+ * Whether the captured inventory already lists an index on exactly `keys`, in that order, for the collection a
+ * document-index card resolved to. The inventory records an index's fields and not their directions, so the order of
+ * the fields is what is compared: `{a: 1, b: -1}` and `{a: -1, b: 1}` read as the same index here, which can only make
+ * this refuse a recommendation that differs in direction alone, never accept a duplicate.
+ */
+function indexExists(
+  events: readonly AgentRunEvent[],
+  collection: string,
+  database: string | undefined,
+  keys: readonly string[],
+): boolean {
+  const snapshot = capturedSnapshot(events);
+  if (snapshot === null) return false;
+  const target = snapshot.objects.find(
+    (object) => object.path?.at(-1) === collection && (database === undefined || object.path?.at(-2) === database),
+  );
+  return (
+    target?.indexes.some(
+      (index) => index.columns.length === keys.length && index.columns.every((column, at) => column === keys[at]),
+    ) ?? false
+  );
 }
 
 const CREATE_INDEX_STATEMENT = /^\s*CREATE\s+(UNIQUE\s+)?INDEX\b/i;

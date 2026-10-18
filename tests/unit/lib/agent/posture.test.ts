@@ -437,3 +437,37 @@ describe("the engine names follow the enforcing list", () => {
     ).toContain(`boundary it declares: ${EXECUTION_ENGINE_NAMES}.`);
   });
 });
+
+describe("a connection whose last run was refused for the connection itself", () => {
+  const refusal = "The database user this run would execute as holds privileges the read-only boundary cannot contain.";
+
+  test("is blocked in agent mode, in the refusal's own words, and says what still runs", () => {
+    const posture = agentPosture({
+      mode: "agent",
+      engine: "mongodb",
+      engineLabel: getDBConfig("mongodb").label,
+      handover: false,
+      refusedHere: refusal,
+    });
+    expect(posture.tone).toBe("blocked");
+    expect(posture.headline).toBe("Refused on this connection");
+    expect(posture.qualifier).toContain("plan mode drafts here");
+    expect(posture.title).toContain("MongoDB");
+    expect(posture.body).toStartWith(refusal);
+  });
+
+  test("leaves plan mode, an unsupported engine and a connection with no refusal as they were", () => {
+    const base = { engine: "mongodb" as const, engineLabel: "MongoDB", handover: false };
+    expect(agentPosture({ ...base, mode: "planning", refusedHere: refusal }).tone).toBe("safe");
+    expect(agentPosture({ ...base, mode: "agent", refusedHere: null }).headline).toBe("Reads only");
+    expect(
+      agentPosture({
+        mode: "agent",
+        engine: "cassandra",
+        engineLabel: "Cassandra",
+        handover: false,
+        refusedHere: refusal,
+      }).headline,
+    ).toContain("Cassandra");
+  });
+});

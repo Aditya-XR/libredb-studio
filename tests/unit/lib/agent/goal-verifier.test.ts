@@ -1168,3 +1168,85 @@ describe("the verifier registry", () => {
     }
   });
 });
+
+describe("agent-query-optimization-mongo.1", () => {
+  const verify = (events: AgentRunEvent[], status: "succeeded" | "cancelled" = "succeeded") =>
+    verifyRunGoal({
+      mode: "agent",
+      workflowType: "query-optimization",
+      status,
+      events,
+      statementLanguage: "mongo",
+      verifier: "agent-query-optimization-mongo.1",
+    });
+
+  const PLAN = "4f2c9a10-0000-4000-8000-0000000000b1";
+  const READ = "4f2c9a10-0000-4000-8000-0000000000b2";
+
+  /** A plan this run read: an artifact under MongoDB's estimating operation, with no row count to measure. */
+  const planRead: AgentRunEvent = {
+    kind: "tool-completed",
+    atMs: 20,
+    stepId: "step_plan",
+    artifact: {
+      correlationId: PLAN,
+      runId: "arun_1",
+      operationId: "mongo.plan.estimate",
+      summary: { rowCount: 0, columnNames: ["plan"], elapsedMs: 3 },
+    },
+  };
+
+  const documentIndex = (correlationId: string): AgentRunEvent => ({
+    kind: "recommendation",
+    atMs: 25,
+    change: "document-index",
+    collection: "orders",
+    keys: { customerId: 1 },
+    evidence: [{ source: "artifact", correlationId }],
+  });
+
+  test("is the verifier the MongoDB optimization variant is opened under", () => {
+    const verdict = verifyRunGoal({
+      mode: "agent",
+      workflowType: "query-optimization",
+      status: "succeeded",
+      events: [contextCaptured, planRead, reportCiting(ARTIFACT(PLAN))],
+      statementLanguage: "mongo",
+    });
+    expect(verdict.verifier).toBe("agent-query-optimization-mongo.1");
+  });
+
+  test("an index recommendation citing a plan of this run answers", () => {
+    expect(verify([contextCaptured, planRead, documentIndex(PLAN), reportCiting(ARTIFACT(PLAN))])).toEqual({
+      outcome: "answered",
+      verifier: "agent-query-optimization-mongo.1",
+      unmet: [],
+    });
+  });
+
+  test("an index recommendation citing no plan is no-plan-evidence, whatever the report cites", () => {
+    expect(
+      verify([contextCaptured, planRead, completed(READ, 3), documentIndex(READ), reportCiting(ARTIFACT(PLAN))]).unmet,
+    ).toEqual(["no-plan-evidence"]);
+  });
+
+  test("a report citing a plan and recommending nothing answers: a plan that already uses an index needs no change", () => {
+    // The plan's zero rows measure nothing, so citing it alone is not empty evidence.
+    expect(verify([contextCaptured, planRead, reportCiting(ARTIFACT(PLAN))]).outcome).toBe("answered");
+  });
+
+  test("a report citing no plan, with no index recommended, is no-plan-cited", () => {
+    expect(verify([contextCaptured, planRead, completed(READ, 3), reportCiting(ARTIFACT(READ))]).unmet).toEqual([
+      "no-plan-cited",
+    ]);
+    expect(verify([contextCaptured, completed(READ, 3), reportCiting(SNAPSHOT)]).unmet).toEqual(["no-plan-cited"]);
+  });
+
+  test("the investigation baseline comes first", () => {
+    expect(verify([contextCaptured, planRead]).unmet).toEqual(["no-report"]);
+    expect(verify([contextCaptured, planRead], "cancelled").unmet).toEqual(["cancelled"]);
+    expect(verify([contextCaptured, completed(READ, 0), reportCiting(ARTIFACT(READ))]).unmet).toEqual([
+      "empty-evidence",
+    ]);
+  });
+});

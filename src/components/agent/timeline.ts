@@ -932,6 +932,8 @@ const SHORTFALL_SENTENCES: Readonly<Record<AgentGoalShortfall, string>> = {
     "No before-and-after plan comparison was recorded, and no index was recommended: a query optimization rests on one or the other.",
   "no-plan-evidence":
     "The index was recommended without citing a plan this run read, so nothing the engine said backs it.",
+  "no-plan-cited":
+    "No index was recommended and the report cites no plan this run read: a query optimization rests on how the engine reaches its documents.",
   // Stays "table" (#414): the profile is `sql.table.profile`, an SQL-only operation
   // offered on engines whose rows really are tables, so the engine's own word and this
   // one are the same word wherever this verdict can be reached.
@@ -978,6 +980,24 @@ function describeFailureReason(reason: AgentRunFailureReason): string {
 }
 
 /**
+ * The failures that are a refusal of the CONNECTION as it is configured, before the run read anything: its user, its
+ * credential, or the server behind it. Any run on that connection meets the same refusal until it is changed.
+ */
+const CONNECTION_REFUSALS: ReadonlySet<AgentRunFailureReason> = new Set<AgentRunFailureReason>([
+  "agent-credential-unusable",
+  "agent-principal-refused",
+  "agent-principal-underprivileged",
+  "server-authorization-off",
+  "profile-target-unsupported",
+]);
+
+/** The sentence a run that failed for its connection was refused with, or null for every other run. */
+export function connectionRefusalSentence(timeline: AgentRunTimeline): string | null {
+  const reason = timeline.failureReason;
+  return reason !== null && CONNECTION_REFUSALS.has(reason) ? FAILURE_SENTENCES[reason] : null;
+}
+
+/**
  * The sentence a FAILED run is described with outside the timeline, or null when its record
  * names no cause at all (#1461).
  *
@@ -1007,6 +1027,10 @@ function describeRefusal(refusal: AgentToolRefusal): Omit<AgentTimelineItem, "id
       return { headline: "Approval required", detail: refusal.operationId };
     case "reading-refused":
       return { headline: READING_REFUSAL_HEADLINES[refusal.reasonCode], detail: refusal.reasonCode };
+    case "not-sent":
+      // The tool's own sentence, which is the server's voice (a reader's or the inventory's refusal, never the
+      // engine's), so it is the detail rather than a quote.
+      return { headline: "Refused before the database", detail: refusal.detail };
     default:
       return { headline: "The database refused the statement", quoted: refusal.message };
   }

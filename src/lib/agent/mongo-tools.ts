@@ -196,11 +196,24 @@ function catalogRows(
  * validates with. The `mode: "estimate-plan"` is what makes the provider wrap the envelope in `explain` instead of
  * running it - the same seam the SQL `EXPLAIN` arms drive.
  */
-export async function mongoInspectPlanTool(context: AgentToolContext, input: unknown): Promise<AgentToolOutcome> {
+export async function mongoInspectPlanTool(
+  context: AgentToolContext,
+  input: unknown,
+  snapshot: AgentContextSnapshot | null = null,
+): Promise<AgentToolOutcome> {
   const parsed = mongoPlanCommandSchema.safeParse(input);
   if (!parsed.success) return unavailable("INVALID_TOOL_INPUT", issueText(parsed.error));
-  const statement = languageServer("mongo").canonicalize(parsed.data.command);
+  const server = languageServer("mongo");
+  const statement = server.canonicalize(parsed.data.command);
   if (statement === null) return unavailable("INVALID_TOOL_INPUT", "The command is empty, and nothing was planned.");
+  // The read path's inventory check, on a command the reader admits; one it does not admit goes on to the pipeline,
+  // which refuses it as before. A plan of a date range written with strings is an index scan over strings, which a
+  // live run on 2026-10-17 reported as the index "efficiently locating matching documents" for a query matching none.
+  if ((server.admit?.(statement) ?? null) === null) {
+    const problem = server.inventoryProblem?.(statement, snapshot) ?? null;
+    if (problem !== null)
+      return unavailable("STATEMENT_NOT_ADMITTED", problem.replace("Nothing was sent.", "Nothing was planned."));
+  }
   return executeAgentOperation(context, {
     operationId: "mongo.plan.estimate",
     sql: statement,

@@ -1342,12 +1342,12 @@ function relevance(table: AgentInventoryObject, terms: readonly string[]): numbe
   return score;
 }
 
-function renderColumn(table: AgentInventoryObject, column: ColumnSchema): string {
+function renderColumn(table: AgentInventoryObject, column: ColumnSchema, sampledFields = false): string {
   const reference = (table.foreignKeys ?? []).find((key) => key.columnName === column.name);
   return [
     column.name,
     column.type === "" ? "" : ` ${column.type}`,
-    column.nullable ? "" : " NOT NULL",
+    column.nullable || sampledFields ? "" : " NOT NULL",
     column.isPrimary ? " PK" : "",
     reference === undefined ? "" : ` -> ${reference.referencedTable}.${reference.referencedColumn}`,
   ].join("");
@@ -1509,8 +1509,10 @@ function readMark(object: AgentInventoryObject): string {
   return object.partlyReadable === true ? " (partly readable)" : "";
 }
 
-function renderTable(table: AgentInventoryObject, inventory: AgentInventory): string {
-  const shown = table.columns.slice(0, MAX_COLUMNS_PER_TABLE).map((column) => renderColumn(table, column));
+function renderTable(table: AgentInventoryObject, inventory: AgentInventory, sampledFields = false): string {
+  const shown = table.columns
+    .slice(0, MAX_COLUMNS_PER_TABLE)
+    .map((column) => renderColumn(table, column, sampledFields));
   const hidden = table.columns.length - shown.length;
   if (hidden > 0) shown.push(`+${hidden} more column(s)`);
 
@@ -1529,6 +1531,10 @@ function renderTable(table: AgentInventoryObject, inventory: AgentInventory): st
   const columnText = shown.length === 0 ? "no columns derivable from the stored definition" : shown.join(", ");
   return `${head}: ${columnText}${indexText}`;
 }
+
+/** What an inventory of sampled fields says about them, beside the lines that would otherwise read as declarations. */
+const SAMPLED_FIELDS_NOTE =
+  "These fields were inferred from sampled documents, not declared: none is NOT NULL, a field may be null or missing in documents the sample did not read, and a type such as mixed(null|string) is what the sample held.";
 
 /**
  * The part of the inventory this task is about, fenced for a prompt.
@@ -1575,6 +1581,12 @@ export function packContextForTask(
     readonly preface?: string;
     readonly omissionAdvice?: string;
     readonly noun?: AgentInventoryNoun;
+    /**
+     * The fields were inferred from sampled records, not declared, so none is rendered NOT NULL: on SQL that word is a
+     * constraint, and written for a field the first sampled records all held it read as one. A live MongoDB run on
+     * 2026-10-17 was shown `email string NOT NULL` for a field six of 1000 documents hold as null.
+     */
+    readonly sampledFields?: boolean;
   } = {},
 ): string {
   const lead = options.preface === undefined ? "" : `${options.preface}\n`;
@@ -1612,15 +1624,17 @@ export function packContextForTask(
   // The notes are recomposed for each candidate rather than written once ahead of the
   // loop: they are gated on the kinds actually rendered, so what fits decides what is
   // said about it, and the bound still covers everything inside the fence.
+  const sampled = options.sampledFields === true;
+  const sampledNote = sampled ? [SAMPLED_FIELDS_NOTE] : [];
   const rendered: AgentInventoryObject[] = [];
   const lines: string[] = [];
   const compose = (shown: readonly AgentInventoryObject[], rows: readonly string[]): string =>
-    [header, ...inventoryNotes(snapshot, shown), ...rows].join("\n");
+    [header, ...sampledNote, ...inventoryNotes(snapshot, shown), ...rows].join("\n");
 
   for (const table of ranked) {
-    const candidate = compose([...rendered, table], [...lines, renderTable(table, snapshot)]);
+    const candidate = compose([...rendered, table], [...lines, renderTable(table, snapshot, sampled)]);
     if (fenceUntrustedContent(close(candidate, ranked.length - rendered.length - 1), source).length > maxChars) break;
-    lines.push(renderTable(table, snapshot));
+    lines.push(renderTable(table, snapshot, sampled));
     rendered.push(table);
   }
 

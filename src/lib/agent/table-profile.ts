@@ -478,7 +478,16 @@ export function readTableProfile(
   return { table, depth, rowCount, columns: profiled, findings: deriveFindings(rowCount, profiled) };
 }
 
-const ratio = (part: number, whole: number): string => `${Math.round((part / whole) * 100)}%`;
+/**
+ * A share as a whole percent, never rounded up onto 100% it has not reached: 999 of 1000 is "over 99%". A live
+ * assessment on 2026-10-17 was told a column held "100% of 1000 rows" with no value while the profile counted one,
+ * and both engines' reports then called the column completely empty. Every finding that states a share is gated at
+ * half or more, so the other end, a share rounded down to 0%, is never stated.
+ */
+const ratio = (part: number, whole: number): string => {
+  const percent = Math.round((part / whole) * 100);
+  return percent === 100 && part < whole ? "over 99%" : `${percent}%`;
+};
 
 function namesPersonalData(column: string): boolean {
   const lowered = column.toLowerCase();

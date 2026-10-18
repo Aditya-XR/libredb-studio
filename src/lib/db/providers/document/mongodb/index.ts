@@ -64,6 +64,7 @@ import {
   QueryError,
   ExecutionProfileError,
   mapDatabaseError,
+  PermissionDeniedError,
 } from "../../../errors";
 import { formatBytes } from "../../../utils/pool-manager";
 import { unionFields, uniquelyKeyedRows } from "../../../utils/result-fields";
@@ -627,6 +628,21 @@ function isServerErrorReply(error: unknown): boolean {
   return error instanceof Error && error.name === "MongoServerError";
 }
 
+/** The code a server replies with for a command this user's roles do not grant: `Unauthorized`. */
+const MONGODB_UNAUTHORIZED_CODE = 13;
+
+/**
+ * Whether a rejection is the server refusing this user the command (code 13), as it does `currentOp`, `serverStatus`
+ * and `system.profile` to a user holding only `read` (measured on 7.0, 8.3.11 and 9.0.4).
+ *
+ * Told apart because "not allowed to look" is not "nothing there": answered as an empty list, a read-only user's
+ * sessions and slow queries read as none, and a live Operate run on 2026-10-17 reported the server "idle with no
+ * active sessions" while an admin saw 46.
+ */
+function isUnauthorizedReply(error: unknown): boolean {
+  return isServerErrorReply(error) && (error as Error & { code?: unknown }).code === MONGODB_UNAUTHORIZED_CODE;
+}
+
 /**
  * WHICH KIND one `listCollections` row is, or `undefined` for a namespace the server
  * owns.
@@ -846,8 +862,14 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       // The sentence therefore carries the envelope itself and names the shell form
       // it excludes: naming only what the language IS did not survive contact with
       // the model's prior on Elasticsearch, and does not here either.
+      //
+      // Each operation is shown with the keys it takes and no others, because one envelope listing every key led live
+      // runs on 2026-10-17 to put `filter` and `options` on an aggregate and `limit` on a findOne, each refused. And
+      // the value syntax is said here, where both plan and agent mode read it: nothing told a model that a date is
+      // `{"$date": ...}` and an ObjectId `{"$oid": ...}`, so runs filtered both as strings, matched nothing, and
+      // reported zero orders and a missing event; a plan draft wrote mongosh's `ISODate(...)`, which is not JSON.
       statementLanguage:
-        'the JSON command object this editor executes - {"collection": "<name>", "operation": "find" | "findOne" | "aggregate" | "count" | "distinct", "database": "<name>" (optional, in the editor another database than the connected one; an agent run reads only the database its connection is bound to), "filter": {...}, "pipeline": [...], "field": "<name>" (distinct only), "options": {"limit": 50}} - and NOT mongosh shell syntax: a statement that starts with `db.` cannot be run here',
+        'the JSON command object this editor executes, one of {"collection": "<name>", "operation": "find", "filter": {...}, "options": {"projection": {...}, "sort": {...}, "skip": N, "limit": N}}, {"collection": "<name>", "operation": "findOne", "filter": {...}, "options": {"projection": {...}}}, {"collection": "<name>", "operation": "aggregate", "pipeline": [...]} (an aggregate takes no "filter" and no "options": write them as $match, $sort, $skip, $limit and $project stages), {"collection": "<name>", "operation": "count", "filter": {...}} and {"collection": "<name>", "operation": "distinct", "field": "<name>", "filter": {...}}, each with an optional "database": "<name>" (in the editor another database than the connected one; an agent run reads only the database its connection is bound to). A date is written {"$date": "2026-03-01T00:00:00Z"} and an ObjectId {"$oid": "<24 hex digits>"}, in a filter and in a pipeline alike: a plain string never equals a date or an ObjectId, so a filter that compares one with a string matches nothing. It is NOT mongosh shell syntax: a statement that starts with `db.`, or writes ISODate(...) or ObjectId(...), cannot be run here',
       // `getSlowQueries()` reads `system.profile`, which does not exist until the
       // profiler is switched on - so the empty panel is the ordinary case here, and it
       // used to name a PostgreSQL extension (#463).
@@ -1936,7 +1958,13 @@ export class MongoDBProvider extends BaseDatabaseProvider {
         avgTime: doc.millis || 0,
         rows: doc.nreturned || 0,
       }));
-    } catch {
+    } catch (error) {
+      if (isUnauthorizedReply(error)) {
+        throw new PermissionDeniedError(
+          "This connection's user may not read system.profile, where the profiler records slow operations (MongoDB 13 Unauthorized), so slow queries are unknown here, not absent.",
+          "mongodb",
+        );
+      }
       // Profiler not enabled or system.profile doesn't exist
       return [];
     }
@@ -1975,6 +2003,12 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       });
     } catch (error) {
       this.logError("getActiveSessions", error);
+      if (isUnauthorizedReply(error)) {
+        throw new PermissionDeniedError(
+          "This connection's user may not run currentOp (MongoDB 13 Unauthorized), so the active sessions are unknown here, not absent.",
+          "mongodb",
+        );
+      }
       return [];
     }
   }

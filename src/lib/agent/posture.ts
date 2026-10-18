@@ -175,6 +175,23 @@ function unsupportedPosture(engineLabel: string): AgentPosture {
 }
 
 /**
+ * Agent mode on a connection whose last run was refused for the connection itself: its user, its credential or the
+ * server behind it. The engine runs agent mode, so the reads posture would be true of the engine and false of this
+ * connection: measured 2026-10-17 on an admin MongoDB seed, the strip said "Reads only, enforced by the server" before
+ * Start, and Start then refused the run. The sentence is the refusal's own, so the strip, the card and the timeline
+ * say one thing.
+ */
+function refusedPosture(engineLabel: string, refusal: string): AgentPosture {
+  return {
+    tone: "blocked",
+    headline: "Refused on this connection",
+    qualifier: "plan mode drafts here, and the operations workflow still runs",
+    title: `Agent mode cannot run on this ${engineLabel} connection as it is configured`,
+    body: `${refusal} Plan mode drafts on every connection, and the operations workflow still runs here, because it sends no statement.`,
+  };
+}
+
+/**
  * Agent mode with no resolved connection.
  *
  * Blocked, because agent mode cannot execute anything from here - but blocked WITHOUT the
@@ -309,10 +326,13 @@ export function agentPosture(input: {
   readonly engine: DatabaseType | null;
   readonly engineLabel: string;
   readonly handover: boolean;
+  /** The refusal the last run on THIS connection met for the connection itself, if it met one. */
+  readonly refusedHere?: string | null;
 }): AgentPosture {
   if (input.mode === "planning") return planPosture();
   if (input.engine === null) return unresolvedPosture();
   const language = AGENT_STATEMENT_LANGUAGE[input.engine];
   if (language === null) return unsupportedPosture(input.engineLabel);
+  if (typeof input.refusedHere === "string") return refusedPosture(input.engineLabel, input.refusedHere);
   return input.handover ? widenedPosture(language) : readsPosture(language);
 }

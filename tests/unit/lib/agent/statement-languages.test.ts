@@ -145,6 +145,21 @@ describe("the mongo language's server adapter", () => {
     expect(languageServer("mongo").readOperation).toBe("mongo.query.read");
     expect(languageServer("mongo").admit).toBe(admitMongoStatement);
   });
+
+  test("reads an admitted command against the inventory, and says nothing about text that is not one command", () => {
+    const inventoryProblem = languageServer("mongo").inventoryProblem;
+    const inventory = {
+      objects: [{ name: "shop.orders", path: ["shop", "orders"], kind: "collection", columns: [], indexes: [] }],
+      kinds: [{ id: "collection", role: "relation" as const, label: "Collection", labelPlural: "Collections" }],
+    };
+    expect(inventoryProblem?.('{"collection": "shop.orders", "operation": "count"}', inventory)).toContain(
+      "is the inventory's spelling",
+    );
+    expect(inventoryProblem?.('{"collection": "orders", "operation": "count"}', inventory)).toBeNull();
+    expect(inventoryProblem?.("not json", inventory)).toBeNull();
+    expect(languageServer("sql").inventoryProblem).toBeUndefined();
+    expect(languageServer("kubectl").inventoryProblem).toBeUndefined();
+  });
 });
 
 describe("the shape advice", () => {

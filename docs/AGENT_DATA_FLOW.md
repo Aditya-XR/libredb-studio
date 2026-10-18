@@ -342,7 +342,8 @@ dialect gets, then packed for the task
 
 - the table name;
 - up to 12 columns, each as `name type`, plus ` NOT NULL`, ` PK` and ` -> referencedTable.column`
-  where they apply;
+  where they apply; on an engine whose fields are inferred from sampled documents (MongoDB), no
+  ` NOT NULL`, with one line saying the fields were sampled (`sampledFields`);
 - up to 4 index names with their column lists;
 - a count of what was left out, named as left out rather than silently dropped.
 

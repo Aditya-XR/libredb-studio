@@ -76,6 +76,7 @@ import {
   type AgentPlanStatementView,
   type AgentTimelineItem,
   type AgentTimelineTone,
+  connectionRefusalSentence,
   describeRunFailure,
 } from "./timeline";
 import type { AgentPrefillRequest } from "./use-agent-prefill";
@@ -1885,6 +1886,10 @@ export const AgentRail = React.memo(function AgentRail({
   */
   const handoverConsented = runOpen ? openedWithHandover : pendingStart !== null && autoExecute;
   const describedMode = runOpen ? run.timeline.mode : mode;
+  // Only for the connection the refused run was opened on: a connection the shell has moved to since has not been
+  // refused, and its strip goes back to what its engine does.
+  const refusedHere =
+    run.openedOn !== null && run.openedOn === connectionId ? connectionRefusalSentence(run.timeline) : null;
   const selectionPosture = agentPosture({
     mode,
     engine: connectionType,
@@ -1892,6 +1897,7 @@ export const AgentRail = React.memo(function AgentRail({
     // The standing step's tick, and OFF otherwise: nothing has been consented to for a
     // run that is not being opened, and the next step's tick starts unticked.
     handover: pendingStart !== null && autoExecute,
+    refusedHere,
   });
 
   /*
@@ -2103,6 +2109,7 @@ export const AgentRail = React.memo(function AgentRail({
         engine={connectionType}
         engineLabel={engineLabel}
         handover={handoverConsented}
+        refusedHere={refusedHere}
       />
 
       <div className="p-3 border-b border-hairline shrink-0">

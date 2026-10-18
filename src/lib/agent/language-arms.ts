@@ -46,7 +46,7 @@ export interface InspectSchemaArm {
 /** A plan arm: the statement it parses, and the estimating plan of it. */
 export interface InspectPlanArm {
   readonly inputSchema: z.ZodType<unknown>;
-  run(context: AgentToolContext, input: unknown): Promise<AgentToolOutcome>;
+  run(context: AgentToolContext, input: unknown, snapshot?: AgentContextSnapshot | null): Promise<AgentToolOutcome>;
 }
 
 /**
