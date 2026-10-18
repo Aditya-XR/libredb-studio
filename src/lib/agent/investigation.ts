@@ -85,6 +85,7 @@ import {
   samplingFor,
   unreadStopAsksFor,
 } from "./models";
+import { mergeDisjoint } from "./disjoint-merge";
 import { erDetailForWorkflow, renderErDiagram } from "./er-diagram";
 import { type AgentGoalShortfall, recommendsIndex, verifyRunGoal } from "./goal-verifier";
 import { type AgentInventoryNoun, inventoryNoun } from "./inventory-noun";
@@ -132,16 +133,10 @@ import {
   selectAgentTools,
   presentableArtifact,
 } from "./tools";
-import {
-  AGENT_ANSWER_CONTRACT,
-  AGENT_EVIDENCE_CONTRACT,
-  capturedSnapshot,
-  citeSnapshot,
-  handoverText,
-} from "./tool-contracts";
+import { AGENT_EVIDENCE_CONTRACT, capturedSnapshot, citeSnapshot, handoverText } from "./tool-contracts";
 import { AGENT_EVIDENCE_TOOLS, agentLanguagePack } from "./languages/index";
-import type { EvidenceToolName } from "./languages/pack";
-import { languageServer } from "./languages/server";
+import type { EvidenceToolName, ShortfallAdvice, ShortfallContext, ShortfallNotice } from "./languages/pack";
+import { LANGUAGE_SHORTFALL_NOTICES, LANGUAGE_USAGE_BAR_NOTICE, languageServer } from "./languages/server";
 import {
   AGENT_WORKFLOW_PRESENTS_ANSWER,
   AGENT_WORKFLOW_SENDS_STATEMENTS,
@@ -335,16 +330,6 @@ const AGENT_PLAN_BAR_NOTICE = [
   "Neither is recorded yet. Before you call compose_report, either call inspect_plan on a rewritten form of the statement and then compare_plans with the two artifact ids, or call recommend_change for an index citing the plan artifact you already hold.",
 ].join(" ");
 
-/**
- * What a resource-efficiency run is told the moment it reads usage: the `AGENT_PLAN_BAR_NOTICE` argument on a
- * cluster. The bar is otherwise delivered by holding `compose_report`, which the report reserve suppresses, so a run
- * that spends its turns reading would hear it only once it could no longer act on it.
- */
-const AGENT_USAGE_BAR_NOTICE = [
-  "You have a usage reading in hand, and this workflow is judged on it: a report answers when a resources recommendation cites that reading, or when the report cites it and says nothing needs to change.",
-  'Before you call compose_report, either call recommend_change with change "resources" citing the inspect_usage artifact, or compose the report citing it.',
-].join(" ");
-
 export const AGENT_REPORT_RESERVE_NOTICE = [
   "This run is nearly out of room: treat this as your last turn.",
   "Call compose_report now with what you have already established, and leave out what you have not.",
@@ -386,9 +371,9 @@ interface PlanningEngine {
    */
   readonly statementLanguage?: string;
   /**
-   * The run's own statement language, where it has one, whose `GROUNDING_COPY` entry may carry planning rules. A
+   * The run's own statement language, where it has one, whose pack's `grounding` may carry planning rules. A
    * MongoDB plan draft names a collection the way a command does, so plan mode is told the collection rule agent mode
-   * is told (`MONGO_COLLECTION_RULE`): without it, three of ten live plan drafts on 2026-10-17 named
+   * is told (`MONGO_COLLECTION_RULE` in `languages/mongo/server.ts`): without it, three of ten live plan drafts on 2026-10-17 named
    * `"collection": "shop.orders"`, which the editor reads as a collection that does not exist and answers with no rows.
    */
   readonly agentLanguage?: AgentStatementLanguageId;
@@ -654,45 +639,9 @@ function tableToProfile(
 }
 
 /**
- * What a run is told about a shortfall it is one call away from fixing.
- *
- * `null` for every shortfall this cannot honestly ask about, and that list is the #350
- * rule applied per case: `no-report` is impossible here (a report is being submitted),
- * `cancelled` is not the model's to fix, and the shortfalls that already have a purpose-
- * written notice keep it, because those carry ids this generic sentence cannot.
+ * The shortfall notices the core speaks. A language's own are its pack's `shortfallNotices`.
  */
-interface ShortfallAdvice {
-  readonly said: string;
-  /**
-   * Whether narrowing the run to its verdict's tools would HELP this shortfall.
-   *
-   * False wherever the fix lies outside that set, and an eval caught the case immediately:
-   * the answer to `no-plan-evidence` is to call `inspect_plan`, which is a READING tool and
-   * so not among the tools the optimization verdict accepts. Narrowing there would have
-   * removed the very tool this notice asks for — telling a run to do something and taking
-   * away its means of doing it, which is the shape of mistake this file has already paid
-   * for twice.
-   */
-  readonly narrow: boolean;
-}
-
-/**
- * What the run holds and calls things, as the notice below needs it: the plans it inspected, oldest first, whether it
- * is offered `compare_plans` at all, and what its language calls one unit it sends.
- */
-interface ShortfallContext {
-  readonly plans: readonly string[];
-  readonly readingsHeld: number;
-  readonly holdsPresentable: boolean;
-  readonly holdsCompare: boolean;
-  readonly noun: string;
-}
-
-function shortfallNotice(
-  shortfall: AgentGoalShortfall,
-  table: string | undefined,
-  { plans, readingsHeld, holdsPresentable, holdsCompare, noun }: ShortfallContext,
-): ShortfallAdvice | null {
+const CORE_SHORTFALL_NOTICES: Readonly<Partial<Record<AgentGoalShortfall, ShortfallNotice>>> = Object.freeze({
   /*
     The shortfall this drive never spoke, and it is worth a whole cell.
 
@@ -711,7 +660,7 @@ function shortfallNotice(
     Only for a run holding nothing presentable — where the run holds one, the present notice is
     the better sentence and owns the case.
   */
-  if (shortfall === "no-answer") {
+  "no-answer": (_table, { holdsPresentable }) => {
     if (holdsPresentable) return null;
     return {
       said: [
@@ -726,8 +675,8 @@ function shortfallNotice(
       // report was followed by a declined read.
       narrow: false,
     };
-  }
-  if (shortfall === "no-table-profile") {
+  },
+  "no-table-profile": (table) => {
     const named = table === undefined ? "a table this run's inventory lists" : `"${table}"`;
     return {
       said: [
@@ -740,8 +689,8 @@ function shortfallNotice(
       // `run_read_query` three without ever profiling.
       narrow: true,
     };
-  }
-  if (shortfall === "no-reading") {
+  },
+  "no-reading": (_table, { readingsHeld }) => {
     // Only for a run that read NOTHING. A run holding artifacts and citing the inventory
     // instead earns the same verdict, but the useful sentence there is
     // `citeWhatYouReadNotice`, which can name the ids it actually has. Saying "this run has
@@ -773,34 +722,8 @@ function shortfallNotice(
       ].join(" "),
       narrow: false,
     };
-  }
-  /*
-    The MongoDB optimization's shortfall (`agent-query-optimization-mongo.1`): no `compare_plans`, so its two routes are
-    an index recommended because of a plan, or a report citing the plan when it already reaches its documents through an
-    index. Both routes are named, because naming only the first is what had a live run on 2026-10-17 recommend the
-    index its plan was already using. With a plan in hand the sentence names it and narrows, keeping `recommend_change`
-    and `compose_report`, the two tools these routes need; without one it sends the run to `inspect_plan` unnarrowed.
-  */
-  if (shortfall === "no-plan-cited") {
-    const latest = plans.at(-1);
-    if (latest !== undefined) {
-      return {
-        said: [
-          "This workflow answers with how the engine reaches its documents, and this run holds a plan that neither an index recommendation nor the report cites, so the report would be scored as having established nothing.",
-          `Your compose_report call was not run. If plan "${latest}" scans the whole collection (COLLSCAN), call recommend_change for an index citing it; if it already uses an index (IXSCAN), nothing needs to change: cite "${latest}" in a claim that says so. Then call compose_report.`,
-        ].join(" "),
-        narrow: true,
-      };
-    }
-    return {
-      said: [
-        "This workflow is judged on plans: a report is scored on whether it shows HOW the engine reaches its documents, and this run has inspected none, so it would be scored as having established nothing.",
-        `Your compose_report call was not run. Call inspect_plan on the ${noun} in question, then either recommend_change for an index citing that plan's artifact id, or, if the plan already uses an index, cite it in a claim that nothing needs to change, and then call compose_report.`,
-      ].join(" "),
-      narrow: false,
-    };
-  }
-  if (shortfall === "no-plan-comparison") {
+  },
+  "no-plan-comparison": (_table, { plans, holdsCompare, noun }) => {
     const latest = plans.at(-1);
     if (latest !== undefined) {
       // With a plan in hand the run is not missing the idea, it is one call short. Where it
@@ -849,8 +772,8 @@ function shortfallNotice(
       ].join(" "),
       narrow: false,
     };
-  }
-  if (shortfall === "no-plan-evidence") {
+  },
+  "no-plan-evidence": (_table, { noun }) => {
     // Measured on `qwen3:8b` and `qwen3:14b`, same arc both times: `inspect_schema`, a
     // refused read, then `recommend_change` for an index and no `inspect_plan` anywhere.
     // The recommendation may well be right; it is simply not established, which is what
@@ -866,39 +789,27 @@ function shortfallNotice(
       // sentence asks for.
       narrow: false,
     };
-  }
-  // The resource-efficiency arms. Both are narrowed: `inspect_usage` and `recommend_change` are the variant's
-  // `narrowedExtras`, so the tools these sentences name survive the narrowing. `no-usage-metrics` has no arm, because
-  // there is nothing the model can do about a cluster without metrics-server; the rail's sentence names it instead.
-  if (shortfall === "no-usage-reading") {
-    return {
-      said: [
-        "This workflow is judged on a usage reading, and this run has taken none: a report without one is scored as having established nothing.",
-        "Your compose_report call was not run. Call inspect_usage on the namespace in question, then either recommend_change citing its artifact id or compose_report citing it, and then call compose_report.",
-      ].join(" "),
-      narrow: true,
-    };
-  }
-  if (shortfall === "no-usage-evidence") {
-    return {
-      said: [
-        "Your report rests on no usage reading of this run: a resources recommendation, or a finding that nothing needs to change, must cite the inspect_usage artifact it rests on.",
-        "Your compose_report call was not run. Cite the inspect_usage artifact id in the recommendation or in a claim, and then call compose_report again.",
-      ].join(" "),
-      narrow: true,
-    };
-  }
-  // The cluster-health arm, narrowed for the same reason: `profile_workloads` is the variant's `narrowedExtras`.
-  if (shortfall === "no-workload-profile") {
-    return {
-      said: [
-        "This workflow answers with the profile profile_workloads takes, and no namespace has been profiled, so the report would be scored as having established nothing.",
-        "Your compose_report call was not run. Call profile_workloads on the namespace in question, and then call compose_report again.",
-      ].join(" "),
-      narrow: true,
-    };
-  }
-  return null;
+  },
+});
+
+/** The core's notices and every pack's, as one table: a pack notice that shadowed a core one fails at load. */
+const SHORTFALL_NOTICES = mergeDisjoint([CORE_SHORTFALL_NOTICES, LANGUAGE_SHORTFALL_NOTICES], "SHORTFALL_NOTICES");
+
+/**
+ * What a run is told about a shortfall it is one call away from fixing.
+ *
+ * `null` for every shortfall this cannot honestly ask about, and that list is the #350
+ * rule applied per case: `no-report` is impossible here (a report is being submitted),
+ * `cancelled` is not the model's to fix, and the shortfalls that already have a purpose-
+ * written notice keep it, because those carry ids this generic sentence cannot.
+ */
+function shortfallNotice(
+  shortfall: AgentGoalShortfall,
+  table: string | undefined,
+  context: ShortfallContext,
+): ShortfallAdvice | null {
+  const notice = Object.hasOwn(SHORTFALL_NOTICES, shortfall) ? SHORTFALL_NOTICES[shortfall] : undefined;
+  return notice === undefined ? null : notice(table, context);
 }
 
 /**
@@ -1273,7 +1184,9 @@ const planningStatementContract = (deliverable: { readonly noun: string }, engin
     // message is the #350 failure — and it names what the language is NOT, because
     // naming only what it is did not survive contact with the model's prior.
     ...(engine.statementLanguage === undefined ? [] : [`Write it in ${engine.statementLanguage}.`]),
-    ...(engine.agentLanguage === undefined ? [] : (GROUNDING_COPY[engine.agentLanguage].planningRules ?? [])),
+    ...(engine.agentLanguage === undefined
+      ? []
+      : (agentLanguagePack(engine.agentLanguage).server.grounding.planningRules ?? [])),
     `Put it in a single fenced block tagged \`${engine.type}\` — three backticks, that tag, the statement, three backticks — and put nothing else inside that block.`,
     `Put the rationale AFTER the statement, and keep it brief: which ${engine.noun.plural} it reads, which joins it makes, and why that answers the objective.`,
     engine.language === "sql"
@@ -1663,246 +1576,10 @@ const planningProseRulesUngrounded = (engine: PlanningEngine): string =>
     planningProseEngineRule(engine.type),
   ].join(" ");
 
-/**
- * How to pursue the objective WITH THE TOOLS (#330 T3). Agent mode only, which is the
- * whole reason this is a record of its own: what each workflow is FOR is its variant's
- * `objective` in `agent-manifest.ts`, said in both modes, and what a plan of it
- * produces instead is the variant's `planDeliverable`.
- *
- * A total record, so a workflow added to the contract stops this file compiling
- * until someone decides what to ask of it. Appended to `agentRules` and never to a
- * planning run's rules: planning is toolless, and telling it to call tools would be
- * asking for something the mode cannot do.
- *
- * The optimization block names `inspect_schema`'s index selector explicitly, and
- * that is not padding. A live run on 2026-08-12 reached for
- * `PRAGMA index_list('a'); PRAGMA index_list('b')` — multi-statement text, refused
- * by the statement guard before the database — because the obvious route to an
- * index inventory is closed and nothing had said which one is open.
- *
- * It also says what to do about an index INSTEAD of comparing plans, and that
- * sentence is the model's half of #356. The verifier now accepts a cited plan in
- * place of a comparison for an index; a rule the model is not told about is a rule
- * live runs fail, which is exactly how the evidence contract failed in #350.
- */
-const SQL_WORKFLOW_TOOL_RULES: Readonly<Record<AgentRunWorkflowType, string>> = Object.freeze({
-  investigation: "Report what the evidence supports, and nothing further.",
-  "query-optimization": [
-    'Read the existing indexes with inspect_schema and kind="indexes" — a multi-statement PRAGMA or SHOW is refused before the database.',
-    "Inspect the plan of the current statement, then of your rewrite, and call compare_plans with the two artifact ids. They must name two different plans.",
-    "An index cannot be compared that way: its second plan would need the index to already exist, and this run creates nothing. Recommend it instead, citing the inspect_plan artifact whose access path the index is meant to change.",
-    "Every plan you can obtain is an ESTIMATE: nothing is executed, and there are no timings. Say so rather than implying a measurement.",
-    "Propose changes with recommend_change. They are offered to the user and never applied by this run.",
-    // The verifier's rule, in the model's own terms — the same #350/#356 move the
-    // `operations` rules make, and the one this workflow was missing. Everything above
-    // describes how the two instruments WORK; none of it says the report is judged on
-    // having used one. Measured across 25 local models, 6 failed on
-    // `no-plan-comparison` with the arc the gate in `tests/evals/query-optimization`
-    // scripts: one `inspect_plan`, then a report. Two evaluated models and
-    // `qwen3.5:9b` produced identical ledgers — a correct diagnosis, and no
-    // `recommend_change` call at all. Stopping after the diagnosis is a reasonable
-    // reading of "explain why it is slow" when nothing has said otherwise, so this
-    // says otherwise, and names both routes because naming the tool is what made the
-    // assessment bar land: a bar phrased as an activity gets satisfied by hand.
-    "One plan on its own answers nothing: before you report, either inspect the plan of your rewrite too and call compare_plans with the two artifact ids, or call recommend_change for an index citing the inspect_plan artifact whose access path it would change.",
-  ].join(" "),
-  "database-assessment": [
-    "Profile the tables that matter with profile_table, deepening only where a shallower profile left a question: basic counts rows and missing values, distribution adds distinct counts, pattern tests for personal-data shapes.",
-    // The verifier's rule, in the model's own terms — the same #350/#356 move the
-    // `operations` rules make below, for the same reason and now on the evidence that
-    // it was needed here too. `verifyDatabaseAssessmentGoal` requires a
-    // `table-profiled` event, and the sentence above it states WHERE to look rather
-    // than what the report is judged by: "profile the tables that matter" reads as
-    // advice a run may take or leave. Measured across 25 local models, 18 failed this
-    // workflow on `no-table-profile`, and five of those composed a report having
-    // called no tool at all — not refusing to profile, just never told a profile was
-    // the condition. There is no honest exception to hedge: profiling an empty table
-    // still produces the event, so a run with a table to profile can always clear it.
-    //
-    // The bar NAMES THE TOOL, and that wording was measured rather than chosen. A first
-    // version said "profile at least one table", which reads as an activity: of the
-    // eight models it was measured on, one satisfied those words by writing
-    // eighteen `run_read_query` count statements by hand, and three more went to
-    // `inspect_schema` — none produced the event the verifier reads, so all four still
-    // failed while believing they had complied. The `operations` rule that works names
-    // its instrument the same way ("everything you read, you read with
-    // inspect_operations"). The second clause is here because a model that composes
-    // counts itself is being diligent, not lazy, and deserves to be told why that does
-    // not clear the bar rather than left to discover it in a verdict.
-    "You must call profile_table on at least one table before you report: this workflow answers with the counts that tool takes, and counts you compose yourself with run_read_query do not establish them.",
-    "Only COUNTS come back. No value is read out of any column, so do not claim what a column contains — claim what its counts show.",
-    "Grade what you find against completeness, uniqueness, consistency and validity, and say which of the four each finding speaks to.",
-  ].join(" "),
-  operations: [
-    // "and no schema inventory was captured for you" until #411, which captures one.
-    // Hedged rather than stated flatly because these rules are the same for every run
-    // of this workflow while the grounding is not. The CAUSE of that moved at #414: it
-    // was the dialect table — `CATALOG_PLANS` served two engines and this workflow
-    // deliberately runs on the others — and it is now a reading that can fail on any
-    // engine, since a dialect with no catalog plan asks its provider instead and
-    // usually gets an inventory. The hedge is unchanged, because an ungrounded
-    // operations run is still an ordinary thing. The per-run truth is in the opening
-    // note, which is built from what this drive actually established.
-    "You have NO SQL in this run: there is no inspect_schema, no run_read_query and no inspect_plan. Where this engine can be read, a schema inventory of table names and their indexes was captured for you before your first turn and the message opening this run says so; it is there to tell you what the engine names back at you.",
-    "Everything you read, you read with inspect_operations.",
-    "Take the readings your objective needs — sessions, slow-queries, table-stats, index-stats, storage, health — one call each, and narrow them with limit or schema rather than asking for everything.",
-    // The verifier's rule, in the model's own terms. A rule the model is never told is
-    // a rule live runs fail (#350, #356), so the bar and its honest exception are both
-    // said here, next to the tools that can satisfy them.
-    "Your report must cite at least one reading you took: this run answers with what the engine said about itself, not with what you expect of a database like this one.",
-    "A reading that comes back EMPTY is an answer, not a failure — no blocked session, no slow query, no unused index is what a healthy server looks like. Cite it and say what it shows.",
-    "If this engine serves no reading of a kind you asked for, you will be told so plainly. Try another kind rather than guessing: a report has to cite a reading you actually took, so a run that takes none can report nothing.",
-    "EVERY READING IS A MOMENT. A session list is who was connected as you looked; a slow-query list is what the engine has accumulated, not what it did today. Say what you saw and when, and never imply you measured a trend or watched something change.",
-    "recommend_change offers the user one index or one rewrite, and nothing else: an operational action — killing a session, vacuuming a table, dropping an index — has no card here, so state it as a claim in your report rather than filing it as a recommendation.",
-  ].join(" "),
-  // The model's half of `agent-data-analysis.1`. The verdict requires an
-  // `answer-composed` event on top of the baseline, so the sentence naming
-  // `present_answer` is what makes that bar reachable — #350's lesson, applied at the
-  // moment the rule is written rather than after a live run fails it. The contract
-  // itself is IMPORTED from the tool layer rather than paraphrased here: two wordings
-  // of one contract is how #350 happened.
-  "data-analysis": [
-    "Answer from data you have READ. The schema tells you where to look; only a result you ran can be the answer.",
-    "profile_table at basic depth is how you tell a fact table from a lookup one, and a date column the business fills from an audit column nobody does: it returns row counts and how many rows have a value, and reads no value out of any column. Go deeper only if a basic profile leaves a question.",
-    "When you have the answer, call present_answer with the artifact id of the read that IS the answer.",
-    // The tool layer's `isStatementReadOperation` rule in `presentAnswerTool`, in the model's terms (#350). A plan
-    // step carries a drafted statement and settles like any other, so nothing in what
-    // the model sees distinguishes a plan artifact from a read one; a rule enforced
-    // only by a refusal is a rule the model meets by spending a turn on it.
-    "Only a result of run_read_query can be presented: a plan describes a statement without running it, and a profile counts a table rather than answering the question. Cite either as evidence, but present a read.",
-    "A chart names columns of THAT result: they are checked against the result's real column names and refused if they do not match.",
-    AGENT_ANSWER_CONTRACT,
-    "Then call compose_report. The presentation shows the result; the claims are what say what it means.",
-    // The third arm of `agent-data-analysis.1`, in the model's own terms. The verdict
-    // now requires the report to be ABOUT the result presented, and the model holds the
-    // id it needs — it passed that id to `present_answer` one turn earlier and was
-    // answered with it. A rule the model is never told is a rule live runs fail (#350).
-    "At least one of those claims must cite the artifact you presented: a report about other evidence entirely is prose beside a picture, and the run is scored as not having answered.",
-  ].join(" "),
-} satisfies Record<AgentRunWorkflowType, string>);
-
-/**
- * How a MongoDB command spells a collection the inventory names. The inventory names each collection by its database
- * and its name (`app.orders`), while a command's `collection` is the name alone: written whole, `app.orders` is a
- * collection of that name inside the connection's database, which does not exist, and a read of it returns nothing
- * rather than an error, so nothing would tell the run its spelling was wrong.
- */
-const MONGO_COLLECTION_RULE =
-  'The inventory names each collection with its database in front, as in app.orders; a command names the collection alone, as in "collection": "orders", and reads the database this run\'s connection is bound to.';
-
-/**
- * How a command reads a field's value, said beside the collection rule because the server cannot say it: a model that
- * wrote `{"$sum": "total"}` was answered 0 for every group, since `$sum` ignores a string, and nothing refused it.
- */
-const MONGO_FIELD_PATH_RULE =
-  'Where an aggregation reads a field\'s value, as $group and $project do, write "$<field>", with the dollar sign, as in {"$sum": "$total"}: a bare "total" is the string itself, which $sum ignores, so the sum reads 0. A filter, in a find or a $match stage, names its fields without the dollar sign.';
-
-/**
- * The tool rules by language, then by workflow. The SQL record is total, as above. A language holds rules for the
- * workflows it has a variant of, and no more: `systemPrompt` throws for an agent-mode run whose language has none,
- * which `requiredVariant` would already have refused. `operations` sends no statement in any language, so its
- * rules are the SQL ones, shared rather than restated.
- *
- * The kubectl investigation names what the redaction removes, because a model told nothing would read `<redacted>`
- * as the value and report it, or guess at it: the honest claim is that the value was not available to the run.
- *
- * Exported so `tests/unit/lib/agent/tool-offer-census.test.ts` can hold every rule to the tools its variant offers:
- * a rule naming a tool the run does not hold costs the run a turn on "there is no tool called ..." (#350).
- */
-export const WORKFLOW_TOOL_RULES: Readonly<
-  Record<AgentStatementLanguageId, Readonly<Partial<Record<AgentRunWorkflowType, string>>>>
-> = Object.freeze({
-  sql: SQL_WORKFLOW_TOOL_RULES,
-  kubectl: Object.freeze({
-    investigation: [
-      "Read the cluster with run_read_query, one kubectl statement at a time: get, describe, logs, top, events, api-resources, explain and auth can-i are the reads there are.",
-      "Narrow every read to what the question needs with -n, -l or --field-selector: a read past the row budget is refused, never cut.",
-      "Some values never reach you: env values, annotation values, ConfigMap data, a container's command and args, and Secret names and values read as <redacted>. Say so where it matters rather than guessing what they hold.",
-      "Report what the evidence supports, and nothing further.",
-    ].join(" "),
-    "query-optimization": [
-      "Read usage with inspect_usage on the namespace in question, narrowed by a label selector where the objective names a workload: one row per container, its CPU and memory use against its requests and limits.",
-      "Usage is metrics-server's latest sample, a moment and not a history. Say so, and never claim a trend.",
-      'Before you report, either call recommend_change with change "resources" for a container whose requests or limits do not fit what it uses, citing the inspect_usage artifact, or, if every container is sized sensibly, report that nothing needs to change and cite the inspect_usage artifact.',
-      "A recommendation is offered to the user and never applied by this run.",
-      "If the cluster serves no usage metrics, say so: install metrics-server to measure usage. Do not estimate usage from anything else.",
-    ].join(" "),
-    "database-assessment": [
-      "You must call profile_workloads on the namespace before you report: this workflow answers with the profile that tool takes, and reads you compose yourself with run_read_query do not establish it.",
-      "Grade what you find: workloads not ready or missing pods, restarts and why they ended, containers without requests, limits or probes, and the Warning events. Say which workload each finding is about.",
-      "Restart counts are cumulative since each container started, not a rate: never present one as recent.",
-      "A namespace with no workloads is an answer: cite the profile and say so.",
-      "Use run_read_query (describe, logs, events) to explain what the profile shows.",
-    ].join(" "),
-    operations: SQL_WORKFLOW_TOOL_RULES.operations,
-    // The SQL analysis rules less the profile, which a cluster has no table for, and with the chart rule said up
-    // front: most kubectl cells are text, which a chart refuses as not numeric, though a server-side Table's integer
-    // columns (a Deployment's Up-to-date and Available, a ReplicaSet's Desired, Current and Ready) can be charted.
-    "data-analysis": [
-      "Answer from what you have READ with run_read_query: only a result you ran can be the answer.",
-      "When you have it, call present_answer with the artifact id of the read that IS the answer. Most kubectl columns are text, so present the read as a table unless the columns you would chart are numeric, such as a Deployment's Up-to-date and Available counts.",
-      AGENT_ANSWER_CONTRACT,
-      "Then call compose_report. The presentation shows the result; the claims are what say what it means.",
-      "At least one of those claims must cite the artifact you presented: a report about other evidence entirely is prose beside a picture, and the run is scored as not having answered.",
-    ].join(" "),
-  }),
-  /**
-   * The MongoDB tool rules: the read-class four exist here, so the rules say how THIS engine spells them - the
-   * command envelope rather than SQL, the aggregation that stands in for a GROUP BY, and the sample-inferred
-   * schema the inventory carries, which is the one honest limit a MongoDB run is told about its own grounding.
-   * Every workflow that writes a command is told how a collection is spelled in one (`MONGO_COLLECTION_RULE`) and how
-   * it reads a field (`MONGO_FIELD_PATH_RULE`).
-   */
-  mongo: Object.freeze({
-    investigation: [
-      "Read the database with run_read_query, one command envelope at a time: find, findOne, aggregate, count and distinct are the reads there are, each as JSON.",
-      MONGO_COLLECTION_RULE,
-      MONGO_FIELD_PATH_RULE,
-      "Narrow every read to what the question needs with a filter, or a $match stage before any $group: a read past the row budget is refused, never cut.",
-      "A pipeline stage that writes ($out, $merge) is refused, as is any write operation: this run reads and reports, and what it establishes goes into the report.",
-      "The schema inventory was sampled from documents, not declared: a field the sample never saw is absent from it, so say what you read rather than what the schema implies.",
-      "Report what the evidence supports, and nothing further.",
-    ].join(" "),
-    // Built around the two routes `agent-query-optimization-mongo.1` accepts: an index recommended because of a plan
-    // it inspected, or a report citing a plan that already uses an index. It names no comparison, because the variant
-    // offers none (`agent-manifest.ts` says why).
-    "query-optimization": [
-      "inspect_plan runs the explain command at queryPlanner verbosity: it answers with the plan the engine would choose for a command and returns none of its documents, and where several plans are candidates the engine tries each for a bounded trial, under the same deadline your reads have.",
-      "What a plan names is this engine's own vocabulary - COLLSCAN, IXSCAN, the index it chose - and that is what an index changes.",
-      "Before you report, read the plan: if it scans the whole collection (COLLSCAN), call recommend_change for an index citing the inspect_plan artifact whose access path it would change; if it already reaches its documents through an index (IXSCAN), nothing needs to change, so recommend nothing and cite that inspect_plan artifact in a claim that says so. Never recommend an index the collection already has. A different filter or a different shape of the command is a finding for your report, not a card.",
-      "Every plan you can obtain is an estimate with no timings in it. Say so rather than implying a measurement.",
-      "recommend_change offers the index to the user and never creates it: this run is read-only by construction.",
-      MONGO_COLLECTION_RULE,
-      MONGO_FIELD_PATH_RULE,
-    ].join(" "),
-    "database-assessment": [
-      "You must call profile_table on at least one collection before you report: this workflow answers with the counts that tool takes, and counts you compose yourself with run_read_query do not establish them.",
-      "Only COUNTS come back. No value is read out of any field, so do not claim what a field contains — claim what its counts show.",
-      "MongoDB declares no foreign keys and no nullability: a field may be absent or null, and the profile's counts are the honest way to tell which is which.",
-      "Grade what you find against completeness, uniqueness, consistency and validity, and say which of the four each finding speaks to.",
-      MONGO_COLLECTION_RULE,
-      MONGO_FIELD_PATH_RULE,
-    ].join(" "),
-    operations: SQL_WORKFLOW_TOOL_RULES.operations,
-    "data-analysis": [
-      "Answer from data you have READ. The schema inventory tells you where to look; only a result you ran can be the answer.",
-      MONGO_COLLECTION_RULE,
-      MONGO_FIELD_PATH_RULE,
-      "profile_table at basic depth tells a large collection from a small one, and a field the documents fill from one they do not: it returns document counts and how many documents have a value, and reads no value out of any field.",
-      "When you have the answer, call present_answer with the artifact id of the read that IS the answer.",
-      "Only a result of run_read_query can be presented: a plan returns none of the command's documents, and a profile counts a collection rather than answering the question. Cite either as evidence, but present a read.",
-      "A chart names columns of THAT result: they are checked against the result's real column names and refused if they do not match.",
-      AGENT_ANSWER_CONTRACT,
-      "Then call compose_report. The presentation shows the result; the claims are what say what it means.",
-      "At least one of those claims must cite the artifact you presented: a report about other evidence entirely is prose beside a picture, and the run is scored as not having answered.",
-    ].join(" "),
-  }),
-} satisfies Record<AgentStatementLanguageId, Partial<Record<AgentRunWorkflowType, string>>>);
-
 /** The tool rules an agent-mode run is given. A language with no rules for the workflow is an error, never silence. */
 function workflowToolRules(record: AgentRunRecord): string {
   const language = record.statementLanguage ?? "sql";
-  const rules: Partial<Record<AgentRunWorkflowType, string>> = WORKFLOW_TOOL_RULES[language];
+  const rules: Partial<Record<AgentRunWorkflowType, string>> = agentLanguagePack(language).server.workflowToolRules;
   const own = Object.hasOwn(rules, record.workflowType) ? rules[record.workflowType] : undefined;
   if (own === undefined) throw new Error(`no tool rules for ${record.workflowType} on ${language}`);
   return own;
@@ -2012,65 +1689,10 @@ const snapshotHandoverText = (fingerprint: string): string =>
   `Cite that inventory in a claim as ${citeSnapshot(fingerprint)}.`;
 
 /**
- * What to do about the tables the packing left out, said only where it can be done.
- *
- * The omission notice is `packContextForTask`'s, and until #411 it ended with this
- * sentence unconditionally — including in plan mode, which holds no tools at all, and
- * for an operations run, which holds no `inspect_schema`. A rule stated to a run whose
- * tool set cannot satisfy it is the #350 failure, so the sentence lives with the
- * caller that knows its own tool set and is passed in by that caller alone.
+ * The SQL omission advice (`INSPECT_SCHEMA_OMISSION_ADVICE` in `languages/sql/server.ts`) for the relations block,
+ * whose selector is a kind rather than a table.
  */
-const INSPECT_SCHEMA_OMISSION_ADVICE = "Call inspect_schema with a table selector to read any of them.";
-
-/** The same sentence for the relations block, whose selector is a kind rather than a table. */
 const INSPECT_SCHEMA_RELATIONS_OMISSION_ADVICE = 'Call inspect_schema with kind="relations" for them.';
-
-/**
- * How an agent-mode run of each language is grounded in words its own tools can act on.
- *
- * `omissionAdvice` names the tool that reads what the packing left out: `inspect_schema` on SQL, and on kubectl,
- * which holds no `inspect_schema`, a `run_read_query` get. `relations` says whether the relations block is shown at
- * all: a cluster declares no foreign keys, and the block's own omission advice names `inspect_schema` again.
- * `ungrounded` replaces the capture's own advice where the run cannot be ungrounded in the capture's words, which
- * send a model to `inspect_schema`; absent, the capture's text is forwarded as it always was. The diagnosis is
- * passed through as-is, joined with a newline, for the reasons `operationsUngroundedNote` records.
- */
-const GROUNDING_COPY: Readonly<
-  Record<
-    AgentStatementLanguageId,
-    {
-      readonly omissionAdvice: string;
-      readonly relations: boolean;
-      readonly ungrounded?: (detail: string, noun: AgentInventoryNoun) => string;
-      /**
-       * The language's engine declares no fields, so its inventory's are inferred from sampled documents and a field
-       * every sample held is no constraint: the packing then states no NOT NULL (`packContextForTask`).
-       */
-      readonly sampledFields?: boolean;
-      /** What a plan-mode draft in this language is told on top of the shared contract (`planningStatementContract`). */
-      readonly planningRules?: readonly string[];
-    }
-  >
-> = Object.freeze({
-  sql: { omissionAdvice: INSPECT_SCHEMA_OMISSION_ADVICE, relations: true },
-  kubectl: {
-    omissionAdvice: "Read any of them with run_read_query, for example get TYPE NAME -n NAMESPACE.",
-    relations: false,
-    ungrounded: (detail: string, noun: AgentInventoryNoun) =>
-      `${detail}\nSo nothing about this cluster has been established for you: not one ${noun.singular} name. Read what you need with run_read_query, starting with get on the kinds your objective names.`,
-  },
-  /**
-   * MongoDB holds `inspect_schema` (its catalog arm reads the provider's own inventory), so its omission advice
-   * names that tool the way SQL's does. `relations` is false because MongoDB declares no foreign keys, and a
-   * relations block that can only ever be empty is a block the model reads as a claim of absence it cannot check.
-   */
-  mongo: {
-    omissionAdvice: "Ask inspect_schema for the collection to list its fields.",
-    relations: false,
-    sampledFields: true,
-    planningRules: [MONGO_COLLECTION_RULE],
-  },
-});
 
 /**
  * The packed inventory, with the sentence that says how to cite it in front of it.
@@ -2080,7 +1702,7 @@ const GROUNDING_COPY: Readonly<
  *
  * Every agent-mode caller of this holds a tool that reads what the packing left out (the
  * one workflow that does not, `operations`, goes through `packOperationsInventory` instead),
- * so the caller passes the advice for its own language's tool (`GROUNDING_COPY`).
+ * so the caller passes the advice for its own language's tool (its pack's `grounding`).
  */
 function packSnapshotMessage(
   snapshot: AgentContextSnapshot,
@@ -3474,7 +3096,7 @@ export async function runInvestigation(
             record.objective,
             readBy,
             engine.noun,
-            GROUNDING_COPY[record.statementLanguage ?? "sql"].sampledFields === true,
+            agentLanguagePack(record.statementLanguage ?? "sql").server.grounding.sampledFields === true,
           ),
         });
         messages.push({
@@ -3555,7 +3177,7 @@ export async function runInvestigation(
         return;
       }
       // The words this run is grounded in are its language's: a kubectl run holds no `inspect_schema` to name.
-      const languageGrounding = GROUNDING_COPY[record.statementLanguage ?? "sql"];
+      const languageGrounding = agentLanguagePack(record.statementLanguage ?? "sql").server.grounding;
 
       /**
        * The inventory, as THIS workflow is shown it.
@@ -3772,7 +3394,7 @@ export async function runInvestigation(
     const announceUsageBar = async (): Promise<void> => {
       if (!usageBarDue || usageBarAnnounced) return;
       usageBarAnnounced = true;
-      messages.push({ role: "user", content: notice(AGENT_USAGE_BAR_NOTICE) });
+      messages.push({ role: "user", content: notice(LANGUAGE_USAGE_BAR_NOTICE) });
       await issueGuidance("usage-bar");
     };
 

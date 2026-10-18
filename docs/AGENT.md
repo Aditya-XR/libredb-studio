@@ -1096,7 +1096,7 @@ A plan run and an operations run open their connection under `agent-operations`,
 The model passes it as `command`, a JSON object rather than text, in the editor's envelope: `collection`, `operation` (`find`, `findOne`, `aggregate`, `count` or `distinct`), and the `filter`, `pipeline`, `field` and `options` that operation reads.
 The server writes it out once, in the order the model wrote its keys (the language's `canonicalize` in `src/lib/agent/languages/mongo/adapter.ts`), so a sort runs in that order and the fence, the provider, the ledger and the repair ledger read one text; the ledger's own fields, `statement-drafted.sql` and `answer-composed.sql`, keep their names.
 The collection is named bare, `orders` for an inventory entry `app.orders`: the run reads the database its connection is bound to (`getDatabaseName()`), a `database` key naming that one is read there, and one naming any other is refused before anything is sent, with a sentence naming the bound one.
-The rules also tell every workflow that writes a command that an aggregation reads a field as `"$<field>"` while a filter names it bare (`MONGO_FIELD_PATH_RULE` in `src/lib/agent/investigation.ts`), because no refusal can catch the slip: `{"$sum": "total"}` is a valid read whose sum is 0, which a real model sent and reported on the browser pass of #1614.
+The rules also tell every workflow that writes a command that an aggregation reads a field as `"$<field>"` while a filter names it bare (`MONGO_FIELD_PATH_RULE` in `src/lib/agent/languages/mongo/server.ts`), because no refusal can catch the slip: `{"$sum": "total"}` is a valid read whose sum is 0, which a real model sent and reported on the browser pass of #1614.
 The fence is the command reader the provider reads with too (`readMongoCommand` in `src/lib/db/providers/document/mongodb/envelope.ts`): it admits the five reads with only the keys each one honours, and refuses, with a sentence naming what to send instead, a write, a pipeline stage that writes (`$out`, `$merge`), the diagnostic and session stages, `$where`, `$function` and `$accumulator` wherever they sit, every internal `$_` operator, and a model's command past 4,096 characters (`src/lib/db/operations/mongo-admission.ts`).
 It is defence in depth: the user is the boundary, and the reader is the one refusal of what the server lets a reader run, such as the JavaScript operators.
 A read past the row budget is refused, never cut, with advice that names what that operation narrows with: a filter or `"options": {"limit": N}` for `find`, a `$match` or a `$limit` stage for `aggregate`.
@@ -1422,7 +1422,7 @@ slow query is recorded", "no index is unused" are answers, and they are the answ
 gives. A run that composed nothing is `no-report`, and a cancelled one says so instead.
 
 The citation half of the rule — *your report must cite a reading you took* — is told to the model in
-`WORKFLOW_TOOL_RULES`, and until #411 it was enforced where it could actually fail rather than judged
+`OPERATIONS_TOOL_RULE` (`src/lib/agent/languages/shared.ts`), and until #411 it was enforced where it could actually fail rather than judged
 afterwards: `composeReportTool` refuses any claim whose evidence does not name something this run
 produced, and the only citable thing an operations run could produce WAS a reading (it is offered no
 other tool that settles a step, and it captured no schema snapshot). A verifier arm for "cited no

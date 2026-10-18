@@ -3,6 +3,8 @@
  */
 import type { ClusterUsageInput } from "@/lib/db/types";
 import type { AgentStatementLanguageId } from "../agent-manifest";
+import type { AgentGoalShortfall } from "../goal-verifier";
+import type { AgentInventoryNoun } from "../inventory-noun";
 import type { PlanStatementIdentifiers } from "../plan-statement";
 import type { AgentProfileDepth } from "../table-profile";
 import type { z } from "zod";
@@ -71,6 +73,63 @@ export interface AgentRecommendationCard<
   record(events: readonly AgentRunEvent[], card: Card): AgentRecommendationOutcome;
 }
 
+/**
+ * How an agent-mode run of a language is grounded in words its own tools can act on.
+ *
+ * `omissionAdvice` names the tool that reads what the packing left out: `inspect_schema` on SQL, and on kubectl,
+ * which holds no `inspect_schema`, a `run_read_query` get. `relations` says whether the relations block is shown at
+ * all: a cluster declares no foreign keys, and the block's own omission advice names `inspect_schema` again.
+ * `ungrounded` replaces the capture's own advice where the run cannot be ungrounded in the capture's words, which
+ * send a model to `inspect_schema`; absent, the capture's text is forwarded as it always was. The diagnosis is
+ * passed through as-is, joined with a newline, for the reasons `operationsUngroundedNote` records.
+ */
+export interface AgentLanguageGrounding {
+  readonly omissionAdvice: string;
+  readonly relations: boolean;
+  readonly ungrounded?: (detail: string, noun: AgentInventoryNoun) => string;
+  /**
+   * The language's engine declares no fields, so its inventory's are inferred from sampled documents and a field
+   * every sample held is no constraint: the packing then states no NOT NULL (`packContextForTask`).
+   */
+  readonly sampledFields?: boolean;
+  /** What a plan-mode draft in this language is told on top of the shared contract (`planningStatementContract`). */
+  readonly planningRules?: readonly string[];
+}
+
+/** What a run is told about a shortfall, and whether it is narrowed to its verdict's tools while it acts on it. */
+export interface ShortfallAdvice {
+  readonly said: string;
+  /**
+   * Whether narrowing the run to its verdict's tools would HELP this shortfall.
+   *
+   * False wherever the fix lies outside that set, and an eval caught the case immediately:
+   * the answer to `no-plan-evidence` is to call `inspect_plan`, which is a READING tool and
+   * so not among the tools the optimization verdict accepts. Narrowing there would have
+   * removed the very tool this notice asks for — telling a run to do something and taking
+   * away its means of doing it, which is the shape of mistake this file has already paid
+   * for twice.
+   */
+  readonly narrow: boolean;
+}
+
+/**
+ * What the run holds and calls things, as a shortfall notice needs it: the plans it inspected, oldest first, whether it
+ * is offered `compare_plans` at all, and what its language calls one unit it sends.
+ */
+export interface ShortfallContext {
+  readonly plans: readonly string[];
+  readonly readingsHeld: number;
+  readonly holdsPresentable: boolean;
+  readonly holdsCompare: boolean;
+  readonly noun: string;
+}
+
+/**
+ * One shortfall's notice: the advice for a report about to be refused, from the table it spoke of and what the run
+ * holds, or null where this shortfall cannot honestly be asked about on this run.
+ */
+export type ShortfallNotice = (table: string | undefined, context: ShortfallContext) => ShortfallAdvice | null;
+
 /** What a language does on the server, below `tools.ts`. Reached through `languageServerPack` in `server.ts`. */
 export interface AgentLanguageServerPack {
   readonly adapter: AgentLanguageServerAdapter;
@@ -100,6 +159,24 @@ export interface AgentLanguageServerPack {
   readonly catalogAdvice?: (message: string, engine: string) => string | undefined;
   /** The card this language's `recommend_change` offers instead of the statement card. Absent for SQL. */
   readonly recommendationCard?: AgentRecommendationCard;
+  /** How an agent-mode run of this language is grounded in words its own tools can act on. */
+  readonly grounding: AgentLanguageGrounding;
+  /**
+   * The tool rules by workflow, for the workflows this language has a variant of and no more. Read through
+   * `workflowToolRules` in `investigation.ts`, which throws for a workflow the record does not hold.
+   */
+  readonly workflowToolRules: Readonly<Partial<Record<AgentRunWorkflowType, string>>>;
+  /**
+   * The shortfall notices only this language's verdicts call for. Global by shortfall: merged into
+   * `LANGUAGE_SHORTFALL_NOTICES` in `server.ts`, and with the core's in `investigation.ts`, where a shortfall two
+   * owners both speak for fails at load.
+   */
+  readonly shortfallNotices: Readonly<Partial<Record<AgentGoalShortfall, ShortfallNotice>>>;
+  /**
+   * What a run is told the moment it holds a usage reading, for the one language whose workflow is judged on one.
+   * Read through `LANGUAGE_USAGE_BAR_NOTICE` in `server.ts`, which exactly one pack supplies.
+   */
+  readonly usageBarNotice?: string;
 }
 
 /** A catalog arm: the selector it parses, and the read. `snapshot` is the inventory this run captured, or null. */

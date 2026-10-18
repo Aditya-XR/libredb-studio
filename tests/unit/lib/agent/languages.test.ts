@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { mergeDisjoint } from "@/lib/agent/disjoint-merge";
 import { AGENT_EVIDENCE_TOOLS, LANGUAGE_TOOL_ARMS, agentLanguagePack } from "@/lib/agent/languages/index";
-import { LANGUAGE_BASE_DEFINITIONS, languageServer, languageServerPack } from "@/lib/agent/languages/server";
+import {
+  LANGUAGE_BASE_DEFINITIONS,
+  LANGUAGE_SHORTFALL_NOTICES,
+  LANGUAGE_USAGE_BAR_NOTICE,
+  WORKFLOW_TOOL_RULES,
+  languageServer,
+  languageServerPack,
+} from "@/lib/agent/languages/server";
+import { OPERATIONS_TOOL_RULE } from "@/lib/agent/languages/shared";
 import { READING_REFUSAL_TEXT, UNAVAILABLE_TEXT } from "@/lib/agent/tool-contracts";
 import { AGENT_TOOL_DEFINITIONS, type AgentToolUnavailableCode, agentToolDefinition } from "@/lib/agent/tools";
 import type { AgentReadingDenyCode } from "@/lib/agent/types";
@@ -220,5 +228,47 @@ describe("the language packs", () => {
     );
     expect(AGENT_EVIDENCE_TOOLS.inspect_usage.event).toBe("usage-read");
     expect(AGENT_EVIDENCE_TOOLS.profile_workloads.event).toBe("workloads-profiled");
+  });
+});
+
+describe("the prompt tables the packs hold", () => {
+  const ids = Object.keys(LANGUAGE_IDS) as AgentStatementLanguageId[];
+
+  test("exactly one pack supplies the usage bar, and it is kubectl's", () => {
+    expect(ids.filter((id) => languageServerPack(id).usageBarNotice !== undefined)).toEqual(["kubectl"]);
+    expect(LANGUAGE_USAGE_BAR_NOTICE).toBe(languageServerPack("kubectl").usageBarNotice as string);
+  });
+
+  test("the workflow rules projection holds each pack's own frozen record, in the order the packs are declared", () => {
+    expect(Object.keys(WORKFLOW_TOOL_RULES)).toEqual(["sql", "kubectl", "mongo"]);
+    expect(Object.isFrozen(WORKFLOW_TOOL_RULES)).toBe(true);
+    for (const id of ids) {
+      expect(WORKFLOW_TOOL_RULES[id]).toBe(languageServerPack(id).workflowToolRules);
+      expect(Object.isFrozen(WORKFLOW_TOOL_RULES[id])).toBe(true);
+      // `operations` sends no statement in any language, so every pack holds the one shared rule.
+      expect(WORKFLOW_TOOL_RULES[id].operations).toBe(OPERATIONS_TOOL_RULE);
+    }
+  });
+
+  test("the language shortfall notices are kubectl's three and MongoDB's one, and SQL adds none", () => {
+    expect(Object.keys(languageServerPack("sql").shortfallNotices)).toEqual([]);
+    expect(Object.keys(LANGUAGE_SHORTFALL_NOTICES)).toEqual([
+      "no-usage-reading",
+      "no-usage-evidence",
+      "no-workload-profile",
+      "no-plan-cited",
+    ]);
+    expect(Object.isFrozen(LANGUAGE_SHORTFALL_NOTICES)).toBe(true);
+  });
+
+  test("each pack grounds a run in its own tools' words, and only MongoDB adds planning rules", () => {
+    for (const id of ids) expect(Object.isFrozen(languageServerPack(id).grounding)).toBe(true);
+    expect(languageServerPack("sql").grounding.relations).toBe(true);
+    expect(languageServerPack("kubectl").grounding.relations).toBe(false);
+    expect(languageServerPack("mongo").grounding.relations).toBe(false);
+    expect(languageServerPack("sql").grounding.planningRules).toBeUndefined();
+    expect(languageServerPack("kubectl").grounding.planningRules).toBeUndefined();
+    const [collectionRule] = languageServerPack("mongo").grounding.planningRules ?? [];
+    expect(WORKFLOW_TOOL_RULES.mongo.investigation).toContain(collectionRule as string);
   });
 });

@@ -12,9 +12,8 @@ import {
   AGENT_WORKFLOW_VARIANTS,
   type AgentStatementLanguageId,
 } from "@/lib/agent/agent-manifest";
-import { WORKFLOW_TOOL_RULES } from "@/lib/agent/investigation";
 import { LANGUAGE_TOOL_ARMS } from "@/lib/agent/languages/index";
-import { languageServer } from "@/lib/agent/languages/server";
+import { languageServer, WORKFLOW_TOOL_RULES } from "@/lib/agent/languages/server";
 import { AGENT_TOOL_DEFINITIONS, type AgentToolName, agentToolDefinition } from "@/lib/agent/tools";
 import type { AgentRunWorkflowType } from "@/lib/agent/types";
 import { createCanonicalOperationRegistry, isStatementReadOperation } from "@/lib/db/operations/descriptors";

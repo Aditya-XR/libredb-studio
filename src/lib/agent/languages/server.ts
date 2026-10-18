@@ -14,6 +14,7 @@
  */
 import type { AgentStatementLanguageId } from "../agent-manifest";
 import { mergeDisjoint } from "../disjoint-merge";
+import type { AgentRunWorkflowType } from "../types";
 import { KUBECTL_SERVER_PACK } from "./kubectl/server";
 import { MONGO_SERVER_PACK } from "./mongo/server";
 import type { AgentLanguageServerAdapter, AgentLanguageServerPack } from "./pack";
@@ -45,3 +46,36 @@ export const LANGUAGE_BASE_DEFINITIONS = mergeDisjoint(
   [SQL_SERVER_PACK.baseDefinitions, KUBECTL_SERVER_PACK.baseDefinitions, MONGO_SERVER_PACK.baseDefinitions],
   "LANGUAGE_BASE_DEFINITIONS",
 );
+
+/**
+ * The tool rules by language, then by workflow: each pack's own record, the very object it holds. The SQL record
+ * is total. A language holds rules for the workflows it has a variant of, and no more: `systemPrompt` throws for an
+ * agent-mode run whose language has none, which `requiredVariant` would already have refused. `operations` sends no
+ * statement in any language, so every pack holds the SQL rules for it, `OPERATIONS_TOOL_RULE` in `shared.ts`.
+ *
+ * Exported so `tests/unit/lib/agent/tool-offer-census.test.ts` can hold every rule to the tools its variant offers:
+ * a rule naming a tool the run does not hold costs the run a turn on "there is no tool called ..." (#350).
+ */
+export const WORKFLOW_TOOL_RULES: Readonly<
+  Record<AgentStatementLanguageId, Readonly<Partial<Record<AgentRunWorkflowType, string>>>>
+> = Object.freeze({
+  sql: SQL_SERVER_PACK.workflowToolRules,
+  kubectl: KUBECTL_SERVER_PACK.workflowToolRules,
+  mongo: MONGO_SERVER_PACK.workflowToolRules,
+} satisfies Record<AgentStatementLanguageId, Partial<Record<AgentRunWorkflowType, string>>>);
+
+/**
+ * Every pack's shortfall notices. Global by shortfall, because a resumed run is judged by its persisted verdict
+ * whatever its language, and a shortfall two packs both speak for fails at load.
+ */
+export const LANGUAGE_SHORTFALL_NOTICES = mergeDisjoint(
+  [SQL_SERVER_PACK.shortfallNotices, KUBECTL_SERVER_PACK.shortfallNotices, MONGO_SERVER_PACK.shortfallNotices],
+  "LANGUAGE_SHORTFALL_NOTICES",
+);
+
+/**
+ * What a run is told the moment it holds a usage reading. kubectl is the one pack that supplies it, which
+ * `tests/unit/lib/agent/languages.test.ts` holds, so the run loop reads it here, beside the bar's trigger, which is
+ * core vocabulary: a held tool and a ledger event kind.
+ */
+export const LANGUAGE_USAGE_BAR_NOTICE: string = KUBECTL_SERVER_PACK.usageBarNotice;

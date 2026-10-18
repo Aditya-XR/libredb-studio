@@ -31,13 +31,13 @@ import { forgetHeldSnapshots } from "@/lib/agent/context-snapshot";
 import { AgentRunDeadline } from "@/lib/agent/deadline";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { verifyRunGoal } from "@/lib/agent/goal-verifier";
-import { DATABASE_TOOL_HANDLERS, runInvestigation, WORKFLOW_TOOL_RULES } from "@/lib/agent/investigation";
+import { DATABASE_TOOL_HANDLERS, runInvestigation } from "@/lib/agent/investigation";
 import { agentPosture, autoExecuteTerms } from "@/lib/agent/posture";
 import { promptedToolContract } from "@/lib/agent/prompted-tools";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import { AgentRunService } from "@/lib/agent/run-service";
 import { AgentRunStore } from "@/lib/agent/run-store";
-import { languageServer } from "@/lib/agent/languages/server";
+import { languageServer, WORKFLOW_TOOL_RULES } from "@/lib/agent/languages/server";
 import { type AgentToolContext, presentAnswerTool, recommendChangeTool, selectAgentTools } from "@/lib/agent/tools";
 import type {
   AgentArtifactReference,

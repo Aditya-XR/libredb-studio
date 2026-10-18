@@ -400,7 +400,7 @@ Making it optional the way `activeConnections` already is touches every provider
 
 **The other path swallows instead of fabricating, and that is not better.**
 On the `slow-queries` reading the agent actually uses, `getSlowQueries()` in `src/lib/db/providers/keyvalue/redis.ts` and `getSlowQueries()` in `src/lib/db/providers/document/mongodb/index.ts` `return []` from their catch where MySQL now rejects.
-So a denied grant reaches the model as an empty reading, and the run prompt tells it `"A reading that comes back EMPTY is an answer, not a failure - no blocked session, no slow query, no unused index is what a healthy server looks like"` (`WORKFLOW_TOOL_RULES` in `src/lib/agent/investigation.ts`).
+So a denied grant reaches the model as an empty reading, and the run prompt tells it `"A reading that comes back EMPTY is an answer, not a failure - no blocked session, no slow query, no unused index is what a healthy server looks like"` (`OPERATIONS_TOOL_RULE` in `src/lib/agent/languages/shared.ts`).
 It also costs the operator the reason: `getMonitoringData()` in `src/lib/db/base-provider.ts` records `errors.slowQueries` from a REJECTION, and a resolved `[]` records nothing, so the panel says "no slow queries" where the truth is that the profiler is off.
 
 **Done when:** a slow-query source that could not be read is absent-with-a-reason on both paths - no
@@ -7677,7 +7677,7 @@ Found 2026-10-14 while building the statement-language layer.
 ### B112. A run's persisted workflow type is never checked when the ledger is read
 
 `foldLedger` in `src/lib/agent/run-store.ts` takes `workflowType` from the ledger as written, defaulting only a missing one, and no check asks whether the value is a workflow Studio knows.
-Five plain-object tables are then indexed with it: `WORKFLOW_TOOL_RULES` (`src/lib/agent/investigation.ts`), `AGENT_WORKFLOW_PRESENTS_ANSWER` (`src/lib/agent/types.ts`), `AGENT_WORKFLOW_BUDGETS` (`src/lib/agent/execution-policy.ts`), `WORKFLOW_DETAIL` (`src/lib/agent/er-diagram.ts`) and `AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION` (`src/lib/agent/tools.ts`).
+Five plain-object tables are then indexed with it: `WORKFLOW_TOOL_RULES` (`src/lib/agent/languages/server.ts`), `AGENT_WORKFLOW_PRESENTS_ANSWER` (`src/lib/agent/types.ts`), `AGENT_WORKFLOW_BUDGETS` (`src/lib/agent/execution-policy.ts`), `WORKFLOW_DETAIL` (`src/lib/agent/er-diagram.ts`) and `AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION` (`src/lib/agent/tools.ts`).
 A ledger carrying an unknown or renamed workflow reads `undefined` from each: the boolean tables take it for false, and a budget read such as `runDeadlineMs` fails as a `TypeError` with no name for the cause.
 The workflow-variant lookup (`agentVariant` in `src/lib/agent/agent-manifest.ts`) guards its own index against an inherited name such as `toString`; these five tables do not.
 Found 2026-10-14 while building agent execution on Kubernetes.
