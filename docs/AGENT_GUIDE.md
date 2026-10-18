@@ -344,7 +344,7 @@ establishes (the investigation variant's `objective` in `AGENT_WORKFLOW_VARIANTS
 Tools: `inspect_schema`, `run_read_query`, `inspect_plan`, `compose_report` (the same variant's `tools`).
 
 **Answered when** the run composed at least one claim and the claims do not rest entirely on empty
-results (`verifyInvestigationGoal`, `src/lib/agent/goal-verifier.ts:349-355`).
+results (`verifyInvestigationGoal`, `src/lib/agent/goal-claims.ts:76-83`).
 
 ### Optimize
 
@@ -727,7 +727,7 @@ finished. What it had gathered is above."*
 
 **The shortfall wins over the ending in both modes** (`describeEnding`, `timeline.ts:604-624`), and
 one ending is where that matters. When the model simply stops, an **Agent** run that composed no
-claims also carries the `no-report` shortfall (`verifyInvestigationGoal`, `goal-verifier.ts:283`), so
+claims also carries the `no-report` shortfall (`verifyInvestigationGoal`, `goal-claims.ts:81`), so
 the sentence you actually read is the shortfall one — *"The run finished without composing a cited
 report, so nothing it found was written down."* The stop sentence for that ending, *"The model
 stopped without composing a cited report."*, is what a run whose ledger carries **no verdict at all**

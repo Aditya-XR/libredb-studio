@@ -400,10 +400,13 @@ describe("the agent core names no language a pack owns", () => {
   });
 });
 
+// A test that walks the import graph of the whole repository (these two and the four tier plants below) takes
+// about a second alone under coverage and exceeded the default 5 s in a loaded coverage run, so each gets the
+// seam guard's 60 s budget.
 describe("the language modules load in tiers", () => {
   test("the real sources hold every tier, and no cycle passes through a pack or a shared module", () => {
     expect(layeringFindings()).toEqual([]);
-  });
+  }, 60_000);
 
   test("the walk reads real code: the graph holds pack modules, and the execution tier reaches the core", () => {
     const graph = agentGraph({});
@@ -414,7 +417,7 @@ describe("the language modules load in tiers", () => {
     expect(cycleText(shortestCycle(graph, `${AGENT}/tools.ts`) as string[])).toBe(
       `${AGENT}/context-snapshot.ts -> ${AGENT}/tools.ts -> ${AGENT}/context-snapshot.ts`,
     );
-  });
+  }, 60_000);
 });
 
 describe("planted violations yield exactly their findings", () => {
@@ -477,7 +480,7 @@ describe("planted violations yield exactly their findings", () => {
       `R3 cycle: ${index} -> ${LANGUAGES}/sql/index.ts -> ${TOOLS} -> ${index}`,
       `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${index}`,
     ]);
-  });
+  }, 60_000);
 
   test("tools.ts imported by a client pack fails the client tier", () => {
     const client = `${LANGUAGES}/kubectl/client.ts`;
@@ -489,7 +492,7 @@ describe("planted violations yield exactly their findings", () => {
       `R3 client: ${client} reaches ${TOOLS} through ${client} -> ${TOOLS}`,
       `R3 cycle: ${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
     ]);
-  });
+  }, 60_000);
 
   test("a builtin imported by a client pack fails the client tier", () => {
     const client = `${LANGUAGES}/sql/client.ts`;
@@ -498,7 +501,7 @@ describe("planted violations yield exactly their findings", () => {
       `R3 client: ${clients} reaches package:node:fs through ${clients} -> ${client} -> package:node:fs`,
       `R3 client: ${client} reaches package:node:fs through ${client} -> package:node:fs`,
     ]);
-  });
+  }, 60_000);
 
   test("goal-verifier.ts imported at run time by a language verifier fails the verifier tier and closes a cycle", () => {
     const verifiers = `${LANGUAGES}/mongo/verifiers.ts`;
@@ -509,5 +512,5 @@ describe("planted violations yield exactly their findings", () => {
     ]);
     // A type-only import loads nothing.
     expect(layeringFindings(prepend(verifiers, 'import type { AgentGoalRule } from "../pack";'))).toEqual([]);
-  });
+  }, 60_000);
 });

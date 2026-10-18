@@ -2931,6 +2931,8 @@ the role's own grants are the whole boundary (A3).
 - **B119**: `compare_plans` is not offered on MongoDB, because `summarisePlan` reads a MongoDB plan as `unknown`, so a comparison would claim a difference nobody has read; an optimization run there recommends an index from one inspected plan instead.
 - **B120**: every measurement of the MongoDB profile is of a standalone server; what the open answers through `mongos`, and on a direct connection to a replica-set secondary, where the probe's delete may meet `NotWritablePrimary` before the authorization check, is unmeasured.
 - **B121**: the model evals have no MongoDB preset, so `bun run agent:eval` cannot measure a real model on the command envelope; the mongo workflows are proved with scripted model turns only.
+- **B122**: `src/lib/agent/tools.ts` and `src/lib/agent/context-snapshot.ts` import runtime values from each other; nothing reads across the cycle at module scope, so it works, and the language boundary guard passes it because it runs through no language pack.
+- **B123**: two per-language tables live in UI components rather than in the language client packs: the hand-over chips (`HANDOVER_CHIPS` in `src/components/agent/ConsentCard.tsx`) and the rail's `"sql"` default when it has no connection type (`handOverLanguage` in `src/components/agent/AgentRail.tsx`).
 
 **What machine redaction leaves unmasked on Kubernetes.**
 Agent reads on a cluster are masked by structural rules and by request target (see [On a Kubernetes connection](#on-a-kubernetes-connection)), and what those rules do not reach is stated here, in the same six lines as [`docs/providers/kubernetes.md`](./providers/kubernetes.md) section 9:

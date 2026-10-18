@@ -44,7 +44,7 @@ const MONGO_WORKFLOW_TOOL_RULES: Readonly<Partial<Record<AgentRunWorkflowType, s
   ].join(" "),
   // Built around the two routes `agent-query-optimization-mongo.1` accepts: an index recommended because of a plan
   // it inspected, or a report citing a plan that already uses an index. It names no comparison, because the variant
-  // offers none (`agent-manifest.ts` says why).
+  // offers none (`mongo/client.ts` says why).
   "query-optimization": [
     "inspect_plan runs the explain command at queryPlanner verbosity: it answers with the plan the engine would choose for a command and returns none of its documents, and where several plans are candidates the engine tries each for a bounded trial, under the same deadline your reads have.",
     "What a plan names is this engine's own vocabulary - COLLSCAN, IXSCAN, the index it chose - and that is what an index changes.",

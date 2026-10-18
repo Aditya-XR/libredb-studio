@@ -5323,7 +5323,7 @@ describe("a run opened with auto-execute is told what the gate needs", () => {
 });
 
 /*
-  A MongoDB run is offered no `compare_plans` (`agent-manifest.ts` says why), so every sentence it is told must name only
+  A MongoDB run is offered no `compare_plans` (`languages/mongo/client.ts` says why), so every sentence it is told must name only
   the tools it holds. Its plans are recorded under `mongo.plan.estimate`, and a count of plans taken over the SQL id
   alone told a run that had inspected one plan that it had "inspected none", and sent it to a tool it does not have.
 */
