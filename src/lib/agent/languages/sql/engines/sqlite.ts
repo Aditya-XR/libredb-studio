@@ -2,6 +2,7 @@
  * SQLite's server overlay (#1821): the dialect-bound members of the SQL server facet, as agent mode composes them on
  * SQLite. Server tier, read only through `engineServerDialect` in `languages/engines/server.ts`.
  */
+import { numeric, text } from "../../../catalog-rows";
 import {
   type AgentCatalogRead,
   type AgentCatalogSelector,
@@ -10,6 +11,7 @@ import {
   assertSelector,
   equalsClause,
 } from "../../../composed-sql-primitives";
+import type { AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";
 import type { AgentProfileComposition } from "../../../table-profile";
 import type { AgentEngineServerOverlay } from "../../pack";
 
@@ -152,10 +154,50 @@ const SQLITE_CATALOG_READ: AgentCatalogRead = Object.freeze({
   declaredSchema: (schema: string) => schema.toLowerCase(),
 });
 
+/**
+ * SQLite's rows: one per (table, index) from `sqlite_stat1`, plus one per table with
+ * a NULL `stat` where the table has no analysed index at all.
+ *
+ * `stat`'s first field is the table's row count as of the last `ANALYZE`; the fields
+ * after it are average rows per equal index prefix. Only the first is read. The
+ * others describe an INDEX PREFIX rather than a column, so turning them into
+ * per-column distinct counts would mean naming the index's leading column and
+ * presenting a derived number where the engine reported an average — and this engine
+ * holds NO null fraction at all, so the column half of the picture would still be
+ * missing. The packing says that limit plainly instead of half-filling it.
+ */
+function buildSqliteEstimates(rows: readonly Record<string, unknown>[]): Map<string, AgentTableEstimate> {
+  const byTable = new Map<string, AgentTableEstimate>();
+
+  for (const row of rows) {
+    const name = text(row.table_name);
+    const estimatedRows = numeric(text(row.stat).split(" ")[0]);
+    const held = byTable.get(name);
+    // The first index that carries an estimate wins; a later NULL `stat` never
+    // overwrites a reading with an absence.
+    if (held !== undefined && held.estimatedRows !== null) continue;
+    byTable.set(name, { estimatedRows, columns: [] });
+  }
+
+  return byTable;
+}
+
+/** SQLite's absolute limit, said once rather than implied by a gap per column. */
+const SQLITE_STATISTICS_LIMIT =
+  "This engine records no per-column distinct count or null fraction at all, so none is shown for any column here, and none can be obtained without reading the data.";
+
+/** SQLite's statistics reading: the probe runs first, for the prepare-time reason on `composeSqliteStatistics`. */
+const SQLITE_STATISTICS: AgentStatisticsReading = Object.freeze({
+  probe: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'",
+  build: buildSqliteEstimates,
+  limitNote: SQLITE_STATISTICS_LIMIT,
+});
+
 export const SQLITE_SERVER_OVERLAY = {
   dialect: Object.freeze({
     catalogRead: SQLITE_CATALOG_READ,
     planEstimate: SQLITE_PLAN_ESTIMATE,
     profileComposition: SQLITE_PROFILE_COMPOSITION,
+    statistics: SQLITE_STATISTICS,
   }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

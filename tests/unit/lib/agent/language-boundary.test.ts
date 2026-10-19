@@ -715,7 +715,7 @@ describe("planted violations yield exactly their findings", () => {
       `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${toIndex}`,
       `R3 server: ${server} reaches ${index} through ${toIndex}`,
       `R3 server: ${postgres} reaches ${index} through ${postgres} -> ${index}`,
-      `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${composed} -> ${toIndex}`,
+      `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${toIndex}`,
       `R3 server: ${profile} reaches ${index} through ${profile} -> ${toIndex}`,
       `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${toIndex}`,
     ]);
@@ -739,6 +739,19 @@ describe("planted violations yield exactly their findings", () => {
     expect(layeringFindings(prepend(postgres, 'import "../../../composed-sql";'))).toEqual([
       `R3 cycle: ${composed} -> ${server} -> ${postgres} -> ${composed}`,
     ]);
+  }, 60_000);
+
+  test("the statistics reader imported at run time by an engine overlay closes a cycle", () => {
+    const sqlite = `${LANGUAGES}/sql/engines/sqlite.ts`;
+    const server = `${LANGUAGES}/engines/server.ts`;
+    const stats = `${AGENT}/schema-stats.ts`;
+    expect(layeringFindings(prepend(sqlite, 'import "../../../schema-stats";'))).toEqual([
+      `R3 cycle: ${server} -> ${sqlite} -> ${stats} -> ${server}`,
+    ]);
+    // The overlays read the reader's types through a type-only import, which loads nothing.
+    expect(read(sqlite)).toContain(
+      'import type { AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";',
+    );
   }, 60_000);
 
   test("an engine server overlay imported by a language verifier fails the verifier closure", () => {

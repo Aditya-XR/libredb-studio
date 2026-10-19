@@ -166,5 +166,6 @@ export const DUCKDB_SERVER_OVERLAY = {
     planEstimate: DUCKDB_PLAN_ESTIMATE,
     // No verified profile composition, so `profile_table` refuses with `UNSUPPORTED_DIALECT` (B111).
     profileComposition: "unsupported",
+    statistics: "unsupported",
   }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

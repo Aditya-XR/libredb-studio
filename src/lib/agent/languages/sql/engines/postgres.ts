@@ -2,12 +2,14 @@
  * PostgreSQL's server overlay (#1821): the dialect-bound members of the SQL server facet, as agent mode composes them
  * on PostgreSQL. Server tier, read only through `engineServerDialect` in `languages/engines/server.ts`.
  */
+import { numeric, text } from "../../../catalog-rows";
 import {
   type AgentCatalogRead,
   type AgentCatalogSelector,
   type AgentPlanEstimate,
   equalsClause,
 } from "../../../composed-sql-primitives";
+import type { AgentColumnEstimate, AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";
 import type { AgentProfileComposition } from "../../../table-profile";
 import type { AgentEngineServerOverlay } from "../../pack";
 
@@ -444,10 +446,48 @@ const POSTGRES_CATALOG_READ: AgentCatalogRead = Object.freeze({
   retry: Object.freeze({ matches: isMissingExtensionCatalogError, rewrite: withoutExtensionOwnershipTest }),
 });
 
+/**
+ * PostgreSQL's rows: one per (table, analysed column), and one per table with every
+ * statistics column NULL where `pg_stats` has nothing — which the composed read's
+ * LEFT JOIN guarantees, so a never-analysed table arrives rather than disappearing.
+ *
+ * `reltuples` of -1 is PostgreSQL 14+ saying the table has never been vacuumed or
+ * analysed. It is read as absence. Older servers left 0 there instead, which is
+ * indistinguishable from a genuinely empty table, and this code does not pretend to
+ * tell those apart — an empty table and an uncounted one both come out as "roughly
+ * 0 rows, estimated" on a server old enough to do that.
+ */
+function buildPostgresEstimates(rows: readonly Record<string, unknown>[]): Map<string, AgentTableEstimate> {
+  const byTable = new Map<string, { estimatedRows: number | null; columns: AgentColumnEstimate[] }>();
+
+  for (const row of rows) {
+    const name = `${text(row.table_schema)}.${text(row.table_name)}`;
+    const rawRows = numeric(row.estimated_rows);
+    const entry = byTable.get(name) ?? { estimatedRows: rawRows === -1 ? null : rawRows, columns: [] };
+    byTable.set(name, entry);
+
+    const column = text(row.column_name);
+    if (column === "") continue;
+    const distinct = numeric(row.n_distinct);
+    entry.columns.push({
+      column,
+      // 0 is PostgreSQL's "no estimate", not "no distinct values".
+      distinct: distinct === 0 ? null : distinct,
+      nullFraction: numeric(row.null_frac),
+    });
+  }
+
+  return byTable;
+}
+
+/** PostgreSQL's statistics reading: no probe, since absence is per table and already NULL in the read itself. */
+const POSTGRES_STATISTICS: AgentStatisticsReading = Object.freeze({ probe: null, build: buildPostgresEstimates });
+
 export const POSTGRES_SERVER_OVERLAY = {
   dialect: Object.freeze({
     catalogRead: POSTGRES_CATALOG_READ,
     planEstimate: POSTGRES_PLAN_ESTIMATE,
     profileComposition: POSTGRES_PROFILE_COMPOSITION,
+    statistics: POSTGRES_STATISTICS,
   }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

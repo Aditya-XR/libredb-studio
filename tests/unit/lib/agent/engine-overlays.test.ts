@@ -41,6 +41,7 @@ const SERVER_DIALECT_MEMBERS: readonly (keyof AgentEngineServerDialect)[] = [
   "catalogRead",
   "planEstimate",
   "profileComposition",
+  "statistics",
 ];
 
 const ENGINE_MODULES: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
@@ -205,6 +206,35 @@ describe("engineServerDialect", () => {
     expect(postgres.retry?.matches('relation "PG_EXTENSION" does not exist')).toBe(true);
     expect(postgres.retry?.matches("permission denied for table orders")).toBe(false);
     expect(postgres.retry?.rewrite).toBe(POSTGRES.withoutExtensionOwnershipTest);
+  });
+  test("statistics is supplied on PostgreSQL, SQLite and SQL Server, and only SQLite probes first or notes a limit", () => {
+    const supplied = SQL_ENGINES.filter((type) => engineServerDialect(type).statistics !== "unsupported");
+    expect(supplied).toEqual(["postgres", "sqlite", "mssql"]);
+    expect(engineServerDialect("duckdb").statistics).toBe("unsupported");
+    expect(engineServerDialect("mysql").statistics).toBe("unsupported");
+    const reading = (type: DatabaseType) => {
+      const statistics = engineServerDialect(type).statistics;
+      if (statistics === "unsupported") throw new Error(`${type} has no statistics`);
+      return statistics;
+    };
+    expect(supplied.map((type) => reading(type).probe)).toEqual([
+      null,
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'",
+      null,
+    ]);
+    expect(supplied.filter((type) => reading(type).limitNote !== undefined)).toEqual(["sqlite"]);
+    for (const type of supplied) {
+      expect(Object.isFrozen(reading(type))).toBe(true);
+      expect(typeof reading(type).build).toBe("function");
+    }
+    expect(new Set(supplied.map((type) => reading(type).build)).size).toBe(3);
+  });
+
+  test("an engine that reads statistics also reads its catalog, since the statistics read is a catalog kind", () => {
+    for (const type of [...ALL_TYPES, "toString" as DatabaseType]) {
+      const dialect = engineServerDialect(type);
+      if (dialect.statistics !== "unsupported") expect(dialect.catalogRead).not.toBe("unsupported");
+    }
   });
 });
 

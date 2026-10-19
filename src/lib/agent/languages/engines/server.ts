@@ -43,6 +43,7 @@ const NO_SERVER_DIALECT: AgentEngineServerDialect = Object.freeze({
   catalogRead: "unsupported",
   planEstimate: "unsupported",
   profileComposition: "unsupported",
+  statistics: "unsupported",
 });
 
 /** What an engine with no overlay holds: nothing, so its server facet is its family's own. */

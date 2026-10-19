@@ -66,8 +66,8 @@ export function composeStatisticsAvailabilityProbe(dialect: DatabaseType): strin
       "UNSUPPORTED_DIALECT",
     );
   }
-  if (dialect !== "sqlite") return null;
-  return "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'";
+  const statistics = engineServerDialect(dialect).statistics;
+  return statistics === "unsupported" ? null : statistics.probe;
 }
 
 /**

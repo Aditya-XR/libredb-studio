@@ -2,12 +2,14 @@
  * SQL Server's server overlay (#1821): the dialect-bound members of the SQL server facet, as agent mode composes them
  * on SQL Server. Server tier, read only through `engineServerDialect` in `languages/engines/server.ts`.
  */
+import { numeric, text } from "../../../catalog-rows";
 import {
   type AgentCatalogRead,
   type AgentCatalogSelector,
   type AgentPlanEstimate,
   equalsClause,
 } from "../../../composed-sql-primitives";
+import type { AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";
 import type { AgentProfileComposition } from "../../../table-profile";
 import type { AgentEngineServerOverlay } from "../../pack";
 
@@ -226,10 +228,48 @@ const MSSQL_CATALOG_READ: AgentCatalogRead = Object.freeze({
   }),
 });
 
+/**
+ * SQL Server's rows: one per USER TABLE, from `composeMssqlStatistics` - the sum of
+ * `sys.partitions.rows` over the heap or clustered index (`index_id IN (0, 1)`).
+ *
+ * Keyed `schema.table`, the same shape `buildPostgresEstimates` produces, because the
+ * inventory addresses a SQL Server object by the same qualified name and the packing
+ * joins the two by that key alone.
+ *
+ * `columns` is empty, and that is this READ's limit rather than the engine's: SQL Server
+ * does hold per-column distributions, but only behind `DBCC SHOW_STATISTICS`, which is a
+ * DBCC command rather than a read and is refused by the admission step and by the shared
+ * statement guard alike (`composeMssqlStatistics` records the same reasoning). The
+ * table half is what a catalog read can honestly answer here, exactly as on SQLite and
+ * DuckDB.
+ *
+ * There is no -1 case to unwind the way PostgreSQL's `reltuples` has one: `sys.partitions`
+ * carries a maintained count and a table with no rows arrives as 0. An unreadable value
+ * becomes absence through `numeric`, which is what keeps a driver that hands a `bigint`
+ * back as text from printing as `NaN` rows. Measured on AdventureWorks2022: the composed
+ * read answers 72 rows, one per user table.
+ */
+function buildMssqlEstimates(rows: readonly Record<string, unknown>[]): Map<string, AgentTableEstimate> {
+  const byTable = new Map<string, AgentTableEstimate>();
+
+  for (const row of rows) {
+    byTable.set(`${text(row.table_schema)}.${text(row.table_name)}`, {
+      estimatedRows: numeric(row.estimated_rows),
+      columns: [],
+    });
+  }
+
+  return byTable;
+}
+
+/** SQL Server's statistics reading: no probe, since `sys.partitions` is part of every database. */
+const MSSQL_STATISTICS: AgentStatisticsReading = Object.freeze({ probe: null, build: buildMssqlEstimates });
+
 export const MSSQL_SERVER_OVERLAY = {
   dialect: Object.freeze({
     catalogRead: MSSQL_CATALOG_READ,
     planEstimate: MSSQL_PLAN_ESTIMATE,
     profileComposition: MSSQL_PROFILE_COMPOSITION,
+    statistics: MSSQL_STATISTICS,
   }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

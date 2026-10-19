@@ -14,6 +14,7 @@ import type { AgentGoalShortfall, VerifiableAgentRun } from "../goal-verifier";
 import type { AgentInventoryNoun } from "../inventory-noun";
 import type { PlanStatementIdentifiers } from "../plan-statement";
 import type { AgentPosture } from "../posture";
+import type { AgentStatisticsReading } from "../schema-stats";
 import type { AgentProfileComposition, AgentProfileDepth } from "../table-profile";
 import type { z } from "zod";
 import type {
@@ -368,6 +369,8 @@ export interface SqlServerDialect {
   readonly planEstimate: AgentPlanEstimate | Unsupported;
   /** The `profile_table` composition (`composeTableProfile` in `table-profile.ts`). */
   readonly profileComposition: AgentProfileComposition | Unsupported;
+  /** The statistics reading (`composeStatisticsAvailabilityProbe` in `composed-sql.ts`, `schema-stats.ts`). */
+  readonly statistics: AgentStatisticsReading | Unsupported;
 }
 
 /** The client view of a SQL engine's dialect: nothing yet. */
