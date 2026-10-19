@@ -788,6 +788,8 @@ describe("the workflow classifier sends a run's options too", () => {
     expect(recording.requests[0]?.url).toBe("https://api.openai.com/v1/responses");
     expect(recording.requests[0]?.body.store).toBe(false);
     expect(recording.requests[0]?.body.reasoning).toEqual({ effort: "low" });
+    // The Responses API counts reasoning against this cap, so the field on the wire is the fix.
+    expect(recording.requests[0]?.body.max_output_tokens).toBe(1024);
   });
 
   test("an effort the model refuses leaves the run unclassified, and no request goes out", async () => {
