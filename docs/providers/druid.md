@@ -832,6 +832,16 @@ Redirects are not followed. Every request sets `redirect: "manual"`, and a 3xx a
 `ConnectionError` naming the status and only the origin of its `Location`, since a followed
 redirect would take the Basic credential and the statement to wherever the server pointed.
 
+### Connection string
+
+`druid` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/sql/druid/connection-string.ts)).
+Druid is reached over plain HTTP through the form, so inventing `druid://` would put a scheme on the login page that `parseConnectionString` rejects.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `druid` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/sql/druid/execution-ui.ts).
+
 ---
 
 ## 5. Query interface

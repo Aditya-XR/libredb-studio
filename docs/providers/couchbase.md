@@ -535,6 +535,18 @@ The TLS path uses `node:https`, which does not follow a redirect on its own; a t
 there is reported as an HTTP failure, `Couchbase request failed with HTTP 302`, rather than as the
 `ConnectionError` above.
 
+### Connection string
+
+The scheme shown for Couchbase is `couchbase://`, and the parser also accepts `couchbases://`.
+Its row in `CONNECTION_STRING` is declared in [`connection-string.ts`](../../src/lib/db/providers/document/couchbase/connection-string.ts).
+It has no `readTls`: the scheme itself is the TLS, so `couchbases://` sets `require` and `couchbase://` sets `disable`.
+It runs no seed load check.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `couchbase` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/document/couchbase/execution-ui.ts).
+
 ---
 
 ## 5. Query interface

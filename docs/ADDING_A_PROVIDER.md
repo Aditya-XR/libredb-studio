@@ -509,9 +509,18 @@ const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     label: 'CockroachDB',                   // Display name in ConnectionModal
     defaultPort: '26257',                   // Default port for host/port form
     showConnectionStringToggle: true,        // Show "Connection String" tab in modal
-    connectionFields: ['host', 'port', 'user', 'password', 'database', 'connectionString'],
+    connectionFields: CONNECTION_FIELDS.cockroachdb, // Declared in src/lib/db/connection-fields.ts
   },
 };
+```
+
+The connection fields themselves are a row of `CONNECTION_FIELDS` in `src/lib/db/connection-fields.ts`, a UI-free module the seed loader can read without loading React icons:
+
+```typescript
+export const CONNECTION_FIELDS: Readonly<Record<DatabaseType, readonly ConnectionField[]>> = Object.freeze({
+  // ... existing entries ...
+  cockroachdb: ['host', 'port', 'user', 'password', 'database', 'connectionString'],
+});
 ```
 
 Then add the type to the selectable list that drives the ConnectionModal picker:
@@ -1071,7 +1080,10 @@ The integration points, all of which need an entry. This is the list the Strateg
 - [ ] `src/lib/types.ts` — add to the `DatabaseType` union
 - [ ] `src/lib/db/providers/<family>/<type-id>.ts` (or a directory) — **new:** the provider class
 - [ ] `src/lib/db/factory.ts` — add a `case` with a **dynamic** import
-- [ ] `src/lib/db-ui-config.ts` — icon, colour, label, default port, connection fields
+- [ ] `src/lib/db-ui-config.ts` — icon, colour, label, default port
+- [ ] `src/lib/db/connection-fields.ts`: the type's row of `CONNECTION_FIELDS`, which the entry's `connectionFields` reads by reference, and its row of `SEED_ONLY_FIELDS`, which is `null` unless only this engine's provider reads a field
+- [ ] `src/lib/db/providers/<family>/<type-id>/connection-string.ts` (or `<type-id>-connection-string.ts` beside a flat provider file): **new:** the type's `ConnectionStringSpec`, with its scheme, `readTls` and `validateSeed`, each `null` when the engine has none; add its row to `CONNECTION_STRING` in `src/lib/db/connection-string/index.ts` and run `UPDATE_GOLDEN=1` for `tests/unit/db/connection-string/golden.test.ts` and `tests/unit/db/connection-form/golden.test.tsx`
+- [ ] `src/lib/db/providers/<family>/<type-id>/execution-ui.ts` (or `<type-id>-execution-ui.ts` beside a flat provider file): **new:** the type's `ExecutionUiSpec`, its `commitKeyword` (`SQL_COMMIT_KEYWORD` unless the engine keeps a transaction with another keyword) and `consentDeadline` (`null` unless a long read ends differently on it); add its row to `EXECUTION_UI` in `src/lib/db/execution-ui/index.ts` and run `UPDATE_GOLDEN=1` for `tests/unit/db/execution-ui/golden.test.tsx`
 - [ ] `src/hooks/use-connection-form.ts` — **append** to `selectableTypes` (do not retype the array)
 - [ ] `src/components/icons/db-icons.tsx` — the engine's mark (`strokeWidth={1.5}`, no HTML size attrs)
 - [ ] `src/lib/seed/types.ts` — the seed-config `type` enum, or seeded connections fail validation
@@ -1192,8 +1204,9 @@ Those three reach code and tests only; the four prose greps of the published blo
       A new member is not neutral: a reader written `=== "json"` sends it into its SQL branch and one written `!== "sql"` into its MongoDB branch, so every reader needs an explicit arm or a test pinning that its branch is right.
       `grep -rn queryLanguage src` is not the whole population: `src/components/agent/AnswerCard.tsx` reads it through `editorLanguageForTabType`.
       `docs/providers/prometheus.md` section 3.1 is the worked case.
-- [ ] `src/lib/db-ui-config.ts`: `fieldLabels` and `fieldHints`, when a connection field needs its own label or hint.
-      Declare them there rather than adding a type test to `src/components/ConnectionModal.tsx`, which already carries five (`docs/BACKLOG.md` U36).
+- [ ] `src/lib/db-ui-config.ts`: `fieldLabels`, `fieldHints` and `fieldPlaceholders`, when a connection field needs its own label, hint or placeholder.
+- [ ] `src/lib/db-ui-config.ts`: `fieldPlacement`, required when the type's `CONNECTION_FIELDS` row takes one of the `PLACEABLE_FIELDS` (`authSource`, `localDataCenter`, `serviceName`, `instanceName`), saying for each whether the dialog draws it `"open"` or `"advanced"`; the entry does not compile until it says, and a type that takes none of them declares none.
+      Declare them there rather than testing the type id in `src/components/ConnectionModal.tsx`, which reads every label, placeholder and hint from `DatabaseUIConfig`.
 - [ ] `src/lib/db-ui-config.ts`: `hostAcceptsUri`, when the engine's documentation gives its endpoint as an `http://` or `https://` address; and the type's row of `CREDENTIAL_WARNINGS` in `src/lib/db/credential-warnings.ts`, which the entry's `credentialWarnings` reads by reference, when the engine ships a default credential, accepts no secret, or takes a token whose claims say how far it reaches.
       Each needs a test that the real record declares it, and a declared `pair` or `no-secret` entry needs the provider's own `readOnlySeedRefusal` check in `connect()` for a seed connection.
 - [ ] `src/lib/db-ui-config.ts`: `connectionImport`, when users keep this engine's connections in a file of their own, such as a client configuration file.

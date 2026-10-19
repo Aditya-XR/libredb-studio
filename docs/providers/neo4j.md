@@ -239,6 +239,15 @@ The calendar releases, 2025.x and 2026.x, are not refused and connect untested: 
 The overview's version reads `5.26.31 community` on the tested series, `2026.01.0 enterprise (untested)` outside it, and `unknown` when the read at connect failed.
 Enterprise connects too; the monitoring differences are in section 7.
 
+### Connection string
+
+`neo4j` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/graph/neo4j/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `neo4j` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/graph/neo4j/execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 One statement per run

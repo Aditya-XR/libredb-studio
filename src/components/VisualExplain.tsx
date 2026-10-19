@@ -25,6 +25,7 @@ import {
   ListTree,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { explainRequestEngine } from "@/lib/db/execution-ui/explain-request";
 import type { ExplainPlanNode, ExplainPlanResult, ExplainPlanInput, ExplainTreeNode } from "@/lib/explain/types";
 
 export type { ExplainPlanResult } from "@/lib/explain/types";
@@ -526,7 +527,7 @@ function AIExplainTab({
           query: query || "Unknown query",
           explainPlan: plan,
           schemaContext: schemaContext || "",
-          databaseType: databaseType || "postgres",
+          databaseType: explainRequestEngine(databaseType),
         }),
         signal: abortController.signal,
       });

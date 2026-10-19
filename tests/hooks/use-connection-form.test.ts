@@ -91,6 +91,11 @@ const MOCK_CONNECTION_FIELDS: Record<string, string[]> = {
     "schema",
     "role",
   ],
+  // The four engines with a field of their own that `buildConnection` wrote by type id until it read these lists.
+  oracle: ["host", "port", "user", "password", "database", "serviceName"],
+  mssql: ["host", "port", "user", "password", "database", "instanceName"],
+  cassandra: ["host", "port", "user", "password", "database", "localDataCenter"],
+  mongodb: ["host", "port", "user", "password", "database", "connectionString", "authSource"],
 };
 const mockFields = (type: string): string[] =>
   MOCK_CONNECTION_FIELDS[type] ?? ["host", "port", "user", "password", "database"];

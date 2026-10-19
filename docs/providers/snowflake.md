@@ -246,6 +246,17 @@ A seed that sets `connectionString` for `snowflake` is refused.
 The file load also checks, on every field that is not a reference, what `connect()` checks first: the account as `connect()` reads it, that User, Role and the key or token the method needs are not empty, and that the method is `keypair` or `pat`.
 It refuses the file with `Seed connection "<id>": <field> is refused: <sentence>`, the sentence without its closing `Nothing was sent.`, so an entry that could never open is named in the Seed sources card instead of loading and failing when it is opened; the key's and the token's contents are read only when the connection opens.
 
+### Connection string
+
+Snowflake has no connection string scheme and no `readTls` ([`connection-string.ts`](../../src/lib/db/providers/sql/snowflake/connection-string.ts)); a pasted URL is read as section 2.6 describes.
+Its `validateSeed` runs at seed load the checks its provider makes in `connect()` before any socket, each skipped for a field that holds a `${...}` reference, and every refusal is the provider's own sentence.
+The checks are, in order: `host`, the account, by `checkSnowflakeAccount`; `user`, which may not be empty; `authMethod`, which must be `keypair` (the default) or `pat`; `privateKey`, which a key pair needs; `password`, which holds the token `pat` needs; and `role`, which may not be empty.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `snowflake` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/sql/snowflake/execution-ui.ts).
+
 ## 3. The recommended Snowflake setup
 
 Studio runs every statement as Role and stops nothing a role may do.

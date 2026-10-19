@@ -318,7 +318,7 @@ These partial records deliberately have none:
 | The engine overlays' `catalogCapture` | `src/lib/agent/languages/sql/engines/` | Plan mode grounds Prometheus through the provider's own object surface, not through composed catalog statements |
 | The engine overlays' `catalogRead`, `planEstimate` | `src/lib/agent/languages/sql/engines/` | They serve `AGENT_EXECUTION_ENGINES`, and agent execute mode is out of scope for PromQL (#1085, section 2) |
 | The engine overlays' `statistics` | `src/lib/agent/languages/sql/engines/` | Prometheus holds no table statistics a run knows how to read; its series counts are TSDB top-N figures, not estimates |
-| `ENGINE_URI_SCHEMES` | `src/lib/connection-string-parser.ts` | No connection string ([§4.5](#45-no-connection-string)) |
+| `ENGINE_URI_SCHEMES` | `src/lib/db/connection-string/index.ts` | No connection string ([§4.5](#45-no-connection-string)) |
 | `createTable` | `src/lib/db/types.ts` (`CreateTableSpec`) | Only engines that declare a `createTable` reach the Create Table form; Prometheus declares none |
 | `SQL_GRAMMAR` | `src/lib/db/sql-grammar/` | PromQL is not SQL, and the `prometheus` row declares `readsSqlText: false` ([§5.7](#57-sql-grammar)). Nothing on the run path reads PromQL under a SQL grammar: the confirmation gate answers from the `prometheus` row of `NON_SQL_DESTRUCTIVE_VOCABULARY` before any SQL reading ([§5.1](#51-the-call)), the multi-statement route is taken only where `queryLanguage` is `sql`, and the provider's own `prepareQuery` returns the text unchanged |
 | `AGENT_EXECUTION_ENGINES` | `src/lib/agent/engine-support.ts` | Agent execute mode is a non-goal; plan mode and the `operations` workflow still reach the server |
@@ -340,7 +340,8 @@ These partial records deliberately have none:
 | `database` | No | No Database box renders: a Prometheus server is one TSDB, so there is nothing to select |
 | TLS panel | Yes | [§4.4](#44-tls) |
 
-The two dialog strings are declared on the `prometheus` entry of `DB_UI_CONFIG` (`fieldLabels`, `fieldHints`) rather than chosen by a type test in the dialog; `docs/BACKLOG.md` U36 records moving the older engines onto the same declaration.
+The two dialog strings are declared on the `prometheus` entry of `DB_UI_CONFIG` (`fieldLabels`, `fieldHints`) rather than chosen by a type test in the dialog.
+Every engine's dialog labels, placeholders and hints come from that declaration.
 No new `DatabaseConnection` field exists, so the bearer token rides `password`, which the connection store already classifies as a secret.
 
 ### 4.2 Authentication
@@ -380,6 +381,15 @@ Each case is exercised by a real handshake against a local `node:https` server i
 `showConnectionStringToggle: false`: `http://` and `https://` already parse as ClickHouse in `src/lib/connection-string-parser.ts`, and two engines cannot own one scheme.
 There is no path-prefix field either, so Grafana Mimir (`/prometheus`), Grafana Cloud's hosted Prometheus (its query URL ends in `/api/prom` or `/prometheus`), GreptimeDB (`/v1/prometheus`) and proxies that mount the API under a prefix are not reachable in this version (maintainer decision, 2026-09-23).
 The host field cannot carry the prefix instead: a host holding `/` is refused before any request is sent.
+
+### Connection string
+
+`prometheus` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/timeseries/prometheus/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `prometheus` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/timeseries/prometheus/execution-ui.ts).
 
 ---
 

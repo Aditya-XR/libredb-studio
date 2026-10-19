@@ -208,6 +208,15 @@ Through an SSH tunnel the certificate is checked against the agent the user name
 The Path prefix is put in front of every route, so `/mtc` reads `/mtc/probe`, `/mtc/current` and so on.
 It is a path only: a query, a fragment, percent-encoding, a space or an empty, `.` or `..` segment is refused before any request.
 
+### Connection string
+
+`mtconnect` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/industrial/mtconnect/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `mtconnect` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/industrial/mtconnect/execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 The request line

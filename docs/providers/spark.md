@@ -198,6 +198,16 @@ connections:
 
 A seed that sets `connectionString` or `readOnly: true` for `spark` is refused when the file loads; one that sets `user` loads, and its connection is refused at connect with the User sentence of [section 2.1](#21-fields).
 
+### Connection string
+
+Apache Spark has no connection string scheme, no `readTls` and no seed load check ([`connection-string.ts`](../../src/lib/db/providers/sql/spark/connection-string.ts)).
+It has no scheme on purpose, though its `sc://` address is pasted and decomposed by `parseSparkConnectUri`: the login signature prints every scheme with the tail `user@db.internal:<port>/app`, and Spark's grammar refuses both a user part and a path, so the hero would show an address the product refuses.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `spark` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/sql/spark/execution-ui.ts).
+
 ## 3. The recommended Spark setup
 
 Set `spark.connect.authenticate.token` on the server (Spark 4.0 and later), or `SPARK_CONNECT_AUTHENTICATE_TOKEN` in its environment, and put the same value in Token.

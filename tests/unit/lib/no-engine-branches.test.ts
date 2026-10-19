@@ -276,33 +276,6 @@ export const DEBT: readonly Debt[] = [
   { path: "src/lib/export/result-export.ts", declaration: "oracleColumns", count: 1, pr: 4, reason: MOVES_IN[4] },
   { path: "src/lib/export/result-export.ts", declaration: "buildResultExport", count: 1, pr: 4, reason: MOVES_IN[4] },
   { path: "src/lib/export/typed-literals.ts", declaration: "TYPED_WRITERS", count: 1, pr: 4, reason: MOVES_IN[4] },
-  { path: "src/components/ConnectionModal.tsx", declaration: "isCouchbase", count: 1, pr: 7, reason: MOVES_IN[7] },
-  { path: "src/components/ConnectionModal.tsx", declaration: "isTrino", count: 1, pr: 7, reason: MOVES_IN[7] },
-  { path: "src/components/ConnectionModal.tsx", declaration: "isCassandra", count: 1, pr: 7, reason: MOVES_IN[7] },
-  { path: "src/components/ConnectionModal.tsx", declaration: "isMongoDB", count: 1, pr: 7, reason: MOVES_IN[7] },
-  { path: "src/components/ConnectionModal.tsx", declaration: "isLibSQL", count: 1, pr: 7, reason: MOVES_IN[7] },
-  { path: "src/components/ConnectionModal.tsx", declaration: "formContent", count: 4, pr: 7, reason: MOVES_IN[7] },
-  { path: "src/hooks/use-connection-form.ts", declaration: "buildConnection", count: 4, pr: 7, reason: MOVES_IN[7] },
-  {
-    path: "src/lib/connection-string-parser.ts",
-    declaration: "ENGINE_URI_SCHEMES",
-    count: 1,
-    pr: 7,
-    reason: MOVES_IN[7],
-  },
-  { path: "src/lib/connection-string-parser.ts", declaration: "readQueryTLS", count: 4, pr: 7, reason: MOVES_IN[7] },
-  { path: "src/lib/seed/types.ts", declaration: "SEED_LOAD_CHECKS", count: 1, pr: 7, reason: MOVES_IN[7] },
-  { path: "src/lib/seed/types.ts", declaration: "SeedConnectionSchema", count: 2, pr: 7, reason: MOVES_IN[7] },
-  {
-    path: "src/lib/seed/connection-filter.ts",
-    declaration: "assertApiKeyPairIsElasticsearch",
-    count: 1,
-    pr: 7,
-    reason: MOVES_IN[7],
-  },
-  { path: "src/hooks/use-query-execution.ts", declaration: "keepKeyword", count: 1, pr: 8, reason: MOVES_IN[8] },
-  { path: "src/components/agent/ConsentCard.tsx", declaration: "isSqlite", count: 1, pr: 8, reason: MOVES_IN[8] },
-  { path: "src/components/VisualExplain.tsx", declaration: "response", count: 1, pr: 8, reason: MOVES_IN[8] },
 ];
 
 /** Every file git lists under `paths`: tracked, or untracked and not ignored. */

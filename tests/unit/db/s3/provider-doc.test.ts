@@ -170,6 +170,8 @@ const OUTLINE: readonly string[] = [
   "### 4.7 Pasting an address",
   "### 4.8 Server versions",
   "### 4.9 What is not verified",
+  "### Connection string",
+  "### Execution UI",
   "## 5. Query interface",
   "### 5.1 The command",
   "### 5.2 Commands and flags",
@@ -649,6 +651,8 @@ const provider = new S3Provider(
 /** The client, console and preview modules a browser bundle may import. */
 const BROWSER_SET: ReadonlySet<string> = new Set([
   "constants.ts",
+  "connection-string.ts",
+  "execution-ui.ts",
   "names.ts",
   "xml.ts",
   "shapes.ts",

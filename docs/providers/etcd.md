@@ -227,6 +227,15 @@ With authentication on, an etcd below 3.7 answers `AuthStatus` and `Status` to t
 A user who is not root cannot connect to such an etcd: a client certificate is refused with "etcd refused the auth status: this connection's etcd user is not granted all of it. (etcd: permission denied)", and a password with the same sentence naming "the endpoint status".
 Typed commands and the surfaces that walk no key (the member, lease, user and role listings and their Source tabs, health, the Storage tab, the maintenance cards and a value edit's apply) send nothing before their own requests and use the grants as they were last read, so a refusal they meet after such a change can name a range the user has lost, or leave out one it gained, until the next walk.
 
+### Connection string
+
+`etcd` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/keyvalue/etcd/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `etcd` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/keyvalue/etcd/execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 The grammar

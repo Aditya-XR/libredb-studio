@@ -578,6 +578,17 @@ request's own `Host` header, so a direct connection always gets links on the ori
 reverse proxy that rewrites `Host` would make the coordinator advertise its own address, and that
 is what the refusal message points at.
 
+### Connection string
+
+Trino has no connection string scheme, no `readTls` and no seed load check ([`connection-string.ts`](../../src/lib/db/providers/sql/trino/connection-string.ts)).
+Trino is the sharpest version of the scheme gap: it has a canonical URL, `jdbc:trino://host:port/catalog/schema`, but that is a JDBC URL and not a URI, since `new URL()` reads its scheme as `jdbc:`.
+Stripping the prefix would invent a `trino://` form no Trino tool emits, so the scheme is `null`, its capabilities say `supportsConnectionString: false`, and its form offers no paste toggle.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `trino` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/sql/trino/execution-ui.ts).
+
 ---
 
 ## 5. Query interface

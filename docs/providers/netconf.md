@@ -223,6 +223,15 @@ reason is measured rather than assumed: there is no documented vendor default ac
 about, no JWT, and the "no secret" case is unreachable because a missing, empty or wrong
 credential all end in the same refusal.
 
+### Connection string
+
+`netconf` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/network/netconf/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `netconf` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/network/netconf/execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 The request

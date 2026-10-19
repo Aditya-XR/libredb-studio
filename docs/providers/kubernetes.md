@@ -257,6 +257,15 @@ The connection's `agentPassword` alone is the agent's bearer token, because Kube
 Without an agent token, the agent uses the connection's own token.
 That identity's RBAC decides what the agent can see, so give it a ServiceAccount bound to `view`, and to `studio-reader` for the cluster-scoped kinds, as section 4.5 creates.
 
+### Connection string
+
+`kubernetes` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/platform/kubernetes/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `kubernetes` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/platform/kubernetes/execution-ui.ts).
+
 ## 5. Query interface
 
 One kubectl command per run, the selected line: an optional leading `kubectl`, a leading `$ ` or `% ` prompt, POSIX shell quoting and `#` comment lines, with every short and long form of a flag kubectl takes (`-n shop`, `-n=shop`, `-nshop`, `--namespace shop`, `--namespace=shop`).

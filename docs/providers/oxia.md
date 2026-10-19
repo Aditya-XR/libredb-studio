@@ -79,6 +79,8 @@ The console's modules are pure and shipped to the browser, because the editor, t
 | `key-scan.ts` | The Keys panel's pages | server |
 | `monitoring-reads.ts` | Health and the overview | server |
 | `labels.ts` | The labels, the statement language and the key order in words | browser |
+| `connection-string.ts` | The engine's connection string row: no scheme, no TLS read from a URL query, no seed load check | browser |
+| `execution-ui.ts` | The engine's execution UI row: the rolled-back notice names `COMMIT`, no consent deadline | browser |
 | `generators.ts` | The commands Generate Command writes | browser |
 | `sql-grammar.ts` | The SQL grammar facts the editor and the query log read: not SQL text, nothing kept when redacted | browser |
 | `index.ts` | The composition root: the session, the declarations, the snapshot cache, the order verdict's lifetime, the run registry and the one failure path | server |
@@ -306,6 +308,15 @@ A 0.16 release is named here once one carries #1450.
 
 Pulsar names its Oxia metadata store as `oxia://host:6648/ns`.
 The URL is not pasted whole: type `host` in Host, `6648` in Port and `ns` in Namespace.
+
+### Connection string
+
+`oxia` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/keyvalue/oxia/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `oxia` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/keyvalue/oxia/execution-ui.ts).
 
 ## 5. Query interface
 

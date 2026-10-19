@@ -442,6 +442,18 @@ When the first answer's echoed settings do not hold `http_json_result_mode` equa
 
 The live check passed on v1.2.881 for everything it covers except materialized views, which v1.2.881 does not have (`DROP MATERIALIZED VIEW` is a parse error there).
 
+### Connection string
+
+The scheme shown for Databend is `databend://`, and the parser also accepts `databend+http://` and `databend+https://`.
+Its row in `CONNECTION_STRING` is declared in [`connection-string.ts`](../../src/lib/db/providers/sql/databend/connection-string.ts).
+It has no `readTls`: `parseDatabendDSN` in `src/lib/connection-string-parser.ts` reads a DSN's `sslmode` itself, by BendSQL's own rules.
+It runs no seed load check.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `databend` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/sql/databend/execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 The request

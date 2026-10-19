@@ -142,6 +142,15 @@ A proxy that decodes `%2F` answers its own 404 for `/`, which Studio cannot tell
 
 A `readOnly: true` seed with the `guest`/`guest` pair is refused, as the dialog warns: guest/guest is RabbitMQ's default administrator, which the official Docker image accepts from any host; create a user for Studio (studio-reader) instead.
 
+### Connection string
+
+`rabbitmq` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/stream/rabbitmq/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `rabbitmq` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/stream/rabbitmq/execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 The read request

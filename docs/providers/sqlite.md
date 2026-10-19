@@ -494,6 +494,21 @@ Homebrew). Each channel is browser-verified by
 [`scripts/channel-embedded-sample-e2e.sh`](../../scripts/channel-embedded-sample-e2e.sh)
 (see [`docs/DISTRIBUTION.md`](../DISTRIBUTION.md)).
 
+### Connection string
+
+`sqlite` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`sqlite-connection-string.ts`](../../src/lib/db/providers/sql/sqlite-connection-string.ts)).
+SQLite is a file path, so inventing `sqlite://` would put a scheme on the login page that `parseConnectionString` rejects.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction.
+Its row in `EXECUTION_UI` is declared in [`sqlite-execution-ui.ts`](../../src/lib/db/providers/sql/sqlite-execution-ui.ts).
+SQLite is the one engine with a consent deadline: an on-disk SQLite read that overruns its timeout is now killed mid-flight, so only the in-memory database keeps the old blocking behaviour.
+The agent's consent card says so in the words the budget meter already uses for the same fact, true of SQLite and of nothing else.
+Its ticked bounds row carries the chip `SQLite: killed at its timeout`, and the paragraph under the box, shown ticked or not, reads:
+
+> On SQLite a read that runs past its timeout is now killed mid-flight; the in-memory database is the exception and still blocks this application until the read finishes.
+
 ---
 
 ## 5. Query interface

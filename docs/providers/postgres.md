@@ -1444,6 +1444,22 @@ this precedence:
 3. **`options.ssl === false`** → no SSL.
 4. Otherwise `undefined` (driver default).
 
+### Connection string
+
+The scheme shown for PostgreSQL is `postgres://`, and the parser also accepts `postgresql://`.
+Its row in `CONNECTION_STRING` is declared in [`postgres-connection-string.ts`](../../src/lib/db/providers/sql/postgres-connection-string.ts).
+Its `readTls` reads `sslmode` first, and the boolean `ssl` only when no `sslmode` is present: a string carrying both said the specific thing on purpose.
+`sslmode` maps libpq's `disable`, `require`, `verify-ca` and `verify-full`, and leaves `prefer` and `allow` unmapped: they mean "encrypt if the server offers it", which no SSL mode describes.
+`verify-system` is not in that table either, since it is this form's own mode name and not a libpq one.
+`ssl=true` maps to `verify-system` and `ssl=false` to `disable`, by the boolean rule (D26) in `src/lib/db/connection-string/shared.ts`.
+`sslrootcert`, `sslcert` and `sslkey` are read by nobody on purpose: they name files on the machine that wrote the string, and the server that opens the connection cannot read that path.
+It runs no seed load check.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `postgres` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`postgres-execution-ui.ts`](../../src/lib/db/providers/sql/postgres-execution-ui.ts).
+
 ---
 
 ## 5. Query interface

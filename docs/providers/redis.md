@@ -527,6 +527,21 @@ The listener stays attached after the connect settles, and from then on logs eac
 warning, `[Redis] <message>` with `provider: "redis"`, so a dropped socket and the reconnects after
 it stay visible in the server log. The message only, for the same reason as above.
 
+### Connection string
+
+The scheme shown for Redis is `redis://`, and the parser also accepts `rediss://`.
+Its row in `CONNECTION_STRING` is declared in [`redis-connection-string.ts`](../../src/lib/db/providers/keyvalue/redis-connection-string.ts).
+It has no `readTls`: the scheme itself is the TLS, so `rediss://` sets `require` and `redis://` sets `disable`.
+It runs no seed load check.
+
+### Execution UI
+
+An open Redis transaction is a `MULTI`, and the keyword that keeps it is `EXEC`, so the rolled-back notice names `EXEC` where every other engine's names `COMMIT`.
+D74 gave the single-statement route the same `finally` as the script route, and `redis` implements the surface, so the notice reaches a reader whose open transaction is a `MULTI`.
+Naming `COMMIT` would tell them to type a command their engine does not have.
+Its row in `EXECUTION_UI` is declared in [`redis-execution-ui.ts`](../../src/lib/db/providers/keyvalue/redis-execution-ui.ts).
+The agent's consent card has no consent deadline chip or sentence for it.
+
 ---
 
 ## 5. Query interface

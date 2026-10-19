@@ -57,6 +57,8 @@ const OUTSIDE_IMPORTERS_ALLOWED: readonly string[] = [
 ];
 /** Each per-engine contract's registry, with the one Spark module, the engine's declaration, it may import. */
 const CONTRACT_REGISTRIES: Readonly<Record<string, string>> = {
+  "src/lib/db/connection-string/index.ts": `${SPARK}/connection-string`,
+  "src/lib/db/execution-ui/index.ts": `${SPARK}/execution-ui`,
   "src/lib/db/migration-ddl/index.ts": `${SPARK}/migration-ddl`,
 };
 /** The one module under src/lib/db/providers/ outside the directory a Spark file may import. */

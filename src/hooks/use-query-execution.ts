@@ -10,6 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { storage } from "@/lib/storage";
 import { isDangerousQuery } from "@/components/QuerySafetyDialog";
 import { consoleTextByteLimit, statementRefusal } from "@/lib/db/destructive-commands";
+import { executionUiFor } from "@/lib/db/execution-ui";
 import { countCodeStatements, isMultiStatement } from "@/lib/sql/statement-splitter";
 import { readsSqlText, resolveSqlGrammar } from "@/lib/sql/grammar";
 import { hasUnterminatedSpan } from "@/lib/sql/spans";
@@ -845,12 +846,8 @@ export function useQueryExecution({
          * silently rolled back and their next statement autocommitted instead of joining the
          * transaction they had asked for, which is exactly the harm this notice exists to prevent.
          */
-        // THE KEYWORD IS THE ENGINE'S, not SQL's. This sentence said "Add COMMIT" while the only
-        // caller of the ender was a SQL script route. D74 gave the single-statement route the same
-        // `finally`, and `redis` implements the surface, so the notice now reaches a reader whose
-        // open transaction is a `MULTI` and whose keyword is `EXEC`. Naming the wrong one tells
-        // them to type a command their engine does not have.
-        const keepKeyword = activeConnection.type === "redis" ? "EXEC" : "COMMIT";
+        // The keyword is the engine's, not SQL's: see `ExecutionUiSpec.commitKeyword`.
+        const keepKeyword = executionUiFor(activeConnection.type).commitKeyword;
         const transactionNotice =
           resultData.openTransaction === "rolled-back"
             ? ` This left a transaction open and it was rolled back, so its changes were discarded. Add ${keepKeyword} to keep them.`

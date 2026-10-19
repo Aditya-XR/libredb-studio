@@ -96,6 +96,15 @@ A monitoring panel whose read is refused stays empty rather than failing.
 
 Do not set `DB_HTTP_BLOCK_PRIVATE_HOSTS=true` on such a deployment: it blocks the metadata server's link-local address `169.254.169.254`.
 
+### Connection string
+
+`bigquery` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/sql/bigquery/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `bigquery` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/sql/bigquery/execution-ui.ts).
+
 ## 4. Seeding
 
 A BigQuery connection is seeded like any other ([SEED_CONNECTIONS.md](../SEED_CONNECTIONS.md)).

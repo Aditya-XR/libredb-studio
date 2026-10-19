@@ -31,7 +31,7 @@ None of it is a GitHub issue.
 - [Drivers and connections](#drivers-and-connections) — D1-D375, U17 · 272
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R4 · 4
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U146 · 133
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U147 · 133
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC35 · 31
 - [Release pipeline](#release-pipeline) — REL1-REL9 · 9
@@ -4600,18 +4600,6 @@ driven off what the provider publishes rather than off the shape of the string a
 on a database type id in a component, and the tree slot and the flat explorer's column list take the
 same answer from one place.
 
-### U36. The connection dialog picks field labels by testing the type id, beside a declaration that does the same job
-
-`src/components/ConnectionModal.tsx` tests the type id in five booleans.
-Four of them (`isCouchbase`, `isTrino`, `isCassandra`, `isLibSQL`) choose `passwordFieldLabel`, `databaseFieldLabel`, `databaseFieldPlaceholder`, `connectionUriPlaceholder` and four hint paragraphs; `isMongoDB` and `isCassandra` also gate the `authSource` and `localDataCenter` field blocks, which `takesConnectionField` could decide because `connectionFields` in `src/lib/db-ui-config.ts` declares both.
-Since the Prometheus provider (#1085, section 3.3), `DatabaseUIConfig` carries optional `fieldLabels` and `fieldHints`, read through `connectionFieldLabel` and `connectionFieldHint` before those fallbacks, and only the `prometheus` entry declares them.
-So the same fact now has two mechanisms, and a sixth engine that follows the older one extends a chain the component should not own.
-
-Found 2026-09-23 while adding the declaration for #1085.
-Not fixed in #1085, on purpose: moving the older engines onto the declaration changes what five dialogs render, and each has its own E2E or component assertions that would move with it.
-
-**Done when:** no label, placeholder or hint in the dialog is chosen by a type-id boolean, each comes from `DatabaseUIConfig`, and the existing assertions for Couchbase, Trino, Cassandra, MongoDB and libSQL pass unchanged.
-
 ### U37. Monaco's bundled `redis` language shadows the Redis tokenizer this repository registers
 
 `registerRedisLanguage` in `src/lib/editor/redis-language.ts` returns before it registers anything when `monaco.languages.getLanguages()` already lists the `redis` id, which is how it stays idempotent across editor mounts.
@@ -5729,6 +5717,16 @@ Found 2026-10-18 while designing #1822.
 
 **Done when:** each of the eight engines that declare a `createTable` has a live round trip of non-ASCII text, a fractional number, a 64-bit integer and a boolean column through an import into a new table, and the import reads its type spelling from a provider declaration rather than one portable list.
 
+### U147. The ClickHouse connection-URI box shows a MongoDB example
+
+The `clickhouse` entry of `DB_UI_CONFIG` in `src/lib/db-ui-config.ts` declares `fieldPlaceholders.connectionString` as `mongodb://localhost:27017/mydb  or  mongodb+srv://...`, so a ClickHouse dialog switched to its connection string mode offers a MongoDB URI as the example.
+That is the dialog's old fall-through for every toggle engine that was not Couchbase or libSQL, moved onto the declaration unchanged so the engine contract refactor changed no rendered text; `tests/unit/db/connection-form/golden/clickhouse.txt` and `tests/unit/lib/db-ui-config-placement.test.ts` pin it.
+The schemes the parser reads for ClickHouse are `clickhouse://`, `http://` and `https://`.
+
+Found 2026-10-19 by the connection form golden capture of the engine contract refactor; pre-existing.
+
+**Done when:** the ClickHouse connection string placeholder names a URL the parser reads as ClickHouse, the golden file and the placement test are regenerated and updated with it, and the dialog's E2E or component assertions for ClickHouse still pass.
+
 ## Dependencies
 
 ### P1. The desktop shell's `glib` advisory has no reachable fix while Tauri v2 targets GTK 3
@@ -6111,14 +6109,14 @@ Not fixed there: that work runs the scan with those two mounts and counts `0 com
 
 **Done when:** `CONTRIBUTING.md` gives a command that scans the branch from a git worktree as well as from a clone, for example by mounting the worktree and the main checkout's `.git` at their own absolute paths, and says that a scan reporting `0 commits scanned.` checked nothing.
 
-### DOC19. CLAUDE.md names a mongodb branch that moved and a Redis method that no longer exists
+### DOC19. CLAUDE.md names a Redis method that no longer exists
 
-`CLAUDE.md` (Architecture) lists `src/lib/editor/tab-language.ts` among the three UI files that keep a `=== "mongodb"` branch, but that file has none; the branches are in `src/hooks/use-connection-form.ts` (`type === "mongodb" && authSource`) and `src/components/ConnectionModal.tsx` (`isMongoDB`).
 `CLAUDE.md` (Database Connections) says Redis `getSchema()` uses a non-blocking `SCAN`, but `getSchema` left the provider contract in #789 (`src/lib/db/base-provider.ts`), and comments in `src/lib/db/providers/keyvalue/redis.ts` still name it.
 
 Found 2026-10-09 while designing the S3 provider; pre-existing.
+Amended 2026-10-19: its mongodb half closed when the connection dialog's two `=== "mongodb"` branches left `src/hooks/use-connection-form.ts` and `src/components/ConnectionModal.tsx`, and `CLAUDE.md` stopped naming them.
 
-**Done when:** `CLAUDE.md` names the files that hold the branches today and describes the Redis key walk by the method that exists, and the Redis comments name it too.
+**Done when:** `CLAUDE.md` describes the Redis key walk by the method that exists, and the Redis comments name it too.
 
 ### DOC20. docs/ADDING_A_PROVIDER.md carries stale counts and an incomplete label table
 

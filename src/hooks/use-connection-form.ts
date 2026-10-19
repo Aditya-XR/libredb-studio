@@ -1217,10 +1217,10 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
             password: undefined,
           }
         : {}),
-      ...(type === "oracle" && serviceName ? { serviceName } : {}),
-      ...(type === "mssql" && instanceName ? { instanceName } : {}),
-      ...(type === "cassandra" && localDataCenter ? { localDataCenter } : {}),
-      ...(type === "mongodb" && authSource ? { authSource } : {}),
+      ...(addressedFields.has("serviceName") && serviceName ? { serviceName } : {}),
+      ...(addressedFields.has("instanceName") && instanceName ? { instanceName } : {}),
+      ...(addressedFields.has("localDataCenter") && localDataCenter ? { localDataCenter } : {}),
+      ...(addressedFields.has("authSource") && authSource ? { authSource } : {}),
       ...(addressedFields.has("apiKeyId") && apiKeyId ? { apiKeyId } : {}),
       ...(addressedFields.has("apiKeySecret") && apiKeySecret ? { apiKeySecret } : {}),
       // Written only for an engine that takes it and only when one is chosen: a mechanism left

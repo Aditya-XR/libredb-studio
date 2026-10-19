@@ -415,6 +415,18 @@ far end and dialled at the local pair: `opc.tcp://plc.example.net:4840/milo` thr
 address at the REMOTE port, and the unit test agreed with it because its fixture inverted the pair
 too. A tunnel the factory has not opened is refused rather than dialled.
 
+### Connection string
+
+`opcua` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/industrial/opcua/connection-string.ts)).
+`securityMode`, `serverCertificateThumbprint`, `securityPolicyUri`, `clientCertificatePath` and `clientPrivateKeyPath` are its seed-only fields, declared in `SEED_ONLY_FIELDS` in `src/lib/db/connection-fields.ts` (#1677): on any other engine the provider never reads them, so a seed of another engine that carries one would be listed as pinned or as encrypted and be neither, and is refused by name.
+The last three are the fields the dialog has no box for, because they are deployment facts: the policy to insist on, and the client certificate and key to present.
+A server with a trust list of its own has to be given a stable client certificate before it will accept a secured channel, and a file path is how a deployment names one, which is the seed file's job and not a text box's.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `opcua` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/industrial/opcua/execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 The request

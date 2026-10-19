@@ -143,6 +143,20 @@ db2stop && db2start
 Then paste `ca.arm` (it is PEM) into the SSL panel's CA certificate field, set the port to 50001, and choose Verify full.
 `DB2COMM=SSL,TCPIP` keeps the plaintext port open beside the TLS one; drop `TCPIP` once every client uses TLS.
 
+### Connection string
+
+The scheme shown for Db2 is `db2://`.
+Its row in `CONNECTION_STRING` is declared in [`connection-string.ts`](../../src/lib/db/providers/sql/db2/connection-string.ts).
+Its `readTls` reads `security` first and the boolean `ssl` only without it (#786).
+`security=SSL` is the keyword Db2's own CLI and JDBC drivers read, and it maps to `verify-system`, a verifying mode, because the Db2 provider fails closed on unverified transport: without TLS the password crosses the network in cleartext.
+`ssl` maps `true` and `1` onto that same mode, and `false` and `0` onto `disable`.
+It runs no seed load check.
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `db2` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/sql/db2/execution-ui.ts).
+
 ## 4. Known issues (db2-node 1.0.25)
 
 The live script `tests/live/db2-known-issues.ts` probes the row below and every row fixed in 1.0.24 and 1.0.25 against a running Db2 and prints `PRESENT` or `GONE`, so a driver bump starts by running it.

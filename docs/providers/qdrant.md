@@ -186,6 +186,15 @@ To try it, paste the cluster's `https://` endpoint into the Host box and its key
 Its keys are JWTs with manage access to the whole cluster and an expiry of 90 days by default, and a key whose expiry is left empty never expires, which the dialog's warning names: prefer a read-only or collection-scoped key with an expiry.
 Its strict mode answers "Limit exceeded", "Index required but not found", "Exact search disabled" and HTTP 429 with `Retry-After` in normal use; Studio shows each after its own sentence (section 10).
 
+### Connection string
+
+`qdrant` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/vector/qdrant/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `qdrant` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/vector/qdrant/execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 The request

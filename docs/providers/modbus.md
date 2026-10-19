@@ -169,6 +169,15 @@ chain and host name are checked; revocation is NOT checked, and the connection d
 those words. MEASURED on 13 October 2026: a stapled OCSP response saying revoked still completes
 the connection under Node, and under Bun it never reaches the application.
 
+### Connection string
+
+`modbus` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`connection-string.ts`](../../src/lib/db/providers/industrial/modbus/connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `modbus` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`execution-ui.ts`](../../src/lib/db/providers/industrial/modbus/execution-ui.ts).
+
 ## 5. Query interface
 
 One JSON read request, in the Kafka style, in three shapes. Every shape is settled before any

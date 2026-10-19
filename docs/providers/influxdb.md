@@ -267,6 +267,15 @@ InfluxDB Cloud Serverless answers InfluxQL only for a bucket with an explicit DB
 
 Create the mapping with `influx v1 dbrp create --bucket-id <bucket-id> --db <database> --rp <policy> --default`.
 
+### Connection string
+
+`influxdb` has no connection string scheme, no `readTls` and no seed load check: every field of its row in `CONNECTION_STRING` is `null` ([`influxdb-connection-string.ts`](../../src/lib/db/providers/timeseries/influxdb/influxdb-connection-string.ts)).
+
+### Execution UI
+
+The rolled-back notice names `COMMIT` as the keyword that keeps an open transaction, and `influxdb` has no consent deadline, so the agent's consent card shows no deadline chip or sentence for it.
+Its row in `EXECUTION_UI` is declared in [`influxdb-execution-ui.ts`](../../src/lib/db/providers/timeseries/influxdb/influxdb-execution-ui.ts).
+
 ## 5. Query interface
 
 ### 5.1 The request
