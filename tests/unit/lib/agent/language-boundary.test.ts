@@ -2,9 +2,10 @@
  * The language boundary of the agent core (issue #1821, PR 1): the core names no statement language a pack owns, and
  * the packs load in tiers that cannot form an import cycle.
  *
- * R1 and R2 hold every `.ts` and `.tsx` file under `src/lib/agent/` except `src/lib/agent/languages/**`. The pack ids
- * they look for are the keys of `AGENT_LANGUAGE_COPY` other than `sql`, whose rule is PR 3's, so a fourth pack is
- * covered the day it lands. Only AST nodes are visited, so a comment never counts.
+ * R1, R2, R5, R8 and R9 hold every `.ts` and `.tsx` file under `src/lib/agent/` except `src/lib/agent/languages/**`.
+ * The pack ids R1 looks for are the keys of `AGENT_LANGUAGE_COPY` other than `sql`, whose rules are R5's, so a fourth
+ * pack is covered the day it lands. Only AST nodes are visited, so a comment never counts, and the specifier of an
+ * import or export is never a literal any rule reads.
  *
  * - R1a: a string literal, no-substitution template or literal type whose whole text is a pack id.
  * - R1b: a property named by a pack id: an assignment, a shorthand, a signature, a `.x` access or an `["x"]` access.
@@ -15,6 +16,25 @@
  *   operation id, a verifier id or a fingerprint prefix.
  * - R2: an import of a module under `languages/` other than the shared entries: `pack.ts`, `client.ts`, `server.ts`,
  *   `index.ts`, `verifiers.ts`, `refusals.ts` and `engines/{client,server,index}.ts`, matched by full path.
+ * - R5a: a string literal, no-substitution template or literal type whose whole text is `sql`, unless R5b reads it.
+ * - R5b: `sql` read off a language-keyed table: a `.sql` or `["sql"]` access, or a binding-pattern key, whose receiver
+ *   is such a table, a namespace member of that name, or a same-file alias of one (a `const`, or an import renamed). The
+ *   tables are derived, not listed: every value export of `languages/{client,server,index}.ts` and `agent-manifest.ts`
+ *   whose own keys are exactly the pack ids. A statement text's `.sql` field is never one.
+ * - R5c: a reference to `DEFAULT_STATEMENT_LANGUAGE` or `CURATED_CALL_LANGUAGE`, so neither constant becomes a hidden
+ *   `sql` branch.
+ * - R5e: a string literal or literal type that starts with `sql` and a `.`, `:` or `-`: an operation, requirement or
+ *   verifier id.
+ * - R8a: a string literal or literal type whose whole text is an engine id, a key of `AGENT_STATEMENT_LANGUAGE`.
+ * - R8b: a property named by an engine id, except the keys of `AGENT_STATEMENT_LANGUAGE` itself.
+ * - R8c: any other identifier with a whole segment, or a run of adjacent segments, (split at `_` and at case changes,
+ *   then lowercased) that is an engine id: `postgresThing` and `duckDbPlan` are, `redistribute` is not. An import or export specifier is no reference, as for
+ *   R5c, so an imported name is read where the file uses it.
+ * - R9: a read of a server member an engine overlay may override (`ENGINE_OVERRIDABLE_SERVER_MEMBERS`) through a
+ *   family resolver, so an engine's override is never bypassed: the receiver chain starts at a call to
+ *   `agentLanguagePack`, `languageServerPack` or `languageServer`, under any import name or off a namespace, or at a
+ *   name bound to such a chain, by a declarator or a binding pattern.
+ *   An import of `WORKFLOW_TOOL_RULES`, a family projection of one, or a namespace member of that name, is R9 too.
  * - R3: the tiers, each finding the first forbidden module a chain meets, not every module past it. The server modules never reach the execution tier; the client packs never reach a server module, an
  *   execution module or a `node:`/`bun:` builtin; the language verifiers and `goal-claims.ts` never reach
  *   `goal-verifier.ts`; `goal-verifier.ts`, `goal-claims.ts` and every verifier module never reach `tools.ts` or a
@@ -24,7 +44,9 @@
  * - R6: every `*_SERVER_OVERLAY` and `*_CLIENT_OVERLAY` an engine module under `languages/<family>/engines/` declares,
  *   exported or not, is declared `satisfies` its overlay type, `AgentEngineServerOverlay<...>`,
  *   `AgentEngineClientOverlay<...>` or `{ dialect: ClientDialectOf<...> }`, so the excess-property check holds every
- *   overlay to its family's dialect; and an export list gives an overlay's name to no other value.
+ *   overlay to its family's dialect; an export list gives an overlay's name to nothing but such a declaration of the
+ *   same file, whatever its local name, so a re-export from another module fails; no engine module writes `export *`;
+ *   and no binding pattern binds an overlay's name.
  * - R7: no core file declares a name of a dialect table the engine overlays absorbed (`CATALOG_PLANS` and the rest of
  *   `ABSORBED`), at any depth, in a destructuring pattern too, and with no allowlist, so a table cannot come back
  *   beside the overlay that replaced it.
@@ -40,7 +62,12 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
+import * as manifest from "@/lib/agent/agent-manifest";
 import { AGENT_LANGUAGE_COPY, AGENT_STATEMENT_LANGUAGE } from "@/lib/agent/agent-manifest";
+import * as languages from "@/lib/agent/languages";
+import * as languageClients from "@/lib/agent/languages/client";
+import { ENGINE_OVERRIDABLE_SERVER_MEMBERS } from "@/lib/agent/languages/overlay";
+import * as languageServers from "@/lib/agent/languages/server";
 
 const ROOT = join(import.meta.dir, "..", "..", "..", "..");
 const AGENT = "src/lib/agent";
@@ -54,6 +81,32 @@ const ANY_ID = new RegExp(IDS, "i");
 const ENGINE_IDS = new Set(Object.keys(AGENT_STATEMENT_LANGUAGE));
 const PLAN_STAGE = /COLLSCAN|IXSCAN/;
 const COMPOUND_ID = [new RegExp(`^(${IDS})[.:-]`), new RegExp(`-(${IDS})\\.\\d+$`)];
+
+/** The id R1 leaves out: the default family's, whose literals and table reads are R5's. */
+const SQL = "sql";
+const SQL_COMPOUND = /^sql[.:-]/;
+/** The two named readings of the default family (R5c). */
+const DEFAULT_LANGUAGE_CONSTANTS = new Set(["DEFAULT_STATEMENT_LANGUAGE", "CURATED_CALL_LANGUAGE"]);
+
+/** Every value export of the shared language entries and the manifest whose own keys are exactly the pack ids. */
+const LANGUAGE_TABLES: ReadonlySet<string> = new Set(
+  [languageClients, languageServers, languages, manifest].flatMap((module) =>
+    Object.entries(module)
+      .filter(
+        ([, value]) =>
+          typeof value === "object" &&
+          value !== null &&
+          Object.keys(value).sort().join() === Object.keys(AGENT_LANGUAGE_COPY).sort().join(),
+      )
+      .map(([name]) => name),
+  ),
+);
+
+/** The server members an engine overlay may override; every other member is read by family. */
+const OVERRIDABLE_SERVER_MEMBERS = new Set<string>(ENGINE_OVERRIDABLE_SERVER_MEMBERS);
+/** The resolvers that answer a family's pack, blind to the engine's overlay. */
+const FAMILY_RESOLVERS = new Set(["agentLanguagePack", "languageServerPack", "languageServer"]);
+const MANIFEST = `${AGENT}/agent-manifest.ts`;
 
 /** The shared entries of `languages/` the core may import; every other module there belongs to one pack. */
 const SHARED_ENTRIES = new Set(
@@ -71,23 +124,75 @@ const SHARED_ENTRIES = new Set(
 );
 
 /**
- * The findings the core keeps on purpose, each an exact count. Every one is persisted or the spec's own map: the id
- * union `AGENT_STATEMENT_LANGUAGE` maps onto, that total map itself, and the operation and verifier ids the ledgers in
- * `tests/fixtures/agent/*.ndjson` hold.
+ * The findings the core keeps on purpose, each an exact count. None is a pack id read as a branch or an engine branch:
+ * - the spec's own map: the id union `AGENT_STATEMENT_LANGUAGE` maps onto, and that total map itself;
+ * - `sql` as the name of the model's argument, and as a `ProviderCapabilities.queryLanguage` value;
+ * - the reference variant record and the ledger's "the default language is not written" rule (R5c
+ *   `DEFAULT_STATEMENT_LANGUAGE`), and a curated call, which is no statement in any language (R5c
+ *   `CURATED_CALL_LANGUAGE`);
+ * - persisted ids: the `sql-composers` requirement, whose engines are derived from the overlays, and the operation ids
+ *   of the SQL arm runtime, which stays in the core. The one in `describePriorProgress` is temporary: it marks B127,
+ *   and the B127 fix removes it;
+ * - `kubernetes` in the cluster-* requirements, the mirror of the provider's `agentReadings`;
+ * - the execution gate, which the spec keeps in `AGENT_EXECUTION_ENGINES`;
+ * - `postgres` as the `@workflow` durable world, which is no `DatabaseType`;
+ * - the plan readers keyed by the provider-declared `ExplainFormat`, which the spec says a plan format is read from.
+ *
+ * The operation and verifier ids a family owns are its rows in `AgentFamilyOperationIds` and `AgentFamilyVerifierIds`
+ * in `languages/pack.ts`.
  */
 const ALLOWLIST: Readonly<Record<string, number>> = Object.freeze({
   [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "kubectl"`]: 1,
   [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "mongo"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R5a "sql"`]: 1,
   [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "mongo"`]: 1,
   [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "kubectl"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "kubectl.query.read"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "mongo.query.read"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "mongo.schema.read"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "mongo.plan.estimate"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "mongo.table.profile"`]: 1,
-  [`${AGENT}/goal-verifier.ts#AgentGoalVerifierId: R1e "agent-query-optimization-kubectl.1"`]: 1,
-  [`${AGENT}/goal-verifier.ts#AgentGoalVerifierId: R1e "agent-database-assessment-kubectl.1"`]: 1,
-  [`${AGENT}/goal-verifier.ts#AgentGoalVerifierId: R1e "agent-query-optimization-mongo.1"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R5a "sql"`]: 5,
+  [`${AGENT}/agent-manifest.ts#AgentStatementArgument: R5a "sql"`]: 1,
+  [`${AGENT}/tools.ts#argument: R5a "sql"`]: 1,
+  [`${AGENT}/investigation.ts#planningStatementContract: R5a "sql"`]: 2,
+  [`${AGENT}/plan-statement.ts#validatePlanStatement: R5a "sql"`]: 1,
+  [`${AGENT}/agent-manifest.ts#inherited: R5c DEFAULT_STATEMENT_LANGUAGE`]: 1,
+  [`${AGENT}/agent-manifest.ts#planObjectiveOf: R5c DEFAULT_STATEMENT_LANGUAGE`]: 1,
+  [`${AGENT}/agent-manifest.ts#sqlVerifier: R5c DEFAULT_STATEMENT_LANGUAGE`]: 1,
+  [`${AGENT}/agent-manifest.ts#persistedRunFacts: R5c DEFAULT_STATEMENT_LANGUAGE`]: 1,
+  [`${AGENT}/workflow-classifier.ts#lines: R5c DEFAULT_STATEMENT_LANGUAGE`]: 1,
+  [`${AGENT}/workflow-classifier.ts#isWorkflowType: R5c DEFAULT_STATEMENT_LANGUAGE`]: 1,
+  [`${AGENT}/tools.ts#fingerprint: R5c CURATED_CALL_LANGUAGE`]: 1,
+  [`${AGENT}/tools.ts#advice: R5c CURATED_CALL_LANGUAGE`]: 1,
+  [`${AGENT}/tools.ts#runAuditedAgentCall: R5c CURATED_CALL_LANGUAGE`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentVariantRequirement: R5e "sql-composers"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_REQUIREMENT_ENGINES: R5e "sql-composers"`]: 1,
+  [`${AGENT}/agent-manifest.ts#REQUIREMENT_SENTENCES: R5e "sql-composers"`]: 1,
+  [`${AGENT}/tools.ts#readStatementForGrounding: R5e "sql.query.read"`]: 1,
+  [`${AGENT}/tools.ts#request: R5e "sql.query.read"`]: 1,
+  [`${AGENT}/tools.ts#inspectPlanTool: R5e "sql.explain.estimate"`]: 1,
+  [`${AGENT}/tools.ts#outcome: R5e "sql.table.profile"`]: 1,
+  [`${AGENT}/tools.ts#profileTableTool: R5e "sql.table.profile"`]: 2,
+  [`${AGENT}/investigation.ts#describePriorProgress: R5e "sql.table.profile"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_REQUIREMENT_ENGINES: R8a "kubernetes"`]: 2,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "postgres"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "sqlite"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "duckdb"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "mssql"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "mysql"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "kubernetes"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "mongodb"`]: 1,
+  [`${AGENT}/config.ts#AgentDurableBackend: R8a "postgres"`]: 1,
+  [`${AGENT}/config.ts#SANCTIONED_WORLD_TARGETS: R8a "postgres"`]: 1,
+  [`${AGENT}/config.ts#resolveAgentAvailability: R8a "postgres"`]: 1,
+  [`${AGENT}/plan-summary.ts#postgresRoot: R8c postgresRoot`]: 1,
+  [`${AGENT}/plan-summary.ts#root: R8c postgresRoot`]: 1,
+  [`${AGENT}/plan-summary.ts#tallyPostgres: R8c tallyPostgres`]: 2,
+  [`${AGENT}/plan-summary.ts#summarisePostgres: R8c summarisePostgres`]: 1,
+  [`${AGENT}/plan-summary.ts#summarisePostgres: R8c tallyPostgres`]: 1,
+  [`${AGENT}/plan-summary.ts#SQLITE_INDEX_STEP: R8c SQLITE_INDEX_STEP`]: 1,
+  [`${AGENT}/plan-summary.ts#SQLITE_SCAN_STEP: R8c SQLITE_SCAN_STEP`]: 1,
+  [`${AGENT}/plan-summary.ts#summariseSqlite: R8c summariseSqlite`]: 1,
+  [`${AGENT}/plan-summary.ts#summariseSqlite: R8c SQLITE_INDEX_STEP`]: 1,
+  [`${AGENT}/plan-summary.ts#summariseSqlite: R8c SQLITE_SCAN_STEP`]: 1,
+  [`${AGENT}/plan-summary.ts#PLAN_READINGS: R8c summarisePostgres`]: 1,
+  [`${AGENT}/plan-summary.ts#PLAN_READINGS: R8c summariseSqlite`]: 1,
 });
 
 /** Declarations too wide to key an allowlist entry on: one entry would excuse a whole run loop or file. */
@@ -224,12 +329,117 @@ function isPropertyName(node: ts.Node): boolean {
   );
 }
 
-/** R1 and R2 over one core file: every finding, once per occurrence. */
-function coreFileFindings(file: string, text: string): string[] {
+/** `expression` without the parentheses, assertions and non-null marks around it. */
+function unwrap(expression: ts.Expression): ts.Expression {
+  let at = expression;
+  while (
+    ts.isParenthesizedExpression(at) ||
+    ts.isAsExpression(at) ||
+    ts.isSatisfiesExpression(at) ||
+    ts.isNonNullExpression(at)
+  ) {
+    at = at.expression;
+  }
+  return at;
+}
+
+/** The words of an identifier, split at `_` and at case changes and lowercased: `tallyPostgres` is `tally`, `postgres`. */
+const segmentsOf = (name: string): string[] =>
+  name
+    .split("_")
+    .flatMap((part) => part.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/))
+    .map((segment) => segment.toLowerCase());
+
+/**
+ * True when a run of adjacent segments of `name` is an engine id: `postgresThing` holds `postgres` as one segment, and
+ * `duckDbPlan` holds `duckdb` across two, because an id is spelled in camel case across its own words too.
+ */
+const namesEngine = (name: string): boolean => {
+  const segments = segmentsOf(name);
+  return segments.some((_, start) =>
+    segments.slice(start).some((_, length) => ENGINE_IDS.has(segments.slice(start, start + length + 1).join(""))),
+  );
+};
+
+/** The key a binding element reads: `sql` in `{ sql }` and in `{ sql: x }`. */
+function bindingKey(element: ts.BindingElement): string | undefined {
+  const key = element.propertyName ?? element.name;
+  return ts.isIdentifier(key) || ts.isStringLiteral(key) ? key.text : undefined;
+}
+
+/** The declaration whose initializer a binding element destructures, through any nesting of patterns. */
+function destructured(element: ts.BindingElement): ts.VariableDeclaration | undefined {
+  let at: ts.Node = element.parent.parent;
+  while (ts.isBindingElement(at)) at = at.parent.parent;
+  return ts.isVariableDeclaration(at) ? at : undefined;
+}
+
+/** True when an import or export specifier names `node`, which then is no reference. */
+const isSpecifierName = (node: ts.Node): boolean =>
+  ts.isImportSpecifier(node.parent) || ts.isExportSpecifier(node.parent);
+
+/** R1, R2, R5, R8 and R9 over one core file: every finding, once per occurrence. */
+function coreFileFindings(file: string, text: string, exemptEngineMap = true): string[] {
   const source = parse(file, text);
   const findings: string[] = [];
   const add = (node: ts.Node, rule: string, detail: string): void => {
     findings.push(`${file}#${declarationOf(node)}: ${rule} ${detail}`);
+  };
+  // The file's names for a language-keyed table (R5b) and for a family resolver's answer (R9), in source order.
+  const tables = new Set(LANGUAGE_TABLES);
+  const resolved = new Set<string>();
+  // The file's names for a family resolver: its own, and any import that renames one.
+  const resolvers = new Set(FAMILY_RESOLVERS);
+  const isTable = (expression: ts.Expression): boolean => {
+    const at = unwrap(expression);
+    return (
+      (ts.isIdentifier(at) && tables.has(at.text)) ||
+      (ts.isPropertyAccessExpression(at) && LANGUAGE_TABLES.has(at.name.text))
+    );
+  };
+  const isResolved = (expression: ts.Expression): boolean => {
+    let at = unwrap(expression);
+    while (ts.isPropertyAccessExpression(at) || ts.isElementAccessExpression(at)) at = unwrap(at.expression);
+    if (ts.isCallExpression(at)) {
+      const callee = unwrap(at.expression);
+      return (
+        (ts.isIdentifier(callee) && resolvers.has(callee.text)) ||
+        (ts.isPropertyAccessExpression(callee) && FAMILY_RESOLVERS.has(callee.name.text))
+      );
+    }
+    return ts.isIdentifier(at) && resolved.has(at.text);
+  };
+  const bind = (node: ts.Node): void => {
+    if (ts.isImportSpecifier(node) && LANGUAGE_TABLES.has((node.propertyName ?? node.name).text))
+      tables.add(node.name.text);
+    if (ts.isImportSpecifier(node) && FAMILY_RESOLVERS.has((node.propertyName ?? node.name).text))
+      resolvers.add(node.name.text);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      if (isTable(node.initializer)) tables.add(node.name.text);
+      if (isResolved(node.initializer)) resolved.add(node.name.text);
+    }
+    if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
+      // `const { server } = agentLanguagePack(x)` names a resolver's answer; a key that is an overridable member is R9.
+      const key = bindingKey(node);
+      const initializer = destructured(node)?.initializer;
+      if (
+        key !== undefined &&
+        !OVERRIDABLE_SERVER_MEMBERS.has(key) &&
+        initializer !== undefined &&
+        isResolved(initializer)
+      )
+        resolved.add(node.name.text);
+    }
+    ts.forEachChild(node, bind);
+  };
+  bind(source);
+  const isEngineMapKey = (node: ts.Node): boolean =>
+    exemptEngineMap &&
+    file === MANIFEST &&
+    ts.isPropertyAssignment(node.parent) &&
+    declarationOf(node) === "AGENT_STATEMENT_LANGUAGE";
+  const engineProperty = (node: ts.Node, name: string): void => {
+    if (!isEngineMapKey(node)) add(node, "R8b", name);
   };
   const visit = (node: ts.Node): void => {
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
@@ -237,6 +447,17 @@ function coreFileFindings(file: string, text: string): string[] {
       const isSpecifier = ts.isImportDeclaration(node.parent) || ts.isExportDeclaration(node.parent);
       if (!isSpecifier && WHOLE_ID.test(node.text)) add(node, isPropertyName(node) ? "R1b" : "R1a", literal);
       if (!isSpecifier && COMPOUND_ID.some((pattern) => pattern.test(node.text))) add(node, "R1e", literal);
+      if (!isSpecifier && node.text === SQL) {
+        const parent = node.parent;
+        const tableRead =
+          ts.isElementAccessExpression(parent) && parent.argumentExpression === node && isTable(parent.expression);
+        add(node, tableRead ? "R5b" : "R5a", tableRead ? SQL : literal);
+      }
+      if (!isSpecifier && SQL_COMPOUND.test(node.text)) add(node, "R5e", literal);
+      if (!isSpecifier && ENGINE_IDS.has(node.text)) {
+        if (isPropertyName(node)) engineProperty(node, node.text);
+        else add(node, "R8a", literal);
+      }
     }
     if (ts.isStringLiteral(node) || ts.isTemplateLiteralToken(node)) {
       if (PLAN_STAGE.test(node.text)) add(node, "R1d", JSON.stringify(node.text));
@@ -244,6 +465,46 @@ function coreFileFindings(file: string, text: string): string[] {
     if (ts.isIdentifier(node)) {
       if (WHOLE_ID.test(node.text) && isPropertyName(node)) add(node, "R1b", node.text);
       else if (ANY_ID.test(node.text) && !ENGINE_IDS.has(node.text)) add(node, "R1c", node.text);
+      const parent = node.parent;
+      if (
+        node.text === SQL &&
+        ts.isPropertyAccessExpression(parent) &&
+        parent.name === node &&
+        isTable(parent.expression)
+      ) {
+        add(node, "R5b", SQL);
+      }
+      if (DEFAULT_LANGUAGE_CONSTANTS.has(node.text) && !isSpecifierName(node)) add(node, "R5c", node.text);
+      if (ENGINE_IDS.has(node.text) && isPropertyName(node)) engineProperty(node, node.text);
+      else if (!isSpecifierName(node) && namesEngine(node.text)) add(node, "R8c", node.text);
+      if (
+        OVERRIDABLE_SERVER_MEMBERS.has(node.text) &&
+        ts.isPropertyAccessExpression(parent) &&
+        parent.name === node &&
+        isResolved(parent.expression)
+      ) {
+        add(node, "R9", node.text);
+      }
+      if (
+        node.text === "WORKFLOW_TOOL_RULES" &&
+        ((ts.isImportSpecifier(parent) && (parent.propertyName ?? parent.name) === node) ||
+          (ts.isPropertyAccessExpression(parent) && parent.name === node))
+      ) {
+        add(node, "R9", node.text);
+      }
+    }
+    if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
+      const member = node.argumentExpression.text;
+      if (OVERRIDABLE_SERVER_MEMBERS.has(member) && isResolved(node.expression)) add(node, "R9", member);
+    }
+    if (ts.isBindingElement(node)) {
+      const key = bindingKey(node);
+      const initializer = destructured(node)?.initializer;
+      if (key !== undefined && initializer !== undefined) {
+        const direct = ts.isVariableDeclaration(node.parent.parent);
+        if (key === SQL && direct && isTable(initializer)) add(node, "R5b", SQL);
+        if (OVERRIDABLE_SERVER_MEMBERS.has(key) && isResolved(initializer)) add(node, "R9", key);
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -261,10 +522,26 @@ function coreFileFindings(file: string, text: string): string[] {
 const coreFiles = (): string[] => sourcesUnder(AGENT).filter((file) => !file.startsWith(`${LANGUAGES}/`));
 
 /** R1 and R2 checked against the allowlist (R4): every finding it does not excuse, and every stale entry. */
+/**
+ * Each core file's findings on its text as committed, scanned once. A plant changes one file, so every other file is
+ * read from here instead of being parsed again; parsing the whole core per plant is what outran bun's five-second test
+ * timeout on CI.
+ */
+const COMMITTED_FINDINGS = new Map<string, readonly string[]>();
+
+function committedFindings(file: string): readonly string[] {
+  const cached = COMMITTED_FINDINGS.get(file);
+  if (cached !== undefined) return cached;
+  const found = coreFileFindings(file, read(file));
+  COMMITTED_FINDINGS.set(file, found);
+  return found;
+}
+
 function boundaryFindings(planted: Planted = {}): string[] {
   const counts = new Map<string, number>();
   for (const file of coreFiles()) {
-    for (const finding of coreFileFindings(file, textOf(file, planted))) {
+    const fileFindings = Object.hasOwn(planted, file) ? coreFileFindings(file, planted[file]) : committedFindings(file);
+    for (const finding of fileFindings) {
       counts.set(finding, (counts.get(finding) ?? 0) + 1);
     }
   }
@@ -458,7 +735,8 @@ const OVERLAY_NAME = /_(SERVER|CLIENT)_OVERLAY$/;
 
 /**
  * R6 over every engine module: each overlay declaration, exported or not, that is not declared `satisfies` its overlay
- * type, and each name an export list gives an overlay's name that is not such a declaration.
+ * type; each name an export list gives an overlay's name whose local is not such a declaration of the same file, a
+ * re-export from another module and a rename included; each `export *`; and each overlay name a binding pattern binds.
  */
 function overlayShapeFindings(planted: Planted = {}): string[] {
   const findings: string[] = [];
@@ -466,6 +744,8 @@ function overlayShapeFindings(planted: Planted = {}): string[] {
   for (const file of modules) {
     const source = parse(file, textOf(file, planted));
     const shapedNames = new Set<string>();
+    // An unshaped declaration is reported where it is declared, not again where an export list names it.
+    const unshapedNames = new Set<string>();
     for (const statement of source.statements) {
       if (!ts.isVariableStatement(statement)) continue;
       for (const declaration of statement.declarationList.declarations) {
@@ -477,20 +757,34 @@ function overlayShapeFindings(planted: Planted = {}): string[] {
           ts.isSatisfiesExpression(initializer) &&
           OVERLAY_TYPE.test(initializer.type.getText(source));
         if (shaped) shapedNames.add(name);
-        else findings.push(`${file}#${name}: R6`);
+        else {
+          unshapedNames.add(name);
+          findings.push(`${file}#${name}: R6`);
+        }
       }
     }
     for (const statement of source.statements) {
-      if (!ts.isExportDeclaration(statement) || statement.exportClause === undefined) continue;
-      if (!ts.isNamedExports(statement.exportClause)) continue;
+      if (!ts.isExportDeclaration(statement)) continue;
+      if (statement.exportClause === undefined || ts.isNamespaceExport(statement.exportClause)) {
+        findings.push(`${file}#<export *>: R6`);
+        continue;
+      }
       for (const specifier of statement.exportClause.elements) {
         const local = (specifier.propertyName ?? specifier.name).getText(source);
         const exported = specifier.name.getText(source);
-        if (OVERLAY_NAME.test(exported) && !shapedNames.has(local) && !OVERLAY_NAME.test(local)) {
+        const declaredHere = statement.moduleSpecifier === undefined;
+        if (OVERLAY_NAME.test(exported) && !(declaredHere && (shapedNames.has(local) || unshapedNames.has(local)))) {
           findings.push(`${file}#${exported}: R6`);
         }
       }
     }
+    const bindings = (node: ts.Node): void => {
+      if (ts.isBindingElement(node) && ts.isIdentifier(node.name) && OVERLAY_NAME.test(node.name.text)) {
+        findings.push(`${file}#${node.name.text}: R6`);
+      }
+      ts.forEachChild(node, bindings);
+    };
+    bindings(source);
   }
   return findings.sort();
 }
@@ -554,7 +848,8 @@ describe("the agent core names no language a pack owns", () => {
 
   test("the scan reads real code: the core holds every allowlisted finding, and the packs hold many more", () => {
     const core = coreFiles().flatMap((file) => coreFileFindings(file, read(file)));
-    expect(core.sort()).toEqual(Object.keys(ALLOWLIST).sort());
+    const expanded = Object.entries(ALLOWLIST).flatMap(([finding, count]) => Array<string>(count).fill(finding));
+    expect(core.sort()).toEqual(expanded.sort());
     const packs = sourcesUnder(LANGUAGES).flatMap((file) => coreFileFindings(file, read(file)));
     expect(packs.length).toBeGreaterThan(100);
   });
@@ -620,6 +915,32 @@ describe("every engine overlay is declared satisfies its overlay type", () => {
         .replace(' as const satisfies AgentEngineServerOverlay<"sql">', "")}\nexport { DUCKDB_SERVER_OVERLAY };\n`,
     };
     expect(overlayShapeFindings(planted)).toEqual([`${duckdb}#DUCKDB_SERVER_OVERLAY: R6`]);
+  });
+
+  test("an overlay name an export list gives to another module's overlay, a rename, or a pattern fails R6", () => {
+    const duckdb = `${LANGUAGES}/sql/engines/duckdb.ts`;
+    const text = read(duckdb);
+    const plant = (code: string): Planted => ({ [duckdb]: `${text}\n${code}\n` });
+    expect(overlayShapeFindings(plant("export { POSTGRES_SERVER_OVERLAY as DUCKDB_SERVER_OVERLAY };"))).toEqual([
+      `${duckdb}#DUCKDB_SERVER_OVERLAY: R6`,
+    ]);
+    expect(overlayShapeFindings(plant('export { MYSQL_SERVER_OVERLAY } from "./mysql";'))).toEqual([
+      `${duckdb}#MYSQL_SERVER_OVERLAY: R6`,
+    ]);
+    expect(overlayShapeFindings(plant("const { X_SERVER_OVERLAY } = {};"))).toEqual([`${duckdb}#X_SERVER_OVERLAY: R6`]);
+    // A shaped overlay of the same file exported by a second name is still that declaration.
+    expect(overlayShapeFindings(plant("export { DUCKDB_SERVER_OVERLAY as COPY_SERVER_OVERLAY };"))).toEqual([]);
+  });
+
+  test("an engine module that re-exports everything from another fails R6", () => {
+    const duckdb = `${LANGUAGES}/sql/engines/duckdb.ts`;
+    const text = read(duckdb);
+    expect(overlayShapeFindings({ [duckdb]: `${text}\nexport * from "./mysql";\n` })).toEqual([
+      `${duckdb}#<export *>: R6`,
+    ]);
+    expect(overlayShapeFindings({ [duckdb]: `${text}\nexport * as mysql from "./mysql";\n` })).toEqual([
+      `${duckdb}#<export *>: R6`,
+    ]);
   });
 
   test("a name exported as an overlay that is no shaped overlay declaration fails R6", () => {
@@ -716,14 +1037,147 @@ describe("planted violations yield exactly their findings", () => {
     expect(boundaryFindings(planted)).toEqual([`${TOOLS}#runReadQueryTool: R1e "mongo.plan.estimate"`]);
   });
 
-  test("an allowlisted id written twice fails R4 as a surplus, and one removed fails it as stale", () => {
+  test("a family's verifier id written back into the core union fails R1e", () => {
     const id = '"agent-query-optimization-kubectl.1"';
-    const key = `${GOAL_VERIFIER}#AgentGoalVerifierId: R1e ${id}`;
     expect(boundaryFindings(plantInTypeAlias(GOAL_VERIFIER, "AgentGoalVerifierId", id))).toEqual([
+      `${GOAL_VERIFIER}#AgentGoalVerifierId: R1e ${id}`,
+    ]);
+  });
+
+  test("the default family's id compared as a string fails R5a", () => {
+    expect(boundaryFindings(plantInFunction(TOOLS, "agentToolDefinition", 'if (language === "sql") {}'))).toEqual([
+      `${TOOLS}#agentToolDefinition: R5a "sql"`,
+    ]);
+  });
+
+  test("the default family's row read off a language-keyed table, an alias or a pattern fails R5b", () => {
+    const scan = (code: string): string[] => boundaryFindings(plantInFunction(TOOLS, "agentToolDefinition", code));
+    expect(scan("void AGENT_WORKFLOW_VARIANTS.sql;")).toEqual([`${TOOLS}#agentToolDefinition: R5b sql`]);
+    expect(scan('void AGENT_WORKFLOW_VARIANTS["sql"];')).toEqual([`${TOOLS}#agentToolDefinition: R5b sql`]);
+    expect(scan("const v = AGENT_LANGUAGE_COPY; void v.sql;")).toEqual([`${TOOLS}#agentToolDefinition: R5b sql`]);
+    expect(scan("const { sql } = AGENT_WORKFLOW_VARIANTS;")).toEqual([`${TOOLS}#agentToolDefinition: R5b sql`]);
+    expect(scan("void manifest.AGENT_PLAN_ESTIMATE_OPERATION.sql;")).toEqual([`${TOOLS}#agentToolDefinition: R5b sql`]);
+    const renamed = prepend(
+      INVESTIGATION,
+      'import { LANGUAGE_TOOL_ARMS as ARMS } from "./languages";\nconst arms = ARMS.sql;',
+    );
+    expect(boundaryFindings(renamed)).toEqual([`${INVESTIGATION}#arms: R5b sql`]);
+    // A statement text's `.sql` field is no language-keyed table.
+    expect(scan("const input = { sql: 1 }; void input.sql;")).toEqual([]);
+  });
+
+  test("the derived language-keyed tables are the ones the core reads by family", () => {
+    expect([...LANGUAGE_TABLES].sort()).toEqual([
+      "AGENT_LANGUAGE_COPY",
+      "AGENT_PLAN_ESTIMATE_OPERATION",
+      "AGENT_WORKFLOW_VARIANTS",
+      "LANGUAGE_TOOL_ARMS",
+      "WORKFLOW_TOOL_RULES",
+    ]);
+  });
+
+  test("a new reference to a default-language constant fails R5c", () => {
+    const posture = `${AGENT}/posture.ts`;
+    expect(boundaryFindings(prepend(posture, "if (x === DEFAULT_STATEMENT_LANGUAGE) {}"))).toEqual([
+      `${posture}#<module>: R5c DEFAULT_STATEMENT_LANGUAGE`,
+    ]);
+  });
+
+  test("an operation id of the default family fails R5e", () => {
+    expect(boundaryFindings(plantInFunction(TOOLS, "readCatalog", 'void "sql.query.write";'))).toEqual([
+      `${TOOLS}#readCatalog: R5e "sql.query.write"`,
+    ]);
+  });
+
+  test("an engine id compared as a string fails R8a", () => {
+    const planted = plantInFunction(TOOLS, "readCatalog", 'if (context.connection.type === "postgres") {}');
+    expect(boundaryFindings(planted)).toEqual([`${TOOLS}#readCatalog: R8a "postgres"`]);
+  });
+
+  test("an engine id as a property name fails R8b, and only the total map's keys are exempt", () => {
+    const posture = `${AGENT}/posture.ts`;
+    expect(boundaryFindings(prepend(posture, "const T = { postgres: 1, sqlite: 2 };"))).toEqual([
+      `${posture}#T: R8b postgres`,
+      `${posture}#T: R8b sqlite`,
+    ]);
+    const unexempt = coreFileFindings(MANIFEST, read(MANIFEST), false).filter((finding) => finding.includes(": R8b "));
+    expect(unexempt).toHaveLength(Object.keys(AGENT_STATEMENT_LANGUAGE).length);
+    expect(unexempt.every((finding) => finding.startsWith(`${MANIFEST}#AGENT_STATEMENT_LANGUAGE: R8b `))).toBe(true);
+  });
+
+  test("an identifier with an engine id as a whole segment fails R8c, and one that only contains it does not", () => {
+    const posture = `${AGENT}/posture.ts`;
+    expect(boundaryFindings(prepend(posture, "function postgresThing() {}"))).toEqual([
+      `${posture}#postgresThing: R8c postgresThing`,
+    ]);
+    expect(boundaryFindings(prepend(posture, "const redistribute = 1;"))).toEqual([]);
+    // An engine id written in camel case across its own words is still that id: `duckDb` is `duckdb`.
+    expect(boundaryFindings(prepend(posture, "function duckDbPlan() {}"))).toEqual([
+      `${posture}#duckDbPlan: R8c duckDbPlan`,
+    ]);
+    expect(boundaryFindings(prepend(posture, "const MsSqlCap = 2;"))).toEqual([`${posture}#MsSqlCap: R8c MsSqlCap`]);
+  });
+
+  test("an overridable member read through a family resolver, an alias, a pattern or a projection fails R9", () => {
+    const scan = (code: string): string[] =>
+      boundaryFindings(plantInFunction(INVESTIGATION, "workflowToolRules", code));
+    expect(scan("void agentLanguagePack(x).server.grounding;")).toEqual([
+      `${INVESTIGATION}#workflowToolRules: R9 grounding`,
+    ]);
+    expect(scan("const p = languageServerPack(x); void p.workflowToolRules;")).toEqual([
+      `${INVESTIGATION}#workflowToolRules: R9 workflowToolRules`,
+    ]);
+    expect(scan('void languageServerPack(x)["answerNotADataRead"];')).toEqual([
+      `${INVESTIGATION}#workflowToolRules: R9 answerNotADataRead`,
+    ]);
+    expect(scan("const { grounding } = languageServerPack(x);")).toEqual([
+      `${INVESTIGATION}#workflowToolRules: R9 grounding`,
+    ]);
+    expect(scan("const { server: { grounding } } = agentLanguagePack(x);")).toEqual([
+      `${INVESTIGATION}#workflowToolRules: R9 grounding`,
+    ]);
+    // Names are read file-wide, and `planningEngine` binds a `server` of its own, so the planted one is renamed.
+    expect(scan("const { server: family } = agentLanguagePack(x); void family.grounding;")).toEqual([
+      `${INVESTIGATION}#workflowToolRules: R9 grounding`,
+    ]);
+    const projected = prepend(INVESTIGATION, 'import { WORKFLOW_TOOL_RULES } from "./languages/server";');
+    expect(boundaryFindings(projected)).toEqual([`${INVESTIGATION}#<module>: R9 WORKFLOW_TOOL_RULES`]);
+    const namespaced = prepend(
+      INVESTIGATION,
+      'import * as rules from "./languages/server"; void rules.WORKFLOW_TOOL_RULES;',
+    );
+    expect(boundaryFindings(namespaced)).toEqual([`${INVESTIGATION}#<module>: R9 WORKFLOW_TOOL_RULES`]);
+    // A resolver imported under another name, or called off a namespace, is the same resolver.
+    const renamed = prepend(
+      INVESTIGATION,
+      'import { languageServerPack as lsp } from "./languages/server"; void lsp(x).grounding;',
+    );
+    expect(boundaryFindings(renamed)).toEqual([`${INVESTIGATION}#<module>: R9 grounding`]);
+    const called = prepend(
+      INVESTIGATION,
+      'import * as L from "./languages/server"; void L.languageServerPack(x).grounding;',
+    );
+    expect(boundaryFindings(called)).toEqual([`${INVESTIGATION}#<module>: R9 grounding`]);
+    // A member no overlay may override is read by family.
+    expect(scan("void languageServerPack(x).adapter;")).toEqual([]);
+  });
+
+  test("an execution engine written twice fails R4 as a surplus", () => {
+    const support = `${AGENT}/engine-support.ts`;
+    const planted = { [support]: read(support).replace('  "postgres",\n', '  "postgres",\n  "postgres",\n') };
+    expect(boundaryFindings(planted)).toEqual([
+      `R4 surplus: ${support}#AGENT_EXECUTION_ENGINES: R8a "postgres" (found 2, allowed 1)`,
+    ]);
+  });
+
+  test("an allowlisted id written twice fails R4 as a surplus, and one removed fails it as stale", () => {
+    const manifest = `${AGENT}/agent-manifest.ts`;
+    const id = '"kubectl"';
+    const key = `${manifest}#AgentStatementLanguageId: R1a ${id}`;
+    expect(boundaryFindings(plantInTypeAlias(manifest, "AgentStatementLanguageId", id))).toEqual([
       `R4 surplus: ${key} (found 2, allowed 1)`,
     ]);
-    const text = read(GOAL_VERIFIER);
-    const removed = { [GOAL_VERIFIER]: text.replace(`| ${id}`, "").replace(id, '"agent-renamed.1"') };
+    const removed = { [manifest]: read(manifest).replace(` | ${id}`, "") };
     expect(boundaryFindings(removed)).toEqual([`R4 stale: ${key} (found 0, allowed 1)`]);
   });
 
@@ -762,12 +1216,19 @@ describe("planted violations yield exactly their findings", () => {
     const claims = `${AGENT}/goal-claims.ts`;
     const toTools = `${manifest} -> ${clients} -> ${client} -> ${TOOLS}`;
     // The manifest loads the client packs, and the verifiers load the manifest, so the verifier closure fails too.
+    // `tools.ts` reads the engine server dialects, whose run resolver reads `statementFamilyOf`: a cycle closes there.
+    // `tools.ts` reads `statementFamilyOf` itself too, so the shortest cycle through the client packs closes on it.
+    // The SQL statement card reads the manifest's plan operations, so a cycle closes there from both of its importers.
+    const toCard = `${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${LANGUAGES}/server.ts`;
     expect(layeringFindings(planted)).toEqual([
       `R3 client: ${clients} reaches ${TOOLS} through ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${engines} reaches ${TOOLS} through ${engines} -> ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${client} reaches ${TOOLS} through ${client} -> ${TOOLS}`,
-      `R3 cycle: ${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
+      `R3 cycle: ${toCard} -> ${LANGUAGES}/sql/recommendation.ts -> ${manifest}`,
+      `R3 cycle: ${toCard} -> ${LANGUAGES}/sql/server.ts -> ${LANGUAGES}/sql/recommendation.ts -> ${manifest}`,
       `R3 cycle: ${manifest} -> ${engines} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
+      `R3 cycle: ${clients} -> ${client} -> ${TOOLS} -> ${clients}`,
+      `R3 cycle: ${clients} -> ${client} -> ${TOOLS} -> ${LANGUAGES}/engines/server.ts -> ${clients}`,
       `R3 verifier: ${claims} reaches ${TOOLS} through ${claims} -> ${toTools}`,
       `R3 verifier: ${GOAL_VERIFIER} reaches ${TOOLS} through ${GOAL_VERIFIER} -> ${toTools}`,
       `R3 verifier: ${LANGUAGES}/kubectl/verifiers.ts reaches ${TOOLS} through ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toTools}`,
@@ -812,6 +1273,7 @@ describe("planted violations yield exactly their findings", () => {
   test("an engine module imported by the core fails R2", () => {
     const posture = `${AGENT}/posture.ts`;
     const planted = prepend(posture, 'import { POSTGRES_SERVER_OVERLAY } from "./languages/sql/engines/postgres";');
+    // An import specifier is no reference, so R8c leaves the overlay's name to the reads of it.
     expect(boundaryFindings(planted)).toEqual([`${posture}#<module>: R2 ${LANGUAGES}/sql/engines/postgres.ts`]);
   });
 
@@ -822,9 +1284,15 @@ describe("planted violations yield exactly their findings", () => {
     const claims = `${AGENT}/goal-claims.ts`;
     const toServer = `${AGENT}/agent-manifest.ts -> ${engines} -> ${client} -> ${server}`;
     // The manifest reads the engines' client dialects, and the verifiers load the manifest, so their closure fails too.
+    // The run resolver reads each engine's family from `engines/client.ts`, so a cycle closes there.
+    // The SQL statement card reads the manifest's plan operations, so a cycle closes there from both of its importers.
+    const toCard = `${toServer} -> ${LANGUAGES}/server.ts`;
     expect(layeringFindings(prepend(client, 'import "../../engines/server";'))).toEqual([
       `R3 client: ${engines} reaches ${server} through ${engines} -> ${client} -> ${server}`,
       `R3 client: ${client} reaches ${server} through ${client} -> ${server}`,
+      `R3 cycle: ${toCard} -> ${LANGUAGES}/sql/recommendation.ts -> ${AGENT}/agent-manifest.ts`,
+      `R3 cycle: ${toCard} -> ${LANGUAGES}/sql/server.ts -> ${LANGUAGES}/sql/recommendation.ts -> ${AGENT}/agent-manifest.ts`,
+      `R3 cycle: ${engines} -> ${client} -> ${server} -> ${engines}`,
       `R3 verifier: ${claims} reaches ${server} through ${claims} -> ${toServer}`,
       `R3 verifier: ${GOAL_VERIFIER} reaches ${server} through ${GOAL_VERIFIER} -> ${toServer}`,
       `R3 verifier: ${LANGUAGES}/kubectl/verifiers.ts reaches ${server} through ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toServer}`,

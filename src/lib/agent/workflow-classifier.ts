@@ -54,6 +54,7 @@ import { logger } from "@/lib/logger";
 import type { AgentRunWorkflowType } from "./types";
 import { DEFAULT_AGENT_WORKFLOW_TYPE } from "./types";
 import { AGENT_WORKFLOW_VARIANTS, type AgentStatementLanguageId, requiredVariant } from "./agent-manifest";
+import { DEFAULT_STATEMENT_LANGUAGE, statementFamilyOf } from "./languages/client";
 import type { AgentFetch } from "./provider-registry";
 import { type AgentModel, createAgentModel, mapAgentModelError } from "./model-adapter";
 
@@ -119,7 +120,7 @@ const classifySystems = new Map<AgentStatementLanguageId, string>();
 function classifySystem(language: AgentStatementLanguageId): string {
   const held = classifySystems.get(language);
   if (held !== undefined) return held;
-  const lines = (Object.keys(AGENT_WORKFLOW_VARIANTS.sql) as AgentRunWorkflowType[])
+  const lines = (Object.keys(AGENT_WORKFLOW_VARIANTS[DEFAULT_STATEMENT_LANGUAGE]) as AgentRunWorkflowType[])
     .map((id) => `${id}: ${requiredVariant(language, id).classifierDescription}`)
     .join("\n");
   const system = [
@@ -134,7 +135,7 @@ function classifySystem(language: AgentStatementLanguageId): string {
 }
 
 const isWorkflowType = (value: string): value is AgentRunWorkflowType =>
-  Object.hasOwn(AGENT_WORKFLOW_VARIANTS.sql, value);
+  Object.hasOwn(AGENT_WORKFLOW_VARIANTS[DEFAULT_STATEMENT_LANGUAGE], value);
 
 /**
  * Strips what a model wraps an identifier in — surrounding whitespace, quotes,
@@ -168,7 +169,7 @@ export async function classifyAgentWorkflow(
 ): Promise<AgentWorkflowClassification> {
   // Read before any model failure can be caught: a language missing a workflow's line is a manifest defect, and
   // folding it into `unclassified` would hide it behind the fallback every transient failure reaches.
-  const system = classifySystem(options.statementLanguage ?? "sql");
+  const system = classifySystem(statementFamilyOf(options.statementLanguage));
   // The ceiling always applies; a caller's signal only ever makes the bound tighter.
   const signals = [AbortSignal.timeout(AGENT_WORKFLOW_CLASSIFY_TIMEOUT_MS)];
   if (options.signal) signals.push(options.signal);

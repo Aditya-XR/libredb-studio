@@ -6,14 +6,13 @@ import {
   type AgentToolContext,
   inspectPlanTool,
   inspectSchemaTool,
-  planStatementSchema,
   planTableProfile,
-  profileSelectorSchema,
   profileTableTool,
 } from "../../tools";
-import { catalogSelectorSchema } from "../../tool-contracts";
+import { catalogSelectorSchema, profileSelectorSchema } from "../../tool-contracts";
 import type { AgentLanguagePack } from "../pack";
 import { SQL_CLIENT_PACK } from "./client";
+import { planStatementSchema } from "./definitions";
 import { SQL_SERVER_PACK } from "./server";
 
 export const SQL_PACK = Object.freeze({

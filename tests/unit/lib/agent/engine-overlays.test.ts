@@ -11,7 +11,7 @@ import { KUBECTL_PACK } from "@/lib/agent/languages/kubectl/index";
 import * as MONGO_CLIENT_OVERLAYS from "@/lib/agent/languages/mongo/engines/client";
 import * as MONGODB from "@/lib/agent/languages/mongo/engines/mongodb";
 import { MONGO_PACK } from "@/lib/agent/languages/mongo/index";
-import { defineOverlay, dialectOnly } from "@/lib/agent/languages/overlay";
+import { defineOverlay, dialectOnly, ENGINE_OVERRIDABLE_SERVER_MEMBERS } from "@/lib/agent/languages/overlay";
 import type { AgentEngineClientDialect, AgentEngineServerDialect } from "@/lib/agent/languages/pack";
 import { languageServerPack } from "@/lib/agent/languages/server";
 import * as SQL_CLIENT_OVERLAYS from "@/lib/agent/languages/sql/engines/client";
@@ -65,6 +65,14 @@ const ENGINE_MODULES: Readonly<Record<string, Readonly<Record<string, unknown>>>
   "kubectl/engines/client": KUBECTL_CLIENT_OVERLAYS,
 };
 
+/** Every overlay an engine module exports, named `<module>#<export>`. */
+const exportedOverlays = (): readonly (readonly [string, object])[] =>
+  Object.entries(ENGINE_MODULES)
+    .flatMap(([module, exports]) =>
+      Object.entries(exports).map(([name, overlay]) => [`${module}#${name}`, overlay as object] as const),
+    )
+    .filter(([name]) => /_(SERVER|CLIENT)_OVERLAY$/.test(name));
+
 const without = (facet: object, key: string): Record<string, unknown> =>
   Object.fromEntries(Object.entries(facet).filter(([name]) => name !== key));
 
@@ -99,18 +107,28 @@ describe("the engine registry", () => {
     expect(() => agentEnginePack("oracle")).toThrow(new Error("no engine pack for oracle"));
   });
 
-  test("every engine module exports overlays that hold a dialect and nothing else (ruling 2)", () => {
-    const all = Object.entries(ENGINE_MODULES).flatMap(([module, exports]) =>
-      Object.entries(exports).map(([name, overlay]) => [`${module}#${name}`, overlay] as const),
-    );
-    const exported = all.filter(([name]) => /_(SERVER|CLIENT)_OVERLAY$/.test(name));
+  test("every engine module's server overlay holds a dialect and overridable members, its client one a dialect alone (ruling 2)", () => {
+    const exported = exportedOverlays();
     expect(exported).toHaveLength(14);
     // The one other export is the PostgreSQL retry's rewrite, which its tests call directly.
-    expect(all.filter(([name]) => !/_(SERVER|CLIENT)_OVERLAY$/.test(name)).map(([name]) => name)).toEqual([
-      "sql/engines/postgres#withoutExtensionOwnershipTest",
-    ]);
-    for (const [, overlay] of exported) {
-      expect(Object.keys(overlay as object).filter((key) => key !== "dialect")).toEqual([]);
+    expect(
+      Object.entries(ENGINE_MODULES)
+        .flatMap(([module, exports]) => Object.keys(exports).map((name) => `${module}#${name}`))
+        .filter((name) => !/_(SERVER|CLIENT)_OVERLAY$/.test(name)),
+    ).toEqual(["sql/engines/postgres#withoutExtensionOwnershipTest"]);
+    const overridable: readonly string[] = ENGINE_OVERRIDABLE_SERVER_MEMBERS;
+    for (const [name, overlay] of exported) {
+      const others = Object.keys(overlay).filter((key) => key !== "dialect");
+      expect(others.filter((key) => !(name.endsWith("_SERVER_OVERLAY") && overridable.includes(key)))).toEqual([]);
+    }
+  });
+
+  test("no shipped overlay overrides a Shared member (provisional: the first engine that does deletes this test)", () => {
+    for (const [, overlay] of exportedOverlays()) {
+      expect(Object.keys(overlay).filter((key) => key !== "dialect")).toEqual([]);
+    }
+    for (const type of ENGINES) {
+      expect(Object.keys(engineServerOverlay(type)).filter((key) => key !== "dialect")).toEqual([]);
     }
   });
 });

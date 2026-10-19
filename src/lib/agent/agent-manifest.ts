@@ -14,7 +14,7 @@
  */
 import type { DatabaseType } from "@/lib/types";
 import type { AgentGoalVerifierId } from "./goal-verifier";
-import { projectClientPacks } from "./languages/client";
+import { DEFAULT_STATEMENT_LANGUAGE, projectClientPacks, statementFamilyOf } from "./languages/client";
 import { enginesSupporting } from "./languages/engines/client";
 import type { AgentOperationId, AgentToolName } from "./tools";
 import type { AgentRunMode, AgentRunWorkflowType } from "./types";
@@ -211,7 +211,7 @@ export function agentVariant(
   language: AgentStatementLanguageId | undefined,
   workflow: AgentRunWorkflowType,
 ): AgentWorkflowVariant | undefined {
-  const id = language ?? "sql";
+  const id = statementFamilyOf(language);
   if (!Object.hasOwn(AGENT_WORKFLOW_VARIANTS, id)) throw new AgentManifestError(`unknown statement language ${id}`);
   // The workflow is read from a ledger too, so it is guarded the same way: a name such as `toString` must be a
   // missing variant, never the inherited method.
@@ -225,7 +225,7 @@ export function requiredVariant(
   workflow: AgentRunWorkflowType,
 ): AgentWorkflowVariant {
   const variant = agentVariant(language, workflow);
-  if (variant === undefined) throw new AgentManifestError(`no ${workflow} variant for ${language ?? "sql"}`);
+  if (variant === undefined) throw new AgentManifestError(`no ${workflow} variant for ${statementFamilyOf(language)}`);
   return variant;
 }
 
@@ -239,7 +239,7 @@ export function planDeliverableOf(
 ): AgentPlanDeliverable {
   const own = agentVariant(language, workflow)?.planDeliverable;
   if (own !== undefined && own !== "inherits") return own;
-  const inherited = requiredVariant("sql", workflow).planDeliverable;
+  const inherited = requiredVariant(DEFAULT_STATEMENT_LANGUAGE, workflow).planDeliverable;
   if (inherited === "inherits") throw new AgentManifestError(`the sql ${workflow} variant inherits from nothing`);
   return inherited;
 }
@@ -252,7 +252,7 @@ export function planObjectiveOf(
   language: AgentStatementLanguageId | undefined,
   workflow: AgentRunWorkflowType,
 ): string {
-  return (agentVariant(language, workflow) ?? requiredVariant("sql", workflow)).objective;
+  return (agentVariant(language, workflow) ?? requiredVariant(DEFAULT_STATEMENT_LANGUAGE, workflow)).objective;
 }
 
 /**
@@ -354,10 +354,10 @@ export function persistedRunFacts(
   availability: Extract<AgentWorkflowAvailability, { open: true }>,
 ): { readonly statementLanguage?: AgentStatementLanguageId; readonly verifier?: AgentGoalVerifierId } {
   const language = availability.statementLanguage;
-  const sqlVerifier = requiredVariant("sql", workflow).verifier;
+  const sqlVerifier = requiredVariant(DEFAULT_STATEMENT_LANGUAGE, workflow).verifier;
   const verifier = mode === "agent" ? availability.variant?.verifier : undefined;
   return {
-    ...(language === null || language === "sql" ? {} : { statementLanguage: language }),
+    ...(language === null || language === DEFAULT_STATEMENT_LANGUAGE ? {} : { statementLanguage: language }),
     ...(verifier === undefined || verifier === sqlVerifier ? {} : { verifier }),
   };
 }

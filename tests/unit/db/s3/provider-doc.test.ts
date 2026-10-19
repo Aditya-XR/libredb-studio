@@ -1937,7 +1937,8 @@ describe("the agent docs count the type-ids and name S3 where they list engines"
     expect(prose).toContain(`the other ${word(noStatistics)} hold no statistics this run`);
     expect(prose).toContain(`so all ${word(ids)} ids pass it`);
     expect(prose).toContain(`Collapsing the other ${word(provided)} onto the composed one`);
-    expect(agent).toContain(`four of the ${word(ids)}`);
+    // The engines composed SQL serves are named by the resolver that answers them, never counted (#1821).
+    expect(agent).toContain('the engines `enginesSupporting("catalogRead", "planEstimate")` answers');
   });
 
   test("62. AGENT_GUIDE and AGENT_DATA_FLOW", () => {

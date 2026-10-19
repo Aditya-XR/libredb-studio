@@ -14,6 +14,21 @@ import { MONGO_CLIENT_PACK } from "./mongo/client";
 import type { AgentLanguageClientPack } from "./pack";
 import { SQL_CLIENT_PACK } from "./sql/client";
 
+/**
+ * The language a run record without one reads as. `persistedRunFacts` leaves `statementLanguage` off the record for a
+ * SQL engine, for a ledger older than statement languages and for an engine with no family, and each of those runs
+ * reads the SQL pack. It is also the family whose variant record is total over `AgentRunWorkflowType`.
+ */
+export const DEFAULT_STATEMENT_LANGUAGE = "sql" as const satisfies AgentStatementLanguageId;
+
+/**
+ * The family a run reads: its persisted language, or `DEFAULT_STATEMENT_LANGUAGE` when the record holds none. The one
+ * place an absent language is read. The id is not validated, so an unknown one fails where its resolver names it.
+ */
+export function statementFamilyOf(language: AgentStatementLanguageId | undefined): AgentStatementLanguageId {
+  return language ?? DEFAULT_STATEMENT_LANGUAGE;
+}
+
 const CLIENT_PACKS: Readonly<Record<AgentStatementLanguageId, AgentLanguageClientPack>> = Object.freeze({
   sql: SQL_CLIENT_PACK,
   kubectl: KUBECTL_CLIENT_PACK,

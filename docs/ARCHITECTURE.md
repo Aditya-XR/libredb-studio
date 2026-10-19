@@ -312,6 +312,12 @@ The SQLite **DB provider** is runtime-adaptive: it loads `bun:sqlite` under Bun 
 
 A read-only investigation agent: a model drafts SQL against a connected database, repairs statements that fail, and composes a report whose claims cite the results they came from. Three boundaries define it. Its availability is **derived, not flagged** (#331 T5): the agent exists when a model is configured through the existing `src/lib/llm` settings *and* the durable ledger has a writable path, so no rail renders where the first Start would fail, and the discovery probe answers `{"enabled": false, "reason": …}` naming the condition that is missing — that is how the rail learns to stay absent and how the operator learns why. `LIBREDB_AGENT_ENABLED=false` remains the explicit off-switch. `isAgentRuntimeEnabled()` stays synchronous, answering the off-switch and the model configuration for its five in-request callers; the ledger's writable path is I/O and is composed into the answer by `GET /api/agent/config` alone. It is **standalone-only**, so the `@libredb/studio` package gains no agent module, agent type or runtime dependency (asserted by a package-boundary test); and every database reach goes through the same `src/lib/db/operations/` pipeline as the rest of the app, under a read-only execution profile with the agent's own frozen policy — there is no second path to a driver. A run is an append-only ledger on a durable backend (`WORKFLOW_TARGET_WORLD`: zero-config single-instance `local`, or the opt-in Postgres world for multiple replicas), and it re-derives its state from that ledger, so a resumed run never repeats a tool execution. Model configuration is the existing `src/lib/llm` settings surface — there is no second place to enter a key, and therefore no second reader of one.
 
+What the agent does differently per statement language lives in language packs under `src/lib/agent/languages/`: one family pack per statement language (`sql`, `kubectl`, `mongo`), and one overlay per engine under `languages/<statement-language>/engines/<type-id>.ts` that supplies the engine's dialect.
+A pack member is Shared (the family's, which an engine overlay may override only for the members `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names), Dialect-bound (supplied by each SQL engine or declared `"unsupported"`, enforced by the compiler) or Optional.
+A run reads its pack through the run resolver, `runServerPack`: the family its persisted statement language names, with the connection's overlay applied only when that engine speaks the family.
+The packs live in the agent, which imports the database layer and is never imported by it, and a pack never opens execution on an engine.
+How the packs, overlays and resolvers fit together: [`docs/AGENT.md`](AGENT.md#language-packs).
+
 Full behaviour, the tool set, what bounds a run, the HTTP surface and the honest limitations: [`docs/AGENT.md`](AGENT.md).
 
 ### 4.10. MCP Server (`src/lib/mcp/`, off by default)
@@ -408,6 +414,7 @@ src/
     │   ├── query-dialects.ts # The dialect registry: each queryDialect's tab type and row-menu answers
     │   └── types.ts         # Database types
     ├── agent/               # Agent runtime: run ledger, workflow, tools, policy (docs/AGENT.md)
+    │   └── languages/       # Statement language packs, their engine overlays and resolvers (docs/AGENT.md, Language packs)
     ├── mcp/                 # MCP server: SDK handler, token, pre-processing, tools (docs/MCP.md)
     ├── governance/          # Governance (docs/GOVERNANCE.md): contract v1, the settings registry and the runtime that
     │                        #   reads the source: keyring, admission, pool, snapshot, freshness, refresher, listener

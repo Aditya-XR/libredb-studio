@@ -7,10 +7,33 @@
  * record gives all of it. Every member the overlay leaves alone keeps its reference, and an overlay with no own key is
  * no overlay: the base comes back itself.
  *
- * `dialectOnly` is what both engine registries (`engines/server.ts`, `engines/client.ts`) keep of an engine module's
- * overlay: its `dialect` and nothing else.
+ * `dialectOnly` is what the client registry (`engines/client.ts`) keeps of an engine module's overlay: its `dialect`
+ * and nothing else. The server registry (`engines/server.ts`) keeps the whole overlay, whose other members are the ones
+ * `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names.
  */
 import type { FacetOverrides } from "./pack";
+
+/**
+ * The server members an engine overlay may override besides its `dialect` (`AgentEngineServerOverlay`): exactly the
+ * members every consumer reads through the run resolver (`runServerPack` in `engines/server.ts`), so an override
+ * reaches every reader. Every other member stays its family's:
+ *
+ * - `adapter` (with its `inventoryProblem` and `planDraftIdentifiers`) and `catalogAdvice` are read through
+ *   `AuditedAgentCall.fingerprintLanguage` and `draftedStatement(input, language)`, which carry no engine, and step
+ *   ids and repair identity depend on them (B128);
+ * - `toolOverrides`, `recommendationCard` and the statement definitions make the offer, which is computed from the
+ *   run record with no connection, and a card's schema must equal the offered one;
+ * - `baseDefinitions`, `shortfallNotices`, `usageBarNotice` and `evidenceTools` are merged by name across every
+ *   family in `languages/server.ts`.
+ *
+ * Client overlays stay dialect-only: `copy`, `variants` and `planEstimateOperation` are projected per family into
+ * browser tables, and `posture.handoverTerms` is read by language (B123).
+ */
+export const ENGINE_OVERRIDABLE_SERVER_MEMBERS = Object.freeze([
+  "grounding",
+  "workflowToolRules",
+  "answerNotADataRead",
+] as const);
 
 /**
  * `base` with `overlay` applied, frozen. `A` carries members the base lacks, such as an engine's `dialect`; a member the
