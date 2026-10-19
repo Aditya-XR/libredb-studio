@@ -124,6 +124,8 @@ mock.module("@/lib/llm/types", () => ({
     (error instanceof MockLLMStreamError || error instanceof Error) &&
     error.message.includes("exceeds the available context size"),
   MAX_SCHEMA_CONTEXT_CHARS: 30_000,
+  // Same whole-module requirement: `utils/config.ts` validates `LLM_MODEL_EFFORT` against it.
+  LLM_MODEL_EFFORTS: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
 }));
 
 const { guardRoute } = await import("@/lib/api/require-session");

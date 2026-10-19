@@ -1175,7 +1175,8 @@ describe("POST /api/agent/runs", () => {
   test("the surface does not exist when no model is configured at all", async () => {
     // The other half of the derived answer (#331 T5). A server with the AI
     // configuration removed has no agent to route to, and says so the same way.
-    for (const key of ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "LLM_API_URL"]) delete process.env[key];
+    for (const key of ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "LLM_API_URL", "LLM_MODEL_EFFORT"])
+      delete process.env[key];
 
     const res = await POST(startRequest(VALID_BODY));
 

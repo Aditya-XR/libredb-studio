@@ -9,6 +9,21 @@
 
 export type LLMProviderType = "gemini" | "openai" | "ollama" | "custom";
 
+/**
+ * The reasoning efforts `LLM_MODEL_EFFORT` may name: exactly the values the installed
+ * `@ai-sdk/openai` declares for `reasoningEffort` on its chat options, which
+ * `tests/unit/llm/config.test.ts` pins at compile time so an SDK upgrade cannot widen or narrow
+ * the set behind this list's back. The SDK's Responses options take any string, so the chat enum
+ * is the stricter of its two declarations and the one an operator's typo is caught against.
+ *
+ * Which of these a given model accepts is the model's fact, not this list's: GPT-6.1 Sol, for
+ * one, has no `none`. Studio keeps no model table for that; the SDK's own refusal is raised as an
+ * error where the agent reads it (`src/lib/agent/model-adapter.ts`).
+ */
+export const LLM_MODEL_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export type LLMModelEffort = (typeof LLM_MODEL_EFFORTS)[number];
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -24,6 +39,13 @@ export interface LLMConfig {
    * over. Absent means implicit, which keeps a hand-built config on the quiet path.
    */
   providerExplicit?: boolean;
+  /**
+   * The reasoning effort `LLM_MODEL_EFFORT` names, trimmed and lower-cased, or absent for the
+   * provider's own default. Held as configured rather than as an `LLMModelEffort`, because a
+   * typo has to survive resolution to be refused by `validateConfig`; read it through
+   * `validModelEffort`, which narrows it.
+   */
+  modelEffort?: string;
 }
 
 // ============================================================================
