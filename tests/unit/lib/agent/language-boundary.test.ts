@@ -28,11 +28,12 @@
  * - R8a: a string literal or literal type whose whole text is an engine id, a key of `AGENT_STATEMENT_LANGUAGE`.
  * - R8b: a property named by an engine id, except the keys of `AGENT_STATEMENT_LANGUAGE` itself.
  * - R8c: any other identifier with a whole segment (split at `_` and at case changes, then lowercased) that is an
- *   engine id: `postgresThing` is one, `redistribute` is not.
+ *   engine id: `postgresThing` is one, `redistribute` is not. An import or export specifier is no reference, as for
+ *   R5c, so an imported name is read where the file uses it.
  * - R9: a read of a server member an engine overlay may override (`OVERRIDABLE_SERVER_MEMBERS`) through a family
  *   resolver, so an engine's override is never bypassed: the receiver chain starts at a call to `agentLanguagePack`,
  *   `languageServerPack` or `languageServer`, or at a name bound to such a chain, by a declarator or a binding pattern.
- *   An import of `WORKFLOW_TOOL_RULES`, a family projection of one, is R9 too.
+ *   An import of `WORKFLOW_TOOL_RULES`, a family projection of one, or a namespace member of that name, is R9 too.
  * - R3: the tiers, each finding the first forbidden module a chain meets, not every module past it. The server modules never reach the execution tier; the client packs never reach a server module, an
  *   execution module or a `node:`/`bun:` builtin; the language verifiers and `goal-claims.ts` never reach
  *   `goal-verifier.ts`; `goal-verifier.ts`, `goal-claims.ts` and every verifier module never reach `tools.ts` or a
@@ -397,6 +398,18 @@ function coreFileFindings(file: string, text: string, exemptEngineMap = true): s
       if (isTable(node.initializer)) tables.add(node.name.text);
       if (isResolved(node.initializer)) resolved.add(node.name.text);
     }
+    if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
+      // `const { server } = agentLanguagePack(x)` names a resolver's answer; a key that is an overridable member is R9.
+      const key = bindingKey(node);
+      const initializer = destructured(node)?.initializer;
+      if (
+        key !== undefined &&
+        !OVERRIDABLE_SERVER_MEMBERS.has(key) &&
+        initializer !== undefined &&
+        isResolved(initializer)
+      )
+        resolved.add(node.name.text);
+    }
     ts.forEachChild(node, bind);
   };
   bind(source);
@@ -443,7 +456,8 @@ function coreFileFindings(file: string, text: string, exemptEngineMap = true): s
       }
       if (DEFAULT_LANGUAGE_CONSTANTS.has(node.text) && !isSpecifierName(node)) add(node, "R5c", node.text);
       if (ENGINE_IDS.has(node.text) && isPropertyName(node)) engineProperty(node, node.text);
-      else if (segmentsOf(node.text).some((segment) => ENGINE_IDS.has(segment))) add(node, "R8c", node.text);
+      else if (!isSpecifierName(node) && segmentsOf(node.text).some((segment) => ENGINE_IDS.has(segment)))
+        add(node, "R8c", node.text);
       if (
         OVERRIDABLE_SERVER_MEMBERS.has(node.text) &&
         ts.isPropertyAccessExpression(parent) &&
@@ -454,8 +468,8 @@ function coreFileFindings(file: string, text: string, exemptEngineMap = true): s
       }
       if (
         node.text === "WORKFLOW_TOOL_RULES" &&
-        ts.isImportSpecifier(parent) &&
-        (parent.propertyName ?? parent.name) === node
+        ((ts.isImportSpecifier(parent) && (parent.propertyName ?? parent.name) === node) ||
+          (ts.isPropertyAccessExpression(parent) && parent.name === node))
       ) {
         add(node, "R9", node.text);
       }
@@ -1082,8 +1096,17 @@ describe("planted violations yield exactly their findings", () => {
     expect(scan("const { server: { grounding } } = agentLanguagePack(x);")).toEqual([
       `${INVESTIGATION}#workflowToolRules: R9 grounding`,
     ]);
+    // Names are read file-wide, and `planningEngine` binds a `server` of its own, so the planted one is renamed.
+    expect(scan("const { server: family } = agentLanguagePack(x); void family.grounding;")).toEqual([
+      `${INVESTIGATION}#workflowToolRules: R9 grounding`,
+    ]);
     const projected = prepend(INVESTIGATION, 'import { WORKFLOW_TOOL_RULES } from "./languages/server";');
     expect(boundaryFindings(projected)).toEqual([`${INVESTIGATION}#<module>: R9 WORKFLOW_TOOL_RULES`]);
+    const namespaced = prepend(
+      INVESTIGATION,
+      'import * as rules from "./languages/server"; void rules.WORKFLOW_TOOL_RULES;',
+    );
+    expect(boundaryFindings(namespaced)).toEqual([`${INVESTIGATION}#<module>: R9 WORKFLOW_TOOL_RULES`]);
     // A member no overlay may override is read by family.
     expect(scan("void languageServerPack(x).adapter;")).toEqual([]);
   });
@@ -1199,11 +1222,8 @@ describe("planted violations yield exactly their findings", () => {
   test("an engine module imported by the core fails R2", () => {
     const posture = `${AGENT}/posture.ts`;
     const planted = prepend(posture, 'import { POSTGRES_SERVER_OVERLAY } from "./languages/sql/engines/postgres";');
-    // The overlay's name carries the engine's, so R8c reports the binding too.
-    expect(boundaryFindings(planted)).toEqual([
-      `${posture}#<module>: R2 ${LANGUAGES}/sql/engines/postgres.ts`,
-      `${posture}#<module>: R8c POSTGRES_SERVER_OVERLAY`,
-    ]);
+    // An import specifier is no reference, so R8c leaves the overlay's name to the reads of it.
+    expect(boundaryFindings(planted)).toEqual([`${posture}#<module>: R2 ${LANGUAGES}/sql/engines/postgres.ts`]);
   });
 
   test("the engine server resolver imported by a client overlay fails the client tier", () => {
