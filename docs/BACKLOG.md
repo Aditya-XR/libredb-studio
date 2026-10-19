@@ -3942,7 +3942,7 @@ above beside the fractional ones #969 added.
 
 `NO_INSTANT_TYPE_DIALECTS`, `FLOAT64_ONLY_DIALECTS` and `NO_EXACT_DECIMAL_DIALECTS` in `src/hooks/use-inline-editing.ts` are `ReadonlySet<DatabaseConnection["type"]>` tables holding `sqlite` and `libsql`: an engine with no instant type, an engine where `REAL` and `FLOAT` are 64-bit, and an engine with no exact decimal.
 Each is a fact about the engine kept in a UI hook, so a new engine that shares one of them (or a third SQLite-family id) is wrong until someone edits the hook.
-`tests/unit/components/no-engine-tables-in-ui.test.ts` (#1822) allows exactly these three by file and constant name, and fails when a listed one no longer exists.
+`tests/unit/lib/no-engine-branches.test.ts` allows exactly these three, and the two bound-edit branches beside them, by file and declaration name, and fails when a listed one no longer exists.
 
 Found 2026-10-18 while designing #1822.
 
