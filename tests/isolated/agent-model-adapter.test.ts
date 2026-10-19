@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { generateText, streamText, stepCountIs, tool, LoadAPIKeyError } from "ai";
 import { z } from "zod";
 import {
@@ -10,6 +10,7 @@ import {
 } from "@/lib/agent/model-adapter";
 import type { AgentFetch } from "@/lib/agent/provider-registry";
 import { classifyAgentWorkflow } from "@/lib/agent/workflow-classifier";
+import { logger } from "@/lib/logger";
 import {
   type LLMConfig,
   LLMAuthError,
@@ -777,14 +778,28 @@ describe("the workflow classifier sends a run's options too", () => {
     process.env.LLM_MODEL = "gpt-6.1-sol";
     process.env.LLM_MODEL_EFFORT = "none";
     const recording = recordingFetch(responsesCompletion("operations"));
+    const warn = spyOn(logger, "warn");
 
-    const classification = await classifyAgentWorkflow("vacuum the orders table", { fetch: recording.fetch });
+    try {
+      const classification = await classifyAgentWorkflow("vacuum the orders table", { fetch: recording.fetch });
 
-    expect(classification).toEqual({ workflowType: "investigation", outcome: "unclassified" });
+      expect(classification).toEqual({ workflowType: "investigation", outcome: "unclassified" });
+      // Why it fell back: the SDK dropped the effort (no `reasoning` went out), the reply was a
+      // valid workflow type, and the classifier refused it as a configuration error.
+      expect(recording.requests).toHaveLength(1);
+      expect(recording.requests[0]?.url).toBe("https://api.openai.com/v1/responses");
+      expect(recording.requests[0]?.body).not.toHaveProperty("reasoning");
+      expect(warn).toHaveBeenCalledWith(
+        "Workflow classification failed; the run opens as an unclassified investigation",
+        { route: "agent/workflow-classifier", error: "LLMConfigError" },
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
-describe("ollama and custom stay on Chat Completions, byte for byte", () => {
+describe("ollama and custom stay on Chat Completions, with the options they had", () => {
   const CASES: readonly { label: string; config: Partial<LLMConfig>; url: string }[] = [
     { label: "ollama", config: { provider: "ollama", model: "qwen3:8b" }, url: "http://localhost:11434/v1" },
     { label: "custom", config: CHAT_CONFIG, url: "https://llm.internal/v1" },
