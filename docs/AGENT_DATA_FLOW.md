@@ -70,14 +70,15 @@ if it only lists the good news.
 ## Where a request goes
 
 Exactly one place: the model provider **you** configured through `LLM_PROVIDER`, `LLM_MODEL`,
-`LLM_API_KEY` and `LLM_API_URL`. The agent resolves that configuration through `src/lib/llm`'s own
+`LLM_API_KEY`, `LLM_API_URL` and, for `openai` only, `LLM_MODEL_EFFORT`. The agent resolves that configuration through `src/lib/llm`'s own
 resolution — the same one the remaining AI features use — so there is one answer rather than two
 that can disagree (`src/lib/agent/model-adapter.ts`).
 
 | Kind | Endpoint | Call site |
 | --- | --- | --- |
-| `gemini` | `{LLM_API_URL}` when you set one, Google's own Generative AI endpoint otherwise. The variable is read on both Gemini surfaces, so a proxy configured for the chat surface is also where a run goes — nothing routes to a host you did not name, and nothing silently keeps talking to Google either | `src/lib/agent/provider-registry.ts:136-150`, `src/lib/llm/utils/gemini-endpoint.ts` |
-| `openai`, `ollama`, `custom` | `{LLM_API_URL}/chat/completions` — whatever host you named | `src/lib/agent/provider-registry.ts:123-134` |
+| `gemini` | `{LLM_API_URL}` when you set one, Google's own Generative AI endpoint otherwise. The variable is read on both Gemini surfaces, so a proxy configured for the chat surface is also where a run goes: nothing routes to a host you did not name, and nothing silently keeps talking to Google either | `src/lib/agent/provider-registry.ts:147-161`, `src/lib/llm/utils/gemini-endpoint.ts` |
+| `openai` | `{LLM_API_URL}/responses`, the Responses API, at `https://api.openai.com/v1` unless you set another base URL. Every call is sent `store: false` | `src/lib/agent/provider-registry.ts:131-145`, `agentProviderOptions` in `src/lib/agent/model-adapter.ts` |
+| `ollama`, `custom` | `{LLM_API_URL}/chat/completions`, whatever host you named | `src/lib/agent/provider-registry.ts:131-145` |
 
 Two properties of that seam are enforced rather than assumed:
 
@@ -85,11 +86,15 @@ Two properties of that seam are enforced rather than assumed:
   `OPENAI_BASE_URL` when they are undefined, and `@ai-sdk/google` reads
   `GOOGLE_GENERATIVE_AI_API_KEY`. Every setting is therefore passed explicitly, so none of those
   reads can happen — a keyless Ollama gets a placeholder token and a keyless custom endpoint gets no
-  `Authorization` header at all (`provider-registry.ts:83-113`, asserted on the wire in
+  `Authorization` header at all (`provider-registry.ts:91-121`, asserted on the wire in
   `tests/isolated/agent-model-adapter.test.ts`).
 - **The SDK's hosted gateway is unreachable by construction.** The AI SDK also accepts a bare model
   id, which it resolves through its own gateway — a third party nothing in this repository
-  configures. The type excludes that arm (`AgentLanguageModel`, `provider-registry.ts:55-63`).
+  configures. The type excludes that arm (`AgentLanguageModel`, `provider-registry.ts:63-71`).
+- **OpenAI keeps nothing a run sends.**
+  Every call of the `openai` kind, the run's turns, the capability probe and the workflow classification alike, is a Responses API request with `store: false`, so OpenAI does not store the response or the schemas and rows the request carried.
+  Stateless mode is also why each turn's reasoning comes back as an encrypted item that the next turn sends back unread; Studio cannot read it and holds it only in the drive's in-memory transcript.
+  `LLM_MODEL_EFFORT`, when set, is sent as `reasoning.effort`, and a value the SDK will not send for the configured model is raised as a configuration error when the model is built, before any request leaves, rather than sent at another effort (`agentProviderOptions`, `refusedEffortError` and `createAgentModel` in `src/lib/agent/model-adapter.ts`, asserted on the wire in `tests/isolated/agent-model-adapter.test.ts`).
 
 `LLM_API_URL` reaches the `gemini` kind on the agent path exactly as on the chat surface, so a Gemini
 deployment behind an egress proxy or on a regional endpoint is configurable from the one variable. The
@@ -106,7 +111,7 @@ spellings in `src/lib/llm/utils/gemini-endpoint.ts`. Give the versioned URL; a b
   not render, and every run-reaching agent route answers `404` (`src/lib/agent/config.ts`,
   `docs/AGENT.md`, "Turning it on"). **The test is a configuration that validates, not a key.**
   `validateConfig` demands `LLM_API_KEY` for the `gemini` and `openai` kinds only
-  (`src/lib/llm/utils/config.ts:127-134`): `LLM_PROVIDER=ollama` validates with no key at all, and so
+  (`src/lib/llm/utils/config.ts:184-191`): `LLM_PROVIDER=ollama` validates with no key at all, and so
   does `custom` with an `LLM_API_URL`, and on either of those the agent is available and everything
   on this page is sent to that endpoint. What has no AI is a deployment carrying **no `LLM_*`
   configuration at all** — the provider then defaults to `gemini` (`config.ts:12`), which is refused
@@ -147,7 +152,7 @@ carries nothing of yours:
 
 - the **capability probe**, one round trip asking the model to call a trivial tool. Its prompt is a
   fixed server-written string and carries nothing of yours (`PROBE_PROMPT`,
-  `src/lib/agent/capability-probe.ts:134`). A positive verdict is cached for the life of the
+  `src/lib/agent/capability-probe.ts:135`). A positive verdict is cached for the life of the
   process, so it is paid once (`src/lib/agent/capability-gate.ts`);
 - the **classification**, which sends your objective. It is the section below.
 
@@ -178,6 +183,7 @@ Four bounds, all of them properties of the code rather than of intent:
 - **One call, no tools, no streaming, no retries.** `generateText` with `maxRetries: 0`.
 - **At most 16 output tokens** (`CLASSIFY_MAX_OUTPUT_TOKENS`), because the answer is one
   identifier.
+  The `openai` kind gets 1024 (`CLASSIFY_MAX_OUTPUT_TOKENS_RESPONSES`), because the Responses API counts a reasoning model's thinking against that cap: at 16, `gpt-6-luna` spent all of it reasoning and every run opened unclassified.
 - **Eight seconds** (`AGENT_WORKFLOW_CLASSIFY_TIMEOUT_MS`), after which the run opens unclassified;
   the browser holds a longer ceiling of its own so it never preempts the server's.
 - **It is skipped entirely when you name the workflow yourself** under **Advanced**. That is not an
@@ -197,7 +203,7 @@ routes for that reason.
 
 ## One agent run, message by message
 
-The transcript is assembled in `runInvestigation` (`src/lib/agent/investigation.ts:2540`) and is
+The transcript is assembled in `runInvestigation` (`src/lib/agent/investigation.ts:2537`) and is
 sent by `takeTurn` through `streamText` (`investigation.ts:575-592`). Nothing else in the runtime
 sends anything.
 
@@ -287,10 +293,10 @@ forty it invokes `db.schema.read`, which walks the connection's own OBJECT SURFA
 `listContainers`, `countObjects`, `listObjects` and `describeObjects` the sidebar walks when it lists
 your objects, and composes no statement at all.
 **Forty counts type-ids the factory can build, not engines a user would name**: `SHIPPED` holds
-forty-two, `CATALOG_PLANS` serves two of them, and the remainder is what this second reading covers.
+forty-two, two of them supply a `catalogCapture`, and the remainder is what this second reading covers.
 Every other count said about grounding in these docs counts the same thing. libSQL is one of the
 forty and not one of the two: it speaks SQLite's dialect, but the read-only catalog path
-`CATALOG_PLANS` serves needs a database-native read-only profile, and `PRAGMA query_only` is refused
+a `catalogCapture` takes needs a database-native read-only profile, and `PRAGMA query_only` is refused
 by a libSQL server (see [`providers/libsql.md`](./providers/libsql.md)). Two things it does
 NOT count. The wire-compatible engines of
 [`docs/providers/README.md`](./providers/README.md) are not extra members — TiDB is grounded because it
@@ -342,7 +348,8 @@ dialect gets, then packed for the task
 
 - the table name;
 - up to 12 columns, each as `name type`, plus ` NOT NULL`, ` PK` and ` -> referencedTable.column`
-  where they apply;
+  where they apply; on an engine whose fields are inferred from sampled documents (MongoDB), no
+  ` NOT NULL`, with one line saying the fields were sampled (`sampledFields`);
 - up to 4 index names with their column lists;
 - a count of what was left out, named as left out rather than silently dropped.
 
@@ -381,7 +388,7 @@ rendered characters — a bound in characters, because a count of edges is not a
 | A statement that failed at the database | The **engine's own message**, fenced, referenced by the statement's fingerprint | `runAuditedAgentCall` (`tools.ts`) |
 | A policy denial | Server text only: the deny code, the policy version, and advice that a boundary decided this. There is no engine text because a denial produced none | `denialText` (`tools.ts`) |
 | An approval requirement | Server text naming the operation id | `approvalText` (`tools.ts`) |
-| A table profile (Assess) | Counts, the number of findings, the covered column range, plus the **table name** and the **finding lines** (each the column name, the finding code and its detail, as `describeFindings` writes them), both fenced. No value from any column | `profileTableTool` (`tools.ts`) and, on MongoDB, `runMongoProfile` (`mongo-tools.ts`); `describeFindings` (`tools.ts`) |
+| A table profile (Assess) | Counts, the number of findings, the covered column range, plus the **table name** and the **finding lines** (each the column name, the finding code and its detail, as `describeFindings` writes them), both fenced. No value from any column | `profileTableTool` (`tools.ts`) and, on MongoDB, `runMongoProfile` (`languages/mongo/tools.ts`); `describeFindings` (`tool-contracts.ts`) |
 | A curated operational reading (Operate) | A server sentence naming the artifact id, then the **projected rows**, fenced like any other result. What those rows contain is the point: for `sessions` and `slow-queries` they carry **statement text other users are running or have run**, and for `sessions` the **database username, client address and application name of each connected session**. See below | `tools.ts`, `CURATED_READINGS` |
 | A plan comparison (Optimize) | Server text only: how each of the two plans reaches its rows, by the server's structural reading (`full-scan` / `index` / `mixed` / `unknown`), and that both are estimates. The plans themselves are not echoed, because they carry table and index names. A resumed run is also told the two statements the run drafted, beside those readings | `comparePlansTool` (`tools.ts`), reading by `summarisePlan` (`plan-summary.ts`); restated by `describePriorProgress` (`investigation.ts`) |
 | A catalog read that could not be performed | Fixed server advice, and one of two things before it. When the rows the read produced are already gone, when the connection's provider cannot describe its own schema, or when that description overran the time the run granted it, it is a **server sentence** that may name the connection's **engine type** ("a mongodb connection") or the catalog kind (`readInventory` and `captureFromProvider` in `context-snapshot.ts`). When the catalog read was itself refused, the sentence forwarded is the read's **own `modelText`** (`readCatalogForGrounding` in `tools.ts`, the core `inspectSchemaTool` reads through too), which for a policy denial is server text, and for a **database-error refusal is the engine's own message, fenced** (`runAuditedAgentCall` in `tools.ts`). Either way it is wrapped by `unavailable` in `context-snapshot.ts` and pushed as a user message. **Except on an Operate run**, where the diagnosis is forwarded (`capture.detail`) and only the fixed ADVICE is replaced, because that advice sends a model to `inspect_schema`, a tool the workflow does not hold. So the same text reaches the prompt on an Operate run, including a fenced engine message, minus the sentence naming a tool that is not there |
@@ -595,11 +602,11 @@ output cap, and what it sends is one objective — see
   **One credential does leave, necessarily: your `LLM_API_KEY`.** It is not in a prompt — it is in
   the request's authentication metadata, because that is how the provider authenticates you. The
   OpenAI-compatible kinds send it as the `Authorization` header
-  (`src/lib/agent/provider-registry.ts:108,125-128`) and Gemini passes it to the Google provider
-  (`:143`). Two consequences worth stating: a keyless Ollama gets a placeholder token and a keyless
-  custom endpoint gets no `Authorization` header at all (`:109,112`), so neither invents a
+  (`src/lib/agent/provider-registry.ts:116,133-136`) and Gemini passes it to the Google provider
+  (`:154`). Two consequences worth stating: a keyless Ollama gets a placeholder token and a keyless
+  custom endpoint gets no `Authorization` header at all (`:117,120`), so neither invents a
   credential; and Gemini's `baseURL` comes from `LLM_API_URL` — the host you configured for the chat
-  surface and no other (`:136-150`). "No credentials leave" would be the wrong claim
+  surface and no other (`:147-161`). "No credentials leave" would be the wrong claim
   here — the accurate one is that **no database credential** reaches the model, while the model
   provider's own key reaches the model provider and nothing else.
 - **Cell values from a table's own columns.** No agent path reads a row out of a user table and
@@ -637,7 +644,7 @@ output cap, and what it sends is one objective — see
 - **Not into the server log.** `streamText`'s default `onError` writes the raw provider error to the
   console, and an `APICallError` carries `requestBodyValues` — the entire prompt. It is silenced
   deliberately in both places that call the SDK, and the error is read off the stream instead
-  (`investigation.ts:588-591`, `capability-probe.ts:36-40,257-259`).
+  (`investigation.ts:588-591`, `capability-probe.ts:37-41,266-268`).
 - **Not into the audit trail.** Agent audit events carry the operation id, an `agent:<role>` actor,
   the outcome, a reason code, elapsed time and a correlation id — never the statement, the session
   identifier or the driver's message (`docs/SECURITY.md`, control 3.5).

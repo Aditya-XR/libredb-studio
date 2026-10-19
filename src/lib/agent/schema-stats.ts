@@ -40,9 +40,11 @@
  * is no second path to an engine here.
  */
 
-import { AgentComposedSqlError, type AgentCatalogSelector, composeStatisticsAvailabilityProbe } from "./composed-sql";
+import { composeStatisticsAvailabilityProbe } from "./composed-sql";
+import { AgentComposedSqlError, type AgentCatalogSelector } from "./composed-sql-primitives";
 import { type AgentToolContext, readCatalogForGrounding, readStatementForGrounding } from "./tools";
 import { addressableObjects } from "./inventory-objects";
+import { engineServerDialect } from "./languages/engines/server";
 import { fenceUntrustedContent } from "./untrusted-content";
 import type { AgentInventory } from "./types";
 import type { DatabaseType } from "@/lib/types";
@@ -53,8 +55,8 @@ export type AgentStatisticsUnavailableCode =
    * No verified statistics composition for this engine. The run has no size estimates
    * here; it may still be grounded in a schema — since #414 that is the ORDINARY case
    * on a type-id whose inventory comes from its own provider and that has no reader
-   * in `ESTIMATE_BUILDERS` below, where `schemaKnown` is true and `statisticsShown`
-   * is false.
+   * in its engine overlay's `statistics` (`languages/sql/engines/`), where `schemaKnown`
+   * is true and `statisticsShown` is false.
    */
   | "DIALECT_HAS_NO_STATISTICS"
   /** The engine holds no statistics at all yet: SQLite before its first `ANALYZE`. */
@@ -84,7 +86,8 @@ export interface AgentTableEstimate {
   /**
    * Empty where this run has no per-column distribution to report. That is all of SQLite,
    * which records none at all, and all of SQL Server, which records them behind a DBCC
-   * command this boundary refuses — see `buildMssqlEstimates` for that distinction.
+   * command this boundary refuses — see `buildMssqlEstimates` in
+   * `languages/sql/engines/mssql.ts` for that distinction.
    */
   readonly columns: readonly AgentColumnEstimate[];
 }
@@ -98,6 +101,19 @@ export type AgentSchemaStatistics =
     }
   | { readonly kind: "unavailable"; readonly reasonCode: AgentStatisticsUnavailableCode };
 
+/**
+ * How one engine's statistics are read back (#1821): its server dialect's `statistics` member, supplied by the
+ * engine overlay that composes the read, or `"unsupported"` there.
+ */
+export interface AgentStatisticsReading {
+  /** The availability probe `composeStatisticsAvailabilityProbe` returns, or `null` where none is needed. */
+  readonly probe: string | null;
+  /** The estimates, keyed by the same qualified name the inventory uses, from the statistics read's rows. */
+  readonly build: (rows: readonly Record<string, unknown>[]) => Map<string, AgentTableEstimate>;
+  /** The engine's absolute limit, said once ahead of the fence rather than implied by a gap per column. */
+  readonly limitNote?: string;
+}
+
 // ============================================================================
 // Reading
 // ============================================================================
@@ -106,128 +122,6 @@ const unavailable = (reasonCode: AgentStatisticsUnavailableCode): AgentSchemaSta
   kind: "unavailable",
   reasonCode,
 });
-
-/**
- * A number an engine reported, or `null` when it reported nothing readable.
- *
- * Drivers disagree about the JavaScript type of a numeric column — `pg` returns
- * `numeric` as a string — so the text form is accepted, and anything that does not
- * read as a finite number becomes absence rather than a `NaN` that would later print
- * as a row count.
- */
-function numeric(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value !== "string" || value.trim() === "") return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-const text = (value: unknown): string =>
-  typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
-
-/**
- * PostgreSQL's rows: one per (table, analysed column), and one per table with every
- * statistics column NULL where `pg_stats` has nothing — which the composed read's
- * LEFT JOIN guarantees, so a never-analysed table arrives rather than disappearing.
- *
- * `reltuples` of -1 is PostgreSQL 14+ saying the table has never been vacuumed or
- * analysed. It is read as absence. Older servers left 0 there instead, which is
- * indistinguishable from a genuinely empty table, and this code does not pretend to
- * tell those apart — an empty table and an uncounted one both come out as "roughly
- * 0 rows, estimated" on a server old enough to do that.
- */
-function buildPostgresEstimates(rows: readonly Record<string, unknown>[]): Map<string, AgentTableEstimate> {
-  const byTable = new Map<string, { estimatedRows: number | null; columns: AgentColumnEstimate[] }>();
-
-  for (const row of rows) {
-    const name = `${text(row.table_schema)}.${text(row.table_name)}`;
-    const rawRows = numeric(row.estimated_rows);
-    const entry = byTable.get(name) ?? { estimatedRows: rawRows === -1 ? null : rawRows, columns: [] };
-    byTable.set(name, entry);
-
-    const column = text(row.column_name);
-    if (column === "") continue;
-    const distinct = numeric(row.n_distinct);
-    entry.columns.push({
-      column,
-      // 0 is PostgreSQL's "no estimate", not "no distinct values".
-      distinct: distinct === 0 ? null : distinct,
-      nullFraction: numeric(row.null_frac),
-    });
-  }
-
-  return byTable;
-}
-
-/**
- * SQLite's rows: one per (table, index) from `sqlite_stat1`, plus one per table with
- * a NULL `stat` where the table has no analysed index at all.
- *
- * `stat`'s first field is the table's row count as of the last `ANALYZE`; the fields
- * after it are average rows per equal index prefix. Only the first is read. The
- * others describe an INDEX PREFIX rather than a column, so turning them into
- * per-column distinct counts would mean naming the index's leading column and
- * presenting a derived number where the engine reported an average — and this engine
- * holds NO null fraction at all, so the column half of the picture would still be
- * missing. The packing says that limit plainly instead of half-filling it.
- */
-function buildSqliteEstimates(rows: readonly Record<string, unknown>[]): Map<string, AgentTableEstimate> {
-  const byTable = new Map<string, AgentTableEstimate>();
-
-  for (const row of rows) {
-    const name = text(row.table_name);
-    const estimatedRows = numeric(text(row.stat).split(" ")[0]);
-    const held = byTable.get(name);
-    // The first index that carries an estimate wins; a later NULL `stat` never
-    // overwrites a reading with an absence.
-    if (held !== undefined && held.estimatedRows !== null) continue;
-    byTable.set(name, { estimatedRows, columns: [] });
-  }
-
-  return byTable;
-}
-
-/**
- * SQL Server's rows: one per USER TABLE, from `composeMssqlStatistics` - the sum of
- * `sys.partitions.rows` over the heap or clustered index (`index_id IN (0, 1)`).
- *
- * Keyed `schema.table`, the same shape `buildPostgresEstimates` produces, because the
- * inventory addresses a SQL Server object by the same qualified name and the packing
- * joins the two by that key alone.
- *
- * `columns` is empty, and that is this READ's limit rather than the engine's: SQL Server
- * does hold per-column distributions, but only behind `DBCC SHOW_STATISTICS`, which is a
- * DBCC command rather than a read and is refused by the admission step and by the shared
- * statement guard alike (`composeMssqlStatistics` records the same reasoning). The
- * table half is what a catalog read can honestly answer here, exactly as on SQLite and
- * DuckDB.
- *
- * There is no -1 case to unwind the way PostgreSQL's `reltuples` has one: `sys.partitions`
- * carries a maintained count and a table with no rows arrives as 0. An unreadable value
- * becomes absence through `numeric`, which is what keeps a driver that hands a `bigint`
- * back as text from printing as `NaN` rows. Measured on AdventureWorks2022: the composed
- * read answers 72 rows, one per user table.
- */
-function buildMssqlEstimates(rows: readonly Record<string, unknown>[]): Map<string, AgentTableEstimate> {
-  const byTable = new Map<string, AgentTableEstimate>();
-
-  for (const row of rows) {
-    byTable.set(`${text(row.table_schema)}.${text(row.table_name)}`, {
-      estimatedRows: numeric(row.estimated_rows),
-      columns: [],
-    });
-  }
-
-  return byTable;
-}
-
-const ESTIMATE_BUILDERS: Partial<
-  Record<DatabaseType, (rows: readonly Record<string, unknown>[]) => Map<string, AgentTableEstimate>>
-> = {
-  postgres: buildPostgresEstimates,
-  sqlite: buildSqliteEstimates,
-  mssql: buildMssqlEstimates,
-};
 
 /**
  * Reads what this engine estimates about its own tables, through the audited path.
@@ -244,7 +138,7 @@ const ESTIMATE_BUILDERS: Partial<
  */
 export async function readSchemaStatistics(context: AgentToolContext): Promise<AgentSchemaStatistics> {
   const dialect = context.connection.type;
-  const build = ESTIMATE_BUILDERS[dialect];
+  const statistics = engineServerDialect(dialect).statistics;
 
   let probe: string | null;
   try {
@@ -258,7 +152,7 @@ export async function readSchemaStatistics(context: AgentToolContext): Promise<A
   // A dialect the composer serves but this module cannot read back yields nothing,
   // which is the safe direction — the same asymmetry `context-snapshot.ts` records
   // between composing a statement and building an inventory from its rows.
-  if (build === undefined) return unavailable("DIALECT_HAS_NO_STATISTICS");
+  if (statistics === "unsupported") return unavailable("DIALECT_HAS_NO_STATISTICS");
 
   const nowMs = context.clock?.() ?? Date.now();
 
@@ -276,7 +170,7 @@ export async function readSchemaStatistics(context: AgentToolContext): Promise<A
   const artifact = context.artifacts.get(outcome.artifact.correlationId, nowMs);
   if (artifact === undefined) return unavailable("STATISTICS_RESULT_UNAVAILABLE");
 
-  return { kind: "read", dialect, byTable: build(artifact.value.rows) };
+  return { kind: "read", dialect, byTable: statistics.build(artifact.value.rows) };
 }
 
 // ============================================================================
@@ -313,10 +207,6 @@ const STATISTICS_PREFACE = [
   "Every number below is the ENGINE'S OWN ESTIMATE, never an exact count: it was written when the table was last analysed, so it can be badly out of date, and it is missing entirely for a table that has never been analysed.",
   "A table listed below as having no statistics is a table whose size is UNKNOWN to you — it is not an empty table, and nothing here entitles you to call it small.",
 ].join(" ");
-
-/** SQLite's absolute limit, said once rather than implied by a gap per column. */
-const SQLITE_STATISTICS_LIMIT =
-  "This engine records no per-column distinct count or null fraction at all, so none is shown for any column here, and none can be obtained without reading the data.";
 
 const UNAVAILABLE_REASON: Readonly<Record<AgentStatisticsUnavailableCode, string>> = Object.freeze({
   DIALECT_HAS_NO_STATISTICS: "this engine does not hold statistics this run knows how to read",
@@ -428,7 +318,9 @@ export function packSchemaStatistics(
   // SQLite's per-column gap is not worth stating to a reader that is being shown no
   // column either way: it would be the only sentence about columns in a context whose
   // point is that it carries none.
-  const dialectNote = statistics.dialect === "sqlite" && detail !== "rows" ? ` ${SQLITE_STATISTICS_LIMIT}` : "";
+  const reading = engineServerDialect(statistics.dialect).statistics;
+  const limitNote = reading === "unsupported" ? undefined : reading.limitNote;
+  const dialectNote = limitNote !== undefined && detail !== "rows" ? ` ${limitNote}` : "";
   const lead = `${STATISTICS_PREFACE}${dialectNote}\n`;
   const maxChars = (options.maxChars ?? AGENT_STATISTICS_PACK_MAX_CHARS) - lead.length;
   const source = {

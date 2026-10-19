@@ -151,6 +151,7 @@ const LLM_CONFIG_FIELDS: Record<keyof LLMConfig, FieldClass> = {
   model: "public",
   apiUrl: "public",
   providerExplicit: "public",
+  modelEffort: "public",
 };
 
 type ResultFieldClass = "payload" | "summary";

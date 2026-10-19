@@ -407,7 +407,13 @@ export function validatePlanStatement(
   sql: string,
   inventory: AgentInventory | null,
   language: ProviderCapabilities["queryLanguage"],
+  draftIdentifiers?: (text: string, inventory: AgentInventory | null) => PlanStatementIdentifiers,
 ): PlanStatementValidation {
+  if (draftIdentifiers !== undefined) {
+    // The run's statement language reads its own drafts' names (`planDraftIdentifiers` in `languages/pack.ts`).
+    // The guard still reads only SQL, so it stays unapplied.
+    return { readOnly: false, guardApplicable: false, identifiers: draftIdentifiers(sql, inventory) };
+  }
   if (language !== "sql") {
     // No `guardViolation`: there was no objection, only a reader that does not speak
     // this language, and recording one of the guard's own reason codes here would

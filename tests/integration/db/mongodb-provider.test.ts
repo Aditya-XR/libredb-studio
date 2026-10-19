@@ -685,7 +685,7 @@ describe("MongoDBProvider", () => {
       const caps = provider.getCapabilities();
       expect(caps.queryLanguage).toBe("json");
       expect(caps.defaultPort).toBe(27017);
-      expect(caps.supportsCreateTable).toBe(false);
+      expect(caps.createTable).toBeUndefined();
       // No SQL at all here: the query language is JSON commands, so the inline row
       // editor's `UPDATE ... SET` has nothing to run against (#269).
       expect(caps.supportsInlineRowEdit).toBe(false);
@@ -1762,6 +1762,24 @@ describe("MongoDBProvider", () => {
       const slow = await provider.getSlowQueries();
       expect(slow).toBeArray();
     });
+
+    // A user holding only `read` is refused system.profile with code 13. That is "not allowed to look", not "nothing
+    // there": answered as [], a live Operate run on 2026-10-17 reported no slow queries on a server it could not read.
+    test("a profiler the user may not read is refused as a missing privilege, and any other failure is still none", async () => {
+      const unauthorized = Object.assign(
+        serverErrorReply('not authorized on testdb to execute command { find: "system.profile" }'),
+        {
+          code: 13,
+        },
+      );
+      mongoDriver.findErrors["testdb.system.profile"] = unauthorized;
+      const refused = await provider.getSlowQueries().catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(PermissionDeniedError);
+      expect((refused as Error).message).toContain("unknown here, not absent");
+      mongoDriver.findErrors["testdb.system.profile"] = serverErrorReply("something else");
+      expect(await provider.getSlowQueries()).toEqual([]);
+      delete mongoDriver.findErrors["testdb.system.profile"];
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -1776,6 +1794,24 @@ describe("MongoDBProvider", () => {
     test("returns session data", async () => {
       const sessions = await provider.getActiveSessions();
       expect(sessions).toBeArray();
+    });
+
+    test("a currentOp the user may not run is refused as a missing privilege, and any other failure is still none", async () => {
+      mongoDriver.currentOpError = Object.assign(
+        serverErrorReply("not authorized on admin to execute command { currentOp: 1 }"),
+        {
+          code: 13,
+        },
+      );
+      const refused = await provider.getActiveSessions().catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(PermissionDeniedError);
+      expect((refused as Error).message).toContain("active sessions are unknown here, not absent");
+      // Code 13 from a transport-shaped error is not the server's refusal, and neither is another server error.
+      mongoDriver.currentOpError = Object.assign(new Error("connection reset"), { code: 13 });
+      expect(await provider.getActiveSessions()).toEqual([]);
+      mongoDriver.currentOpError = serverErrorReply("interrupted");
+      expect(await provider.getActiveSessions()).toEqual([]);
+      mongoDriver.currentOpError = undefined;
     });
 
     test("maps in-progress operations with duration formatting for every range", async () => {
@@ -2482,7 +2518,10 @@ describe("MongoDBProvider", () => {
         await profiled.connect();
         const error = await profiled.queryReadOnly(envelope("find"), budget).catch((caught: unknown) => caught);
         expect(error).toBeInstanceOf(QueryError);
-        expect((error as Error).message).toBe("Read-only execution exceeded the row budget: 11 rows > 10 allowed");
+        // A cursor read stops one row past the budget, so the count is that bound and the sentence says the total is unknown.
+        expect((error as Error).message).toBe(
+          'Read-only execution exceeded the row budget: 11 rows > 10 allowed; the read stops one row past the budget, so at least 11 documents match and the total is not known (count it with "operation": "count", or narrow the read)',
+        );
         // The sentence is the one the run reads its row-budget advice from.
         expect(rowBudgetIn((error as Error).message)).toEqual({ projected: 11, allowed: 10 });
         expect(lastCursor()).toMatchObject({ pulled: 11, closes: 1 });

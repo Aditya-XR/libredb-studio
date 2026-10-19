@@ -48,7 +48,12 @@ const DRIVERS = [
 const SERVER = [
   /^node:/,
   /^bun:/,
-  /src\/lib\/agent\/(tools|investigation|statement-languages|repair-ledger|run-store|run-service|runtime)\.ts$/,
+  /src\/lib\/agent\/(tools|investigation|repair-ledger|run-store|run-service|runtime)\.ts$/,
+  /src\/lib\/agent\/(tool-contracts)\.ts$/,
+  /src\/lib\/agent\/languages\/(server|index|verifiers)\.ts$/,
+  /src\/lib\/agent\/languages\/[^/]+\/(adapter|definitions|verifiers|server|tools|index|inventory-check)\.ts$/,
+  /languages\/[^/]+\/engines\/(?!client\.ts$)[^/]+\.ts$/,
+  /src\/lib\/agent\/(composed-sql|composed-sql-primitives|table-profile|schema-stats|context-snapshot|catalog-rows)\.ts$/,
   /src\/lib\/db\/factory\.ts$/,
   /src\/lib\/db\/providers\/.*\/index\.tsx?$/,
   new RegExp(`^(${DRIVERS.map((name) => name.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|")})(/|$)`),
@@ -85,7 +90,9 @@ function resolveSource(specifier: string, fromFile: string): string | null {
     path.join(base, "index.tsx"),
     base,
   ]) {
-    if (existsSync(candidate) && statSync(candidate).isFile()) return path.relative(ROOT, candidate);
+    // Forward slashes on every platform, so the SERVER patterns match on Windows too instead of matching nothing.
+    if (existsSync(candidate) && statSync(candidate).isFile())
+      return path.relative(ROOT, candidate).split(path.sep).join("/");
   }
   return null;
 }
@@ -132,6 +139,17 @@ describe("client modules reach no server module", () => {
     const reached = walk("src/lib/db/factory.ts");
     expect(reached).toContain("src/lib/db/factory.ts");
     expect(reached).toContain("pg");
+  });
+
+  test("an engine's server overlay is a server module and its client overlay is not, the control", () => {
+    const reached = walk("src/lib/agent/table-profile.ts");
+    expect(reached).toContain("src/lib/agent/languages/sql/engines/postgres.ts");
+    const server = (file: string) => SERVER.some((pattern) => pattern.test(file));
+    expect(server("src/lib/agent/languages/sql/engines/postgres.ts")).toBe(true);
+    expect(server("src/lib/agent/languages/engines/server.ts")).toBe(true);
+    expect(server("src/lib/agent/languages/engines/index.ts")).toBe(true);
+    expect(server("src/lib/agent/languages/sql/engines/client.ts")).toBe(false);
+    expect(server("src/lib/agent/languages/engines/client.ts")).toBe(false);
   });
 
   test("a type-only edge is erased, in both of its spellings", () => {

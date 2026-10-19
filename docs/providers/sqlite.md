@@ -1251,7 +1251,7 @@ answers with nothing both while it is in flight and when it failed.
 | `supportsExplain` | `true` |
 | `explainFormat` | `"sqlite-queryplan"` |
 | `supportsExternalQueryLimiting` | `true` (from base) |
-| `supportsCreateTable` | `true` (from base) |
+| `createTable` | declared, see [Create Table form](#create-table-form) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core SQLite DML |
 | `supportsTestDataGeneration` | `true` - the row menus offer Generate Test Data on tables, which writes one multi-row `INSERT INTO ... VALUES` |
 | `supportsResultPagination` | `true` — `LIMIT n OFFSET m` from the shared limiter (#816) |
@@ -1267,6 +1267,26 @@ answers with nothing both while it is in flight and when it failed.
 | `containerLevels` | **`[]`** — SQLite has no container level at all, which `containerDepth()` reads as 0 ([§6.1](#61-the-object-surface-789)) |
 | `containerPathShapes` | `exact`: with no container level, only the empty path `[]` addresses a container, so any segment is refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
 | `objectKinds` | `table`, `view`, `index`, `trigger` — no routine kind of any spelling ([§6.1](#61-the-object-surface-789)) |
+
+### Create Table form
+
+`createTable` is `SQLITE_CREATE_TABLE` in [`sqlite-create-table.ts`](../../src/lib/db/providers/sql/sqlite-create-table.ts), a driver-free module so a test reads it without a SQLite driver (#1822).
+libSQL returns the same object, by import ([libsql.md](./libsql.md#create-table-form)).
+
+| Field | Value |
+| --- | --- |
+| Auto-increment clause | `INTEGER PRIMARY KEY AUTOINCREMENT`, not sequence-backed |
+| Column constraints | Yes: `PRIMARY KEY` and `UNIQUE` |
+| Key type | `INTEGER` |
+| Types | `TEXT`, `INTEGER`, `REAL`, `BLOB`, `NUMERIC` |
+
+SQLite is the reason the form's old single PostgreSQL dialect was a bug rather than an annoyance (#648).
+Measured on SQLite 3.53.4 (the `better-sqlite3` 13.x engine this repo pins), `CREATE TABLE t (id SERIAL PRIMARY KEY)` does not fail: SQLite takes any word as a type name and gives `SERIAL` NUMERIC affinity.
+Two `INSERT INTO t DEFAULT VALUES` then both store `id = NULL`, because only a column typed exactly `INTEGER PRIMARY KEY` is the rowid alias that numbers itself, and SQLite's legacy rule lets a non-INTEGER primary key hold NULLs.
+So the old form handed SQLite users a silently broken key rather than an error.
+`AUTOINCREMENT` has one legal position: `id INTEGER AUTOINCREMENT PRIMARY KEY` is `near "AUTOINCREMENT": syntax error`, and `id BIGINT PRIMARY KEY AUTOINCREMENT` is "AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY", which is why the clause is stored whole instead of assembled from parts.
+SQLite has no JSON type (`json_*()` reads and writes TEXT), and no UUID or BOOLEAN type either, so the list is the five affinity names rather than words it would accept and quietly file under NUMERIC.
+A row that reads like the old shared list is the engine agreeing with it.
 
 ### Labels
 
@@ -1484,10 +1504,10 @@ column list here is `SELECT … FROM pragma_table_info('t')`, and the operations
 table-valued functions and some of them SET (`pragma_query_only(0)` was found while reviewing this
 very profile). So `inspect_schema` composes
 `SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') …`
-([composed-sql.ts](../../src/lib/agent/composed-sql.ts)), whose projection is therefore each object's
+([languages/sql/engines/sqlite.ts](../../src/lib/agent/languages/sql/engines/sqlite.ts)), whose projection is therefore each object's
 own DDL text — a column list is there to be read out of a `CREATE TABLE` statement, rather than
 arriving as rows. PostgreSQL gets a structured column inventory from `information_schema` instead.
-The DDL is parsed by [`sqlite-ddl.ts`](../../src/lib/agent/sqlite-ddl.ts) (#329 T8), which reads four
+The DDL is parsed by [`sqlite-ddl.ts`](../../src/lib/agent/languages/sql/engines/sqlite-ddl.ts) (#329 T8), which reads four
 things out of it and steps over the rest: the columns, which are `NOT NULL`, which form the primary
 key, and where each `REFERENCES` points. Text it cannot read as a `CREATE TABLE` with a column list —
 a view, most obviously — yields an EMPTY definition rather than a partial one, and the table is
@@ -1520,6 +1540,23 @@ on a read-only handle, which the known-limitations record states in full.
 `statementTimeoutMs` down to the run's remaining wall clock before handing it over, which bounds what
 is REPORTED, not what runs — the limitation above is unchanged, and anything that displays a budget
 has to say so rather than imply preemption.
+
+### 12.5 Agent language pack
+
+Statement-language family: `sql`.
+Overlay: [`src/lib/agent/languages/sql/engines/sqlite.ts`](../../src/lib/agent/languages/sql/engines/sqlite.ts), with its client row in [`src/lib/agent/languages/sql/engines/client.ts`](../../src/lib/agent/languages/sql/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`, and the dialect through `engineServerDialect`.
+
+| Member | Kind | Value |
+| --- | --- | --- |
+| `catalogRead` | Dialect-bound | Supplied |
+| `planEstimate` | Dialect-bound | Supplied |
+| `profileComposition` | Dialect-bound | Supplied |
+| `statistics` | Dialect-bound | Supplied |
+| `catalogCapture` | Dialect-bound | Supplied |
+
+This overlay overrides no Shared member, so every Shared member is the `sql` statement-language family's own.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
 
 ---
 

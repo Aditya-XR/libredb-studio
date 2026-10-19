@@ -62,7 +62,7 @@ Three properties frame everything below, and each of them is load-bearing rather
   require `queryReadOnly` (`src/lib/db/factory.ts`, `PROFILE_ACQUISITION`). Since #411 an operations
   run does take one acquisition before its first turn and never during it, for its schema capture,
   exactly as every other workflow does — and since #414 **which profile that capture acquires depends
-  on which of its two readings it takes**: `agent-read-only` on the dialects `CATALOG_PLANS` serves,
+  on which of its two readings it takes**: `agent-read-only` on the dialects that supply a `catalogCapture`,
   because it composes catalog statements, and `agent-operations` everywhere else, because asking a
   provider to describe its own schema sends nothing an engine has to plan.
   That is what lets grounding reach every engine the read-only profile refuses, and it still cannot narrow any workflow's reach: the profile whose acquisition would be refused is never the profile that capture asks for.
@@ -130,6 +130,7 @@ Two companion pages carry what this one deliberately does not:
   - [The surface in the app](#the-surface-in-the-app)
   - [Deployment](#deployment)
   - [Package boundary](#package-boundary)
+  - [Language packs](#language-packs)
   - [Module map](#module-map)
   - [Known limitations](#known-limitations)
   - [Related documentation](#related-documentation)
@@ -201,13 +202,27 @@ sets it and `WORKFLOW_TARGET_WORLD` is absent, the runtime would silently pick t
 hosted backend, so the agent refuses to start until the backend is stated explicitly.
 
 **Model configuration is the existing one.** The agent resolves its model through `src/lib/llm`'s
-own resolution (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_URL`) — the same keys that used
+own resolution (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_URL`, `LLM_MODEL_EFFORT`), the same keys that used
 to power NL2SQL, and the same resolution `src/lib/agent/config.ts` asks whether a model is configured
 at all, so there is one answer rather than two that can disagree. There is deliberately no second
 settings surface
 and no agent-specific provider variable, and the provider packages' own ambient fallbacks
 (`OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_BASE_URL`) are explicitly neutralised so
 an ambient key cannot authenticate a run against a provider nobody configured.
+
+**OpenAI is called through the Responses API; every other kind is not.**
+The `openai` kind posts to `{LLM_API_URL}/responses`, because GPT-6 tool calling lives there: GPT-6.1 Sol and GPT-6 Astra take no function tools on Chat Completions, and GPT-6 Sol and Luna take them there only without reasoning.
+Every call is sent `store: false`, so OpenAI keeps nothing a run sends, and the encrypted reasoning each turn returns is replayed with the next.
+`ollama` and `custom` stay on `{LLM_API_URL}/chat/completions`, which a self-hosted endpoint serves and the Responses API is not.
+`LLM_MODEL_EFFORT` (openai only: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`) sets the reasoning effort and wins over a model profile's quiet switch.
+An effort the configured model does not take is never sent at another effort.
+Building the model raises it as a configuration error, before any request, when the AI SDK knows the answer: `createAgentModel` asks the SDK's own request preparation, offline, whether the model takes the effort, so the SDK's per-model table decides and no copy of it lives here.
+That table covers GPT-6 and later, and the SDK refuses any effort for a model it does not count as a reasoning model (`gpt-4o`).
+For the other reasoning models (GPT-5.x, the o-series) it has no table and the effort is sent as configured, so an effort OpenAI does not take comes back as OpenAI's own error on the run's first turn (measured 2026-10-19: `gpt-5.4-mini` answers `minimal` with a 400).
+Where the SDK does know, the start gate builds the model in every mode, so an Agent or Plan run is refused at start with HTTP 503 and the sentence naming the efforts the model takes, not with a capability refusal that would blame the model and offer Plan mode.
+A turn still reads its own call's warnings and raises the same error, for an effort that reaches a call some other way, a profile's quiet switch.
+The workflow classifier's one call is capped at 1024 output tokens on the `openai` kind and 16 on every other, because the Responses API counts reasoning against the cap and a reasoning model spent 16 thinking (`CLASSIFY_MAX_OUTPUT_TOKENS_RESPONSES` in `workflow-classifier.ts`, with the measurement).
+`agentProviderOptions` in `src/lib/agent/model-adapter.ts` is the one place these options are built.
 
 **"Configured" is a network-free check, and it has one blind spot worth naming.** `validateConfig`
 requires no key for `LLM_PROVIDER=ollama` and defaults the URL to `localhost:11434`, so that
@@ -379,6 +394,16 @@ A run emits a closed set of **semantic events**, and they are the whole of what 
 `run-finished`, plus the four a single workflow's own tool writes — `plan-comparison`,
 `recommendation`, `table-profiled` and `answer-composed`.
 
+**A tool call refused before anything was sent settles as `tool-refused` with class `not-sent`**,
+carrying the tool's reason code and the sentence the model was told: arguments that do not parse, a
+command the language's reader or the run's inventory refuses, a spent deadline, a repair ledger
+declining a fingerprint. These used to settle nothing, which left a lone `tool-invoked` on the
+timeline with no outcome and no reason, so the model was told why and the user was not; measured on
+2026-10-17, MongoDB runs met 19 of their 21 refusals there, because a command envelope is checked
+before the engine. The rail shows it as "Refused before the database", it counts no statement and no
+repair attempt, and a repeat of the call is answered from the ledger with the same reason. A step a
+dead process left with no outcome is still told apart: its outcome is unknowable, and it is said so.
+
 **`driver-resolved` says what drove the run**, and it exists because a finished run used to say
 nothing about that: no event and no record field carried the model id, so "these settings were
 measured" — the product's whole claim about a model — was not checkable from the run that used them.
@@ -446,7 +471,7 @@ audited, budgeted path an agent run's `inspect_schema` takes. The model is hande
 nothing further.
 
 **There are TWO readings, and which one runs is the dialect's decision** (#414). On the dialects
-`CATALOG_PLANS` serves — PostgreSQL and SQLite — the server composes catalog statements and executes
+that supply a `catalogCapture` (`src/lib/agent/languages/sql/engines/`) — PostgreSQL and SQLite — the server composes catalog statements and executes
 them under `agent-read-only`. On every other dialect it invokes `db.schema.read`, a sixth operation
 descriptor whose whole input is empty: it acquires `agent-operations`, walks the connection's own
 object surface — the same reading the sidebar performs when it lists your objects — and returns the
@@ -609,8 +634,8 @@ What a grounded plan run is given, and where each part comes from:
   including the two free ones. That is deliberate: what the model may conclude must not depend on
   which process happened to have read a catalog first. They are read from what the engine already
   holds — `pg_class.reltuples` and `pg_stats` on PostgreSQL, `sqlite_stat1` on SQLite — so no column
-  is scanned and no value is read out of any row. `ESTIMATE_BUILDERS` serves those two and SQL Server (`buildMssqlEstimates`, from `sys.partitions`) and
-  nothing else, and #414 added no engine to it: on the other thirty-nine `readSchemaStatistics` answers
+  is scanned and no value is read out of any row. A `statistics` reading is supplied by the engine overlays of those two and SQL Server (`buildMssqlEstimates`, from `sys.partitions`) and
+  nothing else, and #414 added no engine to them: on the other thirty-nine `readSchemaStatistics` answers
   `DIALECT_HAS_NO_STATISTICS` — *"this engine does not hold statistics this run knows how to read"* —
   so **a known schema with no statistics is now the ORDINARY combination rather than a rare one**, and
   the two sentences the run is handed agree: the inventory is a record of what exists, and every
@@ -733,7 +758,7 @@ Three consequences worth stating plainly, because each is easy to assume the oth
    statistics read (two on SQLite: the `sqlite_stat1` availability probe has to be its own statement,
    because SQLite resolves table names at prepare time). On the other forty it is **one**, the
    single `db.schema.read` call, except on SQL Server, which adds the one statistics read
-   `ESTIMATE_BUILDERS` serves outside `CATALOG_PLANS`; the other thirty-nine hold no statistics this run
+   its overlay's `statistics` supplies without a `catalogCapture`; the other thirty-nine hold no statistics this run
    knows how to read. Since #789 an engine that declares object kinds costs **one more**, the
    object-surface reading above; an engine that declares none is charged nothing extra, because a read
    that cannot exist is never admitted. They come out of the same per-run statement budget every other read does,
@@ -966,7 +991,7 @@ Two consequences worth stating:
 - **A schema read takes one of two descriptors, and which one is the DIALECT's decision.** This
   document said for two milestones that there is no descriptor for catalog access — the canonical set
   was three, then four, then five — and the truer statement is now about the split rather than about
-  a number. On the dialects `CATALOG_PLANS` serves, a catalog read still *is* a bounded read
+  a number. On the dialects that supply a `catalogCapture`, a catalog read still *is* a bounded read
   (`sql.query.read`) whose statement the server writes, and the asymmetry inside that is real and
   documented on the tool: PostgreSQL yields a structured column inventory, while SQLite's
   `pragma_table_info()` is refused by the statement guard, so SQLite yields each object's own DDL text
@@ -1063,7 +1088,7 @@ A narrowed run keeps `compose_report` and the extras below.
 | `data-analysis` | `inspect_schema`, `run_read_query`, `inspect_plan`, `compose_report`, `profile_table`, `present_answer` | `present_answer` |
 
 Every statement workflow is offered the read-class four whole, because the engine answers each of them: a cluster has neither a catalog nor a plan, and a MongoDB database has both.
-`compare_plans` is the one tool left out (B119): a comparison's whole value is the structural access reading of `summarisePlan` (`src/lib/agent/plan-summary.ts`), which reads a MongoDB plan as `unknown`, so a comparison would state that two plans differ in a way nobody has read; an optimization run recommends an index from one inspected plan instead, which `agent-query-optimization.3` accepts.
+`compare_plans` is the one tool left out (B119): a comparison's whole value is the structural access reading of `summarisePlan` (`src/lib/agent/plan-summary.ts`), which reads a MongoDB plan as `unknown`, so a comparison would state that two plans differ in a way nobody has read; an optimization run answers from one inspected plan instead, under `agent-query-optimization-mongo.1`: an index recommended because of that plan, or a report citing a plan that already reaches its documents through an index and recommending nothing, and an index the collection already has is refused (`INDEX_ALREADY_EXISTS`).
 Auto-execute is not offered on any mongo variant (B118): its gate has no reading of a MongoDB plan to weigh and the replay of a MongoDB answer is not verified, so the run route refuses `autoExecute` on a MongoDB connection, the rail raises no consent step, the run's rules never mention it, and a MongoDB answer is never run in the editor.
 MCP clients reach a MongoDB connection through `inspect_schema` alone (B117): `run_read_query` takes SQL, so it refuses a MongoDB connection as soon as the connection resolves, before anything is acquired ([`docs/MCP.md`](./MCP.md)).
 
@@ -1084,9 +1109,9 @@ A plan run and an operations run open their connection under `agent-operations`,
 
 **`run_read_query` takes one command, under `mongo.query.read`.**
 The model passes it as `command`, a JSON object rather than text, in the editor's envelope: `collection`, `operation` (`find`, `findOne`, `aggregate`, `count` or `distinct`), and the `filter`, `pipeline`, `field` and `options` that operation reads.
-The server writes it out once, in the order the model wrote its keys (the language's `canonicalize` in `src/lib/agent/statement-languages.ts`), so a sort runs in that order and the fence, the provider, the ledger and the repair ledger read one text; the ledger's own fields, `statement-drafted.sql` and `answer-composed.sql`, keep their names.
+The server writes it out once, in the order the model wrote its keys (the language's `canonicalize` in `src/lib/agent/languages/mongo/adapter.ts`), so a sort runs in that order and the fence, the provider, the ledger and the repair ledger read one text; the ledger's own fields, `statement-drafted.sql` and `answer-composed.sql`, keep their names.
 The collection is named bare, `orders` for an inventory entry `app.orders`: the run reads the database its connection is bound to (`getDatabaseName()`), a `database` key naming that one is read there, and one naming any other is refused before anything is sent, with a sentence naming the bound one.
-The rules also tell every workflow that writes a command that an aggregation reads a field as `"$<field>"` while a filter names it bare (`MONGO_FIELD_PATH_RULE` in `src/lib/agent/investigation.ts`), because no refusal can catch the slip: `{"$sum": "total"}` is a valid read whose sum is 0, which a real model sent and reported on the browser pass of #1614.
+The rules also tell every workflow that writes a command that an aggregation reads a field as `"$<field>"` while a filter names it bare (`MONGO_FIELD_PATH_RULE` in `src/lib/agent/languages/mongo/server.ts`), because no refusal can catch the slip: `{"$sum": "total"}` is a valid read whose sum is 0, which a real model sent and reported on the browser pass of #1614.
 The fence is the command reader the provider reads with too (`readMongoCommand` in `src/lib/db/providers/document/mongodb/envelope.ts`): it admits the five reads with only the keys each one honours, and refuses, with a sentence naming what to send instead, a write, a pipeline stage that writes (`$out`, `$merge`), the diagnostic and session stages, `$where`, `$function` and `$accumulator` wherever they sit, every internal `$_` operator, and a model's command past 4,096 characters (`src/lib/db/operations/mongo-admission.ts`).
 It is defence in depth: the user is the boundary, and the reader is the one refusal of what the server lets a reader run, such as the JavaScript operators.
 A read past the row budget is refused, never cut, with advice that names what that operation narrows with: a filter or `"options": {"limit": N}` for `find`, a `$match` or a `$limit` stage for `aggregate`.
@@ -1348,7 +1373,7 @@ What differs is the **packing** (`packOperationsInventory`, `context-snapshot.ts
   relation this database does not have.
 
 Grounding reaches this workflow exactly as it reaches every other, and since #414 that means every
-engine: `CATALOG_PLANS` serves PostgreSQL and SQLite, and every other dialect asks its provider to
+engine: PostgreSQL and SQLite supply a `catalogCapture`, and every other dialect asks its provider to
 describe itself instead of being refused on the dialect. Where the reading fails the run continues
 ungrounded. What it is TOLD then is the capture's own DIAGNOSIS under a sentence of this file's own,
 because the capture's ADVICE would have sent it to `inspect_schema`: it is told why no inventory was
@@ -1412,7 +1437,7 @@ slow query is recorded", "no index is unused" are answers, and they are the answ
 gives. A run that composed nothing is `no-report`, and a cancelled one says so instead.
 
 The citation half of the rule — *your report must cite a reading you took* — is told to the model in
-`WORKFLOW_TOOL_RULES`, and until #411 it was enforced where it could actually fail rather than judged
+`OPERATIONS_TOOL_RULE` (`src/lib/agent/languages/shared.ts`), and until #411 it was enforced where it could actually fail rather than judged
 afterwards: `composeReportTool` refuses any claim whose evidence does not name something this run
 produced, and the only citable thing an operations run could produce WAS a reading (it is offered no
 other tool that settles a step, and it captured no schema snapshot). A verifier arm for "cited no
@@ -2047,6 +2072,9 @@ shape what that costs:
   the probe merely failed on starts as before, so the start path gained no new way to fail — and since
   a drive now reports `model-rate-limited`, `model-unauthorized` or `model-unavailable`, those runs
   say what happened rather than sitting at `queued`.
+  The one exception is a configuration the model refused, an `LLM_MODEL_EFFORT` the AI SDK knows it
+  does not take: building the model raises it as a configuration error without a model call, in every
+  mode, and the start answers `503` with its sentence, since the run's first turn would raise the same one.
 - **Positive verdicts are cached for the life of the process; refusals are not.** A model that called
   a tool keeps calling tools, so that round trip is paid once. A refusal is re-probed because an
   operator can fix the server without changing the model id — an `ollama` endpoint serving something
@@ -2078,8 +2106,9 @@ it — driven through the real run loop — ends `succeeded` with empty text and
 statement. Both produce `missing: ["toolCalling", "structuredOutput", "streaming"]`. Only `disproved`
 separates the model that can still plan from the endpoint that will answer nothing at all.
 
-**A verdict is about one mode**, and the rail shows it only over that mode. The gate admits planning
-on its first line, so a refusal is a statement about the agent run that was asked for and about
+**A verdict is about one mode**, and the rail shows it only over that mode. The gate never probes
+planning (it still builds the model, and an `LLM_MODEL_EFFORT` the model refuses answers `503` in
+either mode), so a capability refusal is a statement about the agent run that was asked for and about
 nothing else; a refusal raised for one mode left standing over the other would be the rail asserting
 what the server never said. The mode travels with the verdict (`AgentModelRefusal.mode`) rather than
 being assumed.
@@ -2140,6 +2169,7 @@ An agent run persists its verifier's id when it opens, so a run reopened later, 
 | `planning` | The run left non-empty closing prose, **and** that prose was its deliverable: a drafted statement on the ledger, or an explicit `NO STATEMENT:` refusal. That mode is toolless and can never cite evidence, so judging it by the investigation rule would fail every planning run that did its job — but prose alone was how a generic lecture scored `answered` for as long as it did. `operations` planning is exempt: its plan deliverable is prose by decision, and the exemption survives that workflow's rules welcoming a fenced reading — welcome is not required, and a run that produced no block may have answered its objective perfectly, so a bar asking for one would fail it. Which engines can express a reading as a statement is deliberately not the basis: a Redis Operate plan was observed writing `INFO memory` into a block its editor runs. | `no-plan`, `no-statement` |
 | `agent` (investigation) | The run composed at least one claim, **and** the claims do not rest entirely on empty results. | `no-report`, `empty-evidence` |
 | `agent` (query-optimization) | The baseline above with **plans exempt from its emptiness clause** (a plan's row count measures nothing), **and** either a plan comparison on the ledger or an index recommendation citing a plan this run read. `agent-query-optimization.3`. | the above, plus `no-plan-comparison`, `no-plan-evidence` |
+| `agent` (query-optimization on MongoDB) | The baseline above with plans exempt from its emptiness clause, **and** either an index recommendation citing a plan this run read, or, with no index recommended, a report citing one: the variant holds no `compare_plans` (B119), and a plan that already uses an index needs no change. `agent-query-optimization-mongo.1`; a run opened before it existed keeps `.3`. | the above, plus `no-plan-evidence`, `no-plan-cited` |
 | `agent` (database-assessment) | The baseline above, **and** a table profiled. `agent-database-assessment.1`. | the above, plus `no-table-profile` |
 | `agent` (query-optimization on Kubernetes) | The baseline above, with a usage reading counted as meaningful even when empty, **and** either a `resources` recommendation citing a usage reading of this run or a report citing one and recommending nothing. `agent-query-optimization-kubectl.1`. | the above, plus `no-usage-reading`, `no-usage-evidence`, `no-usage-metrics` |
 | `agent` (database-assessment on Kubernetes) | The baseline above, with a workload profile counted as meaningful even when empty, **and** a namespace's workloads profiled. `agent-database-assessment-kubectl.1`. | the above, plus `no-workload-profile` |
@@ -2296,7 +2326,7 @@ model passed the capability probe**; for anybody else the answer is that there i
 | **A free-form markdown report**, opening with a performance score out of 100 and closing with configuration advice. | A report is claims, each citing an artifact this run read or the snapshot it captured, verified against the run's own ledger before it is recorded. A number cited to nothing cannot be reported — the citation is what is checked, never the claim's text, so a fabricated score citing a real artifact would be accepted. | `src/lib/agent/tools.ts` (`composeReportTool`); `tests/evals/legacy-surface-coverage.test.ts` — an invented correlation id is refused and the run ends `unanswered (no-report)`. |
 | **Maintenance tasks** — `VACUUM`, `ANALYZE`, reindexing — in the same report. | Nothing proposes them: the `change` card has two members and neither is maintenance. It stays where it was before the panels — the monitoring surface, and the user's own editor. | `src/lib/agent/tools.ts` (`recommendationSchema`). |
 | **Multi-turn conversation.** NL2SQL replayed the whole exchange on every request, so "and how many in the second one?" was answerable. | **Largely restored, and differently.** A follow-up is still a NEW run — a run's objective is fixed when it starts, and no ledger event records a later question — but it now belongs to a CONVERSATION and is told about it: every earlier step's objective, and the most recent step's report, derived server-side from those runs' own ledgers and fenced before the model reads it. What is not restored is the replay: NL2SQL re-sent the whole exchange verbatim, while a conversation carries a bounded account of it, and only the newest step's findings. Two other differences are deliberate — the run still re-reads the catalog, because its inventory is its own evidence; and `LIBREDB_AGENT_THREAD_CONTEXT=false` turns the whole thing off, which no panel offered. See [the conversation a run belongs to](#the-conversation-a-run-belongs-to). | `src/lib/agent/thread-context.ts`; `src/app/api/agent/runs/route.ts`; `tests/evals/thread-context.test.ts` — a three-step conversation, and the fence the block arrives inside. |
-| **MongoDB, MySQL and every other engine.** Both panels ran against whatever the connection was, and NL2SQL emitted Mongo query documents when the connection's query language was JSON. | The agent composes catalog SQL for the dialects `CATALOG_COMPOSERS` carries, the engines whose statement language is SQL, and grounds a run through composed catalog statements on PostgreSQL and SQLite among them (`CATALOG_PLANS`); an unlisted dialect is never guessed at: since #414 it is read a different way instead of being refused. `run_read_query` takes each engine's own command language, as `AGENT_STATEMENT_LANGUAGE` (`src/lib/agent/agent-manifest.ts`) names it: SQL, a kubectl read on Kubernetes, and a JSON command on MongoDB. **A run whose workflow sends statements is refused on another engine before it opens**: `POST /api/agent/runs` answers 400 with the posture's own sentence when the mode is agent and `AGENT_WORKFLOW_SENDS_STATEMENTS` holds for the requested workflow, so no run id and no model turn are spent on a refusal the connection's type already decided. What an engine that IS admitted can then do differs by MODE. **Agent mode is still only the engines a provider can bound**: its read-class tools reach the database under the `agent-read-only` profile, which the factory grants only to a provider with `queryReadOnly`, the same fact the refusal reads. **Plan mode is now every engine**: its grounding acquires `agent-operations` and walks the provider's object surface (`db.schema.read`), so a plan run on MongoDB is ordinarily grounded and is asked for one statement or command **in that engine's own language**, in a block still tagged with the canonical type-id. What the engine decides is no longer whether a plan is grounded but HOW (a composed catalog statement or a provider inventory, and whether estimated statistics exist at all), and the four prefaces say which. Where the reading itself fails, the run is steered to the `NO STATEMENT:` refusal with the capture's own diagnosis. **The `operations` workflow reaches every engine in both modes**, because it composes no SQL at all, and since #411 it is grounded under the same rule as everything else. | `src/lib/agent/composed-sql.ts`, `src/lib/agent/context-snapshot.ts` (`captureContextSnapshot`, `captureFromProvider`, `packOperationsInventory`), `src/lib/db/operations/descriptors.ts` (`db.schema.read`); `tests/unit/lib/agent/context-snapshot.test.ts`: the provider path, its timeout and its refusals; `tests/unit/lib/agent/composed-sql.test.ts`: `UNSUPPORTED_DIALECT`; `tests/evals/plan-grounding.test.ts`: a plan run whose provider cannot describe itself runs no statement and says it is ungrounded; `tests/isolated/agent-investigation.test.ts`: a plan run grounded through the engine's own schema inspection. |
+| **MongoDB, MySQL and every other engine.** Both panels ran against whatever the connection was, and NL2SQL emitted Mongo query documents when the connection's query language was JSON. | The agent composes catalog SQL for the dialects whose engine overlay supplies a `catalogRead` (`src/lib/agent/languages/sql/engines/`), the engines whose statement language is SQL, and grounds a run through composed catalog statements on PostgreSQL and SQLite among them (their `catalogCapture`); an unlisted dialect is never guessed at: since #414 it is read a different way instead of being refused. `run_read_query` takes each engine's own command language, as `AGENT_STATEMENT_LANGUAGE` (`src/lib/agent/agent-manifest.ts`) names it: SQL, a kubectl read on Kubernetes, and a JSON command on MongoDB. **A run whose workflow sends statements is refused on another engine before it opens**: `POST /api/agent/runs` answers 400 with the posture's own sentence when the mode is agent and `AGENT_WORKFLOW_SENDS_STATEMENTS` holds for the requested workflow, so no run id and no model turn are spent on a refusal the connection's type already decided. What an engine that IS admitted can then do differs by MODE. **Agent mode is still only the engines a provider can bound**: its read-class tools reach the database under the `agent-read-only` profile, which the factory grants only to a provider with `queryReadOnly`, the same fact the refusal reads. **Plan mode is now every engine**: its grounding acquires `agent-operations` and walks the provider's object surface (`db.schema.read`), so a plan run on MongoDB is ordinarily grounded and is asked for one statement or command **in that engine's own language**, in a block still tagged with the canonical type-id. What the engine decides is no longer whether a plan is grounded but HOW (a composed catalog statement or a provider inventory, and whether estimated statistics exist at all), and the four prefaces say which. Where the reading itself fails, the run is steered to the `NO STATEMENT:` refusal with the capture's own diagnosis. **The `operations` workflow reaches every engine in both modes**, because it composes no SQL at all, and since #411 it is grounded under the same rule as everything else. | `src/lib/agent/composed-sql.ts`, `src/lib/agent/context-snapshot.ts` (`captureContextSnapshot`, `captureFromProvider`, `packOperationsInventory`), `src/lib/db/operations/descriptors.ts` (`db.schema.read`); `tests/unit/lib/agent/context-snapshot.test.ts`: the provider path, its timeout and its refusals; `tests/unit/lib/agent/composed-sql.test.ts`: `UNSUPPORTED_DIALECT`; `tests/evals/plan-grounding.test.ts`: a plan run whose provider cannot describe itself runs no statement and says it is ungrounded; `tests/isolated/agent-investigation.test.ts`: a plan run grounded through the engine's own schema inspection. |
 
 One of these has since been restored under its own workflow (the monitoring row, which closed both
 deferrals that tracked it), and the first row is Phase 1's own boundary rather than a defect, and its one
@@ -2406,8 +2436,10 @@ own.
 | `widened` | *Reads only, and one statement in your editor* | `AGENT_HANDOVER_BUDGET`'s row cap, *no time limit, same read-only session* | The same, with the hand-over consented for the run being opened |
 | `blocked` | *Cannot execute on `<engine>`* | *plan mode drafts here, and the operations workflow still runs* | Agent mode on any other engine |
 | `blocked` | *Cannot execute yet* | *no connection is resolved, so no engine has been established* | Agent mode with no connection resolved |
+| `blocked` | *Refused on this connection* | *plan mode drafts here, and the operations workflow still runs* | Agent mode on an engine it executes on, after a run on this connection was refused for the connection itself (principal too broad or too narrow, authorization off, unsupported target, unusable credential); the popover carries the refusal's own sentence, and a connection the shell has moved to since goes back to its engine's reading |
 
-Four levels, one reading per row above: `blocked` covers both arms that execute nothing and have no bound to state, and they stay separate arms because "has no read-only statement path" is a claim about an engine, which a panel that has resolved no connection has not seen.
+Four levels, one reading per row above: `blocked` covers the three arms that execute nothing and have no bound to state.
+They stay separate arms because "has no read-only statement path" is a claim about an engine, which a panel that has resolved no connection has not seen, and "refused on this connection" is a claim about one connection's user, which says nothing about the engine.
 Not one engine name and not one
 figure is typed in the module — the names come from `AGENT_EXECUTION_ENGINES` through
 `getDBConfig().label` and the figures from the policy rows, which is the rule `hero-proof.tsx`
@@ -2417,7 +2449,7 @@ hazard, and the amber pre-start card below — which renders for an unsupported 
 unresolved connection (`engineUnsupported`, `AgentRail.tsx`) — is where that reading is alerted.
 
 **The qualifier is visible, and that is a claim rather than a layout choice.** A bare "executes
-nothing" overclaims: on the dialects `CATALOG_PLANS` serves (`src/lib/agent/context-snapshot.ts`)
+nothing" overclaims: on the dialects that supply a `catalogCapture` (`src/lib/agent/languages/sql/engines/`)
 plan mode's grounding capture IS a catalog read, and `engine-support.ts` says in its own header that
 copy compressing these facts overclaims. So both halves sit on the same line, the row wraps rather
 than truncating — a qualifier cut off mid-clause is the same overclaim with an ellipsis on it — and
@@ -2750,6 +2782,86 @@ One residual: the shared `BottomPanel` component ships in the package with its a
 branch present but inert — an optional prop the embedded shell never passes, on a component no entry
 point exports.
 
+## Language packs
+
+Agent mode reads statements in three statement languages, `sql`, `kubectl` and `mongo`, and what it does differently in each lives in that language's pack under `src/lib/agent/languages/<statement-language>/`, never in `src/lib/db`.
+The agent imports the database layer, and the database layer never imports the agent.
+The core (`investigation.ts`, `tools.ts` and the modules beside them) names no statement language a pack owns and no engine, which the guard at the end of this section holds.
+
+**The interface.** `AgentLanguagePack` in `languages/pack.ts` has three facets, one per tier:
+
+| Facet | Tier rule | What it holds | Read through |
+| --- | --- | --- | --- |
+| `client` | Browser-safe: it reaches no server module and no `node:` builtin | the copy, the workflow variants, the plan-estimate operation and the posture sentences | `languageClientPack` |
+| `server` | Below `tools.ts`: it never reaches the execution tier | the adapter, the tool overrides and base definitions, the recommendation card, grounding, the tool rules and the shortfall notices | `languageServerPack` |
+| `execution` | Above `tools.ts`: only the run loop reads it | the tool arms and the evidence tools | `agentLanguagePack` |
+
+**The three member kinds.**
+
+- **Shared:** the statement-language family's pack supplies it, and every engine of that family reads it as it is, unless the engine's overlay overrides it (below).
+- **Dialect-bound:** the five SQL members `catalogRead`, `planEstimate`, `profileComposition`, `statistics` and `catalogCapture`.
+  Each SQL engine's overlay supplies each one or says `"unsupported"`, and the compiler refuses an overlay that leaves one out.
+- **Optional:** the adapter's `inventoryProblem` and `planDraftIdentifiers`, which a pack with no such check leaves out.
+
+Some members are global by name, because a reader dispatches on the name before it reads a run's language: every pack's `baseDefinitions`, `shortfallNotices` and `evidenceTools` are merged into `LANGUAGE_BASE_DEFINITIONS`, `LANGUAGE_SHORTFALL_NOTICES` and `AGENT_EVIDENCE_TOOLS`, and a name two packs both hold fails at load.
+`LANGUAGE_USAGE_BAR_NOTICE` is the one pack's `usageBarNotice` that supplies one.
+`REFERENCE_STATEMENT_DEFINITIONS` are the default statement-language family's definitions of `inspect_schema`, `run_read_query`, `inspect_plan` and `profile_table`: `AGENT_TOOL_DEFINITIONS` spreads them first, and every family's `toolOverrides` replace them by name.
+
+**Engine overlays.** An engine that speaks a statement language has an overlay module at `languages/<statement-language>/engines/<type-id>.ts` and a client row in that directory's `client.ts`.
+`defineOverlay` applies an overlay to one facet of the family pack: a value replaces the member, a function derives it from the base member, nothing is merged deeper than one member, the result is frozen, and an empty overlay returns the base itself.
+A client overlay holds its `dialect` and nothing else.
+A server overlay holds its `dialect` and may override exactly the members `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names, `grounding`, `workflowToolRules` and `answerNotADataRead`, because every consumer reads those through the run resolver, so an override reaches every reader.
+Every other server member stays the family's:
+
+- `adapter` and `catalogAdvice` are read through `AuditedAgentCall.fingerprintLanguage` and `draftedStatement`, which carry no engine, and step ids and repair identity depend on them (B128);
+- `toolOverrides`, `recommendationCard` and the statement definitions make the tool offer, which is computed from the run record with no connection, and a card's schema must equal the offered one;
+- the global members above are merged by name across every family.
+
+Client overlays stay dialect-only because the copy, the variants and the plan-estimate operation are projected per family into browser tables, and the hand-over terms are read by language (B123).
+No shipped overlay overrides a Shared member.
+
+**Resolvers.**
+
+| Scope | Resolver | Answers |
+| --- | --- | --- |
+| Statement-language family | `languageClientPack`, `languageServerPack`, `agentLanguagePack` | one family's client facet, server facet or whole pack; an id the server does not know is a named error |
+| Engine | `engineFamily` | the statement-language family a type speaks, or null |
+| Engine | `engineClientPack` | the family's client facet with the engine's client overlay applied |
+| Engine | `engineServerOverlay` | the engine's server overlay as the registry holds it, or an empty one |
+| Engine | `engineServerDialect` | the engine's server dialect, every member `"unsupported"` for a type with none |
+| Engine | `agentEnginePack` | the engine's whole pack, which is the family pack itself while both overlays are empty |
+| Engine | `enginesSupporting` | the engines whose client dialect supports every member asked |
+| Run | `statementFamilyOf` | the family a run reads: its persisted `statementLanguage`, or `DEFAULT_STATEMENT_LANGUAGE` when the record holds none |
+| Run | `runServerPack` | the server facet a run reads: its family's, with the connection type's overlay applied only when that type speaks the family |
+
+A run's statement language is persisted, and the connection type only selects the overlay.
+`persistedRunFacts` leaves `statementLanguage` off the record for a SQL engine, for a ledger older than statement languages and for an engine with no statement language, and `statementFamilyOf` reads each of them as `DEFAULT_STATEMENT_LANGUAGE`, which is `sql`.
+An engine with no statement language, and a connection re-typed after its run opened, read the family pack itself.
+Every member an overlay cannot override stays keyed by the persisted family, so the tool offer and the dispatch agree.
+`CURATED_CALL_LANGUAGE` is the language a curated call is fingerprinted and refused in, because its `operations:` or `objects:` key is no statement in any language.
+
+**A pack never opens execution.** Whether agent mode executes on an engine is decided by `AGENT_EXECUTION_ENGINES` and the execution-profile check; a pack only says how a statement in its language is read, refused and narrated.
+
+**How to add an engine to a statement-language family.**
+
+1. Map the type-id onto its statement language in `AGENT_STATEMENT_LANGUAGE` in `agent-manifest.ts`.
+2. Write `languages/<statement-language>/engines/<type-id>.ts`, its server overlay declared `satisfies AgentEngineServerOverlay<...>`, with every dialect-bound member supplied or `"unsupported"`.
+3. Add its client row to `languages/<statement-language>/engines/client.ts`, and register both overlays in `languages/engines/server.ts` and `languages/engines/client.ts`; both registries are total, so the build fails until they hold the engine.
+4. Add the `Agent language pack` subsection to `docs/providers/<type-id>.md`, which `tests/unit/lib/agent/engine-docs.test.ts` holds to the overlay row for row.
+5. Run `engine-overlays.test.ts` and `engine-pack-contract.test.ts` under `tests/unit/lib/agent/`, which read the engine list from the manifest, so the new engine joins every case.
+
+**The guard.** `tests/unit/lib/agent/language-boundary.test.ts` reads every core file under `src/lib/agent/` outside `languages/`, and its allowlist holds each finding the core keeps on purpose with an exact count:
+
+- R1: no pack id other than `sql` as a literal, a property or part of an identifier, and no operation, verifier or fingerprint id that starts with one.
+- R2: no import of a module that belongs to one pack, only of the shared entries of `languages/`.
+- R3: the tiers hold: no server module reaches the execution tier, no client pack reaches a server module or a builtin, and no runtime cycle passes through `languages/`.
+- R4: the allowlist is exact, so it can only shrink.
+- R5: no `sql` literal, no `sql` read off a language-keyed table, no id that starts with `sql`, and an exact count of the references to `DEFAULT_STATEMENT_LANGUAGE` and `CURATED_CALL_LANGUAGE`.
+- R6: every engine overlay is declared `satisfies` its overlay type, so the excess-property check holds it to its family's dialect.
+- R7: no dialect table the overlays absorbed is declared in the core again.
+- R8: no engine id as a literal, a property or a segment of an identifier.
+- R9: no read of an overridable server member through a family resolver, which would bypass an engine's override.
+
 ## Module map
 
 ```
@@ -2765,8 +2877,10 @@ src/lib/agent/
 ├── runtime.ts            # composition root: the only place that assembles a tool context
 ├── tools.ts              # the four tools + server-side selection; the only database reach,
                           #   the model's tools and the server's own grounding reads alike
-├── composed-sql.ts # the SQL the SERVER writes, per dialect: four of the forty-two
-├── sqlite-ddl.ts         # reading SQLite's stored DDL back into an inventory
+├── composed-sql.ts # the type-keyed entry points to the SQL the SERVER writes, each dispatched to an engine's dialect: the engines `enginesSupporting("catalogRead", "planEstimate")` answers
+├── languages/            # the statement language packs and their resolvers (see Language packs)
+├── languages/sql/engines/ # each SQL engine's own compositions, read through `engineServerDialect`
+├── languages/sql/engines/sqlite-ddl.ts # reading SQLite's stored DDL back into an inventory
 ├── execution-policy.ts   # the frozen policy and the run-level ceilings
 ├── deadline.ts           # the wall-clock deadline and the timeout clamp
 ├── repair-ledger.ts      # the bounded repair loop and its statement fingerprint
@@ -2906,7 +3020,7 @@ the role's own grants are the whole boundary (A3).
 - **B108**: RabbitMQ is served by plan mode and the MCP metadata tools only: its provider implements no `queryReadOnly`, so agent execution of a workflow that sends statements and MCP `run_read_query` refuse it; its plan-mode walk reads the virtual host `/` alone and counts the others it did not read (`docs/providers/rabbitmq.md` section 8).
 - **B109**: the schema docs route puts table, collection and stream names in the prompt without the untrusted-content fence, for every provider; the route has no tools, so the exposure is a spoofed document on the user's screen.
 - **B110**: the answer card's inventory chip counts every captured object under the engine's entity noun, so a RabbitMQ capture of 17 streams, 6 queues and 18 exchanges reads "41 streams read".
-- **B111**: DuckDB is offered `profile_table` by the database-assessment and data-analysis workflows, and `composeTableProfile` (`src/lib/agent/table-profile.ts`) has no verified DuckDB composition, so every call answers `UNSUPPORTED_DIALECT`; it was kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
+- **B111**: DuckDB is offered `profile_table` by the database-assessment and data-analysis workflows, and DuckDB's engine overlay (`src/lib/agent/languages/sql/engines/duckdb.ts`) declares its `profileComposition` `"unsupported"`, so every `composeTableProfile` call answers `UNSUPPORTED_DIALECT`; it was kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
 - **B112**: a run's persisted workflow type is not checked when its ledger is read, so a ledger naming a workflow Studio does not know reaches five workflow-keyed tables as `undefined`, and a budget read on it fails as a `TypeError` rather than a named refusal.
 - **B113**: [`AGENT_GUIDE.md`](./AGENT_GUIDE.md) and [`AGENT_DATA_FLOW.md`](./AGENT_DATA_FLOW.md) cite code by line number, and those numbers have drifted from the code they name; read the file and symbol a citation names rather than its line.
 - **B114**: a cluster health run drops the Warning events of a controller whose kind the workload profile does not list, such as a CloudNativePG `Cluster` or an Argo `Rollout`, when that controller has no pod in the namespace, because `readWorkloadProfile` gives it no row to count them under.
@@ -2918,6 +3032,13 @@ the role's own grants are the whole boundary (A3).
 - **B119**: `compare_plans` is not offered on MongoDB, because `summarisePlan` reads a MongoDB plan as `unknown`, so a comparison would claim a difference nobody has read; an optimization run there recommends an index from one inspected plan instead.
 - **B120**: every measurement of the MongoDB profile is of a standalone server; what the open answers through `mongos`, and on a direct connection to a replica-set secondary, where the probe's delete may meet `NotWritablePrimary` before the authorization check, is unmeasured.
 - **B121**: the model evals have no MongoDB preset, so `bun run agent:eval` cannot measure a real model on the command envelope; the mongo workflows are proved with scripted model turns only.
+- **B122**: `src/lib/agent/tools.ts` and `src/lib/agent/context-snapshot.ts` import runtime values from each other; nothing reads across the cycle at module scope, so it works, and the language boundary guard passes it because it runs through no language pack.
+- **B123**: two per-language tables live in UI components rather than in the language client packs: the hand-over chips (`HANDOVER_CHIPS` in `src/components/agent/ConsentCard.tsx`) and the rail's `"sql"` default when it has no connection type (`handOverLanguage` in `src/components/agent/AgentRail.tsx`).
+- **B124**: on MySQL, an estimating plan request for `EXPLAIN FORMAT=JSON SELECT 1` is composed as `EXPLAIN FORMAT=JSON FORMAT=JSON SELECT 1`, because `withoutEstimatingPrefix` (`src/lib/agent/composed-sql.ts`) strips PostgreSQL's and SQLite's spellings of the prefix and not MySQL's.
+- **B125**: a catalog read's declared schema is folded to lower case on SQLite only, while SQL Server under its default collation and DuckDB compare schema names case-insensitively too, so a scope allowlist of `["dbo"]` would deny a read the model asked for as `DBO`; nothing builds a schema allowlist for an agent run today, so no run meets it.
+- **B126**: the SQL catalog advice tells a model that `information_schema` and `pg_catalog` belong to another engine on every SQL engine, including the ones where they are native: a mistyped `information_schema.colums` on PostgreSQL is told that the catalog belongs to another engine and that the connection is postgres.
+- **B127**: a resumed MongoDB run that already profiled a collection is told that profile under the SQL profile's operation id, `sql.table.profile`, because `describePriorProgress` (`src/lib/agent/investigation.ts`) writes that id for every `table-profiled` event.
+- **B128**: an engine overlay can override only `grounding`, `workflowToolRules` and `answerNotADataRead`; the adapter and the catalog advice stay the statement-language family's, because `AuditedAgentCall.fingerprintLanguage` and `draftedStatement` carry no engine and step ids and repair identity depend on them.
 
 **What machine redaction leaves unmasked on Kubernetes.**
 Agent reads on a cluster are masked by structural rules and by request target (see [On a Kubernetes connection](#on-a-kubernetes-connection)), and what those rules do not reach is stated here, in the same six lines as [`docs/providers/kubernetes.md`](./providers/kubernetes.md) section 9:

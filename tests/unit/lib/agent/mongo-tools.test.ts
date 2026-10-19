@@ -13,7 +13,6 @@ import { AgentRunDeadline } from "@/lib/agent/deadline";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import {
-  AGENT_ANSWER_CONTRACT,
   AGENT_TOOL_DEFINITIONS,
   type AgentToolContext,
   type AgentToolName,
@@ -25,12 +24,13 @@ import {
   runReadQueryTool,
   selectAgentTools,
 } from "@/lib/agent/tools";
+import { AGENT_ANSWER_CONTRACT } from "@/lib/agent/tool-contracts";
 import {
   mongoInspectPlanTool,
   mongoInspectSchemaTool,
   mongoProfileTablePlan,
   planMongoProfile,
-} from "@/lib/agent/mongo-tools";
+} from "@/lib/agent/languages/mongo/tools";
 import { draftedStatement, profileTable } from "@/lib/agent/investigation";
 import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
@@ -270,6 +270,41 @@ describe("run_read_query on mongo", () => {
     expect(h.acquireProvider).not.toHaveBeenCalled();
   });
 
+  test("a read the captured inventory shows would answer nothing is refused before anything is sent", async () => {
+    const snapshot = snapshotOf(
+      [collection("app", "orders", [field("_id", "number"), field("created_at", "date")])],
+      ["app"],
+    );
+    const h = harness();
+    const qualified = await runReadQueryTool(
+      h.context,
+      { command: { collection: "app.orders", operation: "count" } },
+      snapshot,
+    );
+    expect(qualified.kind === "unavailable" && qualified.reasonCode).toBe("STATEMENT_NOT_ADMITTED");
+    expect(qualified.kind === "unavailable" && qualified.detail).toContain('as in "collection": "orders"');
+    const stringDate = await runReadQueryTool(
+      h.context,
+      { command: { collection: "orders", operation: "count", filter: { created_at: { $gte: "2026-03-01" } } } },
+      snapshot,
+    );
+    expect(stringDate.kind === "unavailable" && stringDate.detail).toContain('{"$date": "2026-03-01"}');
+    expect(h.acquireProvider).not.toHaveBeenCalled();
+    // The same read with the date written as one is sent.
+    const wrapped = await runReadQueryTool(
+      h.context,
+      {
+        command: {
+          collection: "orders",
+          operation: "count",
+          filter: { created_at: { $gte: { $date: "2026-03-01" } } },
+        },
+      },
+      snapshot,
+    );
+    expect(wrapped.kind).toBe("completed");
+  });
+
   test("an sql argument on a mongo run is invalid input, and the field name is the language's own", async () => {
     const h = harness();
     const outcome = await runReadQueryTool(h.context, { sql: "SELECT 1" });
@@ -280,7 +315,7 @@ describe("run_read_query on mongo", () => {
 
   test("the description names the collection bare and the bound database, and offers no database key", () => {
     expect(agentToolDefinition("mongo", "investigation", "run_read_query").description).toBe(
-      'Run one bounded read-only command envelope as JSON: {"collection": "<name>", "operation": "find" | "findOne" | "aggregate" | "count" | "distinct", "filter": {...}, "pipeline": [...], "field": "<name>" (distinct only), "options": {"limit": N}}. Write the collection by its bare name, as in "orders" for an inventory entry app.orders: the run reads the database its connection is bound to. Writes and the write stages of a pipeline ($out, $merge) are refused before the database is reached, and you are told why.',
+      'Run one bounded read-only command envelope as JSON, with the keys its operation takes and no others: find takes "filter" and "options" ("projection", "sort", "skip", "limit"); findOne takes "filter" and "options" ("projection" only); aggregate takes "pipeline" only, so its filter, sort and limit are $match, $sort and $limit stages; count takes "filter"; distinct takes "field" and "filter". For example {"collection": "orders", "operation": "aggregate", "pipeline": [{"$match": {"status": "paid"}}, {"$group": {"_id": "$status", "n": {"$sum": 1}}}]}. Write the collection by its bare name, as in "orders" for an inventory entry app.orders: the run reads the database its connection is bound to. Write a date as {"$date": "2026-03-01T00:00:00Z"} and an ObjectId as {"$oid": "<24 hex digits>"}: a plain string never equals either, and a read shows both as plain strings. Writes and the write stages of a pipeline ($out, $merge) are refused before the database is reached, and you are told why.',
     );
   });
 });
@@ -489,6 +524,29 @@ describe("inspect_plan on mongo", () => {
     expect(outcome.kind === "completed" && outcome.artifact.operationId).toBe("mongo.plan.estimate");
   });
 
+  test("a command the inventory shows would match nothing is not planned, and one the reader refuses goes on to the pipeline", async () => {
+    const snapshot = snapshotOf(
+      [collection("app", "events", [field("_id", "objectId"), field("ts", "date")])],
+      ["app"],
+    );
+    const h = harness({ workflowType: "query-optimization" });
+    const strings = await mongoInspectPlanTool(
+      h.context,
+      { command: { collection: "events", operation: "find", filter: { ts: { $gte: "2026-10-01T00:00:00.000Z" } } } },
+      snapshot,
+    );
+    expect(strings.kind === "unavailable" && strings.reasonCode).toBe("STATEMENT_NOT_ADMITTED");
+    expect(strings.kind === "unavailable" && strings.detail).toEndWith("Nothing was planned.");
+    expect(h.queryReadOnly).not.toHaveBeenCalled();
+    // A write is the reader's to refuse, as it always was: the inventory is never asked about it.
+    const write = await mongoInspectPlanTool(
+      h.context,
+      { command: { collection: "nowhere", operation: "insertOne", documents: [{ a: 1 }] } },
+      snapshot,
+    );
+    expect(write.kind).toBe("refused");
+  });
+
   test("an empty command is invalid input, as it is for the read, and nothing is planned", async () => {
     const h = harness();
     const outcome = await mongoInspectPlanTool(h.context, { command: {} });
@@ -509,7 +567,7 @@ describe("inspect_plan on mongo", () => {
 
   test("the description says what the plan costs, and claims no untouched document", () => {
     expect(agentToolDefinition("mongo", "query-optimization", "inspect_plan").description).toBe(
-      "Ask the engine for the ESTIMATED plan of one read-only command envelope, the same JSON shape run_read_query takes. The engine plans the command with the explain command at queryPlanner verbosity and returns no result rows; where several plans are candidates it tries each for a bounded trial, under the same deadline your reads have. No timings are produced.",
+      "Ask the engine for the ESTIMATED plan of one read-only command envelope, the same JSON shape run_read_query takes, with dates and ObjectIds written the same way: a range over a date field written with strings plans an index scan over strings, which matches no document. The engine plans the command with the explain command at queryPlanner verbosity and returns no result rows; where several plans are candidates it tries each for a bounded trial, under the same deadline your reads have. No timings are produced.",
     );
   });
 
@@ -696,7 +754,7 @@ describe("profile_table on mongo", () => {
     }));
     const { service, recorded, invocations } = serviceOver(snapshotOf([orders], ["app"]));
 
-    const result = await profileTable(service, h.context, { input: { table: "app.orders" } }, new Set(), new Set());
+    const result = await profileTable(service, h.context, { input: { table: "app.orders" } }, new Set());
 
     expect(result.kind === "answered" && result.text).toContain("Profiled a collection: 7 document(s)");
     // Covered as far as the inventory goes: its fields were inferred from a sample and are bounded, so the sentence
@@ -724,7 +782,7 @@ describe("profile_table on mongo", () => {
     }));
     const { service } = serviceOver(snapshotOf([orders], ["app"]));
 
-    const result = await profileTable(service, h.context, { input: { table: "orders" } }, new Set(), new Set());
+    const result = await profileTable(service, h.context, { input: { table: "orders" } }, new Set());
 
     const text = result.kind === "answered" ? result.text : "";
     expect(text).toContain("high_null");
@@ -749,7 +807,7 @@ describe("profile_table on mongo", () => {
     const h = harness(undefined, async () => ({ rows: [], fields: [], rowCount: 0, executionTime: 1 }));
     const { service, recorded } = serviceOver(snapshotOf([orders], ["app"]));
 
-    const result = await profileTable(service, h.context, { input: { table: "orders" } }, new Set(), new Set());
+    const result = await profileTable(service, h.context, { input: { table: "orders" } }, new Set());
 
     expect(result.kind === "answered" && result.text).toContain("0 document(s)");
     const profiled = recorded.find((event) => event.kind === "table-profiled");
@@ -765,7 +823,7 @@ describe("profile_table on mongo", () => {
     }));
     const { service } = serviceOver(snapshotOf([collection("app", "empty", [])], ["app"]));
 
-    const result = await profileTable(service, h.context, { input: { table: "empty" } }, new Set(), new Set());
+    const result = await profileTable(service, h.context, { input: { table: "empty" } }, new Set());
 
     const text = result.kind === "answered" ? result.text : "";
     expect(text).toContain("Profiled a collection: 3 document(s), no field at basic depth, 0 finding(s).");
@@ -789,7 +847,7 @@ describe("profile_table on mongo", () => {
         executionTime: 1,
       }));
       const { service, steps } = serviceOver(snapshotOf([wide], ["app"]));
-      await profileTable(service, h.context, { input }, new Set(), new Set());
+      await profileTable(service, h.context, { input }, new Set());
       return steps[0];
     };
 
@@ -808,7 +866,7 @@ describe("profile_table on mongo", () => {
       throw new QueryError("Read-only execution exceeded the row budget: 11 rows > 10 allowed", "mongodb", "");
     });
     const { service } = serviceOver(snapshotOf([orders], ["app"]));
-    const refused = await profileTable(service, h.context, { input: { table: "orders" } }, new Set(), new Set());
+    const refused = await profileTable(service, h.context, { input: { table: "orders" } }, new Set());
     // The refusal's own model text is what the model reads: the row-budget sentence, not a silent nothing.
     expect(refused.kind === "answered" && refused.text).toContain("row budget");
   });
@@ -821,7 +879,7 @@ describe("profile_table on mongo", () => {
       executionTime: 3,
     }));
     const { service } = serviceOver(snapshotOf([orders], ["app"]));
-    const outcome = await profileTable(service, h.context, { input: { table: "orders" } }, new Set(), new Set());
+    const outcome = await profileTable(service, h.context, { input: { table: "orders" } }, new Set());
     expect(outcome.kind === "answered" && outcome.text).toContain("could not be read as counts");
   });
 
@@ -865,7 +923,6 @@ describe("profile_table on mongo", () => {
       h.context,
       { input: { table: "orders" } },
       new Set(),
-      new Set(),
     );
     expect(replayed.kind === "answered" && replayed.text).toContain("already taken in this run");
 
@@ -878,7 +935,6 @@ describe("profile_table on mongo", () => {
       h.context,
       { input: { table: "orders" } },
       new Set(),
-      new Set(),
     );
     expect(indeterminate.kind === "answered" && indeterminate.text).toContain("outcome was never recorded");
 
@@ -890,7 +946,6 @@ describe("profile_table on mongo", () => {
       } as unknown as Parameters<typeof profileTable>[0],
       h.context,
       { input: { table: "orders" } },
-      new Set(),
       new Set(),
     );
     expect(cancelled.kind).toBe("cancelled");
@@ -967,6 +1022,62 @@ describe("recommend_change on mongo", () => {
     if (outcome.kind !== "recommended") throw new Error(`expected a card, got ${outcome.reasonCode}`);
     expect(outcome.recommendation).toMatchObject({ change: "document-index", collection: "archive" });
     expect(Object.hasOwn(outcome.recommendation, "database")).toBe(false);
+  });
+
+  test("an index on keys the collection already has is refused, with no change named as the answer instead", async () => {
+    const { h, events, plan } = await runHoldingAPlan();
+    const indexed = events.map((event) =>
+      event.kind === "context-captured"
+        ? captured(
+            snapshotOf(
+              [
+                {
+                  ...collection("app", "orders"),
+                  indexes: [{ name: "customer_1_status_1", columns: ["customer", "status"], unique: false }],
+                },
+              ],
+              ["app"],
+            ),
+          )
+        : event,
+    );
+    const card = (keys: Record<string, number>, spelling = "orders") => ({
+      change: "document-index",
+      collection: spelling,
+      keys,
+      evidence: [{ source: "artifact", correlationId: plan }],
+    });
+    for (const spelling of ["orders", "app.orders"]) {
+      const same = recommendChangeTool(
+        h.context,
+        { runId: "run-1", events: indexed },
+        card({ customer: 1, status: -1 }, spelling),
+      );
+      expect(same.kind === "unavailable" && same.reasonCode).toBe("INDEX_ALREADY_EXISTS");
+      expect(same.kind === "unavailable" && same.modelText).toContain("nothing needs to change");
+    }
+    // A different order, a prefix, a longer key that begins with the existing one and another collection are new indexes.
+    for (const keys of [
+      { status: 1, customer: 1 },
+      { customer: 1 },
+      { customer: 1, status: 1, created_at: 1 },
+    ] as Record<string, number>[]) {
+      expect(recommendChangeTool(h.context, { runId: "run-1", events: indexed }, card(keys)).kind).toBe("recommended");
+    }
+    expect(
+      recommendChangeTool(h.context, { runId: "run-1", events: indexed }, card({ customer: 1, status: 1 }, "archive"))
+        .kind,
+    ).toBe("recommended");
+    // A capture that placed no database still finds the collection by its own name.
+    const unplaced = indexed.map((event) =>
+      event.kind === "context-captured" && event.snapshot !== undefined
+        ? captured(snapshotOf(event.snapshot.objects))
+        : event,
+    );
+    expect(
+      recommendChangeTool(h.context, { runId: "run-1", events: unplaced }, card({ customer: 1, status: 1 }, "orders"))
+        .kind,
+    ).toBe("unavailable");
   });
 
   test("a card citing nothing this run produced is refused as unverifiable", async () => {

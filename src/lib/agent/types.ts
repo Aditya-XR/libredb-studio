@@ -852,7 +852,19 @@ export type AgentToolRefusal =
        */
       readonly answered?: boolean;
     }
-  | { readonly class: "reading-refused"; readonly reasonCode: AgentReadingDenyCode; readonly elapsedMs?: number };
+  | { readonly class: "reading-refused"; readonly reasonCode: AgentReadingDenyCode; readonly elapsedMs?: number }
+  /**
+   * Refused by the tool itself before anything was sent: arguments that do not parse, a command the language's reader
+   * or the run's inventory refuses, a spent deadline, a repair ledger declining a fingerprint. `reasonCode` is the
+   * tool's own code (`AgentToolUnavailableCode`) and `detail` its sentence: the reason it named, or where it named
+   * none, the whole sentence the model was told. Required, because no ledger written before this class carries it.
+   *
+   * These used to settle nothing, which left a lone `tool-invoked` on the timeline with no outcome and no reason: the
+   * model was told why and the user was not. Measured 2026-10-17, MongoDB runs met 19 of their 21 refusals here (a
+   * command envelope is checked before the engine), against 2 on PostgreSQL. Nothing reached a database, so no
+   * statement and no repair attempt is counted for it.
+   */
+  | { readonly class: "not-sent"; readonly reasonCode: string; readonly detail: string };
 
 interface AgentRunEventBase {
   /** Epoch milliseconds. A number, not a Date: a Date does not round-trip. */

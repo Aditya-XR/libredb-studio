@@ -73,6 +73,30 @@ function renderStrip(input: StripCase) {
   );
 }
 
+describe("SafetyStrip on a connection that was refused", () => {
+  test("renders the refusal's posture, and a strip told of no refusal keeps the engine's", () => {
+    const refusal =
+      "The database user this run would execute as holds privileges the read-only boundary cannot contain.";
+    const refused = render(
+      <SafetyStrip
+        mode="agent"
+        engine="mongodb"
+        engineLabel={labelFor("mongodb")}
+        handover={false}
+        refusedHere={refusal}
+      />,
+    );
+    expect(refused.getByTestId("agent-safety-headline").textContent).toBe("Refused on this connection");
+    expect(refused.getByTestId("agent-safety-claim").textContent).toContain(refusal);
+    refused.unmount();
+
+    const plain = render(
+      <SafetyStrip mode="agent" engine="mongodb" engineLabel={labelFor("mongodb")} handover={false} />,
+    );
+    expect(plain.getByTestId("agent-safety-headline").textContent).toBe("Reads only");
+  });
+});
+
 describe("SafetyStrip renders the posture whole", () => {
   test("the pill carries the headline and the qualifier sits beside it, visible", () => {
     const { getByTestId } = renderStrip(PLAN);

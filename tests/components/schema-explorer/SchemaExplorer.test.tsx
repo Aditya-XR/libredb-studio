@@ -49,6 +49,7 @@ import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
 import type { ProviderLabels } from "@/lib/db/types";
 import { mockSchema, emptySchema } from "../../fixtures/schemas";
 import type { DetailedObject } from "@/lib/db/detailed-object";
+import { TEST_CREATE_TABLE_SPEC } from "../../helpers/mock-provider";
 
 // =============================================================================
 // SchemaExplorer Tests
@@ -80,7 +81,7 @@ const defaultMetadata: ProviderMetadata = {
     queryLanguage: "sql",
     supportsExplain: true,
     supportsExternalQueryLimiting: true,
-    supportsCreateTable: true,
+    createTable: TEST_CREATE_TABLE_SPEC,
     supportsInlineRowEdit: true,
     supportsMaintenance: false,
     maintenanceOperations: [],
@@ -159,12 +160,12 @@ describe("SchemaExplorer", () => {
     expect(onCreateTableClick).toHaveBeenCalledTimes(1);
   });
 
-  test("empty state offers no create-table action when supportsCreateTable is false", () => {
+  test("empty state offers no create-table action when the engine declares no createTable", () => {
     const props = createDefaultProps({
       schema: emptySchema,
       metadata: {
         ...defaultMetadata,
-        capabilities: { ...defaultMetadata.capabilities, supportsCreateTable: false },
+        capabilities: { ...defaultMetadata.capabilities, createTable: undefined },
       },
     });
     const { container } = render(<SchemaExplorer {...props} />);
@@ -188,6 +189,14 @@ describe("SchemaExplorer", () => {
     const createButton = container.querySelector('button[title="Create Collection"]');
     expect(createButton).not.toBeNull();
     expect(createButton?.textContent).toContain("Create Collection");
+  });
+
+  test("empty state offers no create-table action before the capabilities load (#1435)", () => {
+    const props = createDefaultProps({ schema: emptySchema, metadata: null });
+    const { container } = render(<SchemaExplorer {...props} />);
+
+    expect(container.textContent).toContain("No structures found");
+    expect(container.querySelector('button[title="Create Table"]')).toBeNull();
   });
 
   // A read that FAILED says nothing about whether the engine takes DDL, so the error branch offers
@@ -307,7 +316,7 @@ describe("SchemaExplorer", () => {
 
   // ── Create table button ───────────────────────────────────────────────────
 
-  test("create table button visible when capabilities.supportsCreateTable", () => {
+  test("create table button visible when the engine declares a createTable", () => {
     const onCreateTableClick = mock(() => {});
     const props = createDefaultProps({ onCreateTableClick });
     const { container } = render(<SchemaExplorer {...props} />);
@@ -331,14 +340,13 @@ describe("SchemaExplorer", () => {
 
   // ── Create table button hidden ──────────────────────────────────────────
 
-  test("create table button hidden when supportsCreateTable is false", () => {
+  test("create table button hidden when the engine declares no createTable", () => {
     const props = createDefaultProps({
       metadata: {
         capabilities: {
           queryLanguage: "sql" as const,
           supportsExplain: true,
           supportsExternalQueryLimiting: true,
-          supportsCreateTable: false,
           supportsInlineRowEdit: true,
           supportsMaintenance: false,
           maintenanceOperations: [],
@@ -478,7 +486,6 @@ describe("SchemaExplorer", () => {
           queryLanguage: "json" as const,
           supportsExplain: false,
           supportsExternalQueryLimiting: false,
-          supportsCreateTable: false,
           supportsInlineRowEdit: false,
           supportsMaintenance: false,
           maintenanceOperations: [],
@@ -518,7 +525,7 @@ describe("SchemaExplorer", () => {
           queryLanguage: "json" as const,
           supportsExplain: false,
           supportsExternalQueryLimiting: false,
-          supportsCreateTable: true,
+          createTable: TEST_CREATE_TABLE_SPEC,
           supportsInlineRowEdit: false,
           supportsMaintenance: false,
           maintenanceOperations: [],
@@ -560,9 +567,9 @@ describe("SchemaExplorer", () => {
 
     // Default search placeholder
     expect(view.getByPlaceholderText("Search tables or columns...")).not.toBeNull();
-    // Default create button title
-    const createButton = container.querySelector('button[title="Create Table"]');
-    expect(createButton).not.toBeNull();
+    // No create action before the capabilities load: the Create Table form quotes every name in
+    // the connection's own dialect and refuses to open without them (#1435).
+    expect(container.querySelector('button[title="Create Table"]')).toBeNull();
     // Tables should still render
     expect(container.querySelector('[data-testid="table-users"]')).not.toBeNull();
   });

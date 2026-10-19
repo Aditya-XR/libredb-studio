@@ -143,7 +143,7 @@ describe("a plan run on a cold process grounds itself in the database it is abou
 
 describe("a plan run on an engine this server cannot ground says so", () => {
   test("mysql: no statement is sent, nothing is captured, and the run is told it has seen nothing", async () => {
-    // `CATALOG_COMPOSERS` covers PostgreSQL and SQLite and MySQL is not one of them,
+    // `catalogCapture` is supplied for PostgreSQL and SQLite and MySQL is not one of them,
     // so no catalog STATEMENT is composed here — which is what `drive.statements`
     // pins. Since #414 that is no longer the whole reason the run is ungrounded: the
     // dialect falls through to its PROVIDER instead, and this preset's provider

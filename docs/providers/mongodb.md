@@ -1181,7 +1181,7 @@ request here.
 | `queryLanguage` | `json` |
 | `supportsExplain` | `false` |
 | `supportsExternalQueryLimiting` | `false` |
-| `supportsCreateTable` | `false` |
+| `createTable` | absent |
 | `supportsInlineRowEdit` | `false` — the query language is JSON commands, so there is no `UPDATE ... SET` for the results grid's inline editor to emit |
 | `supportsTestDataGeneration` | `true` - a separate fact from the flag above: the Generate Test Data dialog writes one `insertMany` command, which a collection takes ([§3.3](#33-sampling-based-schema-inference-nested-to-three-levels)), so both row menus offer it (#1468) |
 | `supportsResultPagination` | `false` — `prepareQuery` pins `offset` to 0 and returns the command untouched, so page two would be page one. The find document's own `limit` stays the bound here (#816) |
@@ -1391,10 +1391,30 @@ The operations workflow, MCP's `inspect_schema` and plan mode's grounding open u
    The seed's own user is the read user because a run opens on a seed only and a seed carries no separate agent credential (B85); an agent credential beside a connection string is refused with `AGENT_CREDENTIAL_WITH_CONNECTION_STRING`.
    `authSource` names the database the user was created in: the wrong one fails as a credentials error, not as a refusal of the profile.
 4. Keep the admin seed for the editor and the monitoring panels, and add this one beside it.
-   As the read user, `serverStatus`, `currentOp` and `top` answer code 13 (measured on 9.0.4; `dbStats` answers), so the overview, the sessions panel and the slow-query view go blank on a read-only connection.
+   As the read user, `serverStatus`, `currentOp` and `top` answer code 13 (measured on 9.0.4; `dbStats` answers), so the overview goes blank on a read-only connection, and the sessions panel and the slow-query view say the user may not read them: `getActiveSessions` and `getSlowQueries` raise a `PermissionDeniedError` on code 13 instead of answering an empty list, because "not allowed to look" is not "nothing there" (an Operate run on 2026-10-17 reported the server idle while an admin saw 46 sessions).
+   An agent run's Operate workflow is told the same: its `inspect_operations` reading of sessions or slow queries is refused with that sentence, not answered with zero rows.
 
 [`docker/mongodb-init/02-agent-principal.js`](../../docker/mongodb-init/02-agent-principal.js) creates this user, `libredb_agent` with `read` on `app`, for the compose fixture.
 The image runs the init scripts on a fresh data directory only, so recreate the container after an edit.
+
+#### What a run is told, and what is checked before a read is sent
+
+Measured on 2026-10-17 against PostgreSQL holding the same data, with one local model, these are the places where a MongoDB read answers an empty result instead of an error, or where a run spent turns on its own command shape; each is now said to the model and, where the inventory can decide it, checked before anything is sent.
+
+- **The tool schema.** `run_read_query` and `inspect_plan` take `command` as an object and `recommend_change` takes `keys` and `options` as objects, all records.
+  The schema a model is shown is built by `modelToolSchema` ([`model-tool-schema.ts`](../../src/lib/agent/model-tool-schema.ts)): the SDK's own conversion, except that a record keeps an open `additionalProperties`.
+  The SDK's conversion closes every object, which made each of these an object with no allowed key, and a model server that holds tool arguments to their schema (llama.cpp with `--jinja`) then sent `{"command": {}}` on every call.
+- **Values.** The statement language label (`statementLanguage` above) shows each operation with the keys it takes, and says a date is `{"$date": "..."}` and an ObjectId `{"$oid": "..."}`, because a read result shows both as plain strings and a plain string never equals either.
+  A run that filtered `created_at` with strings read 0 orders where `$date` read 578.
+- **The inventory check** ([`languages/mongo/inventory-check.ts`](../../src/lib/agent/languages/mongo/inventory-check.ts)), on a command the reader admits, before the policy pipeline, for `run_read_query` and `inspect_plan`:
+  - a collection the run's inventory does not hold by its own name is refused, naming the bare spelling for `shop.orders`, the inventory's case for `Orders`, or the collections that exist; only when the inventory claims to be complete;
+  - a field every sampled document typed as `date` or `objectId` compared with a plain string is refused, naming the wrapper to write; only in the filters that address the collection's own documents (a find, findOne, count or distinct filter, and the `$match` stages a pipeline opens with).
+  Both refusals are `STATEMENT_NOT_ADMITTED`, end "Nothing was sent." (or "Nothing was planned."), and settle as `tool-refused` with class `not-sent`, so the rail shows them.
+- **An empty `"options": {}`** asks for nothing, so the reader no longer refuses it on an aggregate, a count or a distinct; options that ask for something are still refused with their sentence.
+- **The row budget.** A cursor read stops one row past the budget, so its refusal adds that the total is not known (`rowBudgetRefusal` in `agent-read.ts`); the opening `exceeded the row budget: N rows > M allowed` is unchanged for `rowBudgetIn`.
+- **The inventory's nullability.** A MongoDB run's inventory states no `NOT NULL` (`sampledFields` in `packContextForTask`): a field every one of the first sampled documents held is an observation, not a constraint.
+- **Plan mode** is told the collection rule agent mode is told, and its drafts' collections are checked (`validatePlanStatement` with the run's language): three of ten drafts named `shop.orders`, which the editor reads as a collection that does not exist.
+- **Optimize** is judged by `agent-query-optimization-mongo.1`: an index recommendation citing a plan of this run, or a report citing a plan that already uses an index and recommending nothing. A recommended index whose keys the inventory already lists for that collection is refused (`INDEX_ALREADY_EXISTS`).
 
 #### The boundary, layer by layer
 
@@ -1511,6 +1531,16 @@ Three residuals of reading the text as JSON stay in both: JavaScript puts intege
 
 **What this profile does not overclaim.** MongoDB has no read-only transaction, which is the whole reason the boundary is the user and not a session.
 `distribution`-depth profiling is refused rather than composed: a distinct count here has no one-statement shape that does not materialise the set, and trading the profile's one-statement-per-table contract silently is worse than saying so.
+
+#### Agent language pack
+
+Statement-language family: `mongo`.
+Overlay: [`src/lib/agent/languages/mongo/engines/mongodb.ts`](../../src/lib/agent/languages/mongo/engines/mongodb.ts), with its client row in [`src/lib/agent/languages/mongo/engines/client.ts`](../../src/lib/agent/languages/mongo/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`.
+Both overlays are empty, so the engine resolves to the `mongo` family pack itself.
+The `mongo` statement-language family has no dialect-bound member.
+This overlay overrides no Shared member, so every Shared member is the `mongo` statement-language family's own.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
 
 ## 13. Known limitations & future work
 

@@ -119,7 +119,6 @@ const POSTGRES_CAPABILITIES: ProviderCapabilities = {
   supportsExplain: true,
   explainFormat: "postgres-json",
   supportsExternalQueryLimiting: true,
-  supportsCreateTable: true,
   supportsInlineRowEdit: true,
   supportsMaintenance: false,
   maintenanceOperations: [],
@@ -301,7 +300,7 @@ export const EVAL_ENGINES: Readonly<Record<EvalEngine, EvalEnginePreset>> = Obje
     },
     catalogReads: [],
     // None, and that is the honest limit rather than an omission: grounding is served
-    // for the dialects `CATALOG_COMPOSERS` covers, so a run here — plan or agent —
+    // for the dialects that supply a `catalogCapture`, so a run here — plan or agent —
     // reads no catalog and no statistics at all.
     groundingReads: [],
     catalogAnswer: () => null,

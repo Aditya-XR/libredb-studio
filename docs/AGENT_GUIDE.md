@@ -344,7 +344,7 @@ establishes (the investigation variant's `objective` in `AGENT_WORKFLOW_VARIANTS
 Tools: `inspect_schema`, `run_read_query`, `inspect_plan`, `compose_report` (the same variant's `tools`).
 
 **Answered when** the run composed at least one claim and the claims do not rest entirely on empty
-results (`verifyInvestigationGoal`, `src/lib/agent/goal-verifier.ts:349-355`).
+results (`verifyInvestigationGoal`, `src/lib/agent/goal-claims.ts:76-83`).
 
 ### Optimize
 
@@ -449,6 +449,7 @@ It is one of the readings below and not a mood, and the qualifier beside the pil
 | *Reads only* | *200 rows and 10 s per command, enforced by the server* | **Agent** mode on MongoDB, where auto-execute is not offered, so there is nothing to widen |
 | *Cannot execute on `<engine>`* | *plan mode drafts here, and the operations workflow still runs* | **Agent** mode on any other engine. A run whose workflow sends a statement is refused when it is started, before a run is opened |
 | *Cannot execute yet* | *no connection is resolved, so no engine has been established* | **Agent** mode with no connection resolved. Nothing has been read, so the panel does not claim to know which engine you are on |
+| *Refused on this connection* | *plan mode drafts here, and the operations workflow still runs* | **Agent** mode after a run on this connection was refused for the connection itself, for example a user that holds writes or a server with authorization off. The popover says why; switch to another connection and the strip goes back to what its engine does |
 
 Those two figures are the ones the server is enforcing, and they are the same on every workflow — the
 strip is shown before a run has one, so it states the pair every workflow row shares rather than
@@ -710,6 +711,7 @@ whole vocabulary (`SHORTFALL_SENTENCES`, `timeline.ts:633-645`):
 | `no-statement` | "The run described how it would approach the question and never wrote the statement, and it did not say what was missing either." |
 | `no-plan-comparison` | "No before-and-after plan comparison was recorded, and no index was recommended: a query optimization rests on one or the other." |
 | `no-plan-evidence` | "The index was recommended without citing a plan this run read, so nothing the engine said backs it." |
+| `no-plan-cited` | "No index was recommended and the report cites no plan this run read: a query optimization rests on how the engine reaches its documents." |
 | `no-table-profile` | "No table was profiled, so the state of the data was never established." |
 | `no-reading` | "The report rests only on this database's list of tables, and on no reading of what the engine is doing, so nothing it says was measured on this server." |
 | `no-answer` | "The run reported what it found but never produced an answer to show, so there is nothing to put in front of you." |
@@ -725,7 +727,7 @@ finished. What it had gathered is above."*
 
 **The shortfall wins over the ending in both modes** (`describeEnding`, `timeline.ts:604-624`), and
 one ending is where that matters. When the model simply stops, an **Agent** run that composed no
-claims also carries the `no-report` shortfall (`verifyInvestigationGoal`, `goal-verifier.ts:283`), so
+claims also carries the `no-report` shortfall (`verifyInvestigationGoal`, `goal-claims.ts:81`), so
 the sentence you actually read is the shortfall one — *"The run finished without composing a cited
 report, so nothing it found was written down."* The stop sentence for that ending, *"The model
 stopped without composing a cited report."*, is what a run whose ledger carries **no verdict at all**
@@ -863,14 +865,15 @@ start the run and are reported by the drive as `model-unauthorized`, `model-rate
 ## Running the agent on a local model (Ollama)
 
 Ollama is a first-class path: `LLM_PROVIDER=ollama` with `LLM_API_URL=http://localhost:11434/v1`
-reaches the OpenAI-compatible endpoint through the same adapter as the `openai` and `custom` kinds
-(`src/lib/agent/provider-registry.ts:123-134,156-161`), and no key is required — the adapter sends a
+reaches the OpenAI-compatible Chat Completions endpoint through the same adapter as the `custom` kind
+(`src/lib/agent/provider-registry.ts:131-145,168-173`); the `openai` kind shares the adapter but
+calls OpenAI's Responses API. No key is required: the adapter sends a
 placeholder rather than leaving `apiKey` undefined, so an ambient `OPENAI_API_KEY` cannot leak in
-(`provider-registry.ts:88,109,112`).
+(`provider-registry.ts:96,117,120`).
 
 **The model decides whether a local deployment can run the agent — not the endpoint.** This is
 worth stating precisely, because it is the opposite of what the mechanism suggests. The capability
-probe sends `toolChoice: "required"` (`capability-probe.ts:253`), which the OpenAI-compatible
+probe sends `toolChoice: "required"` (`capability-probe.ts:259`), which the OpenAI-compatible
 provider serializes as `tool_choice` — and **Ollama documents `tool_choice` as an unsupported
 field** on `/v1/chat/completions` (<https://docs.ollama.com/openai>), with forcing a tool call
 listed under future improvements in its own tool-support announcement

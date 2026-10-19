@@ -117,6 +117,11 @@ export interface AgentRunFollower {
    */
   readonly isStopping: boolean;
   readonly timeline: AgentRunTimeline;
+  /**
+   * The connection the run being followed was opened on, or null before the server opened one. The rail reads it
+   * to tell a refusal of THIS connection's user from one of a connection the shell has since left.
+   */
+  readonly openedOn: string | null;
   /** The app's own words about why the last attempt did not continue. */
   readonly error: string | null;
   /**
@@ -380,9 +385,11 @@ export interface AgentModelRefusal {
    * The mode the refused start asked for, and the only mode this verdict is about.
    *
    * The gate probes a model because an AGENT run needs tools; planning is toolless by
-   * contract and returns `allowed` on its first line (`capability-gate.ts`), so it is
-   * never probed and never refused. A verdict left standing over a mode it was never
-   * about would be a false statement, which is why it is recorded rather than assumed.
+   * contract and is never probed (`capability-gate.ts`), so it never gets this verdict.
+   * Its model is still built, and an `LLM_MODEL_EFFORT` the model refuses answers 503 in
+   * either mode, a configuration error rather than this verdict. A verdict left standing
+   * over a mode it was never about would be a false statement, which is why it is
+   * recorded rather than assumed.
    */
   readonly mode: AgentRunMode;
 }
@@ -438,6 +445,7 @@ function messageFor(error: unknown): string {
 
 export function useAgentRun(): AgentRunFollower {
   const [runId, setRunId] = useState<string | null>(null);
+  const [openedOn, setOpenedOn] = useState<string | null>(null);
   const [thread, setThread] = useState<AgentThreadContext | null>(null);
   const storedThread = useSyncExternalStore(subscribeStoredThread, storedThreadSnapshot, serverThreadSnapshot);
   const [entries, setEntries] = useState<readonly AgentLedgerEntry[]>([]);
@@ -508,6 +516,7 @@ export function useAgentRun(): AgentRunFollower {
       setRefusal(null);
       setEntries([]);
       setRunId(null);
+      setOpenedOn(null);
 
       let openedRunId: string;
       let openedThread: AgentThreadContext | null = null;
@@ -558,6 +567,7 @@ export function useAgentRun(): AgentRunFollower {
       }
 
       setRunId(openedRunId);
+      setOpenedOn(input.connectionId);
       setThread(openedThread);
       // Written from what the SERVER said this run belongs to, like everything else about
       // the thread. The notice this feeds is about the ABSENCE of a run, so nothing has to
@@ -690,6 +700,7 @@ export function useAgentRun(): AgentRunFollower {
     isBusy,
     isStopping,
     timeline,
+    openedOn,
     error,
     errorCode,
     refusal,

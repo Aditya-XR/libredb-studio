@@ -2308,7 +2308,7 @@ gated on the literal `vacuum`, so MySQL's own wording was written and never show
 | `supportsExplain` | `true` unless the server refuses both EXPLAIN grammars, measured at connect ([§5.5](#55-the-explain-grammar-is-measured-at-connect)) |
 | `explainFormat` | `mysql-json` before `connect()` and on a server that accepts `EXPLAIN FORMAT=JSON`; `mysql-text` on one that accepts only plain `EXPLAIN` (TiDB, StarRocks, SingleStore, Doris); the key is ABSENT when both are refused, and `supportsExplain` is then `false` |
 | `supportsExternalQueryLimiting` | `true` (from base) |
-| `supportsCreateTable` | `true` (from base) |
+| `createTable` | declared, see [Create Table form](#create-table-form) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core MySQL DML |
 | `supportsTestDataGeneration` | `true` - the row menus offer Generate Test Data on tables, which writes one multi-row `INSERT INTO ... VALUES` |
 | `supportsResultPagination` | `true` — `LIMIT n OFFSET m` from the shared limiter (#816) |
@@ -2324,6 +2324,24 @@ gated on the literal `vacuum`, so MySQL's own wording was written and never show
 | `containerLevels` | one level, `{ id: 'schema', label: 'Database', labelPlural: 'Databases' }` ([§7.1](#71-the-object-surface-789)) |
 | `containerPathShapes` | `exact`: only `[database]` addresses a container, so a shorter or a longer path is refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
 | `objectKinds` | six on MySQL, eight on MariaDB, resolved from the server's own `VERSION()` string at connect and never from the type id ([§7.1](#71-the-object-surface-789)) |
+
+### Create Table form
+
+`createTable` is `MYSQL_CREATE_TABLE` in [`mysql-create-table.ts`](../../src/lib/db/providers/sql/mysql-create-table.ts), a module with no driver import so a test reads the spec without loading `mysql2` (#1822).
+It is the grammar the Create Table form writes for this engine:
+
+| Field | Value |
+| --- | --- |
+| Auto-increment key | `INT AUTO_INCREMENT PRIMARY KEY`, not sequence-backed |
+| `PRIMARY KEY` and `UNIQUE` checkboxes | Yes |
+| Key type when not auto-increment | `INT` |
+| Type list, in dropdown order | `VARCHAR(255)`, `TEXT`, `INT`, `BIGINT`, `BOOLEAN`, `TIMESTAMP`, `DATE`, `JSON`, `CHAR(36)`, `DECIMAL(10,2)` |
+
+The spellings are the ones MySQL documents as current.
+`JSON` is a type since MySQL 5.7.
+MySQL has no `UUID` type, and its documentation's recommendation for one is a fixed-width `CHAR(36)` (or `BINARY(16)` through `UUID_TO_BIN`), so the list offers `CHAR(36)`.
+The key type is `INT` rather than the `INTEGER` MySQL would also accept, because it has to be a name the type list holds or the dropdown trigger renders empty.
+The rest of the list is the one the form offered every engine before #648; a row that reads like that old shared list is this engine agreeing with it, not a row nobody looked at.
 
 ### Labels
 
@@ -2480,8 +2498,8 @@ So the `flags` parameter is stripped too, and the capability is removed by the `
 The profile's pool is separate from the pool every other path shares for that reason and one more: each call pins a transaction and several session modes on the connection it holds, and closes it afterwards, traffic an editor's own statements never see.
 
 The catalog compositions of `composeCatalogRead("mysql", …)` and the profile compositions of
-`composeTableProfile("mysql", …)` ([composed-sql.ts](../../src/lib/agent/composed-sql.ts),
-[table-profile.ts](../../src/lib/agent/table-profile.ts)) run through this path, and every spelling
+`composeTableProfile("mysql", …)` ([languages/sql/engines/mysql.ts](../../src/lib/agent/languages/sql/engines/mysql.ts),
+reached through [composed-sql.ts](../../src/lib/agent/composed-sql.ts) and [table-profile.ts](../../src/lib/agent/table-profile.ts)) run through this path, and every spelling
 in them was measured on both engines as `libredb_agent`. The one aggregate-order fact worth
 recording: MariaDB accepts `JSON_ARRAYAGG(… ORDER BY …)` and MySQL answers **1064** for the same
 text, so the column list is `GROUP_CONCAT(… ORDER BY … SEPARATOR ',')` bracketed by `CONCAT` — the
@@ -2583,6 +2601,23 @@ measured on MySQL is not proven on any of them — Vitess, for one, refuses `KIL
 
 A server whose `VERSION()` answer could not be read is refused fail-closed the same way: an
 unidentified engine is an unproven boundary.
+
+### 12.6 Agent language pack
+
+Statement-language family: `sql`.
+Overlay: [`src/lib/agent/languages/sql/engines/mysql.ts`](../../src/lib/agent/languages/sql/engines/mysql.ts), with its client row in [`src/lib/agent/languages/sql/engines/client.ts`](../../src/lib/agent/languages/sql/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`, and the dialect through `engineServerDialect`.
+
+| Member | Kind | Value |
+| --- | --- | --- |
+| `catalogRead` | Dialect-bound | Supplied |
+| `planEstimate` | Dialect-bound | Supplied |
+| `profileComposition` | Dialect-bound | Supplied |
+| `statistics` | Dialect-bound | `"unsupported"` |
+| `catalogCapture` | Dialect-bound | `"unsupported"` |
+
+This overlay overrides no Shared member, so every Shared member is the `sql` statement-language family's own.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
 
 ## 13. Testing
 

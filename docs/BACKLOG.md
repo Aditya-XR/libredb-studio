@@ -28,10 +28,10 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
-- [Drivers and connections](#drivers-and-connections) — D1-D375, U17 · 272
+- [Drivers and connections](#drivers-and-connections) — D1-D376, U17 · 273
 - [Value interpolation](#value-interpolation) — V1
-- [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U145 · 132
+- [Row editing](#row-editing) — R1–R4 · 4
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U146 · 133
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC35 · 31
 - [Release pipeline](#release-pipeline) — REL1-REL9 · 9
@@ -41,7 +41,7 @@ None of it is a GitHub issue.
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4-K8 · 5
 - [Security scanner triage](#security-scanner-triage) — SCAN1-SCAN2 · 2
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A2–A8 · 5
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B121 · 54
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B128 · 61
 - [Passkey deferrals (#785)](#passkey-deferrals-785) — PK1-PK9 · 8
 - [MCP server deferrals (#246)](#mcp-server-deferrals-246) — MCP1-MCP3 · 3
 - [Governance follow-ups](#governance-follow-ups) — GOV1-GOV30 · 30
@@ -400,7 +400,7 @@ Making it optional the way `activeConnections` already is touches every provider
 
 **The other path swallows instead of fabricating, and that is not better.**
 On the `slow-queries` reading the agent actually uses, `getSlowQueries()` in `src/lib/db/providers/keyvalue/redis.ts` and `getSlowQueries()` in `src/lib/db/providers/document/mongodb/index.ts` `return []` from their catch where MySQL now rejects.
-So a denied grant reaches the model as an empty reading, and the run prompt tells it `"A reading that comes back EMPTY is an answer, not a failure - no blocked session, no slow query, no unused index is what a healthy server looks like"` (`WORKFLOW_TOOL_RULES` in `src/lib/agent/investigation.ts`).
+So a denied grant reaches the model as an empty reading, and the run prompt tells it `"A reading that comes back EMPTY is an answer, not a failure - no blocked session, no slow query, no unused index is what a healthy server looks like"` (`OPERATIONS_TOOL_RULE` in `src/lib/agent/languages/shared.ts`).
 It also costs the operator the reason: `getMonitoringData()` in `src/lib/db/base-provider.ts` records `errors.slowQueries` from a REJECTION, and a resolved `[]` records nothing, so the panel says "no slow queries" where the truth is that the profiler is off.
 
 **Done when:** a slow-query source that could not be read is absent-with-a-reason on both paths - no
@@ -655,7 +655,7 @@ This is load-bearing for the editing phase rather than cosmetic: any client-side
 `provider-meta`'s answer is, on MariaDB, built on the wrong server's declaration.
 
 One sentence in the tree contradicts this entry, and it is the reason the entry is easy to lose.
-`flavourFor`'s docblock (`src/lib/db/providers/sql/mysql.ts:1189`) says that defaulting to MySQL
+`flavourFor`'s docblock in `src/lib/db/providers/sql/mysql.ts` says that defaulting to MySQL
 "costs two folders a MariaDB user regains the moment the connection is live". Nothing re-reads
 capabilities once a connection opens, which is this entry's whole subject, so a reader who meets that
 sentence first concludes the gap closes itself and stops looking. It is on `origin/main` and
@@ -834,7 +834,7 @@ out of the population the guard compares.
 Measured 2026-09-13, both directions. Exploding an EXISTING entry past 120 columns is a LOUD red: two
 declared ids against the agent side's four, 1 fail, "Expected - 0 / Received + 2", with `table` and
 `trigger` unmatched. So that half is safe. But adding a FIFTH kind as a multi-line entry drops it from
-the guard's population AND it is absent from `COMPOSED_KIND_WORDS`, both sides shrink together, and
+the guard's population AND it is absent from `COMPOSED_KIND_WORDS` (now the SQLite engine overlay's `catalogCapture.kindWords` in `src/lib/agent/languages/sql/engines/sqlite.ts`), both sides shrink together, and
 the guard passes at 1 pass 0 fail, while the same kind written on one line fails.
 
 So the defect is a kind that is declared and unmapped, not a formatter. The provider keeps its entries
@@ -2020,12 +2020,12 @@ Found 2026-10-03 while reviewing the Neo4j provider (PR #1239, review N6).
 ### D145. Db2 Create Table is off until the dialog and the import have Db2 column types
 
 Inline row edit and the import into an existing table came back with `db2-node` 1.0.24, which reads non-ASCII text back as written and refuses a DECIMAL that does not fit its column, measured on Db2 12.1 and 11.5 by `tests/live/db2-live-check.ts` (K1 and K22 in `docs/providers/db2.md`), and 1.0.25 stores a BOOLEAN edit too (K16, fixed).
-`db2Capabilities` (`src/lib/db/providers/sql/db2/capabilities.ts`) still sets `supportsCreateTable` to false, which also withholds an import into a new table, because neither path can spell a Db2 table.
-`CreateTableModal` (`src/components/CreateTableModal.tsx`) has no Db2 row in `DIALECTS` and refuses to open without one, and `inferSqlType` in `src/components/DataImportModal.tsx` writes `TEXT`, which Db2 refuses (SQL0204N), and `NUMERIC`, which Db2 reads as `DECIMAL(5,0)` and so cuts every fraction.
+`db2Capabilities` (`src/lib/db/providers/sql/db2/capabilities.ts`) still declares no `createTable`, which also withholds an import into a new table, because neither path can spell a Db2 table.
+`CreateTableModal` (`src/components/CreateTableModal.tsx`) writes only the grammar a provider declares and refuses to open without one (#1822), and `inferSqlType` in `src/components/DataImportModal.tsx` writes `TEXT`, which Db2 refuses (SQL0204N), and `NUMERIC`, which Db2 reads as `DECIMAL(5,0)` and so cuts every fraction.
 
 Found 2026-10-03 by the Db2 provider's driver spike (#786); narrowed to Create Table 2026-10-04 when writes came back.
 
-**Done when:** `CreateTableModal` carries a Db2 row whose every type was measured in a `CREATE TABLE` on 12.1 and 11.5, an import into a new Db2 table infers Db2 types that keep the imported values exactly, with a round trip of non-ASCII text and a fractional number in the live check, and Db2 declares `supportsCreateTable`.
+**Done when:** Db2 declares a `createTable` whose every type was measured in a `CREATE TABLE` on 12.1 and 11.5, and an import into a new Db2 table infers Db2 types that keep the imported values exactly, with a round trip of non-ASCII text and a fractional number in the live check.
 
 ### D146. Db2 monitoring reads only the version and two catalog counts
 
@@ -3836,6 +3836,16 @@ Found 2026-10-17 while verifying an external review of #1785.
 
 **Done when:** concurrent requests for a stale entry share one retirement and one replacement, for example by taking the entry out of the cache before awaiting its disconnect, no provider is left connected outside the cache, and a test with a disconnect held open and two requests shows one replacement provider and the old one closed.
 
+### D376. The schema-diff migration generator keeps its per-engine rules in tables keyed by type id
+
+`src/lib/schema-diff/migration-generator.ts` decides what it can write per engine from tables keyed by `DatabaseType`: `NO_COLUMN_MODIFICATION`, `NO_DROP_IF_EXISTS`, `NO_TRANSACTION_WRAPPER`, `NO_TABLE_DDL`, `NO_PORTABLE_INDEX_DDL`, `NO_FOREIGN_KEYS`, `NO_PRIMARY_KEY_CONSTRAINT` and `FOREIGN_KEY_ONLY_IN_CREATE_TABLE`, plus `dialect === "<id>"` branches in the column and `ALTER TABLE` writers.
+A new provider gets the generator's default (PostgreSQL-shaped) DDL until someone adds it to the right tables, which is the defect class #648 was for the Create Table form, and the engine's facts live in the generator rather than beside its provider.
+#1822 moved the Create Table form's grammar onto the provider as `createTable` and left these tables alone, because they are a separate surface with their own scope; D147 and D350 are single-engine entries inside it.
+
+Found 2026-10-18 while designing #1822.
+
+**Done when:** each rule the generator reads is a declaration on the provider's capabilities, the generator holds no table or branch keyed by a type id, and `tests/unit/schema-diff/migration-dialects.test.ts` still pins every engine's emitted text unchanged.
+
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound
@@ -3927,6 +3937,16 @@ writes correctly and must keep doing so.
 point on the engines whose drivers round - the scale beside the word, or a second field that says
 it - a whole key is refused only where it can, and a test carries the Oracle and SQL Server pairs
 above beside the fractional ones #969 added.
+
+### R4. Three of the inline editor's value rules are tables keyed by type id
+
+`NO_INSTANT_TYPE_DIALECTS`, `FLOAT64_ONLY_DIALECTS` and `NO_EXACT_DECIMAL_DIALECTS` in `src/hooks/use-inline-editing.ts` are `ReadonlySet<DatabaseConnection["type"]>` tables holding `sqlite` and `libsql`: an engine with no instant type, an engine where `REAL` and `FLOAT` are 64-bit, and an engine with no exact decimal.
+Each is a fact about the engine kept in a UI hook, so a new engine that shares one of them (or a third SQLite-family id) is wrong until someone edits the hook.
+`tests/unit/components/no-engine-tables-in-ui.test.ts` (#1822) allows exactly these three by file and constant name, and fails when a listed one no longer exists.
+
+Found 2026-10-18 while designing #1822.
+
+**Done when:** the three facts are declared on the provider's capabilities and read from there, the measurements in their docblocks move to `docs/providers/sqlite.md` and `docs/providers/libsql.md`, the inline-editing tests pass unchanged, and the guard's allowlist is empty.
 
 ---
 
@@ -5489,7 +5509,7 @@ Found 2026-10-12 in a browser pass of the RabbitMQ provider, reproduced with scr
 ### U124. Firestore's Database ID box carries a sentence about Create Table and SHOW SCHEMAS
 
 The connection dialog draws one fixed sentence under the schema box for every engine that takes the field (`src/components/ConnectionModal.tsx:1063`, `:1080-1083`): "Used for unqualified table names in queries and Create Table. Leave empty to qualify names yourself. Run SHOW SCHEMAS to list the catalog's schemas."
-It was written for Trino, and the box is also Firestore's "Database ID" (`src/lib/db-ui-config.ts:987-992`), where the provider declares `supportsCreateTable: false` (`src/lib/db/providers/document/firestore/index.ts:200`) and there is no `SHOW SCHEMAS`.
+It was written for Trino, and the box is also Firestore's "Database ID" (`src/lib/db-ui-config.ts:987-992`), where the provider declares no `createTable` (`src/lib/db/providers/document/firestore/index.ts`) and there is no `SHOW SCHEMAS`.
 So a Firestore user reads, under the engine's own hint ("Empty for the (default) database"), advice about table names and a statement the engine does not have.
 BigQuery's "Default dataset" box (`src/lib/db-ui-config.ts:859`) takes the same sentence, and whether it holds there is not measured.
 The sentence is not a declared field, so an engine entry cannot replace or drop it the way `fieldHints` and `fieldPlaceholders` do.
@@ -5708,6 +5728,16 @@ Measured 2026-10-17 on `main` at 674683b19 with `e2e/opcua-provider.spec.ts`, on
 Found 2026-10-17 while verifying #1790.
 
 **Done when:** the specs open the dialog by the button's own name (`getByRole("button", { name: "New connection" })`, the header's `aria-label`), and no spec under `e2e/` picks a sidebar header button by its position.
+
+### U146. An import into a new table spells types the engine may not have
+
+`inferSqlType` in `src/components/DataImportModal.tsx` writes `TEXT`, `INTEGER`, `NUMERIC` or `BOOLEAN` for every engine that declares a `createTable`.
+By the facts the Create Table form records (`docs/providers/<type-id>.md`, "Create Table form"), Trino and Oracle have no `TEXT` and SQL Server has no `BOOLEAN`; that is inferred from those sections, not measured through the import.
+D145 measured the same class on Db2, where `TEXT` is SQL0204N and `NUMERIC` is `DECIMAL(5,0)`.
+
+Found 2026-10-18 while designing #1822.
+
+**Done when:** each of the eight engines that declare a `createTable` has a live round trip of non-ASCII text, a fractional number, a 64-bit integer and a boolean column through an import into a new table, and the import reads its type spelling from a provider declaration rather than one portable list.
 
 ## Dependencies
 
@@ -5988,6 +6018,7 @@ Two halves, and the second is what stops it recurring:
 
 DOC4 is the same class in the provider docs.
 More instances, found stale at `8f2fc5c81` during the PR #1575 review (2026-10-07): `tests/integration/db/mssql-provider.test.ts` (`mssql.ts:1798`), `docs/providers/opensearch.md` (`http-transport.ts` `:806`, `:883-935`, `:913`, `:999`, `:1127`, `:1128`, `:1283`), `docs/providers/elasticsearch.md` (`http-transport.ts:1194`), `docs/BACKLOG.md` (`http-transport.ts:1556`), `tests/components/studio/BottomPanel.test.tsx` (`BottomPanel.tsx:574`), `docs/BACKLOG.md` (`BottomPanel.tsx:445`), and the `oracle.ts:1492`, `:2000` and `:2015` citations in `oracle.ts`, `tests/integration/db/oracle-provider.test.ts` and `tests/api/db-objects.test.ts`.
+Each should become a symbol anchor rather than a corrected number.
 This entry was first written as a second "D94 (proposed)" block, which reused the id of D94 and was not a heading the structure guard reads.
 
 **Done when:** a test fails on a stale `file.ts:NNNN` anywhere under `src/`, `docs/` and `tests/`,
@@ -6211,7 +6242,7 @@ Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 
 ### DOC31. A composed-sql.ts comment says every shipped grammar row declares backslashAlwaysEscapes false
 
-The docblock above `assertSelector` in `src/lib/agent/composed-sql.ts` says the per-dialect fact `backslashAlwaysEscapes` is one "that every shipped row declares false".
+The docblock above `assertSelector` in `src/lib/agent/composed-sql-primitives.ts` says the per-dialect fact `backslashAlwaysEscapes` is one "that every shipped row declares false".
 In `src/lib/sql/grammar.ts`, `DATABEND_GRAMMAR`, `BIGQUERY_GRAMMAR` and `SNOWFLAKE_GRAMMAR` declare it `true`.
 The function's rule, refusing any backslash in a selector, is unaffected: the docblock already says it is correct whichever way a row declares the fact, so only the sentence is stale.
 S2's heading and its "Every shipped row but Databend's" sentence in this file are stale the same way.
@@ -6223,11 +6254,11 @@ Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 ### DOC32. docs/AGENT.md says composed-sql.ts composes for four engines
 
 The repository layout in `docs/AGENT.md` annotates `composed-sql.ts` as "the SQL the SERVER writes, per dialect: four of the thirty-seven".
-`CATALOG_COMPOSERS` in `src/lib/agent/composed-sql.ts` has five rows (PostgreSQL, SQLite, DuckDB, SQL Server and MySQL) since #1629 added MySQL's; the thirty-seven is the size of `DatabaseType`, which moves with every engine (#1759 made it thirty-seven).
+`CATALOG_COMPOSERS` in `src/lib/agent/composed-sql.ts` had five rows (PostgreSQL, SQLite, DuckDB, SQL Server and MySQL) since #1629 added MySQL's, and since #1821 they are the five SQL engine overlays that supply a `catalogRead` (`src/lib/agent/languages/sql/engines/`); the thirty-seven is the size of `DatabaseType`, which moves with every engine (#1759 made it thirty-seven).
 
 Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 
-**Done when:** the annotation names the composed dialects, or counts `CATALOG_COMPOSERS` with no denominator that moves with each engine, and `tests/unit/agent-documentation.test.ts` holds it to the record.
+**Done when:** the annotation names the composed dialects, or counts the engines that supply a `catalogRead` with no denominator that moves with each engine, and `tests/unit/agent-documentation.test.ts` holds it to the record.
 
 ### DOC33. snowflake.md does not say that a database whose schemas fail to list is named as not read and the plan walk goes on
 
@@ -7638,6 +7669,7 @@ Found 2026-10-12 in a plan-mode pass of the RabbitMQ provider.
 ### B111. DuckDB is offered profile_table, which can only refuse
 
 `profile_table` is offered to the database-assessment and data-analysis workflows on DuckDB, and `composeTableProfile` (`src/lib/agent/table-profile.ts`) has no verified DuckDB composition, so every call answers `UNSUPPORTED_DIALECT`.
+Since #1821 that absence is DuckDB's engine overlay declaring its `profileComposition` `"unsupported"` (`src/lib/agent/languages/sql/engines/duckdb.ts`).
 Kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
 Found 2026-10-14 while building the statement-language layer.
 
@@ -7646,7 +7678,7 @@ Found 2026-10-14 while building the statement-language layer.
 ### B112. A run's persisted workflow type is never checked when the ledger is read
 
 `foldLedger` in `src/lib/agent/run-store.ts` takes `workflowType` from the ledger as written, defaulting only a missing one, and no check asks whether the value is a workflow Studio knows.
-Five plain-object tables are then indexed with it: `WORKFLOW_TOOL_RULES` (`src/lib/agent/investigation.ts`), `AGENT_WORKFLOW_PRESENTS_ANSWER` (`src/lib/agent/types.ts`), `AGENT_WORKFLOW_BUDGETS` (`src/lib/agent/execution-policy.ts`), `WORKFLOW_DETAIL` (`src/lib/agent/er-diagram.ts`) and `AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION` (`src/lib/agent/tools.ts`).
+Five plain-object tables are then indexed with it: `WORKFLOW_TOOL_RULES` (`src/lib/agent/languages/server.ts`), `AGENT_WORKFLOW_PRESENTS_ANSWER` (`src/lib/agent/types.ts`), `AGENT_WORKFLOW_BUDGETS` (`src/lib/agent/execution-policy.ts`), `WORKFLOW_DETAIL` (`src/lib/agent/er-diagram.ts`) and `AGENT_WORKFLOW_ACCEPTS_SNAPSHOT_CITATION` (`src/lib/agent/tools.ts`).
 A ledger carrying an unknown or renamed workflow reads `undefined` from each: the boolean tables take it for false, and a budget read such as `runDeadlineMs` fails as a `TypeError` with no name for the cause.
 The workflow-variant lookup (`agentVariant` in `src/lib/agent/agent-manifest.ts`) guards its own index against an inherited name such as `toString`; these five tables do not.
 Found 2026-10-14 while building agent execution on Kubernetes.
@@ -7714,7 +7746,7 @@ Filed 2026-10-17 with agent execution on MongoDB (#1790), which turned the setti
 
 The mongo `query-optimization` variant offers `inspect_plan` and no `compare_plans` (`AGENT_WORKFLOW_VARIANTS.mongo` in `src/lib/agent/agent-manifest.ts`).
 A comparison's whole value is the structural access reading of `summarisePlan` (`src/lib/agent/plan-summary.ts`), which reads only the plan formats it was verified against and every other plan as `unknown`, so a MongoDB comparison would state that two plans differ in a way nobody has read.
-A run that optimizes a command recommends an index from one inspected plan instead, which `agent-query-optimization.3` accepts.
+A run that optimizes a command answers from one inspected plan instead, under `agent-query-optimization-mongo.1`: an index recommended because of the plan, or a report citing a plan that already uses an index.
 
 Filed 2026-10-17 with agent execution on MongoDB (#1790).
 
@@ -7737,6 +7769,77 @@ Found 2026-10-16 in the review of #1790 (issue #1614).
 Found 2026-10-16 in the review of #1790 (issue #1614).
 
 **Done when:** a `mongodb` preset serves the mongo variants' catalog, plan and profile answers, the real-model runner drives the four statement workflows on it, and a measured result for at least one model is recorded; cited in `docs/AGENT.md`.
+
+### B122. `tools.ts` and `context-snapshot.ts` import each other at runtime
+
+`src/lib/agent/tools.ts` imports `connectionIdentity` and `heldSnapshotForConnection` from `src/lib/agent/context-snapshot.ts`, which imports `readCatalogForGrounding` and `readObjectInventoryForGrounding` back from `tools.ts`.
+Both directions are runtime values, so which module finishes evaluating first depends on which one a process loads first, and a top-level read of the other's export would meet it uninitialised.
+Nothing reads across the cycle at module scope today, so it works; the language boundary guard (`tests/unit/lib/agent/language-boundary.test.ts`) passes it on purpose, because it runs through no language pack.
+
+Found 2026-10-19 while splitting the agent core into language packs (#1821).
+
+**Done when:** one of the two directions is gone, for example by moving the two grounding reads into a module that imports neither, a test proves that `tools.ts` and `context-snapshot.ts` each load alone in a fresh process, and the language boundary guard no longer names the cycle in its non-vacuity test; cited in `docs/AGENT.md`.
+
+### B123. Per-language agent tables live in UI components, outside the language packs
+
+Two per-language decisions sit in `src/components/agent` rather than in a language's client pack (`src/lib/agent/languages/<id>/client.ts`).
+`HANDOVER_CHIPS` in `ConsentCard.tsx` is keyed by `AgentStatementLanguageId` and holds the SQL hand-over terms as chips, with empty entries for `kubectl` and `mongo`.
+`handOverLanguage` in `AgentRail.tsx` answers `"sql"` when the rail has no connection type, so a language default is decided by a component.
+A new language must therefore edit both components, and the language boundary guard reads only `src/lib/agent`, so it cannot see either.
+
+Found 2026-10-19 while splitting the agent core into language packs (#1821).
+
+**Done when:** the hand-over chips are a member of each language's client pack and `ConsentCard.tsx` reads them through `languageClientPack`, the no-connection default in `AgentRail.tsx` is named in the client tier rather than written as a literal, and the existing ConsentCard and AgentRail tests pass unchanged; cited in `docs/AGENT.md`.
+
+### B124. MySQL's estimating plan doubles a FORMAT=JSON the model already wrote
+
+`composeEstimatingExplain("mysql", "EXPLAIN FORMAT=JSON SELECT 1")` in `src/lib/agent/composed-sql.ts` returns `EXPLAIN FORMAT=JSON FORMAT=JSON SELECT 1`.
+`withoutEstimatingPrefix` strips a leading `EXPLAIN`, `EXPLAIN QUERY PLAN` and `EXPLAIN (FORMAT JSON)`, the PostgreSQL, DuckDB and SQLite spellings, and not MySQL's `FORMAT=JSON` tail, so MySQL's prefix from its engine overlay (`src/lib/agent/languages/sql/engines/mysql.ts`) is put in front of a format clause that is still there.
+The engine-dialect golden (`tests/fixtures/agent/engine-dialect/`) pins this as current behaviour.
+
+Found 2026-10-19 while moving the estimating prefixes onto the engine overlays (#1821).
+
+**Done when:** a statement that already carries MySQL's estimating prefix is composed with it once, the golden entry is regenerated in that change with the reason, and a test covers `EXPLAIN FORMAT=JSON` in upper and lower case; cited in `docs/AGENT.md`.
+
+### B125. A catalog read's declared schema is folded on SQLite only
+
+`readCatalog` in `src/lib/agent/tools.ts` declares the selector's schema as its policy target through the engine's `catalogRead.declaredSchema`, and only SQLite's overlay supplies one (lower case).
+SQL Server under its default collation and DuckDB compare schema names case-insensitively as well, so on them `DBO` or `MAIN` is declared as written, and a scope allowlist of `["dbo"]` would deny a read the engine itself would serve, because `withinAllowlist` in `src/lib/db/operations/policy.ts` compares case-sensitively.
+Nothing builds a schema allowlist for an agent run today, so no run meets it.
+
+Found 2026-10-19 while moving the catalog reads onto the engine overlays (#1821).
+
+**Done when:** each engine whose catalog compares schema names case-insensitively declares the fold its catalog applies, or the policy compares by the engine's rule, with a test that a mixed-case schema passes a lower-case allowlist on SQL Server and DuckDB; cited in `docs/AGENT.md`.
+
+### B126. The SQL catalog advice calls a native catalog another engine's
+
+`sqlCatalogAdvice` in `src/lib/agent/languages/sql/server.ts` answers any database error that names `information_schema` or `pg_catalog` with the sentence that the catalog belongs to another engine.
+Both are native on PostgreSQL, and `information_schema` is native on MySQL, SQL Server and DuckDB.
+Measured 2026-10-19 on PostgreSQL 18: `SELECT * FROM information_schema.colums LIMIT 1` fails with `relation "information_schema.colums" does not exist`, and the advice for that message on a `postgres` connection tells the model the catalog belongs to another engine and that the connection is postgres.
+
+Found 2026-10-19 while splitting the agent core into engine overlays (#1821).
+
+**Done when:** the advice names a catalog as foreign only when it is not the connection engine's own, with a test of the PostgreSQL message above and of a `pg_catalog` error on SQLite; cited in `docs/AGENT.md`.
+
+### B127. A resumed MongoDB run is told its collection profile under the SQL profile's operation id
+
+`describePriorProgress` in `src/lib/agent/investigation.ts` narrates every `table-profiled` event of a resumed run with the fence label `operationId: "sql.table.profile"`, whatever the run's statement language.
+A MongoDB run that profiled a collection through `mongo.table.profile` and is then resumed is told that profile under the SQL id, so the narration names an operation the run never drove.
+`tests/unit/lib/agent/resume-narration-pins.test.ts` pins this as current behaviour, and the language boundary guard (`tests/unit/lib/agent/language-boundary.test.ts`) allowlists the literal with this entry as its reason.
+
+Found 2026-10-19 while moving the agent core onto the run resolver (#1821).
+
+**Done when:** the narration names the operation id the profile was taken under, read from the event or the run's language pack rather than written in core, the pin changes on purpose with the reason, the guard's allowlist entry is gone, and a test resumes a MongoDB run and a SQL run that each profiled a table; cited in `docs/AGENT.md`.
+
+### B128. An engine overlay cannot override a pack's adapter or its catalog advice
+
+An engine overlay may override only `grounding`, `workflowToolRules` and `answerNotADataRead` (`ENGINE_OVERRIDABLE_SERVER_MEMBERS` in `src/lib/agent/languages/overlay.ts`).
+The `adapter` (with its `inventoryProblem` and `planDraftIdentifiers`) and `catalogAdvice` stay the statement-language family's, because their readers carry no engine: `AuditedAgentCall.fingerprintLanguage` in `src/lib/agent/tools.ts` and `draftedStatement(input, language)` in `src/lib/agent/investigation.ts` name a language only, and step ids and repair identity depend on the adapter's fingerprint.
+An engine whose statement text needs its own canonical form or its own advice cannot have it today without changing every engine of its family.
+
+Found 2026-10-19 while widening the engine overlays (#1821).
+
+**Done when:** the audited call and the drafted statement carry the connection's engine, every reader of the adapter and of the catalog advice resolves them through the run resolver, `adapter` and `catalogAdvice` join `ENGINE_OVERRIDABLE_SERVER_MEMBERS`, and a test proves an engine override of each reaches the fingerprint, the draft and the refusal while a ledger written before it keeps its step ids; cited in `docs/AGENT.md`.
 
 ## Passkey deferrals (#785)
 

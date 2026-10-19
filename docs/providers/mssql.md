@@ -1432,7 +1432,7 @@ render those words and send an operation SQL Server declares (#496).
 | `queryLanguage` | `sql` |
 | `supportsExplain` | **`false`** (the editor's Explain action only; the agent's estimating plan is [§12.2](#122-admission-by-the-optimizer-which-executes-nothing), see [Known limitations](#15-known-limitations--future-work)) |
 | `supportsExternalQueryLimiting` | `true` (from base) |
-| `supportsCreateTable` | `true` (from base) |
+| `createTable` | declared, see [Create Table form](#create-table-form) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core T-SQL DML |
 | `supportsTestDataGeneration` | `true` - the row menus offer Generate Test Data on tables, which writes one multi-row `INSERT INTO ... VALUES` |
 | `supportsResultPagination` | `true` — `OFFSET m ROWS FETCH NEXT n ROWS ONLY`, built by this provider's own `prepareQuery` override. Page one is `SELECT TOP n`, so the two pages are structurally different statements, and page two carries the `ORDER BY (SELECT NULL)` T-SQL demands before `OFFSET` — which promises nothing about order (#816) |
@@ -1446,6 +1446,26 @@ render those words and send an operation SQL Server declares (#496).
 | `containerLevels` | **two**: `catalog` (Database) then `schema` - the first two-level engine in #789 ([§7](#the-object-surface-789)) |
 | `containerPathShapes` | `prefixes`: `[database]` and `[database, schema]` both address a container, because a database alone is a true question here ([§7](#the-object-surface-789)); the empty path and a longer path are both refused, by the object routes over HTTP and by this provider for a caller that reaches it directly (#1147) |
 | `objectKinds` | seven: table, view, procedure, function, trigger, synonym, sequence. No `index` kind and no materialized view ([§7](#the-object-surface-789)) |
+
+### Create Table form
+
+`createTable` is `MSSQL_CREATE_TABLE` in [`mssql-create-table.ts`](../../src/lib/db/providers/sql/mssql-create-table.ts), a module that loads no driver, so the Create Table form and its tests read the real declaration (#1822).
+It is the grammar the form writes; the form itself knows no engine.
+
+| Field | Value |
+|-------|-------|
+| Auto-increment clause | `INT IDENTITY(1,1) PRIMARY KEY`, not sequence-backed |
+| Column constraints (`PRIMARY KEY`, `UNIQUE`) | Yes |
+| Key type | `INT` |
+| Types, in dropdown order | `VARCHAR(255)`, `NVARCHAR(MAX)`, `INT`, `BIGINT`, `BIT`, `DATETIME2`, `DATE`, `UNIQUEIDENTIFIER`, `DECIMAL(10,2)` |
+
+The auto-increment clause is the spelling SQL Server documents as the current one, `IDENTITY(seed, increment)`.
+There is no `BOOLEAN` type: a true/false column is `BIT`.
+There is no `UUID` type: a GUID column is `UNIQUEIDENTIFIER`.
+`TIMESTAMP` is a trap rather than a missing name: it is a deprecated synonym for `ROWVERSION`, a row-change counter that holds no date at all, so a column meaning a moment in time is `DATETIME2`.
+JSON is stored in `NVARCHAR(MAX)`, because the native `json` type is SQL Server 2025 and this repo's `database-compose.yml` pins `mssql/server:2022-latest`; the text entry serves both and is listed once.
+The key type is `INT` rather than the `INTEGER` SQL Server would also accept, because the key type has to be one of the listed names or the dropdown trigger renders empty.
+A row that reads like the old shared list is SQL Server agreeing with it, not a row nobody looked at.
 
 ### Labels — overridden (`getLabels()`, [`mssql.ts`](../../src/lib/db/providers/sql/mssql.ts))
 
@@ -1469,12 +1489,20 @@ is the thing a DBA can act on.
 | Missing `host`/`database` (no connection string) | `DatabaseConfigError` |
 | Operation before `connect()` | `DatabaseConfigError` (via `ensureConnected()`) |
 | `connect()` fails | `ConnectionError` (carries host/port) |
+| Message contains *cannot open database* (`4060`) | `ConnectionError`, matched **before** the access refusals, because the server's sentence ends in *The login failed.* (#1451) |
 | A permission the principal lacks, by the error number `mssql` carries: `229` on an object, `230` on a column, `262` in a database, `297` for an action, `300` on a server-level object, `916` a database the login may not enter | `PermissionDeniedError`, answered `403 PERMISSION_DENIED` with `Permission denied: ` before the server's sentence |
 | Message contains *login failed* | `AuthenticationError`, answered `401 AUTH_ERROR`. tedious raises a refused login as `ELOGIN` without the server's error number (`18456`), so the words decide this one |
-| *Cannot open database* | `ConnectionError` |
 | Cancellation messages (*canceling statement*, *query was cancelled*, *query execution was interrupted*, *kill query*) | `QueryCancelledError` — matched **before** the timeout check |
 | `requestTimeout` exceeded (message contains *timeout*) | `TimeoutError` |
 | Other errors | generic `QueryError` / `DatabaseError` with the original message |
+
+A database that does not exist stays distinguishable from a wrong password in the text Test Connection
+shows. SQL Server answers such a login with **4060** — *Cannot open database "…" requested by the login.
+The login failed.* — and then **18456** (*Login failed for user '…'*), and tedious emits every login
+error token but keeps only the last as `loginError`. `buildConfig()` installs a `beforeConnect` hook
+that watches them, and `connect()` reports the 4060 sentence rather than the 18456 one (#1451). The
+ordering in the table above is the same problem from the other side: the real 4060 text ends in *The
+login failed.*, so testing *login failed* first would classify it as an `AuthenticationError`.
 
 Because `requestTimeout` *is* wired ([§3.5](#35-a-query-timeout-is-wired-driver-enforced)) — even
 though it's driver-enforced rather than server-side — an overrunning query genuinely produces a
@@ -1623,7 +1651,8 @@ admission's own plan rows ARE the answer, so the plan a caller reads is the plan
 statement rather than a second compilation of it.
 
 That mode is how the agent's plan reading reaches this engine at all.
-`composeEstimatingExplain` ([composed-sql.ts](../../src/lib/agent/composed-sql.ts)) hands every other
+`composeEstimatingExplain` ([composed-sql.ts](../../src/lib/agent/composed-sql.ts)) reads each engine's `planEstimate`
+([languages/sql/engines/mssql.ts](../../src/lib/agent/languages/sql/engines/mssql.ts) for this one), and hands every other
 dialect a prefix and hands this one the statement unchanged with the MODE set, because `SET SHOWPLAN_ALL
 ON` must be the only statement in its batch and has to be turned off again on the same connection, and a
 prefix can say neither.
@@ -1732,6 +1761,23 @@ apart.
   falling back to `query()`: such a provider has had no principal verification, so its session may be
   able to write, and serving agent semantics without the layer that makes them true is the one thing
   this path must not do.
+
+### 12.6 Agent language pack
+
+Statement-language family: `sql`.
+Overlay: [`src/lib/agent/languages/sql/engines/mssql.ts`](../../src/lib/agent/languages/sql/engines/mssql.ts), with its client row in [`src/lib/agent/languages/sql/engines/client.ts`](../../src/lib/agent/languages/sql/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`, and the dialect through `engineServerDialect`.
+
+| Member | Kind | Value |
+| --- | --- | --- |
+| `catalogRead` | Dialect-bound | Supplied |
+| `planEstimate` | Dialect-bound | Supplied |
+| `profileComposition` | Dialect-bound | Supplied |
+| `statistics` | Dialect-bound | Supplied |
+| `catalogCapture` | Dialect-bound | `"unsupported"` |
+
+This overlay overrides no Shared member, so every Shared member is the `sql` statement-language family's own.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
 
 ---
 

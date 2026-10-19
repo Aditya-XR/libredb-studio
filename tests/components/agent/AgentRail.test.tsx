@@ -1205,6 +1205,32 @@ describe("AgentRail", () => {
   });
 
   /**
+   * A reasoning effort the model refuses is the configuration's fault, not the model's: the
+   * route answers it as a configuration error (503), never as the capability gate's 422. The
+   * rail shows the sentence, names no missing capability and offers no Plan mode, because
+   * Plan mode sends the same effort and would fail the same way.
+   */
+  test("a refused reasoning effort is a configuration error, with no capability chips and no Plan mode offer", async () => {
+    const said =
+      'LLM_MODEL_EFFORT "none" was refused for the model "gpt-6.1-sol" (openai): gpt-6.1-sol only supports the following reasoning efforts: low, medium, high, xhigh, max. Change LLM_MODEL_EFFORT or unset it.';
+    globalThis.fetch = mock(async () =>
+      jsonResponse({ error: said, code: "LLM_CONFIG", statusCode: 503 }, 503),
+    ) as unknown as typeof fetch;
+    const { getByTestId, findByTestId, queryByTestId } = render(<AgentRail {...DEFAULT_PROPS} />);
+
+    fireEvent.click(getByTestId("agent-mode-agent"));
+    fireEvent.change(getByTestId("agent-objective"), { target: { value: "why is checkout slow" } });
+    await act(async () => {
+      fireEvent.click(getByTestId("agent-start"));
+    });
+
+    expect((await findByTestId("agent-error")).textContent).toContain(said);
+    expect(queryByTestId("agent-model-refusal")).toBeNull();
+    expect(queryByTestId("agent-model-refusal-missing")).toBeNull();
+    expect(queryByTestId("agent-model-refusal-use-planning")).toBeNull();
+  });
+
+  /**
    * The refused model (#331 T4).
    *
    * A `422` is the one start failure that is a verdict about the MODEL: the capability
@@ -1717,6 +1743,35 @@ describe("AgentRail", () => {
     expect((await findByTestId("agent-failure-reason")).textContent).toBe(
       "The model provider is not configured or could not be reached.",
     );
+  });
+
+  test("a run refused for the connection's own user turns the strip to that refusal, on that connection only", async () => {
+    // Measured 2026-10-17 on an admin MongoDB seed: before Start the strip said "Reads only, enforced by the server",
+    // and Start then refused the run. After a refusal of the connection itself, its strip says so.
+    const refusedLine = `${JSON.stringify({
+      kind: "event",
+      event: { kind: "run-finished", atMs: 1_002, status: "failed", reason: "agent-principal-refused" },
+    })}\n`;
+    mockAgentFetch([OPENED_LINE, refusedLine], { runId: "arun_1", status: "queued", mode: "agent" });
+    const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="mongodb" />);
+    fireEvent.click(view.getByTestId("agent-mode-agent"));
+    expect(view.getByTestId("agent-safety-headline").textContent).toBe("Reads only");
+
+    fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "how many orders" } });
+    await act(async () => {
+      fireEvent.click(view.getByTestId("agent-start"));
+    });
+    expect((await view.findByTestId("agent-run-status")).textContent).toBe("failed");
+
+    expect(view.getByTestId("agent-safety-strip").getAttribute("data-tone")).toBe("blocked");
+    expect(view.getByTestId("agent-safety-headline").textContent).toBe("Refused on this connection");
+    expect(view.getByTestId("agent-safety-claim").textContent).toContain(
+      "holds privileges the read-only boundary cannot contain",
+    );
+
+    // Another connection has not been refused, so its strip says what its engine does.
+    view.rerender(<AgentRail {...DEFAULT_PROPS} connectionId={{ id: "seed:other" }} connectionType="mongodb" />);
+    expect(view.getByTestId("agent-safety-headline").textContent).toBe("Reads only");
   });
 
   /**

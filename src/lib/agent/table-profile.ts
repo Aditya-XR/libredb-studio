@@ -31,7 +31,8 @@
 
 import { quoteIdentifier } from "@/lib/sql/identifier";
 import type { ColumnSchema, DatabaseType } from "@/lib/types";
-import { AgentComposedSqlError, MAX_CATALOG_SELECTOR_LENGTH } from "./composed-sql";
+import { AgentComposedSqlError, MAX_CATALOG_SELECTOR_LENGTH } from "./composed-sql-primitives";
+import { engineServerDialect } from "./languages/engines/server";
 import type { AgentInventoryObject } from "./types";
 
 /**
@@ -113,9 +114,6 @@ const PII_NAME_WORDS: readonly string[] = Object.freeze([
  */
 const TEXTUAL_TYPE = /char|text|string|clob|varying/i;
 
-/** Dialects with a verified profile composition; enforced by `composeTableProfile`. */
-type ProfileDialect = "postgres" | "sqlite" | "mssql" | "mysql";
-
 /** Something, an `@`, something, a `.`, something. All three dialects spell `LIKE` alike. */
 const EMAIL_SHAPE = "%_@_%._%";
 
@@ -129,11 +127,52 @@ const EMAIL_SHAPE = "%_@_%._%";
  */
 export const DIGIT_RUN_LENGTH = 9;
 
-/** SQLite has no quantifier, so the run is spelled out one class at a time. */
-const SQLITE_DIGIT_RUN = `*${"[0-9]".repeat(DIGIT_RUN_LENGTH)}*`;
-
-/** The same run as a T-SQL `LIKE` pattern: the class repeated, between two `%`s. */
-const MSSQL_DIGIT_RUN = `%${"[0-9]".repeat(DIGIT_RUN_LENGTH)}%`;
+/**
+ * How one engine composes a profile: the server dialect member `profileComposition`, which each SQL engine's overlay
+ * in `languages/sql/engines/` supplies or declares `"unsupported"`. The core passes the shapes' own constants into the
+ * shape tests, so an overlay needs nothing from this module but its types.
+ */
+export interface AgentProfileComposition {
+  /** The shape tests, each over an already-quoted column reference, in this engine's spelling (see `PROFILE_SHAPES`). */
+  readonly shapeTests: {
+    readonly email: (quotedColumn: string, likePattern: string) => string;
+    readonly digitRun: (quotedColumn: string, runLength: number) => string;
+  };
+  /**
+   * Types with no equality operator, so `count(DISTINCT …)` refuses them.
+   *
+   * PostgreSQL answers `could not identify an equality operator for type json` — and
+   * because one unsupported column aborts the WHOLE aggregate, a single `json` column
+   * would have failed distribution and pattern profiling for the entire table. Found
+   * by review on #345.
+   *
+   * An exclusion rather than an allowlist of comparable types, deliberately: the
+   * comparable set is open (every domain, every enum, every extension type), so an
+   * allowlist would refuse to count things it simply had not heard of. This list is
+   * the closed set that genuinely has no default equality.
+   */
+  readonly incomparableType: RegExp;
+  /**
+   * Types the engine refuses to COUNT at all, so the column is left out whole.
+   *
+   * Stronger than `incomparableType`, and therefore its own set: an incomparable type
+   * still has a presence count and only loses its distinct count, while a column of one
+   * of these types cannot be projected at all. SQL Server answers
+   * "Operand data type text is invalid for count operator" (Msg 8117) for a plain
+   * `count([col])` on `text`, `ntext` and `image` - measured on 2022 CU26, one probe
+   * column per type. Because the whole profile is ONE aggregate over one scan, a single
+   * such column would fail the statement and with it every other column's statistics, so
+   * the column contributes no presence, no distinct count and no shape test. That reads
+   * back as "the engine was not asked about this column", which is exactly true: a
+   * column the composer left out is absent from the profile rather than reported as
+   * empty (see `readTableProfile`).
+   *
+   * Only SQL Server has such a set. PostgreSQL and SQLite count presence for every type
+   * this module has met, including the ones they refuse to count DISTINCT, so an entry
+   * for them would be an assertion nothing measured.
+   */
+  readonly uncountableType?: RegExp;
+}
 
 /** One value shape, and how each engine spells the test for it. */
 interface ProfileShape {
@@ -141,8 +180,8 @@ interface ProfileShape {
   readonly alias: string;
   /** The app's own words for the shape, read back into a `suspected_pii` finding. */
   readonly words: string;
-  /** The predicate, per dialect, over an already-quoted column reference. */
-  readonly predicate: Readonly<Record<ProfileDialect, (quotedColumn: string) => string>>;
+  /** The predicate, in the engine's own shape tests, over an already-quoted column reference. */
+  readonly test: (shapeTests: AgentProfileComposition["shapeTests"], quotedColumn: string) => string;
 }
 
 /**
@@ -166,31 +205,14 @@ interface ProfileShape {
 const EMAIL_SHAPE_TEST: ProfileShape = Object.freeze({
   alias: "shaped",
   words: "an email address",
-  predicate: Object.freeze({
-    postgres: (quoted: string) => `${quoted} LIKE '${EMAIL_SHAPE}'`,
-    sqlite: (quoted: string) => `${quoted} LIKE '${EMAIL_SHAPE}'`,
-    mssql: (quoted: string) => `${quoted} LIKE '${EMAIL_SHAPE}'`,
-    // LIKE is spelled the same way on MySQL and MariaDB, `_` meaning "any character"
-    // included, measured on both engines as the least-privilege account.
-    mysql: (quoted: string) => `${quoted} LIKE '${EMAIL_SHAPE}'`,
-  }),
+  test: (shapeTests: AgentProfileComposition["shapeTests"], quoted: string) => shapeTests.email(quoted, EMAIL_SHAPE),
 });
 
 const DIGIT_RUN_SHAPE_TEST: ProfileShape = Object.freeze({
   alias: "digits",
   words: `a run of ${DIGIT_RUN_LENGTH} or more digits`,
-  predicate: Object.freeze({
-    postgres: (quoted: string) => `${quoted} ~ '[0-9]{${DIGIT_RUN_LENGTH},}'`,
-    sqlite: (quoted: string) => `${quoted} GLOB '${SQLITE_DIGIT_RUN}'`,
-    // T-SQL has no regular expressions and no GLOB. Its `LIKE` DOES take a character
-    // class, so the run is spelled as the class repeated: there is no quantifier, so
-    // nine `[0-9]`s is the shortest faithful spelling of "nine or more digits".
-    mssql: (quoted: string) => `${quoted} LIKE '${MSSQL_DIGIT_RUN}'`,
-    // Both engines of this family take the SQL:1999 REGEXP operator with a POSIX-ish
-    // pattern, measured on MySQL 26.7.0 and MariaDB 13.0.2 as the least-privilege
-    // account: the nine-digit run counted 1, the eight-digit one 0.
-    mysql: (quoted: string) => `${quoted} REGEXP '[0-9]{${DIGIT_RUN_LENGTH},}'`,
-  }),
+  test: (shapeTests: AgentProfileComposition["shapeTests"], quoted: string) =>
+    shapeTests.digitRun(quoted, DIGIT_RUN_LENGTH),
 });
 
 const PROFILE_SHAPES: readonly ProfileShape[] = Object.freeze([EMAIL_SHAPE_TEST, DIGIT_RUN_SHAPE_TEST]);
@@ -277,7 +299,7 @@ function quoteTarget(dialect: DatabaseType, segments: readonly string[]): string
  * declared name is what a person wants to see and what `type` carries; it is a name the
  * schema's author invented, so every regex below would match nothing against it, and the
  * one column in that table the PII shapes exist to find got no shape test at all. Worse,
- * an alias over `text` would slip past `UNCOUNTABLE_TYPE` and fail the whole table's
+ * an alias over `text` would slip past `uncountableType` and fail the whole table's
  * profile with Msg 8117.
  *
  * `baseType` is the provider's answer to that, absent wherever an engine draws no such
@@ -287,83 +309,11 @@ const decidableType = (column: ColumnSchema): string => column.baseType ?? colum
 
 const isTextual = (column: ColumnSchema): boolean => TEXTUAL_TYPE.test(decidableType(column));
 
-/**
- * Types with no equality operator, so `count(DISTINCT …)` refuses them.
- *
- * PostgreSQL answers `could not identify an equality operator for type json` — and
- * because one unsupported column aborts the WHOLE aggregate, a single `json` column
- * would have failed distribution and pattern profiling for the entire table. Found
- * by review on #345.
- *
- * An exclusion rather than an allowlist of comparable types, deliberately: the
- * comparable set is open (every domain, every enum, every extension type), so an
- * allowlist would refuse to count things it simply had not heard of. This list is
- * the closed set that genuinely has no default equality.
- */
-const INCOMPARABLE_TYPE: Readonly<Record<ProfileDialect, RegExp>> = Object.freeze({
-  postgres: /\b(jsonb?|xml|point|line|lseg|box|path|polygon|circle)\b/i,
-  sqlite: /\b(jsonb?|xml|point|line|lseg|box|path|polygon|circle)\b/i,
-  // PER DIALECT because the sets genuinely differ, and one shared regex would have to
-  // be wrong about one of them.
-  //
-  // Every SQL Server entry was MEASURED on 2022 CU26, one `count(DISTINCT …)` per type,
-  // rather than reasoned about: `xml`, `geography` and `geometry` each answer
-  // "Operand data type <type> is invalid for count operator" (Msg 8117), while
-  // `varbinary(max)` and `uniqueidentifier` both count without complaint. `hierarchyid`
-  // was listed here and is NOT incomparable: the same probe counts it, and
-  // `count(DISTINCT DocumentNode)` over `Production.Document` answers 13 for 13 rows.
-  // Listing it cost that column its distinct count for nothing, so it is gone.
-  //
-  // `text`, `ntext` and `image` are absent for a different reason: SQL Server refuses
-  // PLAIN `count` on them too, so they are excluded from the projection entirely by
-  // `UNCOUNTABLE_TYPE` below and never reach this test. `text` is also why this cannot
-  // be one shared list, since PostgreSQL's `text` is its ordinary string type.
-  mssql: /\b(xml|geography|geometry)\b/i,
-  // PER DIALECT, and this arm matches NOTHING - measured, not assumed. On MySQL
-  // 26.7.0 and MariaDB 13.0.2, as the least-privilege account, one
-  // `count(DISTINCT …)` per column of a probe table holding `json`, `blob`,
-  // `geometry`, `bigint` past 2^53, `varchar` and `text`: every one of them counted
-  // (the two engines compare by the value's own form, so each answered 1 for the one
-  // row). Neither engine of this family refuses a DISTINCT the way PostgreSQL
-  // refuses `json`, so listing any type here would cost a column its distinct count
-  // for nothing. `\b\B` cannot match ANY text, by construction: no position is both
-  // a word boundary and not one (`$^`, the first spelling of this, matches the empty
-  // string, which would have ruled out a column whose declared type read back empty).
-  //
-  // The engines DO refuse `ORDER BY` and comparison on some of these types - that is
-  // a different operation than the COUNT this test guards, and nothing this module
-  // composes orders by a column value.
-  mysql: /\b\B/,
-});
+const isComparable = (column: ColumnSchema, composition: AgentProfileComposition): boolean =>
+  !composition.incomparableType.test(decidableType(column));
 
-const isComparable = (column: ColumnSchema, dialect: ProfileDialect): boolean =>
-  !INCOMPARABLE_TYPE[dialect].test(decidableType(column));
-
-/**
- * Types the engine refuses to COUNT at all, so the column is left out whole.
- *
- * Stronger than `INCOMPARABLE_TYPE`, and therefore its own set: an incomparable type
- * still has a presence count and only loses its distinct count, while a column of one
- * of these types cannot be projected at all. SQL Server answers
- * "Operand data type text is invalid for count operator" (Msg 8117) for a plain
- * `count([col])` on `text`, `ntext` and `image` - measured on 2022 CU26, one probe
- * column per type. Because the whole profile is ONE aggregate over one scan, a single
- * such column would fail the statement and with it every other column's statistics, so
- * the column contributes no presence, no distinct count and no shape test. That reads
- * back as "the engine was not asked about this column", which is exactly true: a
- * column the composer left out is absent from the profile rather than reported as
- * empty (see `readTableProfile`).
- *
- * Only SQL Server has such a set. PostgreSQL and SQLite count presence for every type
- * this module has met, including the ones they refuse to count DISTINCT, so an entry
- * for them would be an assertion nothing measured.
- */
-const UNCOUNTABLE_TYPE: Readonly<Partial<Record<ProfileDialect, RegExp>>> = Object.freeze({
-  mssql: /\b(text|ntext|image)\b/i,
-});
-
-const isCountable = (column: ColumnSchema, dialect: ProfileDialect): boolean => {
-  const refused = UNCOUNTABLE_TYPE[dialect];
+const isCountable = (column: ColumnSchema, composition: AgentProfileComposition): boolean => {
+  const refused = composition.uncountableType;
   return refused === undefined || !refused.test(decidableType(column));
 };
 
@@ -381,7 +331,7 @@ const isCountable = (column: ColumnSchema, dialect: ProfileDialect): boolean => 
  * conversion of the table.
  *
  * A column of a type the engine will not count is left out of the projection entirely
- * (`UNCOUNTABLE_TYPE`). Because everything is one aggregate, one such column would
+ * (`uncountableType`). Because everything is one aggregate, one such column would
  * otherwise cost the table its whole profile. A table made only of them still composes:
  * the row count is a profile, a smaller one than was asked for.
  */
@@ -390,7 +340,8 @@ export function composeTableProfile(
   selector: { readonly segments: readonly string[]; readonly depth: AgentProfileDepth },
   columns: readonly ColumnSchema[],
 ): string {
-  if (dialect !== "postgres" && dialect !== "sqlite" && dialect !== "mssql" && dialect !== "mysql") {
+  const composition = engineServerDialect(dialect).profileComposition;
+  if (composition === "unsupported") {
     throw new AgentComposedSqlError(
       `no verified profile composition for provider type "${dialect}"`,
       "UNSUPPORTED_DIALECT",
@@ -404,18 +355,18 @@ export function composeTableProfile(
   columns.forEach((column, index) => {
     // A type the engine refuses to count contributes NOTHING: one such column in the
     // projection fails the single aggregate and takes the whole table's profile with it.
-    if (!isCountable(column, dialect)) return;
+    if (!isCountable(column, composition)) return;
     const quoted = quoteIdentifier(column.name, dialect);
     parts.push(`count(${quoted}) AS ${alias("present", index)}`);
     // A type with no equality operator is skipped rather than counted: its absence
     // reads as "the engine did not report this", which is exactly true.
-    if (selector.depth !== "basic" && isComparable(column, dialect)) {
+    if (selector.depth !== "basic" && isComparable(column, composition)) {
       parts.push(`count(DISTINCT ${quoted}) AS ${alias("distinct", index)}`);
     }
     if (selector.depth === "pattern" && isTextual(column)) {
       // Counted inside the database: the rows that matched are never returned.
       for (const shape of PROFILE_SHAPES) {
-        const test = shape.predicate[dialect](quoted);
+        const test = shape.test(composition.shapeTests, quoted);
         parts.push(`count(CASE WHEN ${test} THEN 1 END) AS ${alias(shape.alias, index)}`);
       }
     }
@@ -443,7 +394,7 @@ const count = (row: Record<string, unknown>, key: string): number | undefined =>
  *
  * A COLUMN the engine did not report is absent the same way, and for the same reason.
  * The composer leaves an uncountable column out of the projection whole
- * (`UNCOUNTABLE_TYPE`), and reading its missing presence count back as zero would make
+ * (`uncountableType`), and reading its missing presence count back as zero would make
  * a `text` column on SQL Server arrive as `high_null` at 100% - a finding derived from
  * a question nobody asked. The aliases carry the column's own index, so dropping one
  * column cannot shift another's statistics onto it.
@@ -478,7 +429,16 @@ export function readTableProfile(
   return { table, depth, rowCount, columns: profiled, findings: deriveFindings(rowCount, profiled) };
 }
 
-const ratio = (part: number, whole: number): string => `${Math.round((part / whole) * 100)}%`;
+/**
+ * A share as a whole percent, never rounded up onto 100% it has not reached: 999 of 1000 is "over 99%". A live
+ * assessment on 2026-10-17 was told a column held "100% of 1000 rows" with no value while the profile counted one,
+ * and both engines' reports then called the column completely empty. Every finding that states a share is gated at
+ * half or more, so the other end, a share rounded down to 0%, is never stated.
+ */
+const ratio = (part: number, whole: number): string => {
+  const percent = Math.round((part / whole) * 100);
+  return percent === 100 && part < whole ? "over 99%" : `${percent}%`;
+};
 
 function namesPersonalData(column: string): boolean {
   const lowered = column.toLowerCase();

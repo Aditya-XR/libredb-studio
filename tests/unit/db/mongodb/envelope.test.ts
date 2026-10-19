@@ -391,6 +391,20 @@ describe("a key no reader of that operation honours is refused, naming what to s
     }
   });
 
+  test("an EMPTY options object asks for nothing, so no operation refuses it, and it reaches no reader", () => {
+    // Live runs on 2026-10-17 wrote `"options": {}` on aggregates and spent a turn on each refusal.
+    for (const [operation, extra] of [
+      ["aggregate", { pipeline: [] }],
+      ["count", {}],
+      ["distinct", { field: "customer" }],
+      ["find", {}],
+    ] as const) {
+      const reading = readMongoCommand(command(operation, { ...extra, options: {} }));
+      expect(reading.ok, operation).toBe(true);
+      if (reading.ok && operation !== "find") expect(Object.hasOwn(reading.envelope, "options"), operation).toBe(false);
+    }
+  });
+
   test("options on a count or a distinct, which take none", () => {
     expect(refused(command("count", { options: { limit: 5 } }), "unknown-key")).toContain('A count takes no "options"');
     expect(refused(command("distinct", { field: "customer", options: { limit: 2 } }), "unknown-key")).toContain(

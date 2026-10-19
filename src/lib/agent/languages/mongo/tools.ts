@@ -1,8 +1,8 @@
 /**
  * The MongoDB arms of the agent tools (issue #1614): what `inspect_schema`, `inspect_plan` and `profile_table` do on
  * the `mongo` statement language, beside the `run_read_query` arm that lives in `tools.ts` because it is the
- * language's statement path. The run loop reaches them through the language's record in `language-arms.ts`, never by
- * testing the language itself.
+ * language's statement path. The run loop reaches them through the language's pack (`languages/mongo/index.ts`), never
+ * by testing the language itself.
  *
  * A module of its own beside `tools.ts`'s 5,500 lines, which is the lesson of #1744's D348 applied at birth: the
  * SQL arms are one file's history, and a second language's arms are a second file rather than a second thousand
@@ -31,27 +31,28 @@
 import type { z } from "zod";
 import type { ReadOnlyCatalogReading, ReadOnlyCatalogSelector } from "@/lib/db/types";
 import type { ColumnSchema } from "@/lib/types";
-import { AGENT_EXECUTION_PROFILE } from "./execution-policy";
-import { resolveProfileTarget } from "./inventory-address";
-import { addressableObjects } from "./inventory-objects";
-import { languageServer } from "./statement-languages";
-import { DIGIT_RUN_LENGTH, MAX_PROFILE_COLUMNS, type AgentTableProfile, readTableProfile } from "./table-profile";
+import { AGENT_EXECUTION_PROFILE } from "../../execution-policy";
+import { resolveProfileTarget } from "../../inventory-address";
+import { addressableObjects } from "../../inventory-objects";
+import { MONGO_ADAPTER } from "./adapter";
+import { mongoPlanCommandSchema, mongoProfileSelectorSchema } from "./definitions";
+import { DIGIT_RUN_LENGTH, MAX_PROFILE_COLUMNS, type AgentTableProfile, readTableProfile } from "../../table-profile";
 import {
   type AgentTableProfileOutcome,
   type AgentToolContext,
   type AgentToolOutcome,
+  executeAgentOperation,
+  runAuditedAgentCall,
+} from "../../tools";
+import {
   capturedSnapshot,
   catalogSelectorSchema,
   describeFindings,
-  executeAgentOperation,
   handoverText,
-  mongoPlanCommandSchema,
-  mongoProfileSelectorSchema,
-  runAuditedAgentCall,
   unavailable,
-} from "./tools";
-import type { AgentArtifactReference, AgentContextSnapshot, AgentInventoryObject, AgentRunRecord } from "./types";
-import { fenceUntrustedContent } from "./untrusted-content";
+} from "../../tool-contracts";
+import type { AgentArtifactReference, AgentContextSnapshot, AgentInventoryObject, AgentRunRecord } from "../../types";
+import { fenceUntrustedContent } from "../../untrusted-content";
 
 /** One schema's problems on one line, the rendering this layer's refusals carry elsewhere. */
 function issueText(error: z.ZodError): string {
@@ -196,11 +197,24 @@ function catalogRows(
  * validates with. The `mode: "estimate-plan"` is what makes the provider wrap the envelope in `explain` instead of
  * running it - the same seam the SQL `EXPLAIN` arms drive.
  */
-export async function mongoInspectPlanTool(context: AgentToolContext, input: unknown): Promise<AgentToolOutcome> {
+export async function mongoInspectPlanTool(
+  context: AgentToolContext,
+  input: unknown,
+  snapshot: AgentContextSnapshot | null = null,
+): Promise<AgentToolOutcome> {
   const parsed = mongoPlanCommandSchema.safeParse(input);
   if (!parsed.success) return unavailable("INVALID_TOOL_INPUT", issueText(parsed.error));
-  const statement = languageServer("mongo").canonicalize(parsed.data.command);
+  const server = MONGO_ADAPTER;
+  const statement = server.canonicalize(parsed.data.command);
   if (statement === null) return unavailable("INVALID_TOOL_INPUT", "The command is empty, and nothing was planned.");
+  // The read path's inventory check, on a command the reader admits; one it does not admit goes on to the pipeline,
+  // which refuses it as before. A plan of a date range written with strings is an index scan over strings, which a
+  // live run on 2026-10-17 reported as the index "efficiently locating matching documents" for a query matching none.
+  if ((server.admit?.(statement) ?? null) === null) {
+    const problem = server.inventoryProblem?.(statement, snapshot) ?? null;
+    if (problem !== null)
+      return unavailable("STATEMENT_NOT_ADMITTED", problem.replace("Nothing was sent.", "Nothing was planned."));
+  }
   return executeAgentOperation(context, {
     operationId: "mongo.plan.estimate",
     sql: statement,

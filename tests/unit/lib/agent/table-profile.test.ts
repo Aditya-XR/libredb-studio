@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { parseSqliteTableDdl } from "@/lib/agent/sqlite-ddl";
+import { parseSqliteTableDdl } from "@/lib/agent/languages/sql/engines/sqlite-ddl";
 import {
   DIGIT_RUN_LENGTH,
   HIGH_NULL_RATIO,
@@ -181,6 +181,14 @@ describe("the findings, derived from the numbers", () => {
 
     expect(codes(profile)).toContain("high_null");
     expect(profile?.findings[0]?.detail).toMatch(/% of \d+ rows have no value/);
+  });
+
+  test("a column with one value in a thousand rows is never called 100% empty", () => {
+    // A live assessment on 2026-10-17 was told "100% of 1000 rows have no value here" while the profile counted one.
+    const almost = readTableProfile("t", "basic", [column("note")], [{ row_count: 1000, present_0: 1 }]);
+    expect(almost?.findings[0]?.detail).toBe("over 99% of 1000 rows have no value here.");
+    const empty = readTableProfile("t", "basic", [column("note")], [{ row_count: 1000, present_0: 0 }]);
+    expect(empty?.findings[0]?.detail).toBe("100% of 1000 rows have no value here.");
   });
 
   test("a sparse column in a tiny table is not reported, because the ratio would say more about the sample", () => {

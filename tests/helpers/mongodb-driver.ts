@@ -158,6 +158,8 @@ function initialState() {
       { name: "orders", type: "collection" },
     ] as MockCollectionInfo[],
     currentOps: [] as Doc[],
+    /** What `currentOp` rejects with, when set: the server refusing it to a user holding only `read`. */
+    currentOpError: undefined as Error | undefined,
     /** Every `killOp` command the admin database received (#1424). */
     killOpCommands: [] as Doc[],
     /** What `listDatabases` answers. */
@@ -379,7 +381,7 @@ const holds = (value: unknown): boolean => value !== false && value !== null && 
 
 /**
  * One aggregation expression evaluated against one document: the operators the agent's collection profile composes
- * (`mongo-tools.ts`), and nothing else. An operator outside them is refused by name, so a change to what the
+ * (`languages/mongo/tools.ts`), and nothing else. An operator outside them is refused by name, so a change to what the
  * composition sends fails the test that drives it rather than counting nothing. `$and` stops at its first false
  * operand, as the server's does, and `$regexMatch` answers false for a null or missing input and refuses any other input
  * that is not a string, as the server's does.
@@ -714,7 +716,10 @@ function createMockDb(database = "testdb") {
       serverStatus: async () => mongoDriver.serverStatus(),
       command: async (command: Doc) => {
         mongoDriver.commands.push({ database: "admin", command });
-        if (command.currentOp) return { inprog: mongoDriver.currentOps };
+        if (command.currentOp) {
+          if (mongoDriver.currentOpError !== undefined) throw mongoDriver.currentOpError;
+          return { inprog: mongoDriver.currentOps };
+        }
         if (command.killOp) {
           mongoDriver.killOpCommands.push(command);
           return { info: "attempting to kill op", ok: 1 };

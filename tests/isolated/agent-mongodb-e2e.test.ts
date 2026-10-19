@@ -254,6 +254,17 @@ const verificationCommands = (): string[] =>
     ["buildInfo", "connectionStatus", "delete"].filter((name) => command[name] !== undefined),
   );
 
+/** The opening of the note an inventory of sampled fields carries (`context-snapshot.ts`). */
+const SAMPLED_FIELDS_NOTE = "These fields were inferred from sampled documents, not declared";
+
+/** The JSON schema the model was offered for one argument of one tool. */
+function offeredParameter(turn: Turn, toolName: string, argument: string): Record<string, unknown> | undefined {
+  const tools = (turn.body.tools ?? []) as {
+    function: { name: string; parameters: { properties: Record<string, Record<string, unknown>> } };
+  }[];
+  return tools.find((tool) => tool.function.name === toolName)?.function.parameters.properties[argument];
+}
+
 /** The orders read the investigation and the analysis send: every order, the larger first. */
 const ORDERS_BY_TOTAL = {
   command: { collection: "orders", operation: "find", filter: {}, options: { sort: { total: -1 } } },
@@ -272,6 +283,13 @@ describe("agent runs on a MongoDB connection, scored by their own verifiers", ()
     expect(promptText(run.turns[0] as Turn)).toContain(
       "an agent run reads only the database its connection is bound to",
     );
+    // The inventory's fields were sampled, and the message says so instead of calling any of them NOT NULL.
+    expect(promptText(run.turns[0] as Turn)).toContain(SAMPLED_FIELDS_NOTE);
+    expect(promptText(run.turns[0] as Turn)).not.toMatch(/^app\..* NOT NULL/m);
+    // The command reaches the model as an open object: closed with no keys, a schema-constrained server could only
+    // emit `{}` for it (`model-tool-schema.ts`).
+    expect(offeredParameter(run.turns[0] as Turn, "run_read_query", "command")).toMatchObject({ type: "object" });
+    expect(offeredParameter(run.turns[0] as Turn, "run_read_query", "command")?.additionalProperties).not.toBe(false);
     expect(completed(run.events)).toEqual(["mongo.schema.read", "mongo.query.read"]);
     // The grounding and both tools acquired the read-only profile, whose open proved the boundary once.
     expect(acquired).toEqual(["agent-read-only", "agent-read-only", "agent-read-only"]);
@@ -330,7 +348,7 @@ describe("agent runs on a MongoDB connection, scored by their own verifiers", ()
     });
     expect(finishedOf(run.events)).toMatchObject({
       status: "succeeded",
-      goalVerdict: { outcome: "answered", verifier: "agent-query-optimization.3" },
+      goalVerdict: { outcome: "answered", verifier: "agent-query-optimization-mongo.1" },
     });
   });
 
@@ -498,7 +516,14 @@ describe("plan mode and the operations workflow on the admin principal open as t
     expect(run.events.find((event) => event.kind === "plan-statement-drafted")).toMatchObject({
       sql: JSON.stringify(ORDERS_BY_TOTAL.command),
       dialect: "mongodb",
+      identifiers: { kind: "checked", unknownTables: [] },
     });
+    // The planning inventory states the same sampling, and the draft is told how a command spells a collection.
+    expect(promptText(run.turns[0] as Turn)).toContain(SAMPLED_FIELDS_NOTE);
+    expect(promptText(run.turns[0] as Turn)).not.toMatch(/^app\..* NOT NULL/m);
+    expect(promptText(run.turns[0] as Turn)).toContain(
+      'a command names the collection alone, as in "collection": "orders"',
+    );
     expect(finishedOf(run.events)).toMatchObject({
       status: "succeeded",
       goalVerdict: { outcome: "answered", verifier: "agent-planning.1" },

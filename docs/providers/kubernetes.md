@@ -384,6 +384,17 @@ MCP:
 - MCP is not offered for Kubernetes: the MCP fence reads SQL only, so `run_read_query` and `inspect_schema` refuse a Kubernetes connection (B105).
 - The operations workflow opens on Kubernetes in both modes, as on every engine, because it sends no statement; its reports of sessions, slow queries, health, storage, table statistics and index usage come back empty or N/A here.
 
+### 9.1 Agent language pack
+
+Statement-language family: `kubectl`.
+Overlay: [`src/lib/agent/languages/kubectl/engines/kubernetes.ts`](../../src/lib/agent/languages/kubectl/engines/kubernetes.ts), with its client row in [`src/lib/agent/languages/kubectl/engines/client.ts`](../../src/lib/agent/languages/kubectl/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`.
+Both overlays are empty, so the engine resolves to the `kubectl` family pack itself.
+The `kubectl` statement-language family has no dialect-bound member.
+This overlay overrides no Shared member, so every Shared member is the `kubectl` statement-language family's own.
+The cluster-* requirements hold here: `AGENT_REQUIREMENT_ENGINES` mirrors `cluster-usage-reading` and `cluster-workload-reading` from this provider's `agentReadings`, which the client tier cannot reach.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
+
 ## 10. Error handling
 
 | Answer | What Studio says |

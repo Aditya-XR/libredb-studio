@@ -76,6 +76,7 @@ import {
   type AgentPlanStatementView,
   type AgentTimelineItem,
   type AgentTimelineTone,
+  connectionRefusalSentence,
   describeRunFailure,
 } from "./timeline";
 import type { AgentPrefillRequest } from "./use-agent-prefill";
@@ -1661,12 +1662,13 @@ export const AgentRail = React.memo(function AgentRail({
   /*
     A verdict about the model is a verdict about ONE mode (#331 T4).
 
-    `admitAgentModel` returns `allowed` for planning on its first line: the mode is
-    toolless by contract, so tool calling is not among the capabilities it needs and it
-    is never probed. A refusal is therefore only ever true of the mode it was raised
-    for, and showing it above another mode would be the rail stating something the
-    server did not — most visibly right after the user takes the way out this state
-    itself points at.
+    `admitAgentModel` never probes planning: the mode is toolless by contract, so tool
+    calling is not among the capabilities it needs. (It still builds the model, and an
+    `LLM_MODEL_EFFORT` the model refuses answers 503 in either mode, which is a
+    configuration error and not a verdict.) A capability refusal is therefore only ever
+    true of the mode it was raised for, and showing it above another mode would be the
+    rail stating something the server did not, most visibly right after the user takes
+    the way out this state itself points at.
 
     Scoped here rather than cleared in the hook: the hook reports what the server said,
     and which of it applies to the surface's current selection is the surface's
@@ -1885,6 +1887,10 @@ export const AgentRail = React.memo(function AgentRail({
   */
   const handoverConsented = runOpen ? openedWithHandover : pendingStart !== null && autoExecute;
   const describedMode = runOpen ? run.timeline.mode : mode;
+  // Only for the connection the refused run was opened on: a connection the shell has moved to since has not been
+  // refused, and its strip goes back to what its engine does.
+  const refusedHere =
+    run.openedOn !== null && run.openedOn === connectionId ? connectionRefusalSentence(run.timeline) : null;
   const selectionPosture = agentPosture({
     mode,
     engine: connectionType,
@@ -1892,6 +1898,7 @@ export const AgentRail = React.memo(function AgentRail({
     // The standing step's tick, and OFF otherwise: nothing has been consented to for a
     // run that is not being opened, and the next step's tick starts unticked.
     handover: pendingStart !== null && autoExecute,
+    refusedHere,
   });
 
   /*
@@ -2103,6 +2110,7 @@ export const AgentRail = React.memo(function AgentRail({
         engine={connectionType}
         engineLabel={engineLabel}
         handover={handoverConsented}
+        refusedHere={refusedHere}
       />
 
       <div className="p-3 border-b border-hairline shrink-0">

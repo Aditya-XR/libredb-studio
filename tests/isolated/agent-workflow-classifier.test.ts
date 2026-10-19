@@ -13,7 +13,7 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { LLMStreamError } from "@/lib/llm/types";
+import { LLMConfigError, LLMStreamError } from "@/lib/llm/types";
 import type { AgentModel } from "@/lib/agent/model-adapter";
 
 interface GenerateTextCall {
@@ -24,6 +24,7 @@ interface GenerateTextCall {
   readonly maxRetries?: number;
   readonly abortSignal?: AbortSignal;
   readonly tools?: unknown;
+  readonly providerOptions?: unknown;
 }
 
 let lastCall: GenerateTextCall | undefined;
@@ -39,8 +40,16 @@ const model = (): AgentModel => ({ provider: "gemini", modelId: "gemini-3.5-flas
 
 const createAgentModel = mock<(options?: { fetch?: unknown }) => Promise<AgentModel>>(async () => model());
 const mapAgentModelError = mock((error: unknown) => new LLMStreamError(String(error), "gemini"));
+const RUN_OPTIONS = { openai: { store: false } };
+const agentProviderOptions = mock<(model: AgentModel) => typeof RUN_OPTIONS>(() => RUN_OPTIONS);
+const refusedEffortError = mock<(warnings: unknown, model: AgentModel) => LLMConfigError | undefined>(() => undefined);
 
-mock.module("@/lib/agent/model-adapter", () => ({ createAgentModel, mapAgentModelError }));
+mock.module("@/lib/agent/model-adapter", () => ({
+  createAgentModel,
+  mapAgentModelError,
+  agentProviderOptions,
+  refusedEffortError,
+}));
 
 const { AGENT_WORKFLOW_CLASSIFY_TIMEOUT_MS, classifyAgentWorkflow } = await import("@/lib/agent/workflow-classifier");
 
@@ -56,6 +65,9 @@ beforeEach(() => {
   generateText.mockClear();
   createAgentModel.mockClear();
   mapAgentModelError.mockClear();
+  agentProviderOptions.mockClear();
+  refusedEffortError.mockClear();
+  refusedEffortError.mockImplementation(() => undefined);
   createAgentModel.mockImplementation(async () => model());
   replies("investigation");
 });
@@ -91,6 +103,22 @@ describe("classifying an objective into a workflow", () => {
     expect(lastCall?.tools).toBeUndefined();
     expect(lastCall?.maxOutputTokens).toBeLessThanOrEqual(32);
     expect(lastCall?.abortSignal?.aborted).toBe(false);
+  });
+
+  test.each([
+    // On the Responses API max_output_tokens counts reasoning tokens too. Measured 2026-10-19 at
+    // the old cap of 16, gpt-6-luna spent all 16 reasoning and answered nothing on 5 objectives of
+    // 5, and gpt-6.1-sol on 2 of 5; at 1024 the most any of them reasoned was 383 tokens.
+    ["openai", 1024],
+    ["gemini", 16],
+    ["ollama", 16],
+    ["custom", 16],
+  ] as const)("the %s kind's one call is capped at %d output tokens", async (provider, cap) => {
+    createAgentModel.mockImplementationOnce(async () => ({ provider, modelId: "m", model: {} }) as AgentModel);
+
+    await classifyAgentWorkflow("count the rows in public.orders");
+
+    expect(lastCall?.maxOutputTokens).toBe(cap);
   });
 
   test("an injected fetch reaches the model adapter", async () => {
@@ -204,6 +232,15 @@ describe("classifying an objective into a workflow", () => {
   });
 });
 
+describe("the classifier asks the model what a run asks it", () => {
+  test("its call carries the run's provider options, built for the same model", async () => {
+    await classifyAgentWorkflow("count the rows in public.orders");
+
+    expect(agentProviderOptions).toHaveBeenCalledWith(model());
+    expect(lastCall?.providerOptions).toBe(RUN_OPTIONS);
+  });
+});
+
 describe("everything that can go wrong resolves to an unclassified investigation", () => {
   const FALLBACK = { workflowType: "investigation", outcome: "unclassified" };
 
@@ -228,6 +265,14 @@ describe("everything that can go wrong resolves to an unclassified investigation
 
     expect(await classifyAgentWorkflow("anything")).toEqual(FALLBACK as never);
     expect(mapAgentModelError).toHaveBeenCalledTimes(1);
+  });
+
+  test("a reasoning effort the model refused, which the SDK would otherwise drop in silence", async () => {
+    const refused = new LLMConfigError('LLM_MODEL_EFFORT "none" was refused', "openai");
+    refusedEffortError.mockImplementation(() => refused);
+
+    expect(await classifyAgentWorkflow("anything")).toEqual(FALLBACK as never);
+    expect(mapAgentModelError).toHaveBeenCalledWith(refused, "gemini");
   });
 
   test("a model that cannot even be built", async () => {

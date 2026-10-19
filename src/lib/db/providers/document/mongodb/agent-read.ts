@@ -138,10 +138,25 @@ function rowBound(budget: ReadOnlyStatementBudget): number {
   return budget.maxResultRows + 1;
 }
 
-/** The row-budget refusal, in the sentence the SQL profile established (`rowBudgetIn` in `context-snapshot.ts` reads it). */
-export function rowBudgetRefusal(rows: number, budget: ReadOnlyStatementBudget, statement: string): QueryError {
+/**
+ * The row-budget refusal, in the sentence the SQL profile established (`rowBudgetIn` in `context-snapshot.ts` reads it).
+ *
+ * `stoppedAtBound` is a cursor read, which the server ends one row past the budget: its count is that bound, not the
+ * number of documents that match, and the sentence says so. Without it a live run on 2026-10-17 read "201 rows > 200
+ * allowed", retried with a limit of 200 and reported that the collection held 200 orders, of 8000. The opening is
+ * unchanged, so `rowBudgetIn` and MCP's limit reader still read it.
+ */
+export function rowBudgetRefusal(
+  rows: number,
+  budget: ReadOnlyStatementBudget,
+  statement: string,
+  stoppedAtBound = false,
+): QueryError {
+  const total = stoppedAtBound
+    ? `; the read stops one row past the budget, so at least ${rows} documents match and the total is not known (count it with "operation": "count", or narrow the read)`
+    : "";
   return new QueryError(
-    `Read-only execution exceeded the row budget: ${rows} rows > ${budget.maxResultRows} allowed`,
+    `Read-only execution exceeded the row budget: ${rows} rows > ${budget.maxResultRows} allowed${total}`,
     "mongodb",
     statement,
   );
@@ -479,7 +494,7 @@ async function collectWithinBudget(
     for (let next = await cursor.next(); next !== null; next = await cursor.next()) {
       // Opened with `raw: true`: the document is its own BSON bytes.
       const document = next as Uint8Array;
-      if (rows.length === budget.maxResultRows) throw rowBudgetRefusal(rows.length + 1, budget, statement);
+      if (rows.length === budget.maxResultRows) throw rowBudgetRefusal(rows.length + 1, budget, statement, true);
       bytes += document.byteLength;
       if (bytes > budget.maxResultBytes) throw byteBudgetRefusal(bytes, budget, statement);
       rows.push(serializeMongoDocument(mongodbDriver.BSON.deserialize(document, DRIVER_DECODE)));

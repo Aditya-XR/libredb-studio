@@ -7,7 +7,13 @@ import {
 } from "@/lib/agent/provider-registry";
 import { type LLMConfig, type LLMProviderType, LLMConfigError } from "@/lib/llm/types";
 import { DEFAULT_MODELS } from "@/lib/llm/utils/config";
-import { type CapturedRequest, chatTextStream, geminiTextStream, recordingFetch } from "./fixtures/agent-transport";
+import {
+  type CapturedRequest,
+  chatTextStream,
+  geminiTextStream,
+  recordingFetch,
+  responsesTextStream,
+} from "./fixtures/agent-transport";
 
 /**
  * T5's registry half in one sentence: every provider kind the settings surface can
@@ -136,13 +142,13 @@ describe("each resolved adapter builds a model for its own endpoint", () => {
     expect(request.url).toStartWith("https://gemini-proxy.internal/v1beta/");
   });
 
-  test("openai reaches the configured OpenAI-compatible endpoint with a bearer key", async () => {
+  test("openai reaches the configured endpoint's Responses API with a bearer key", async () => {
     const request = await firstRequestThroughRegistry(
       { provider: "openai", apiKey: "sk-configured", model: "gpt-4o-mini", apiUrl: "https://api.openai.com/v1" },
-      chatTextStream("pong"),
+      responsesTextStream("pong"),
     );
 
-    expect(request.url).toBe("https://api.openai.com/v1/chat/completions");
+    expect(request.url).toBe("https://api.openai.com/v1/responses");
     expect(request.headers.authorization).toBe("Bearer sk-configured");
   });
 
@@ -170,7 +176,7 @@ describe("each resolved adapter builds a model for its own endpoint", () => {
 describe("a built model names the kind the operator configured", () => {
   const KINDS: readonly { config: LLMConfig; tag: string }[] = [
     { config: { provider: "gemini", apiKey: "k", model: "gemini-2.5-flash" }, tag: "google.generative-ai" },
-    { config: { provider: "openai", apiKey: "k", model: "gpt-4o-mini" }, tag: "openai.chat" },
+    { config: { provider: "openai", apiKey: "k", model: "gpt-4o-mini" }, tag: "openai.responses" },
     { config: { provider: "ollama", model: "llama3.2", apiUrl: "http://localhost:11434/v1" }, tag: "ollama.chat" },
     { config: { provider: "custom", model: "mixtral", apiUrl: "https://llm.internal/v1" }, tag: "custom.chat" },
   ];

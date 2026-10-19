@@ -17,6 +17,7 @@
 | **Connection string** | Supported (`postgres://` / `postgresql://`) |
 | **Transactions** | Yes — explicit `BEGIN`/`COMMIT`/`ROLLBACK` with auto-rollback timeout |
 | **Query cancellation** | Yes: PID tracking + `pg_cancel_backend`, then the wire-protocol CancelRequest where that is refused ([§5.3](#53-query-cancellation)) |
+| **Identifier length** | 63 bytes, declared as `maxIdentifierBytes` ([§3.4.2](#342-identifier-length-63-bytes-1435)) |
 | **Agent read-only profile** | Yes — `BEGIN READ ONLY` + extended-protocol single statement (#328, §12) |
 | **Source** | [`src/lib/db/providers/sql/postgres.ts`](../../src/lib/db/providers/sql/postgres.ts) |
 | **Base** | [`src/lib/db/providers/sql/sql-base.ts`](../../src/lib/db/providers/sql/sql-base.ts) |
@@ -217,7 +218,7 @@ already gate on that, so no badge is drawn rather than a number nobody produced.
 
 A genuine `0` is kept, because an empty table is a real measurement. On a server old enough to
 write `0` instead of `-1` the two cannot be told apart, the same limit
-[schema-stats.ts](../../src/lib/agent/schema-stats.ts) documents for the agent's grounding read.
+[languages/sql/engines/postgres.ts](../../src/lib/agent/languages/sql/engines/postgres.ts) documents for the agent's grounding read.
 
 This mattered more than it looks. Measured on stock PostgreSQL 18.4, two tables holding 5000 and
 1200 rows both answered -1 until `ANALYZE` ran, and the browser showed **0 rows** for both — a
@@ -1227,6 +1228,13 @@ whose `search_path` puts another schema first therefore spells `public.orders` q
 join prefers that other schema, and a bare name would then be read in the wrong place. Nothing in
 the fixture reaches it, because the seeded connection's default IS `public`.
 
+### 3.4.2 Identifier length: 63 bytes (#1435)
+
+PostgreSQL keeps NAMEDATALEN-1 bytes of an identifier, 63 at the default build, and truncates a longer one with only a NOTICE.
+A Create Table name one byte longer would land under a name nobody typed, so the capabilities declare `maxIdentifierBytes: 63` and the Create Table form refuses a longer table or column name under its field, counting UTF-8 bytes rather than characters.
+It is declared rather than probed at connect: `/api/db/provider-meta` reads capabilities off a provider it never connects, so a measured value would never reach the form.
+The `postgres` type-id is the only one built on `PostgresProvider`, but a wire-compatible relative connected under it (CockroachDB, for one) gets the same limit: where that engine keeps longer names, the form refuses one it would have taken, and never lets one be shortened.
+
 ### 3.5 Resilient monitoring
 
 Monitoring never hard-fails on a missing optional feature:
@@ -2217,7 +2225,7 @@ Overrides the SQL base defaults:
 | `supportsExplain` | `true` when the server accepts one of the grammars below, measured at connect |
 | `explainFormat` | `postgres-json`, `postgres-text-analyze` or `postgres-text` — **measured, not declared** (see §10.1) |
 | `supportsExternalQueryLimiting` | `true` |
-| `supportsCreateTable` | `true` |
+| `createTable` | declared, see [Create Table form](#create-table-form) |
 | `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core PostgreSQL DML |
 | `supportsTestDataGeneration` | `true` - the row menus offer Generate Test Data on tables, which writes one multi-row `INSERT INTO ... VALUES` |
 | `supportsResultPagination` | `true` — `LIMIT n OFFSET m` from the shared limiter (#816) |
@@ -2281,7 +2289,7 @@ query has no plan* rather than as an error.
 **The read-only agent profile does not probe.** That connection's invariant is that every statement
 it runs arrives inside a `BEGIN READ ONLY` envelope, and a bare probe at connect would be the first
 statement to leave it. It would also buy nothing: the agent path composes its own EXPLAIN from
-[`composed-sql.ts`](../../src/lib/agent/composed-sql.ts) keyed on the type id, and `summarisePlan`
+the `planEstimate` of [`languages/sql/engines/postgres.ts`](../../src/lib/agent/languages/sql/engines/postgres.ts) keyed on the type id, and `summarisePlan`
 reads a plan only when that composed `EXPLAIN (FORMAT JSON)` succeeded — the case where the probe
 would have answered `postgres-json` anyway. So a profiled provider keeps the static default.
 
@@ -2295,6 +2303,23 @@ with `•` — the marker is the structure and the lines between two markers bec
 one above them; read by indentation alone, `└── • hash join` would land underneath its own parent's
 `│ group by: name` attribute. Materialize marks nothing that way and indents correctly, so the rule
 is applied only to a plan that uses it.
+
+### Create Table form
+
+`createTable` is `POSTGRES_CREATE_TABLE` in [`postgres-create-table.ts`](../../src/lib/db/providers/sql/postgres-create-table.ts), a module with no driver import so a test reads the spec without loading `pg` (#1822).
+It is the grammar the Create Table form writes for this engine:
+
+| Field | Value |
+| --- | --- |
+| Auto-increment key | `INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY`, not sequence-backed |
+| `PRIMARY KEY` and `UNIQUE` checkboxes | Yes |
+| Key type when not auto-increment | `INTEGER` |
+| Type list, in dropdown order | `VARCHAR(255)`, `TEXT`, `INTEGER`, `BIGINT`, `BOOLEAN`, `TIMESTAMP`, `DATE`, `JSONB`, `UUID`, `DECIMAL(10,2)` |
+
+The key is an identity column rather than `SERIAL`, because PostgreSQL's own documentation calls `SERIAL` historical and points at identity columns.
+Until #648 the form wrote `id SERIAL PRIMARY KEY` here, so this engine changed too rather than keeping the text it already emitted.
+The type list is the one the form offered every engine before #648; a row that reads like that old shared list is this engine agreeing with it, not a row nobody looked at.
+A table or column name longer than 63 bytes is refused under its field, from `maxIdentifierBytes` ([§3.4.2](#342-identifier-length-63-bytes-1435)).
 
 ### Labels
 
@@ -2536,7 +2561,8 @@ Four things about the PostgreSQL side of that layer are worth knowing here:
 - **Plan inspection uses `EXPLAIN (FORMAT JSON)`, never `EXPLAIN (ANALYZE, …)`.** The editor's
   Explain button emits the ANALYZE form deliberately (a user asked for real timings) and that form
   EXECUTES the statement, which on this engine performs a data-modifying CTE. The agent path is
-  served by [`composed-sql.ts`](../../src/lib/agent/composed-sql.ts) instead, and the executing
+  served by [`composed-sql.ts`](../../src/lib/agent/composed-sql.ts) and the `planEstimate` of
+  [`languages/sql/engines/postgres.ts`](../../src/lib/agent/languages/sql/engines/postgres.ts) instead, and the executing
   variant stays behind the approval-gated `sql.explain.analyze` descriptor that no tool reaches.
 - **The statement timeout is clamped to the run's remaining wall clock** before it reaches
   `SET LOCAL statement_timeout`, so a statement cannot outlive the run that asked for it. Here that
@@ -2553,6 +2579,23 @@ Four things about the PostgreSQL side of that layer are worth knowing here:
   A run cancellation is still enforced by the run loop's own state rather than by that exception,
   because an operator cancel arriving mid-statement is repairable too (see [BACKLOG](../BACKLOG.md) B4
   for the residual: classification reads the message text rather than the `57014`/`55P03` SQLSTATE).
+
+### 12.5 Agent language pack
+
+Statement-language family: `sql`.
+Overlay: [`src/lib/agent/languages/sql/engines/postgres.ts`](../../src/lib/agent/languages/sql/engines/postgres.ts), with its client row in [`src/lib/agent/languages/sql/engines/client.ts`](../../src/lib/agent/languages/sql/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`, and the dialect through `engineServerDialect`.
+
+| Member | Kind | Value |
+| --- | --- | --- |
+| `catalogRead` | Dialect-bound | Supplied |
+| `planEstimate` | Dialect-bound | Supplied |
+| `profileComposition` | Dialect-bound | Supplied |
+| `statistics` | Dialect-bound | Supplied |
+| `catalogCapture` | Dialect-bound | Supplied |
+
+This overlay overrides no Shared member, so every Shared member is the `sql` statement-language family's own.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
 
 ---
 

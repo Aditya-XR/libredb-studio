@@ -350,8 +350,9 @@ describe("canonical input schemas", () => {
 
 describe("the MongoDB composed profile", () => {
   /**
-   * A profile's `$group` in the shape `mongo-tools.ts` composes it at pattern depth: a presence count for every field,
-   * and the two shape tests for every textual one, over `fields` fields whose dotted names are `nameLength` long.
+   * A profile's `$group` in the shape `languages/mongo/tools.ts` composes it at pattern depth: a presence count for
+   * every field, and the two shape tests for every textual one, over `fields` fields whose dotted names are
+   * `nameLength` long.
    */
   function composedProfile(fields: number, nameLength: number): string {
     const group: Record<string, unknown> = { _id: null, row_count: { $sum: 1 } };

@@ -91,6 +91,7 @@ import { ApiErrorCode } from "@/lib/api/error-codes";
 import type { QueryResultSet } from "@/lib/types";
 import { assertReadOnlyBudget, measureResultBytes } from "./read-only-budget";
 import { sendPgCancelRequest, type PgCancelTarget } from "./pg-wire-cancel";
+import { POSTGRES_CREATE_TABLE } from "./postgres-create-table";
 import { type PgFieldMetadata, postgresColumnTypes } from "./column-types";
 import { uniqueFieldNames } from "../../utils/result-fields";
 import { keyRowsByPosition } from "../../utils/positional-rows";
@@ -2791,6 +2792,8 @@ export class PostgresProvider extends SQLBaseProvider {
     return {
       ...super.getCapabilities(),
       defaultPort: 5432,
+      // The Create Table form's grammar; the reasons for each spelling are in `docs/providers/postgres.md` (#1822).
+      createTable: POSTGRES_CREATE_TABLE,
       // Measured at connect, not declared per type id: the PostgreSQL-wire relatives
       // do not all accept the parenthesised JSON form (#597). The key is spread in
       // rather than set to `undefined` because `ProviderCapabilities.explainFormat` is
@@ -2799,6 +2802,10 @@ export class PostgresProvider extends SQLBaseProvider {
       supportsExplain: this.measuredExplainFormat !== undefined,
       ...(this.measuredExplainFormat === undefined ? {} : { explainFormat: this.measuredExplainFormat }),
       supportsConnectionString: true,
+      // NAMEDATALEN-1 at the default build: a longer identifier is truncated with only a NOTICE
+      // (#1435). Declared, not measured: `/api/db/provider-meta` reads capabilities off a provider
+      // it never connects, so a value probed at connect would never reach the Create Table form.
+      maxIdentifierBytes: 63,
       supportsInlineRowEdit: true,
       // The Generate Test Data dialog's multi-row `INSERT INTO ... VALUES` (#1468).
       supportsTestDataGeneration: true,
@@ -2983,7 +2990,7 @@ export class PostgresProvider extends SQLBaseProvider {
         // (`tests/isolated/agent-investigation-e2e.test.ts` asserts exactly that), and
         // a bare probe at connect would be the first statement to leave it - for an
         // answer that path cannot use: the agent composes its own EXPLAIN from
-        // `ESTIMATING_EXPLAIN_PREFIX`, keyed on the type id and not on this capability,
+        // its `planEstimate` (`src/lib/agent/languages/sql/engines/postgres.ts`), keyed on the type id and not on this capability,
         // and `summarisePlan` reads a plan only when that composed `EXPLAIN
         // (FORMAT JSON)` succeeded, which is the case where the probe would have
         // answered `postgres-json` anyway. So the profile keeps the static default and

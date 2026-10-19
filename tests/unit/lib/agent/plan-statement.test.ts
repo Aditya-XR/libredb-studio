@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PLAN_NO_STATEMENT_MARKER, readPlanStatement } from "@/lib/agent/plan-draft";
 import { readStatementTables, validatePlanStatement } from "@/lib/agent/plan-statement";
+import { languageServer } from "@/lib/agent/languages/server";
 import type { AgentInventory } from "@/lib/agent/types";
 
 /**
@@ -852,5 +853,55 @@ describe("an unfenced statement ends where the SQL ends, not where the prose lea
 
     if (draft.kind !== "statement") throw new Error("expected a statement");
     expect(draft.sql).toBe("SELECT 1\nstill part of it");
+  });
+});
+
+/*
+  A MongoDB draft IS readable for its names, because it is one JSON command whose collections sit in known keys. Three
+  of ten live plan drafts on 2026-10-17 named `"collection": "shop.orders"`, which the editor reads as a collection
+  that does not exist and answers with no rows, under a card that said the names were "not checked".
+*/
+describe("a MongoDB draft's collections are checked against the inventory by their own names", () => {
+  const MONGO_DRAFT_IDENTIFIERS = languageServer("mongo").planDraftIdentifiers;
+  const MONGO_INVENTORY: AgentInventory = {
+    objects: [
+      { name: "shop.orders", path: ["shop", "orders"], kind: "collection", columns: [], indexes: [] },
+      { name: "shop.customers", path: ["shop", "customers"], kind: "collection", columns: [], indexes: [] },
+    ],
+    kinds: [{ id: "collection", role: "relation", label: "Collection", labelPlural: "Collections" }],
+  };
+
+  test("a qualified spelling and an invented name are unknown, the bare names are not, and the guard still declines", () => {
+    const draft = JSON.stringify({
+      collection: "shop.orders",
+      operation: "aggregate",
+      pipeline: [{ $lookup: { from: "customers" } }, { $unionWith: "invoices" }],
+    });
+    expect(validatePlanStatement(draft, MONGO_INVENTORY, "json", MONGO_DRAFT_IDENTIFIERS)).toEqual({
+      readOnly: false,
+      guardApplicable: false,
+      identifiers: { kind: "checked", unknownTables: ["shop.orders", "invoices"] },
+    });
+    expect(
+      validatePlanStatement(
+        '{"collection": "orders", "operation": "count"}',
+        MONGO_INVENTORY,
+        "json",
+        MONGO_DRAFT_IDENTIFIERS,
+      ).identifiers,
+    ).toEqual({ kind: "checked", unknownTables: [] });
+  });
+
+  test("with no inventory nothing is checked, and a draft that is not JSON is one no reader here can open", () => {
+    expect(
+      validatePlanStatement('{"collection": "orders"}', null, "json", MONGO_DRAFT_IDENTIFIERS).identifiers,
+    ).toEqual({
+      kind: "no-inventory",
+    });
+    expect(
+      validatePlanStatement("db.orders.find({})", MONGO_INVENTORY, "json", MONGO_DRAFT_IDENTIFIERS).identifiers,
+    ).toEqual({
+      kind: "not-applicable",
+    });
   });
 });

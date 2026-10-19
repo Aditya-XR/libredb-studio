@@ -12,7 +12,8 @@ import { UNTRUSTED_CONTENT_BEGIN, UNTRUSTED_CONTENT_END } from "@/lib/agent/untr
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import { AgentRunService } from "@/lib/agent/run-service";
 import { AgentRunStore } from "@/lib/agent/run-store";
-import { AGENT_ANSWER_CONTRACT, type AgentToolContext } from "@/lib/agent/tools";
+import { AGENT_ANSWER_CONTRACT } from "@/lib/agent/tool-contracts";
+import type { AgentToolContext } from "@/lib/agent/tools";
 import type { AgentRunEvent, AgentRunMode, AgentRunWorkflowType } from "@/lib/agent/types";
 import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
@@ -619,9 +620,14 @@ describe("a kubectl resource-efficiency run", () => {
 
     expect(drive.events.filter((event) => event.kind === "usage-read")).toHaveLength(1);
     expect(promptText(drive.turns[2] as Turn)).toContain("This exact call was already made in this run.");
+    // Refused before the cluster, the step settles as a refusal of its own: the repeat is answered from the ledger,
+    // with the reason the first call was given.
     expect(promptText(drive.turns[4] as Turn)).toContain(
-      "(inspect_usage) was refused before the database was reached, so nothing ran and nothing was recorded.",
+      "(inspect_usage) was refused before the database was reached, so nothing ran: the fields that did not match",
     );
+    expect(drive.events.filter((event) => event.kind === "tool-refused")).toMatchObject([
+      { refusal: { class: "not-sent", reasonCode: "INVALID_TOOL_INPUT" } },
+    ]);
     expect(
       drive.events.filter((event) => event.kind === "tool-invoked" && event.tool === "inspect_usage"),
     ).toHaveLength(2);
@@ -654,9 +660,10 @@ describe("a kubectl resource-efficiency run", () => {
     );
     expect(opening).toContain("Usage could not be read in namespace web");
     expect(offeredTools(resumed.turns[0] as Turn)).toContain("inspect_usage");
-    // The invalid call the dead process left unsettled is not sent again, whatever this process can reach.
+    // The invalid call the dead process refused is settled on its ledger, so this process is told why, and does not
+    // send it again whatever it can reach.
     expect(promptText(resumed.turns[1] as Turn)).toContain(
-      "(inspect_usage) was started before this run was interrupted and its outcome was never recorded",
+      "(inspect_usage) was refused before the database was reached, so nothing ran: the fields that did not match",
     );
     expect(resumed.events.find((event) => event.kind === "run-finished")).toMatchObject({
       goalVerdict: { outcome: "answered", verifier: "agent-query-optimization-kubectl.1" },
@@ -1117,7 +1124,6 @@ describe("a step's identity is the call it makes", () => {
       supportsExplain: true,
       explainFormat: "postgres-json",
       supportsExternalQueryLimiting: true,
-      supportsCreateTable: true,
       supportsInlineRowEdit: true,
       supportsMaintenance: false,
       maintenanceOperations: [],

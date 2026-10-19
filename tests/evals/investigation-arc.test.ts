@@ -239,7 +239,7 @@ describe("a planning run is judged by what planning mode can produce", () => {
     What replaced "a plan run on a connection nothing has read". A cold PostgreSQL
     connection is no longer the ungrounded case — the run reads its own catalog — so
     the case that still ships is the engine this server cannot ground at all: the
-    dialects `CATALOG_COMPOSERS` does not serve. The MySQL preset carries no
+    dialects that supply no `catalogCapture`. The MySQL preset carries no
     `queryReadOnly`, so a run that tried to read one here would die on the fixture
     rather than pass quietly. The preset stands for an engine outside
     `AGENT_EXECUTION_ENGINES`: the real MySQL provider has implemented `queryReadOnly`

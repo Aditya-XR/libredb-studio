@@ -35,6 +35,7 @@ import { ApiErrorCode } from "@/lib/api/error-codes";
 import { CACHE_HIT_RATIO_UNAVAILABLE } from "@/lib/monitoring-cache-ratio";
 import { assertObjectSurface } from "../../helpers/object-surface-conformance";
 import { renderSegments, userPositionOf } from "@/lib/db/object-edit";
+import { POSTGRES_CREATE_TABLE } from "@/lib/db/providers/sql/postgres-create-table";
 
 // ============================================================================
 // Mock pg BEFORE importing the provider
@@ -3935,6 +3936,18 @@ describe("PostgresProvider", () => {
       expect(Object.keys(specs ?? {}).sort()).toEqual([...provider.getCapabilities().maintenanceOperations].sort());
     });
 
+    // PostgreSQL shortens a longer identifier to NAMEDATALEN-1 bytes with only a NOTICE, so a
+    // Create Table name past it would land as a different name than the one typed (#1435).
+    test("declares the 63-byte identifier limit the engine truncates at", () => {
+      expect(new PostgresProvider(makePgConfig()).getCapabilities().maxIdentifierBytes).toBe(63);
+    });
+
+    test("declares the PostgreSQL Create Table grammar (#1822)", () => {
+      // The base declares no grammar, so the provider must hand the form its own; the identity
+      // assertion keeps the spec in one module the component tests import too.
+      expect(new PostgresProvider(makePgConfig()).getCapabilities().createTable).toBe(POSTGRES_CREATE_TABLE);
+    });
+
     test("the vacuum label really means vacuum here", () => {
       // Absent is the default, so the four engines whose vacuum wording names
       // something else are the ones that have to say so (#496).
@@ -4454,7 +4467,7 @@ describe("PostgresProvider", () => {
 
       // A bare probe at connect would be the first statement this connection ran
       // outside `BEGIN READ ONLY`. It buys nothing here: the agent composes its own
-      // EXPLAIN from `ESTIMATING_EXPLAIN_PREFIX` rather than from this capability.
+      // EXPLAIN from its `planEstimate` overlay member rather than from this capability.
       expect(fresh.statements.map((s) => s.text)).toEqual([]);
       expect(profiled.getCapabilities().explainFormat).toBe("postgres-json");
       await profiled.disconnect();
@@ -5975,7 +5988,7 @@ describe("object surface", () => {
         .sort(),
     ).toEqual(["materialized_view", "sequence", "table", "view"]);
     // The other direction. A routine and a trigger have no relation behind them, so
-    // `describeObject` answers them without a round trip at all (`postgres.ts:2969-2972`).
+    // `describeObject` answers them without a round trip at all (its `RELKIND_BY_KIND` check in `postgres.ts`).
     expect(
       kinds
         .filter((kind) => kind.hasColumns !== true)
