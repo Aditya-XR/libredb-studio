@@ -36,9 +36,89 @@ import type {
   AgentRunWorkflowType,
 } from "../types";
 
+/** SQL's operations. `sql.explain.analyze` is a member for the reason `AgentOperationId` in `tools.ts` gives. */
+type SqlOperationId =
+  | "sql.query.read"
+  | "sql.explain.estimate"
+  | "sql.explain.analyze"
+  /** Bounded per-table profiling; #330 T3 reopened the three-descriptor decision. */
+  | "sql.table.profile";
+
+/** kubectl's operations: its reads and its two curated cluster readings. */
+type KubectlOperationId =
+  /** One kubectl read the model wrote, on a `kubernetes` connection; see `kubectlQueryReadDescriptor` for its id. */
+  | "kubectl.query.read"
+  /** Container usage in one namespace, a curated cluster reading; see `clusterUsageReadDescriptor` for its id. */
+  | "cluster.usage.read"
+  /** One namespace's workload profile, a curated cluster reading; see `clusterWorkloadsReadDescriptor` for its id. */
+  | "cluster.workloads.read";
+
+/** MongoDB's operations. */
+type MongoOperationId =
+  /** One MongoDB command the model wrote, on a `mongodb` connection; see `mongoQueryReadDescriptor` for its id. */
+  | "mongo.query.read"
+  /** A scoped MongoDB catalog read from the provider's own inventory; see `mongoSchemaReadDescriptor` for its id. */
+  | "mongo.schema.read"
+  /** The estimating plan of one MongoDB command; see `mongoPlanEstimateDescriptor` for its id. */
+  | "mongo.plan.estimate"
+  /** A MongoDB collection profile composed as an aggregation; see `mongoTableProfileDescriptor` for its id. */
+  | "mongo.table.profile";
+
+/**
+ * The canonical operations each family's tools drive, by family. `AgentOperationId` in `tools.ts` is the core's two
+ * curated ids and every row here, so a family's ids are written once, beside the family's other types.
+ */
+export interface AgentFamilyOperationIds {
+  readonly sql: SqlOperationId;
+  readonly kubectl: KubectlOperationId;
+  readonly mongo: MongoOperationId;
+}
+
+/** kubectl's goal verifiers. */
+type KubectlVerifierId =
+  /**
+   * Resource efficiency on a cluster, the kubectl query optimization: a usage reading of this run, cited by a
+   * resources recommendation or by a report that recommends nothing.
+   *
+   * Its own id rather than a new version of the SQL one, because it is a different bar and not a revision of it:
+   * a statement and a container are different subjects, and both rules stay live side by side.
+   */
+  | "agent-query-optimization-kubectl.1"
+  /**
+   * Cluster health, the kubectl database assessment: the investigation baseline, with a workload profile counted as
+   * meaningful even when it holds no row, then at least one workload profile of this run. The report need not cite it.
+   *
+   * Its own id for the reason the kubectl optimization has one: a workload is not a table, and both rules stay live.
+   */
+  | "agent-database-assessment-kubectl.1";
+
+/**
+ * The goal verifiers each family's rules judge under, by family. `AgentGoalVerifierId` in `goal-verifier.ts` is the
+ * core's ids and every row here. SQL has none of its own: its runs are judged by the core's rules.
+ */
+export interface AgentFamilyVerifierIds {
+  readonly sql: never;
+  readonly kubectl: KubectlVerifierId;
+  /**
+   * The MongoDB query optimization, which has no `compare_plans`: an index recommendation citing a plan of this run,
+   * as `.3`'s index arm, or a report citing a plan of this run and recommending nothing, because a command whose plan
+   * already reaches its documents through an index needs no change. Under `.3` such a run was held until it
+   * recommended something, and a live run on 2026-10-17 recommended the index its plan was already using.
+   *
+   * Its own id, as the kubectl rule has one: `.3` judged MongoDB runs before this existed, and a ledger opened under
+   * it keeps that rule, while this one judges the runs opened since.
+   */
+  readonly mongo: "agent-query-optimization-mongo.1";
+}
+
+/** The operation a family's model-written reads are evaluated under: its row's `<family>.query.read`. */
+type AgentFamilyReadOperation = {
+  [F in keyof AgentFamilyOperationIds]: Extract<AgentFamilyOperationIds[F], `${F}.query.read`>;
+}[keyof AgentFamilyOperationIds];
+
 export interface AgentLanguageServerAdapter {
   /** The descriptor this language's model-written reads are evaluated under. */
-  readonly readOperation: "sql.query.read" | "kubectl.query.read" | "mongo.query.read";
+  readonly readOperation: AgentFamilyReadOperation;
   /**
    * The model's argument as the one statement text every server layer reads: the fence, the provider, the ledger
    * and the repair identity. Null for any value that carries no statement, which the caller refuses rather than

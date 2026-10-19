@@ -71,23 +71,15 @@ const SHARED_ENTRIES = new Set(
 );
 
 /**
- * The findings the core keeps on purpose, each an exact count. Every one is persisted or the spec's own map: the id
- * union `AGENT_STATEMENT_LANGUAGE` maps onto, that total map itself, and the operation and verifier ids the ledgers in
- * `tests/fixtures/agent/*.ndjson` hold.
+ * The findings the core keeps on purpose, each an exact count. Every one is the spec's own map: the id union
+ * `AGENT_STATEMENT_LANGUAGE` maps onto, and that total map itself. The operation and verifier ids a family owns are its
+ * rows in `AgentFamilyOperationIds` and `AgentFamilyVerifierIds` in `languages/pack.ts`.
  */
 const ALLOWLIST: Readonly<Record<string, number>> = Object.freeze({
   [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "kubectl"`]: 1,
   [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "mongo"`]: 1,
   [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "mongo"`]: 1,
   [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "kubectl"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "kubectl.query.read"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "mongo.query.read"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "mongo.schema.read"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "mongo.plan.estimate"`]: 1,
-  [`${AGENT}/tools.ts#AgentOperationId: R1e "mongo.table.profile"`]: 1,
-  [`${AGENT}/goal-verifier.ts#AgentGoalVerifierId: R1e "agent-query-optimization-kubectl.1"`]: 1,
-  [`${AGENT}/goal-verifier.ts#AgentGoalVerifierId: R1e "agent-database-assessment-kubectl.1"`]: 1,
-  [`${AGENT}/goal-verifier.ts#AgentGoalVerifierId: R1e "agent-query-optimization-mongo.1"`]: 1,
 });
 
 /** Declarations too wide to key an allowlist entry on: one entry would excuse a whole run loop or file. */
@@ -716,14 +708,21 @@ describe("planted violations yield exactly their findings", () => {
     expect(boundaryFindings(planted)).toEqual([`${TOOLS}#runReadQueryTool: R1e "mongo.plan.estimate"`]);
   });
 
-  test("an allowlisted id written twice fails R4 as a surplus, and one removed fails it as stale", () => {
+  test("a family's verifier id written back into the core union fails R1e", () => {
     const id = '"agent-query-optimization-kubectl.1"';
-    const key = `${GOAL_VERIFIER}#AgentGoalVerifierId: R1e ${id}`;
     expect(boundaryFindings(plantInTypeAlias(GOAL_VERIFIER, "AgentGoalVerifierId", id))).toEqual([
+      `${GOAL_VERIFIER}#AgentGoalVerifierId: R1e ${id}`,
+    ]);
+  });
+
+  test("an allowlisted id written twice fails R4 as a surplus, and one removed fails it as stale", () => {
+    const manifest = `${AGENT}/agent-manifest.ts`;
+    const id = '"kubectl"';
+    const key = `${manifest}#AgentStatementLanguageId: R1a ${id}`;
+    expect(boundaryFindings(plantInTypeAlias(manifest, "AgentStatementLanguageId", id))).toEqual([
       `R4 surplus: ${key} (found 2, allowed 1)`,
     ]);
-    const text = read(GOAL_VERIFIER);
-    const removed = { [GOAL_VERIFIER]: text.replace(`| ${id}`, "").replace(id, '"agent-renamed.1"') };
+    const removed = { [manifest]: read(manifest).replace(` | ${id}`, "") };
     expect(boundaryFindings(removed)).toEqual([`R4 stale: ${key} (found 0, allowed 1)`]);
   });
 

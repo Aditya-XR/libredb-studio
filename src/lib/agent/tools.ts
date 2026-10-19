@@ -150,6 +150,7 @@ import type { AgentRepairDenyCode, AgentRepairLedger } from "./repair-ledger";
 import { fingerprintStatement } from "./repair-ledger";
 import { statementFamilyOf } from "./languages/client";
 import { engineServerDialect, runServerPack } from "./languages/engines/server";
+import type { AgentFamilyOperationIds } from "./languages/pack";
 import {
   CURATED_CALL_LANGUAGE,
   LANGUAGE_BASE_DEFINITIONS,
@@ -231,11 +232,6 @@ export type AgentToolName =
  * require-approval for it.
  */
 export type AgentOperationId =
-  | "sql.query.read"
-  | "sql.explain.estimate"
-  | "sql.explain.analyze"
-  /** Bounded per-table profiling; #330 T3 reopened the three-descriptor decision. */
-  | "sql.table.profile"
   /**
    * A curated operational reading. The one operation on this list that carries no
    * statement — see `dbOperationsReadDescriptor` for why it needs its own id.
@@ -248,20 +244,8 @@ export type AgentOperationId =
    * because a model can ask for it.
    */
   | "db.schema.read"
-  /** One kubectl read the model wrote, on a `kubernetes` connection; see `kubectlQueryReadDescriptor` for its id. */
-  | "kubectl.query.read"
-  /** Container usage in one namespace, a curated cluster reading; see `clusterUsageReadDescriptor` for its id. */
-  | "cluster.usage.read"
-  /** One namespace's workload profile, a curated cluster reading; see `clusterWorkloadsReadDescriptor` for its id. */
-  | "cluster.workloads.read"
-  /** One MongoDB command the model wrote, on a `mongodb` connection; see `mongoQueryReadDescriptor` for its id. */
-  | "mongo.query.read"
-  /** A scoped MongoDB catalog read from the provider's own inventory; see `mongoSchemaReadDescriptor` for its id. */
-  | "mongo.schema.read"
-  /** The estimating plan of one MongoDB command; see `mongoPlanEstimateDescriptor` for its id. */
-  | "mongo.plan.estimate"
-  /** A MongoDB collection profile composed as an aggregation; see `mongoTableProfileDescriptor` for its id. */
-  | "mongo.table.profile";
+  /** Every family's own operations, one row per family in `AgentFamilyOperationIds`. */
+  | AgentFamilyOperationIds[AgentStatementLanguageId];
 
 export interface AgentToolDefinition {
   readonly name: AgentToolName;

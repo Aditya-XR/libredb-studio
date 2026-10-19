@@ -41,10 +41,10 @@
  * claims RESTED on, which is a fact about the run.
  */
 
-import { requiredVariant } from "./agent-manifest";
+import { type AgentStatementLanguageId, requiredVariant } from "./agent-manifest";
 import { mergeDisjoint } from "./disjoint-merge";
 import { composedClaims, planArtifacts, recommendsIndex, verifyInvestigationGoal } from "./goal-claims";
-import type { AgentGoalRule } from "./languages/pack";
+import type { AgentFamilyVerifierIds, AgentGoalRule } from "./languages/pack";
 import { LANGUAGE_GOAL_RULES } from "./languages/verifiers";
 import { readPlanStatement } from "./plan-draft";
 import type { AgentRunMode, AgentRunRecord, AgentRunWorkflowType } from "./types";
@@ -83,32 +83,7 @@ export type AgentGoalVerifierId =
    * different rules is exactly what a versioned id exists to prevent.
    */
   | "agent-query-optimization.3"
-  /**
-   * Resource efficiency on a cluster, the kubectl query optimization: a usage reading of this run, cited by a
-   * resources recommendation or by a report that recommends nothing.
-   *
-   * Its own id rather than a new version of the SQL one, because it is a different bar and not a revision of it:
-   * a statement and a container are different subjects, and both rules stay live side by side.
-   */
-  | "agent-query-optimization-kubectl.1"
-  /**
-   * The MongoDB query optimization, which has no `compare_plans`: an index recommendation citing a plan of this run,
-   * as `.3`'s index arm, or a report citing a plan of this run and recommending nothing, because a command whose plan
-   * already reaches its documents through an index needs no change. Under `.3` such a run was held until it
-   * recommended something, and a live run on 2026-10-17 recommended the index its plan was already using.
-   *
-   * Its own id, as the kubectl rule has one: `.3` judged MongoDB runs before this existed, and a ledger opened under
-   * it keeps that rule, while this one judges the runs opened since.
-   */
-  | "agent-query-optimization-mongo.1"
   | "agent-database-assessment.1"
-  /**
-   * Cluster health, the kubectl database assessment: the investigation baseline, with a workload profile counted as
-   * meaningful even when it holds no row, then at least one workload profile of this run. The report need not cite it.
-   *
-   * Its own id for the reason the kubectl optimization has one: a workload is not a table, and both rules stay live.
-   */
-  | "agent-database-assessment-kubectl.1"
   /**
    * Kept for the reason `agent-query-optimization.1` is kept: it shipped on `main` and
    * real runs were measured against it, so a reader of one of those ledgers holds this
@@ -133,7 +108,9 @@ export type AgentGoalVerifierId =
    * makes the union say less, not more. The moment this reaches `main`, the rule is
    * frozen and the next change to it is `.2`.
    */
-  | "agent-data-analysis.1";
+  | "agent-data-analysis.1"
+  /** Every family's own verifiers, one row per family in `AgentFamilyVerifierIds`. */
+  | AgentFamilyVerifierIds[AgentStatementLanguageId];
 
 /**
  * What a run was required to produce and did not. Deliberately a closed union of

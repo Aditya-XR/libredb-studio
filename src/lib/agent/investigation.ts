@@ -2330,15 +2330,22 @@ function narrowedToolNames(record: AgentRunRecord, since = Number.POSITIVE_INFIN
   return kept;
 }
 
-/** What an instrument writes when it worked, so a narrowed run can be asked how often it has. */
-const AGENT_INSTRUMENT_RESULT: Readonly<Partial<Record<AgentToolName, AgentRunEvent["kind"]>>> = Object.freeze({
+/** What a core instrument writes when it worked. A pack's evidence tool writes the event its own row names. */
+const CORE_INSTRUMENT_RESULT: Readonly<Partial<Record<AgentToolName, AgentRunEvent["kind"]>>> = Object.freeze({
   recommend_change: "recommendation",
   compare_plans: "plan-comparison",
   profile_table: "table-profiled",
   present_answer: "answer-composed",
-  inspect_usage: "usage-read",
-  profile_workloads: "workloads-profiled",
 });
+
+/** What an instrument writes when it worked, so a narrowed run can be asked how often it has. */
+const AGENT_INSTRUMENT_RESULT: Readonly<Partial<Record<AgentToolName, AgentRunEvent["kind"]>>> = mergeDisjoint(
+  [
+    CORE_INSTRUMENT_RESULT,
+    Object.fromEntries(Object.entries(AGENT_EVIDENCE_TOOLS).map(([name, evidence]) => [name, evidence.event])),
+  ],
+  "AGENT_INSTRUMENT_RESULT",
+);
 
 /**
  * Whether a narrowed run has used one of its kept instruments enough times to stop keeping it.
