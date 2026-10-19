@@ -31,7 +31,7 @@
 
 import { quoteIdentifier } from "@/lib/sql/identifier";
 import type { ColumnSchema, DatabaseType } from "@/lib/types";
-import { AgentComposedSqlError, MAX_CATALOG_SELECTOR_LENGTH } from "./composed-sql";
+import { AgentComposedSqlError, MAX_CATALOG_SELECTOR_LENGTH } from "./composed-sql-primitives";
 import type { AgentInventoryObject } from "./types";
 
 /**

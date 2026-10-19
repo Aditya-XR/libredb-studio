@@ -40,7 +40,9 @@
  * is no second path to an engine here.
  */
 
-import { AgentComposedSqlError, type AgentCatalogSelector, composeStatisticsAvailabilityProbe } from "./composed-sql";
+import { numeric, text } from "./catalog-rows";
+import { composeStatisticsAvailabilityProbe } from "./composed-sql";
+import { AgentComposedSqlError, type AgentCatalogSelector } from "./composed-sql-primitives";
 import { type AgentToolContext, readCatalogForGrounding, readStatementForGrounding } from "./tools";
 import { addressableObjects } from "./inventory-objects";
 import { fenceUntrustedContent } from "./untrusted-content";
@@ -106,24 +108,6 @@ const unavailable = (reasonCode: AgentStatisticsUnavailableCode): AgentSchemaSta
   kind: "unavailable",
   reasonCode,
 });
-
-/**
- * A number an engine reported, or `null` when it reported nothing readable.
- *
- * Drivers disagree about the JavaScript type of a numeric column — `pg` returns
- * `numeric` as a string — so the text form is accepted, and anything that does not
- * read as a finite number becomes absence rather than a `NaN` that would later print
- * as a row count.
- */
-function numeric(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value !== "string" || value.trim() === "") return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-const text = (value: unknown): string =>
-  typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
 
 /**
  * PostgreSQL's rows: one per (table, analysed column), and one per table with every

@@ -75,7 +75,18 @@
  */
 
 import { createHash } from "node:crypto";
-import type { AgentCatalogKind } from "./composed-sql";
+import {
+  attach,
+  type CatalogRows,
+  type ComposedKindResolver,
+  emptyTable,
+  markPrimary,
+  qualified,
+  type TableIndex,
+  text,
+  truthy,
+} from "./catalog-rows";
+import type { AgentCatalogKind } from "./composed-sql-primitives";
 import { type AgentInventoryNoun, TABLE_INVENTORY_NOUN } from "./inventory-noun";
 import { parseSqliteIndexDdl, parseSqliteTableDdl } from "./sqlite-ddl";
 import {
@@ -96,7 +107,7 @@ import { DatabaseError, ExecutionProfileError, type ExecutionProfileDenyCode } f
 import { declaredKinds } from "@/lib/db/object-kinds";
 import type { ProviderCapabilities } from "@/lib/db/types";
 import { quoteObjectPath } from "@/lib/query-generators";
-import type { ColumnSchema, DatabaseConnection, DatabaseType, ForeignKeySchema, IndexSchema } from "@/lib/types";
+import type { ColumnSchema, DatabaseConnection, DatabaseType } from "@/lib/types";
 
 /**
  * How much of a catalog a refused capture asked for, against how much it may have.
@@ -239,17 +250,6 @@ export type AgentContextCapture =
 const FALLBACK_ADVICE =
   "No schema inventory was captured for this run, so nothing about the schema has been established for you. Use inspect_schema — with a schema or table selector on a large database — before drafting a statement.";
 
-interface MutableTable {
-  readonly name: string;
-  readonly columns: ColumnSchema[];
-  readonly indexes: IndexSchema[];
-  readonly foreignKeys: ForeignKeySchema[];
-  /** The declared kind id this entry was identified as, where the catalog said. */
-  readonly kind?: string;
-}
-
-type TableIndex = Map<string, MutableTable>;
-
 /**
  * How one dialect's inventory is read: which catalog kinds to ask for, and how to
  * turn their rows into tables.
@@ -264,10 +264,7 @@ type TableIndex = Map<string, MutableTable>;
  */
 interface CatalogPlan {
   readonly kinds: readonly AgentCatalogKind[];
-  readonly build: (
-    rows: ReadonlyMap<AgentCatalogKind, readonly Record<string, unknown>[]>,
-    kindOf: ComposedKindResolver,
-  ) => TableIndex;
+  readonly build: (rows: CatalogRows, kindOf: ComposedKindResolver) => TableIndex;
 }
 
 const CATALOG_PLANS: Partial<Record<DatabaseType, CatalogPlan>> = {
@@ -315,9 +312,6 @@ const COMPOSED_KIND_WORDS: Partial<Record<DatabaseType, Readonly<Record<string, 
   postgres: { r: "table", p: "table", v: "view", m: "materialized_view", S: "sequence" },
   sqlite: { table: "table", view: "view", index: "index", trigger: "trigger" },
 };
-
-/** What a catalog row's engine word resolves to: a declared kind id, or nothing. */
-type ComposedKindResolver = (word: unknown) => string | undefined;
 
 function composedKindResolver(context: AgentToolContext): ComposedKindResolver {
   const words = COMPOSED_KIND_WORDS[context.connection.type] ?? {};
@@ -395,18 +389,6 @@ function composedKinds(
 // Reading rows
 // ============================================================================
 
-/** A row value as text. Engine drivers return numbers and booleans for some columns. */
-function text(value: unknown): string {
-  return typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
-}
-
-/** PostgreSQL booleans arrive as booleans from `pg`, and as `t`/`true` from elsewhere. */
-function truthy(value: unknown): boolean {
-  return value === true || value === "t" || value === "true" || value === 1;
-}
-
-const qualified = (schema: unknown, table: unknown): string => `${text(schema)}.${text(table)}`;
-
 /**
  * The column list a PostgreSQL column row carries, aggregated by `json_agg` (B52).
  *
@@ -442,26 +424,7 @@ function parsePostgresColumns(value: unknown): readonly Record<string, unknown>[
   return [];
 }
 
-/** Applies `change` to a known table, and drops the row when there is no such table. */
-function attach(tables: TableIndex, name: string, change: (table: MutableTable) => void): void {
-  const table = tables.get(name);
-  if (table !== undefined) change(table);
-}
-
-function markPrimary(table: MutableTable, columnName: string): void {
-  for (const column of table.columns) {
-    if (column.name === columnName) column.isPrimary = true;
-  }
-}
-
-function emptyTable(name: string): MutableTable {
-  return { name, columns: [], indexes: [], foreignKeys: [] };
-}
-
-function buildPostgresTables(
-  rows: ReadonlyMap<AgentCatalogKind, readonly Record<string, unknown>[]>,
-  kindOf: ComposedKindResolver,
-): TableIndex {
+function buildPostgresTables(rows: CatalogRows, kindOf: ComposedKindResolver): TableIndex {
   const tables: TableIndex = new Map();
 
   for (const row of rows.get("columns") ?? []) {
@@ -507,10 +470,7 @@ function buildPostgresTables(
   return tables;
 }
 
-function buildSqliteTables(
-  rows: ReadonlyMap<AgentCatalogKind, readonly Record<string, unknown>[]>,
-  kindOf: ComposedKindResolver,
-): TableIndex {
+function buildSqliteTables(rows: CatalogRows, kindOf: ComposedKindResolver): TableIndex {
   const tables: TableIndex = new Map();
 
   for (const row of rows.get("columns") ?? []) {

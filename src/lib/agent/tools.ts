@@ -132,14 +132,8 @@ import type { ColumnSchema, DatabaseConnection, QueryResult } from "@/lib/types"
 import { type ProfileTargetResolution, type ResolvedProfileTarget, resolveProfileTarget } from "./inventory-address";
 import { addressableObjects } from "./inventory-objects";
 import type { AgentInventory, AgentInventoryObject, AgentUnlistedParent, AgentUnlistedParentsNotNamed } from "./types";
-import {
-  type AgentCatalogKind,
-  AgentComposedSqlError,
-  composeCatalogRead,
-  composeEstimatingExplain,
-  type AgentEstimatingExplain,
-  withoutExtensionOwnershipTest,
-} from "./composed-sql";
+import { composeCatalogRead, composeEstimatingExplain, withoutExtensionOwnershipTest } from "./composed-sql";
+import { type AgentCatalogKind, AgentComposedSqlError, type AgentEstimatingExplain } from "./composed-sql-primitives";
 import type { AgentDeadlineDenyCode, AgentRunDeadline } from "./deadline";
 import {
   AGENT_EXECUTION_PROFILE,

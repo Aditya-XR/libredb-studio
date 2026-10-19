@@ -1,13 +1,12 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
-  AgentComposedSqlError,
   composeCatalogRead,
   composeEstimatingExplain,
   composeStatisticsAvailabilityProbe,
-  MAX_CATALOG_SELECTOR_LENGTH,
   withoutExtensionOwnershipTest,
 } from "@/lib/agent/composed-sql";
+import { AgentComposedSqlError, MAX_CATALOG_SELECTOR_LENGTH } from "@/lib/agent/composed-sql-primitives";
 import { agentReadSqlInput, inspectAgentStatement } from "@/lib/db/operations/statement-guard";
 import { AGENT_STATEMENT_LANGUAGE } from "@/lib/agent/agent-manifest";
 import { SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";

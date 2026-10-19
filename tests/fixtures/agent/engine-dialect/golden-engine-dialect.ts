@@ -20,14 +20,16 @@
  * Nothing here builds a provider or reaches a database: every entry point it calls is a pure function of its input.
  */
 import {
-  AgentComposedSqlError,
-  type AgentCatalogKind,
-  type AgentCatalogSelector,
   composeCatalogRead,
   composeEstimatingExplain,
   composeStatisticsAvailabilityProbe,
   withoutExtensionOwnershipTest,
 } from "@/lib/agent/composed-sql";
+import {
+  AgentComposedSqlError,
+  type AgentCatalogKind,
+  type AgentCatalogSelector,
+} from "@/lib/agent/composed-sql-primitives";
 import { agentPosture } from "@/lib/agent/posture";
 import { type AgentStatisticsDetail, type AgentTableEstimate, packSchemaStatistics } from "@/lib/agent/schema-stats";
 import { type AgentProfileDepth, composeTableProfile } from "@/lib/agent/table-profile";

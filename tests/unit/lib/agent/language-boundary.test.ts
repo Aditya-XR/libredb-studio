@@ -311,9 +311,14 @@ const CLIENT_FORBIDDEN = new Set([
 const isClientForbidden = (file: string): boolean =>
   CLIENT_FORBIDDEN.has(file) || file.startsWith("package:node:") || file.startsWith("package:bun:");
 const SHARED_MODULES = new Set(
-  ["tool-contracts.ts", "goal-claims.ts", "workflow-tool-sets.ts", "disjoint-merge.ts"].map(
-    (name) => `${AGENT}/${name}`,
-  ),
+  [
+    "tool-contracts.ts",
+    "goal-claims.ts",
+    "workflow-tool-sets.ts",
+    "disjoint-merge.ts",
+    "composed-sql-primitives.ts",
+    "catalog-rows.ts",
+  ].map((name) => `${AGENT}/${name}`),
 );
 
 /** The runtime import graph among the agent modules, `languages/**` included. */
