@@ -984,4 +984,18 @@ describe("an effort the model refuses is refused when the model is built, before
     expect(agentModel.effort).toBe(modelEffort);
     expect(recording.requests).toHaveLength(0);
   });
+
+  test("a model outside the SDK's table is built at an effort OpenAI refuses, so the refusal is OpenAI's", async () => {
+    // The limit docs/llms/setup.md and .env.example state. Measured on 2026-10-19: gpt-5.4-mini
+    // answers "minimal" with a 400 naming the efforts it takes, which the build cannot know.
+    const recording = recordingFetch();
+
+    const agentModel = await createAgentModel({
+      config: { provider: "openai", apiKey: "sk", model: "gpt-5.4-mini", modelEffort: "minimal" },
+      fetch: recording.fetch,
+    });
+
+    expect(agentModel.effort).toBe("minimal");
+    expect(recording.requests).toHaveLength(0);
+  });
 });

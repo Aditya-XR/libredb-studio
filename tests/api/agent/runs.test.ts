@@ -608,7 +608,8 @@ describe("POST /api/agent/runs", () => {
       const res = await POST(startRequest({ ...VALID_BODY, mode }));
       const body = await parseResponseJSON<{ error: string; code: string; missing?: unknown }>(res);
 
-      // Planning is asked too: it sends the same effort, and the gate refuses it without a model call.
+      // Planning is asked too, since it sends the same effort. This pins the route's half only: the
+      // gate's own refusal at the build, in both modes, is pinned in agent-capability-gate.test.ts.
       expect(mockAdmitAgentModel).toHaveBeenCalledWith(mode);
       expect(res.status).toBe(503);
       expect(body.error).toBe(message);
