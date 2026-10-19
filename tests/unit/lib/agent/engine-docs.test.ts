@@ -63,11 +63,16 @@ function packSection(text: string): string {
   return lines.slice(heading.index, next?.index ?? lines.length).join("\n");
 }
 
-/** The table rows of a section whose first cell is a backticked member, each as its trimmed cells joined. */
+/**
+ * Every body row of every table in a section, each as its trimmed cells joined: a table's first two lines, its header
+ * and separator, are skipped, and every other row counts, whatever its first cell holds.
+ */
 function tableRows(section: string): string[] {
-  return section
-    .split("\n")
-    .filter((line) => line.startsWith("| `"))
+  const lines = section.split("\n");
+  return lines
+    .filter(
+      (line, index) => line.startsWith("|") && lines[index - 1]?.startsWith("|") && lines[index - 2]?.startsWith("|"),
+    )
     .map((line) =>
       line
         .split("|")
@@ -181,6 +186,14 @@ describe("each check fails when the document is wrong", () => {
       "| `grounding` | Shared | Overridden |\n| `catalogCapture` | Dialect-bound |",
     );
     expect(check(planted)).toEqual(["duckdb: extra row `grounding` | Shared | Overridden"]);
+  });
+
+  test("a stray row whose first cell has no backticks is extra too", () => {
+    const planted = duckdb.replace(
+      "| `catalogCapture` | Dialect-bound |",
+      "| grounding | Shared | Overridden |\n| `catalogCapture` | Dialect-bound |",
+    );
+    expect(check(planted)).toEqual(["duckdb: extra row grounding | Shared | Overridden"]);
   });
 
   test("an override the document does not list is missing, and the no-override sentence is then false", () => {
