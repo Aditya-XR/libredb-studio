@@ -72,17 +72,30 @@ export function engineServerDialect(type: DatabaseType): AgentEngineServerDialec
   return engineServerOverlay(type).dialect ?? NO_SERVER_DIALECT;
 }
 
+/** The server facet of one engine, as `runServerPack` answers it. */
+type EngineServerFacet = Readonly<AgentLanguageServerPack & { readonly dialect?: AgentEngineServerDialect }>;
+
+/**
+ * Each engine's server facet, derived once, on its first read. A member an overlay derives from its base (`(base) =>
+ * value`) is a new object every time its function runs, so a facet derived on every read would differ on every run,
+ * and from the one `agentEnginePack` holds.
+ */
+const ENGINE_SERVER_FACETS = new Map<DatabaseType, EngineServerFacet>();
+
 /**
  * The server facet one run reads: the family its persisted `language` names (`statementFamilyOf`), with the overlay of
  * `type` applied only when `type` speaks that family. An engine with no family, or a connection re-typed after the
  * run opened, reads the family pack itself. A language this server does not know is the named error of
- * `languageServerPack`.
+ * `languageServerPack`. `agentEnginePack` reads its server facet here too, so both hand out the same object.
  */
-export function runServerPack(
-  language: AgentStatementLanguageId | undefined,
-  type: DatabaseType,
-): Readonly<AgentLanguageServerPack & { readonly dialect?: AgentEngineServerDialect }> {
+export function runServerPack(language: AgentStatementLanguageId | undefined, type: DatabaseType): EngineServerFacet {
   const family = statementFamilyOf(language);
   const base = languageServerPack(family);
-  return engineFamily(type) === family ? defineOverlay(base, engineServerOverlay(type)) : base;
+  if (engineFamily(type) !== family) return base;
+  let facet = ENGINE_SERVER_FACETS.get(type);
+  if (facet === undefined) {
+    facet = defineOverlay(base, engineServerOverlay(type));
+    ENGINE_SERVER_FACETS.set(type, facet);
+  }
+  return facet;
 }

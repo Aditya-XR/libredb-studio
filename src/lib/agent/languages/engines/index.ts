@@ -8,10 +8,9 @@
 import type { DatabaseType } from "@/lib/types";
 import { AGENT_STATEMENT_LANGUAGE } from "../../agent-manifest";
 import { agentLanguagePack } from "../index";
-import { defineOverlay } from "../overlay";
 import type { AgentEnginePack, AgentEngineType } from "../pack";
 import { engineClientPack } from "./client";
-import { engineServerOverlay } from "./server";
+import { runServerPack } from "./server";
 
 /**
  * The pack of `type`: its family pack itself when neither overlay changes a facet, otherwise a frozen pack holding the
@@ -21,7 +20,7 @@ import { engineServerOverlay } from "./server";
 export function agentEnginePack(type: DatabaseType): AgentEnginePack {
   const client = engineClientPack(type);
   const family = agentLanguagePack(AGENT_STATEMENT_LANGUAGE[type as AgentEngineType]);
-  const server = defineOverlay(family.server, engineServerOverlay(type));
+  const server = runServerPack(family.id, type);
   if (client === family.client && server === family.server) return family;
   return Object.freeze({ id: family.id, client, server, execution: family.execution });
 }

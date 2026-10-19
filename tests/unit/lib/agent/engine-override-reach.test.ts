@@ -41,6 +41,7 @@ const { forgetHeldSnapshots } = await import("@/lib/agent/context-snapshot");
 const { AgentRunDeadline } = await import("@/lib/agent/deadline");
 const { AGENT_WORKFLOW_BUDGETS } = await import("@/lib/agent/execution-policy");
 const { runInvestigation } = await import("@/lib/agent/investigation");
+const { agentEnginePack } = await import("@/lib/agent/languages/engines/index");
 const { runServerPack } = await import("@/lib/agent/languages/engines/server");
 const { MONGO_SERVER_PACK } = await import("@/lib/agent/languages/mongo/server");
 const { SQL_SERVER_PACK } = await import("@/lib/agent/languages/sql/server");
@@ -185,6 +186,13 @@ describe("an engine overlay's override", () => {
     expect(duckdb.answerNotADataRead).toBe(NOT_A_DATA_READ);
     expect(duckdb.adapter).toBe(SQL_SERVER_PACK.adapter);
     expect(duckdb.dialect).toBe(REAL_DUCKDB.DUCKDB_SERVER_OVERLAY.dialect);
+  });
+
+  test("is derived once, so every read of the engine's facet is the one the engine pack holds", () => {
+    // A derived member is a new object each time its function runs, so a facet derived on every read would be a
+    // different object on every run and never the engine pack's own.
+    expect(runServerPack(undefined, "duckdb")).toBe(runServerPack("sql", "duckdb"));
+    expect(runServerPack(undefined, "duckdb")).toBe(agentEnginePack("duckdb").server);
   });
 
   test("reaches no other engine, and no run whose record persists another family", () => {
