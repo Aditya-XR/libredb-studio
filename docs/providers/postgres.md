@@ -218,7 +218,7 @@ already gate on that, so no badge is drawn rather than a number nobody produced.
 
 A genuine `0` is kept, because an empty table is a real measurement. On a server old enough to
 write `0` instead of `-1` the two cannot be told apart, the same limit
-[schema-stats.ts](../../src/lib/agent/schema-stats.ts) documents for the agent's grounding read.
+[languages/sql/engines/postgres.ts](../../src/lib/agent/languages/sql/engines/postgres.ts) documents for the agent's grounding read.
 
 This mattered more than it looks. Measured on stock PostgreSQL 18.4, two tables holding 5000 and
 1200 rows both answered -1 until `ANALYZE` ran, and the browser showed **0 rows** for both — a
@@ -2289,7 +2289,7 @@ query has no plan* rather than as an error.
 **The read-only agent profile does not probe.** That connection's invariant is that every statement
 it runs arrives inside a `BEGIN READ ONLY` envelope, and a bare probe at connect would be the first
 statement to leave it. It would also buy nothing: the agent path composes its own EXPLAIN from
-[`composed-sql.ts`](../../src/lib/agent/composed-sql.ts) keyed on the type id, and `summarisePlan`
+the `planEstimate` of [`languages/sql/engines/postgres.ts`](../../src/lib/agent/languages/sql/engines/postgres.ts) keyed on the type id, and `summarisePlan`
 reads a plan only when that composed `EXPLAIN (FORMAT JSON)` succeeded — the case where the probe
 would have answered `postgres-json` anyway. So a profiled provider keeps the static default.
 
@@ -2561,7 +2561,8 @@ Four things about the PostgreSQL side of that layer are worth knowing here:
 - **Plan inspection uses `EXPLAIN (FORMAT JSON)`, never `EXPLAIN (ANALYZE, …)`.** The editor's
   Explain button emits the ANALYZE form deliberately (a user asked for real timings) and that form
   EXECUTES the statement, which on this engine performs a data-modifying CTE. The agent path is
-  served by [`composed-sql.ts`](../../src/lib/agent/composed-sql.ts) instead, and the executing
+  served by [`composed-sql.ts`](../../src/lib/agent/composed-sql.ts) and the `planEstimate` of
+  [`languages/sql/engines/postgres.ts`](../../src/lib/agent/languages/sql/engines/postgres.ts) instead, and the executing
   variant stays behind the approval-gated `sql.explain.analyze` descriptor that no tool reaches.
 - **The statement timeout is clamped to the run's remaining wall clock** before it reaches
   `SET LOCAL statement_timeout`, so a statement cannot outlive the run that asked for it. Here that

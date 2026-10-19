@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { parseSqliteTableDdl } from "@/lib/agent/sqlite-ddl";
+import { parseSqliteTableDdl } from "@/lib/agent/languages/sql/engines/sqlite-ddl";
 import {
   DIGIT_RUN_LENGTH,
   HIGH_NULL_RATIO,

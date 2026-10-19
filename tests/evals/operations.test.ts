@@ -72,7 +72,7 @@ describe("the operations arc, on every engine including one agent mode otherwise
       const drive = await run.drive(operationsArc);
 
       // `context-captured` appears exactly where a catalog can be read (#411): the two
-      // engines `CATALOG_PLANS` serves ground the run before its first turn, and every
+      // engines that supply a `catalogCapture` ground the run before its first turn, and every
       // other engine continues ungrounded rather than failing.
       //
       // Ungrounded is now WRITTEN DOWN rather than left as a hole (B54). The entry the
@@ -233,7 +233,7 @@ describe("an operations run is grounded in the objects its readings will name (#
 
   for (const mode of ["agent", "planning"] as const) {
     test(`mysql: a ${mode} run this server cannot ground is told so, and is not told it has an inventory`, async () => {
-      // `CATALOG_PLANS` serves PostgreSQL and SQLite; since #414 every other dialect
+      // PostgreSQL and SQLite supply a `catalogCapture`; since #414 every other dialect
       // asks its PROVIDER for the same inventory instead of refusing on the dialect.
       // This preset's provider carries only the curated readings — exactly as it did
       // before, and exactly as an engine whose provider cannot describe itself would

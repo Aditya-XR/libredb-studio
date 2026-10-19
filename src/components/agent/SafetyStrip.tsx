@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
  * Three properties are load-bearing, and each is one edit away from being lost:
  *
  *  - **The qualifier sits BESIDE the pill, never behind the ⓘ.** A bare "Executes nothing
- *    it drafts" overclaims: on the dialects `CATALOG_PLANS` serves, plan mode's grounding
+ *    it drafts" overclaims: on the dialects that supply a `catalogCapture`, plan mode's grounding
  *    capture IS a catalog read, and `engine-support.ts` says in its own header that copy
  *    compressing these facts overclaims. Both halves are on one line, and the row
  *    flex-WRAPS rather than truncating, because a qualifier cut off mid-clause is the same

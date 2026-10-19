@@ -63,6 +63,11 @@ describe("the requirement mirrors", () => {
     expect([...AGENT_REQUIREMENT_ENGINES["sql-composers"]].sort()).toEqual([...measured].sort());
   });
 
+  test("sql-composers is frozen, in this order", () => {
+    expect(AGENT_REQUIREMENT_ENGINES["sql-composers"]).toEqual(["postgres", "sqlite", "duckdb", "mssql", "mysql"]);
+    expect(Object.isFrozen(AGENT_REQUIREMENT_ENGINES["sql-composers"])).toBe(true);
+  });
+
   test.each([
     ["cluster-usage-reading", "usage"],
     ["cluster-workload-reading", "workloads"],

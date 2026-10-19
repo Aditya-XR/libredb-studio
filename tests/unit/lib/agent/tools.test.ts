@@ -3403,6 +3403,36 @@ describe("inspectSchemaTool — the server composes the catalog statement", () =
     expect(denied.acquireProvider).not.toHaveBeenCalled();
   });
 
+  /*
+    Only SQLite folds the declared schema. Every other SQL engine declares the spelling the
+    model supplied, `MAIN` included, so an allowlist naming that spelling admits it and one
+    naming the folded spelling does not.
+  */
+  test.each([
+    ["mysql", "MAIN"],
+    ["mysql", "Sales"],
+    ["mssql", "MAIN"],
+    ["mssql", "Sales"],
+    ["duckdb", "MAIN"],
+    ["duckdb", "Sales"],
+  ] as const)("on %s the schema selector %s is declared exactly as supplied", async (type, schema) => {
+    const admitted = harness({
+      connection: { ...connection, type },
+      scope: createTargetScope("conn-1", { schemas: [schema] }),
+    });
+    const denied = harness({
+      connection: { ...connection, type },
+      scope: createTargetScope("conn-1", { schemas: [schema.toLowerCase()] }),
+    });
+
+    const allowed = await inspectSchemaTool(admitted.context, { schema });
+    const refused = await inspectSchemaTool(denied.context, { schema });
+
+    expect(allowed.kind).toBe("completed");
+    if (refused.kind !== "refused") throw new Error(`expected refused, got ${refused.kind}`);
+    expect(refused.refusal).toEqual({ class: "policy-denied", reasonCode: "TARGET_OUT_OF_SCOPE" });
+  });
+
   test("arguments that do not match the tool's declared schema are a typed outcome, not a throw", async () => {
     // The declared `inputSchema` has to be load-bearing: these arguments come from a
     // model, and a caller that forgot to validate must not turn one into a raw
@@ -3543,6 +3573,72 @@ describe("readCatalog — the extension-ownership fallback retry", () => {
 
     expect(outcome.kind).toBe("refused");
     expect(h.queryReadOnly).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(["mysql", "mssql", "duckdb", "sqlite"] as const)(
+    "on %s the same error is not retried, because only PostgreSQL composes the ownership tests",
+    async (type) => {
+      const h = harness({ connection: { ...connection, type } }, async () => {
+        throw new QueryError('relation "pg_depend" does not exist', type);
+      });
+
+      const outcome = await readCatalogForGrounding(h.context, {});
+
+      expect(outcome.kind).toBe("refused");
+      expect(h.queryReadOnly).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("the retry is taken once: a second error naming the catalogs is the answer", async () => {
+    const h = harness({}, async () => {
+      throw new QueryError('relation "pg_extension" does not exist', "postgres");
+    });
+
+    const outcome = await readCatalogForGrounding(h.context, {});
+
+    expect(outcome.kind).toBe("refused");
+    expect(h.queryReadOnly).toHaveBeenCalledTimes(2);
+  });
+
+  /*
+    The retry is skipped when the rewrite changes nothing, and measured at this commit that
+    branch is never taken: every PostgreSQL kind composes both ownership tests under every
+    selector, so the rewrite always shortens the statement. Each kind's retry is pinned here
+    so a kind that one day composes none of them shows up as one call instead of two.
+  */
+  test.each(["columns", "relations", "indexes", "statistics"] as const)(
+    "the %s read carries an ownership test, so the retry sends a different statement",
+    async (kind) => {
+      let attempts = 0;
+      const h = harness({}, async () => {
+        attempts += 1;
+        if (attempts === 1) throw new QueryError('relation "pg_depend" does not exist', "postgres");
+        return queryResult();
+      });
+
+      const outcome = await readCatalogForGrounding(h.context, { kind, schema: "public", table: "orders" });
+
+      expect(outcome.kind).toBe("completed");
+      expect(h.queryReadOnly).toHaveBeenCalledTimes(2);
+      expect(h.queryReadOnly.mock.calls[0][0]).toContain("pg_depend");
+      expect(h.queryReadOnly.mock.calls[1][0]).not.toContain("pg_depend");
+    },
+  );
+
+  test("the model's own inspect_schema call takes the same retry as the grounding read", async () => {
+    let attempts = 0;
+    const h = harness({}, async () => {
+      attempts += 1;
+      if (attempts === 1) throw new QueryError('relation "pg_depend" does not exist', "postgres");
+      return queryResult();
+    });
+
+    const outcome = await inspectSchemaTool(h.context, { schema: "public" });
+
+    expect(outcome.kind).toBe("completed");
+    expect(h.queryReadOnly).toHaveBeenCalledTimes(2);
+    expect(h.queryReadOnly.mock.calls[1][0]).not.toContain("pg_depend");
+    expect(h.queryReadOnly.mock.calls[1][0]).toContain("table_schema = 'public'");
   });
 });
 
@@ -5044,6 +5140,26 @@ describe("profileTableTool — the model names a table, the server decides the r
 
     if (outcome.kind !== "unavailable") throw new Error("expected unavailable");
     expect(outcome.reasonCode).toBe("INVALID_TOOL_INPUT");
+  });
+
+  /*
+    DuckDB composes catalog reads and estimating plans but no profile (B111). The refusal
+    comes after the target is resolved, so a table the run never inventoried is still told
+    so, and an inventoried one is refused for the dialect.
+  */
+  test("on DuckDB an inventoried table is refused for the dialect, after it is resolved", () => {
+    const outcome = plan(harness({ connection: { ...connection, type: "duckdb" } }), { table: "orders" });
+
+    if (outcome.kind !== "unavailable") throw new Error("expected unavailable");
+    expect(outcome.reasonCode).toBe("INVALID_TOOL_INPUT");
+    expect(outcome.detail).toBe("UNSUPPORTED_DIALECT");
+  });
+
+  test("on DuckDB a table the run never inventoried is refused as not inventoried", () => {
+    const outcome = plan(harness({ connection: { ...connection, type: "duckdb" } }), { table: "secrets" });
+
+    if (outcome.kind !== "unavailable") throw new Error("expected unavailable");
+    expect(outcome.reasonCode).toBe("TABLE_NOT_INVENTORIED");
   });
 
   test("a column offset past the end of the table is refused rather than profiling nothing", () => {

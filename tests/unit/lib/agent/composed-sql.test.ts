@@ -1,13 +1,12 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
-  AgentComposedSqlError,
   composeCatalogRead,
   composeEstimatingExplain,
   composeStatisticsAvailabilityProbe,
-  MAX_CATALOG_SELECTOR_LENGTH,
-  withoutExtensionOwnershipTest,
 } from "@/lib/agent/composed-sql";
+import { AgentComposedSqlError, MAX_CATALOG_SELECTOR_LENGTH } from "@/lib/agent/composed-sql-primitives";
+import { withoutExtensionOwnershipTest } from "@/lib/agent/languages/sql/engines/postgres";
 import { agentReadSqlInput, inspectAgentStatement } from "@/lib/db/operations/statement-guard";
 import { AGENT_STATEMENT_LANGUAGE } from "@/lib/agent/agent-manifest";
 import { SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
@@ -193,6 +192,25 @@ describe("composeCatalogRead — SQLite", () => {
 
   test("narrows on a table selector", () => {
     expect(composeCatalogRead("sqlite", { table: "orders" })).toContain("name = 'orders'");
+  });
+
+  test("narrows every kind on a table selector, the indexes on the table they index", () => {
+    // Exact text as composed at 9a11f1252, the base of #1821 PR 2: the golden composes no SQLite read with a table.
+    const objects =
+      "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite@_%' " +
+      "ESCAPE '@' AND name = 'orders' ORDER BY type, name";
+    const selector = { schema: "MAIN", table: "orders" } as const;
+    expect(composeCatalogRead("sqlite", selector)).toBe(objects);
+    expect(composeCatalogRead("sqlite", { ...selector, kind: "relations" })).toBe(objects);
+    expect(composeCatalogRead("sqlite", { ...selector, kind: "indexes" })).toBe(
+      "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL AND name NOT LIKE " +
+        "'sqlite@_%' ESCAPE '@' AND tbl_name = 'orders' ORDER BY tbl_name, name",
+    );
+    expect(composeCatalogRead("sqlite", { ...selector, kind: "statistics" })).toBe(
+      "SELECT m.name AS table_name, s.idx AS index_name, s.stat AS stat FROM sqlite_master m LEFT JOIN sqlite_stat1 " +
+        "s ON s.tbl = m.name WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite@_%' ESCAPE '@' AND m.name = 'orders' " +
+        "ORDER BY m.name, s.idx",
+    );
   });
 
   test("accepts SQLite's only schema name and refuses any other", () => {
@@ -1141,8 +1159,8 @@ describe("the composers are reachable, which is the defect that put this file he
    *
    * It walks the shipped engines whose statement language is SQL, read from
    * `AGENT_STATEMENT_LANGUAGE`, rather than a name, because the defect was never about
-   * DuckDB: `CATALOG_COMPOSERS`' own docblock asserts that every SQL engine agent mode
-   * reads statements on has an entry here, and until this loop existed NOTHING enforced
+   * DuckDB: the docblock of `CATALOG_COMPOSERS`, now each engine overlay's `catalogRead`, asserted that
+   * every SQL engine agent mode reads statements on has an entry there, and until this loop existed NOTHING enforced
    * it - a hardcoded `"duckdb"` passes for ever while another SQL variant joins with no
    * composer and `inspect_schema`, `profile_table` and `inspect_plan` can only refuse on
    * it. Every SQL variant requires the composers; an engine whose language is not SQL
@@ -1225,7 +1243,9 @@ describe("composeCatalogRead — the agent's exclusion set cannot drift from the
       /const SYSTEM_SCHEMAS = \[([\s\S]*?)\] as const;/.exec(readSource("src/lib/db/providers/sql/postgres.ts"))?.[1],
     );
     const agentSchemas = quotedNames(
-      /const POSTGRES_SYSTEM_SCHEMAS = \[([\s\S]*?)\] as const;/.exec(readSource("src/lib/agent/composed-sql.ts"))?.[1],
+      /const POSTGRES_SYSTEM_SCHEMAS = \[([\s\S]*?)\] as const;/.exec(
+        readSource("src/lib/agent/languages/sql/engines/postgres.ts"),
+      )?.[1],
     );
 
     // Non-vacuity first: a regex that stops matching silently turns both lists
@@ -1239,7 +1259,7 @@ describe("composeCatalogRead — the agent's exclusion set cannot drift from the
       readSource("src/lib/db/providers/sql/postgres.ts"),
     )?.[1];
     const agentQuery = /const POSTGRES_EXTENSION_OWNED_SCHEMAS_SQL =([\s\S]*?);/.exec(
-      readSource("src/lib/agent/composed-sql.ts"),
+      readSource("src/lib/agent/languages/sql/engines/postgres.ts"),
     )?.[1];
 
     const normalize = (query: string | undefined): string => (query ?? "").replace(/\s+/g, " ").trim();

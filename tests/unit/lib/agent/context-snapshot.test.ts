@@ -13,6 +13,7 @@ import {
 } from "@/lib/agent/context-snapshot";
 import { AgentRunDeadline } from "@/lib/agent/deadline";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
+import { engineServerDialect } from "@/lib/agent/languages/engines/server";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import { assertPersistableState } from "@/lib/agent/state-guard";
 import type { AgentToolContext } from "@/lib/agent/tools";
@@ -2596,7 +2597,7 @@ describe("captureContextSnapshot — the object surface that says what each entr
    * curated `getSchema()` under `agent-operations`, because `agent-read-only` is refused
    * outright for a provider with no read-only statement path.
    *
-   * On a dialect `CATALOG_PLANS` serves it is not. There the ENTIRE run, grounding included,
+   * On a dialect whose `catalogCapture` is supplied it is not. There the ENTIRE run, grounding included,
    * is composed statements driven through `queryReadOnly` inside `BEGIN READ ONLY`, and
    * `postgres.ts`'s own connect path states that invariant: a provider opened under the
    * read-only profile runs every statement inside the envelope, down to declining a bare
@@ -2670,7 +2671,7 @@ describe("captureContextSnapshot — the object surface that says what each entr
  *
  * Fix round 2 took the object-surface read off this path, because the four curated
  * provider methods send their statements through `provider.query` and a dialect
- * `CATALOG_PLANS` serves runs every statement of its run inside `BEGIN READ ONLY`. What
+ * whose `catalogCapture` is supplied runs every statement of its run inside `BEGIN READ ONLY`. What
  * that cost was the KINDS, on PostgreSQL and SQLite, which are the two engines agent mode
  * executes on: an inventory reached the model with a view in it under no word at all, and
  * the gap it left is one step from the defect #414 measured.
@@ -2781,7 +2782,7 @@ describe("captureContextSnapshot — the kind, composed on the catalog path", ()
 
     `walkObjectInventory` attaches `derivedGroupings` to the relation kinds and this path
     omitted it. What made the omission safe was a precondition nothing pinned - that no
-    engine setting the flag has an entry in `COMPOSED_KIND_WORDS`, so no composed kind could
+    engine setting the flag supplies a `catalogCapture` with `kindWords`, so no composed kind could
     ever come from one - and a precondition nobody asserts is a precondition that expires
     the day someone adds an engine. Carrying the declaration deletes it. The capabilities
     below are PostgreSQL's with the flag set, which no real PostgreSQL sets: the flag is a
@@ -2878,7 +2879,7 @@ describe("captureContextSnapshot — the kind, composed on the catalog path", ()
  *
  * The composed path reads the ENGINE's word and a run must be told the PROVIDER's kind
  * id, or the run and the tree disagree about what a thing is. The right-hand side of
- * `COMPOSED_KIND_WORDS` is therefore a copy of each provider's own mapping, and a copy
+ * each engine's `catalogCapture.kindWords` is therefore a copy of its provider's own mapping, and a copy
  * that nothing checks is a copy that drifts - which is why `POSTGRES_SYSTEM_SCHEMAS` is
  * pinned the same way in `composed-sql.test.ts`. The postgres arm stays source-level,
  * because the agent side must not import a provider module; the sqlite arm asks the
@@ -2887,11 +2888,9 @@ describe("captureContextSnapshot — the kind, composed on the catalog path", ()
 describe("the composed kind vocabulary cannot drift from the provider's declaration", () => {
   const readSource = (relativePath: string): string => readFileSync(join(process.cwd(), relativePath), "utf8");
 
-  const composedMap = (dialect: string): Record<string, string> => {
-    const block = new RegExp(`const COMPOSED_KIND_WORDS[\\s\\S]*?${dialect}: \\{([^}]*)\\}`).exec(
-      readSource("src/lib/agent/context-snapshot.ts"),
-    )?.[1];
-    return Object.fromEntries([...(block ?? "").matchAll(/(\w+): "(\w+)"/g)].map((match) => [match[1], match[2]]));
+  const composedMap = (dialect: DatabaseType): Record<string, string> => {
+    const capture = engineServerDialect(dialect).catalogCapture;
+    return capture === "unsupported" ? {} : { ...capture.kindWords };
   };
 
   /**

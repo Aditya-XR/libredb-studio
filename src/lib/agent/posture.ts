@@ -17,14 +17,14 @@
  *
  *  - **Client-safe imports only** - types, `AGENT_EXECUTION_ENGINES`, the manifest's
  *    `AGENT_STATEMENT_LANGUAGE`, the language packs' client facets (`languages/client.ts`, where each
- *    language's reads, widened and hand-over sentences live), `getDBConfig` and the policy constants. A provider module here would drag `oracledb`/`mssql` toward a bundle
+ *    language's reads, widened and hand-over sentences live), the engines' client facets (`languages/engines/client.ts`), `getDBConfig` and the policy constants. A provider module here would drag `oracledb`/`mssql` toward a bundle
  *    that must not have them, which is the rule `engine-support.ts` records in its header.
  *  - **Every engine name and every number is DERIVED.** Not one is typed as a literal, and
  *    not one is a count. The point of #425 is that "7+" was written when the answer was 7
  *    and stayed while the answer became 11; the same trap is one edit away here, because
  *    each of these sentences names a set the server decides.
  *  - **The qualifier is visible, never folded into the popover.** A bare "executes nothing"
- *    overclaims: on the dialects `CATALOG_PLANS` serves, plan mode's grounding capture IS a
+ *    overclaims: on the dialects with a `catalogCapture`, plan mode's grounding capture IS a
  *    catalog read, and `engine-support.ts` says in its own header that copy compressing these
  *    facts overclaims. The strip therefore shows both halves on one line, and the popover
  *    carries the full claim rather than the missing half.
@@ -34,6 +34,7 @@ import { AGENT_STATEMENT_LANGUAGE, type AgentStatementLanguageId } from "@/lib/a
 import { AGENT_EXECUTION_ENGINES, namedList } from "@/lib/agent/engine-support";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { languageClientPack } from "@/lib/agent/languages/client";
+import { enginesSupporting } from "@/lib/agent/languages/engines/client";
 import type { StatementBudgets } from "@/lib/agent/languages/pack";
 import type { AgentRunMode, AgentRunWorkflowType } from "@/lib/agent/types";
 import { getDBConfig } from "@/lib/db-ui-config";
@@ -60,15 +61,15 @@ export interface AgentPosture {
 
 /**
  * The dialects whose grounding capture is a COMPOSED CATALOG READ rather than a request that
- * the provider describe its own schema - `CATALOG_PLANS` in `src/lib/agent/context-snapshot.ts`.
+ * the provider describe its own schema: the engines whose server `catalogCapture` is supplied.
  *
- * Mirrored rather than imported, and for the reason this module exists at all: that module
- * reaches `node:crypto` and the tool layer, so importing it would put the agent's server tree
- * behind a browser bundle. `tests/unit/lib/agent/posture.test.ts` reads the real
- * `CATALOG_PLANS` out of its source and fails if this mirror falls behind it, which is what
- * keeps a mirror from becoming a second opinion.
+ * Read from the engines' client dialects rather than the server one, and for the reason this
+ * module exists at all: the server dialect reaches the composed reads and the tool layer, so
+ * importing it would put the agent's server tree behind a browser bundle. Each client overlay
+ * is typed from its server overlay, so the two cannot disagree, and
+ * `tests/unit/lib/agent/posture.test.ts` reads the server dialect to hold the copy to it.
  */
-const CATALOG_CAPTURE_ENGINES: readonly DatabaseType[] = ["postgres", "sqlite"];
+const CATALOG_CAPTURE_ENGINES: readonly DatabaseType[] = enginesSupporting("catalogCapture");
 
 /**
  * The per-statement bounds agent mode runs under, taken from one policy row.

@@ -1643,7 +1643,8 @@ admission's own plan rows ARE the answer, so the plan a caller reads is the plan
 statement rather than a second compilation of it.
 
 That mode is how the agent's plan reading reaches this engine at all.
-`composeEstimatingExplain` ([composed-sql.ts](../../src/lib/agent/composed-sql.ts)) hands every other
+`composeEstimatingExplain` ([composed-sql.ts](../../src/lib/agent/composed-sql.ts)) reads each engine's `planEstimate`
+([languages/sql/engines/mssql.ts](../../src/lib/agent/languages/sql/engines/mssql.ts) for this one), and hands every other
 dialect a prefix and hands this one the statement unchanged with the MODE set, because `SET SHOWPLAN_ALL
 ON` must be the only statement in its batch and has to be turned off again on the same connection, and a
 prefix can say neither.

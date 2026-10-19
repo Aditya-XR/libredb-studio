@@ -4467,7 +4467,7 @@ describe("PostgresProvider", () => {
 
       // A bare probe at connect would be the first statement this connection ran
       // outside `BEGIN READ ONLY`. It buys nothing here: the agent composes its own
-      // EXPLAIN from `ESTIMATING_EXPLAIN_PREFIX` rather than from this capability.
+      // EXPLAIN from its `planEstimate` overlay member rather than from this capability.
       expect(fresh.statements.map((s) => s.text)).toEqual([]);
       expect(profiled.getCapabilities().explainFormat).toBe("postgres-json");
       await profiled.disconnect();

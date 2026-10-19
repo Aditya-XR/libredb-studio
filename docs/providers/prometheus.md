@@ -315,9 +315,9 @@ These partial records deliberately have none:
 | Record | Where | Why there is no entry |
 |---|---|---|
 | `DIALECT_TYPES` | `src/lib/export/result-export.ts` | An export's column types map SQL DDL spellings; PromQL has no DDL, so the standard spellings stand |
-| `CATALOG_PLANS`, `COMPOSED_KIND_WORDS` | `src/lib/agent/context-snapshot.ts` | Plan mode grounds Prometheus through the provider's own object surface, not through composed catalog statements |
-| `CATALOG_COMPOSERS`, `ESTIMATING_EXPLAIN_PREFIX` | `src/lib/agent/composed-sql.ts` | They serve `AGENT_EXECUTION_ENGINES`, and agent execute mode is out of scope for PromQL (#1085, section 2) |
-| `ESTIMATE_BUILDERS` | `src/lib/agent/schema-stats.ts` | Prometheus holds no table statistics a run knows how to read; its series counts are TSDB top-N figures, not estimates |
+| The engine overlays' `catalogCapture` | `src/lib/agent/languages/sql/engines/` | Plan mode grounds Prometheus through the provider's own object surface, not through composed catalog statements |
+| The engine overlays' `catalogRead`, `planEstimate` | `src/lib/agent/languages/sql/engines/` | They serve `AGENT_EXECUTION_ENGINES`, and agent execute mode is out of scope for PromQL (#1085, section 2) |
+| The engine overlays' `statistics` | `src/lib/agent/languages/sql/engines/` | Prometheus holds no table statistics a run knows how to read; its series counts are TSDB top-N figures, not estimates |
 | `ENGINE_URI_SCHEMES` | `src/lib/connection-string-parser.ts` | No connection string ([§4.5](#45-no-connection-string)) |
 | `createTable` | `src/lib/db/types.ts` (`CreateTableSpec`) | Only engines that declare a `createTable` reach the Create Table form; Prometheus declares none |
 | `SQL_GRAMMARS` | `src/lib/sql/grammar.ts` | PromQL is not SQL, and `prometheus` is in `NON_SQL_DIALECTS`. Nothing on the run path reads PromQL under a SQL grammar: the confirmation gate answers from the `prometheus` row of `NON_SQL_DESTRUCTIVE_VOCABULARY` before any SQL reading ([§5.1](#51-the-call)), the multi-statement route is taken only where `queryLanguage` is `sql`, and the provider's own `prepareQuery` returns the text unchanged |

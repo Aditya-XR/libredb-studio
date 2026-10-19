@@ -1352,7 +1352,7 @@ describe("planning mode runs no statement of the user's", () => {
 
     /*
       The honest-limits half of the design (item 6): grounding is served for the
-      dialects `CATALOG_COMPOSERS` covers — PostgreSQL and SQLite — and on any other
+      dialects that supply a `catalogCapture` — PostgreSQL and SQLite — and on any other
       engine the run is ungrounded and must KNOW it. This used to be reachable by
       simply not having read the catalog; since a plan run reads its own, the engine
       is what makes it reachable, and it is the case that still ships.
@@ -2251,7 +2251,7 @@ describe("planning mode runs no statement of the user's", () => {
         service: b.service,
         model: await modelOver(script.fetch),
         // The engine decides it: grounding is served for the dialects
-        // `CATALOG_COMPOSERS` covers, and on anything else the run has no inventory
+        // that supply a `catalogCapture`, and on anything else the run has no inventory
         // at all.
         resources: { ...b.resources, connection: { ...CONNECTION, type: "mongodb" } },
       });
@@ -2336,7 +2336,7 @@ describe("planning mode runs no statement of the user's", () => {
 
     /*
       The engine decides it, exactly as it does for every other workflow since #411:
-      `CATALOG_PLANS` serves PostgreSQL and SQLite, and on anything else an operations
+      PostgreSQL and SQLite supply a `catalogCapture`, and on anything else an operations
       plan is ungrounded and must KNOW it — otherwise the rules that keep it from
       naming tables nobody has are resting on a flag that is not honest.
     */

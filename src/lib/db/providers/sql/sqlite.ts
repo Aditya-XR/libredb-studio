@@ -365,7 +365,7 @@ const OBJECT_FOREIGN_KEYS_SQL = `
  * really registers, which `plsql`, `tsql` and `cql` are not.
  *
  * The layout of these entries is free: nothing reads them as text. The vocabulary is pinned to
- * the agent side's `COMPOSED_KIND_WORDS` by `tests/unit/lib/agent/context-snapshot.test.ts`,
+ * the agent side's `catalogCapture.kindWords` (`src/lib/agent/languages/sql/engines/sqlite.ts`) by `tests/unit/lib/agent/context-snapshot.test.ts`,
  * which asks the constructed provider for `getCapabilities().objectKinds` rather than scraping
  * this array (#981). An entry that wraps therefore cannot hide its kind from that guard, which
  * is the hole the earlier `{ id: "..."` scrape left: a fifth kind written across two lines was
