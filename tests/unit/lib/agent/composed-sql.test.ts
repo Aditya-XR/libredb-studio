@@ -194,6 +194,25 @@ describe("composeCatalogRead — SQLite", () => {
     expect(composeCatalogRead("sqlite", { table: "orders" })).toContain("name = 'orders'");
   });
 
+  test("narrows every kind on a table selector, the indexes on the table they index", () => {
+    // Exact text as composed at 9a11f1252, the base of #1821 PR 2: the golden composes no SQLite read with a table.
+    const objects =
+      "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite@_%' " +
+      "ESCAPE '@' AND name = 'orders' ORDER BY type, name";
+    const selector = { schema: "MAIN", table: "orders" } as const;
+    expect(composeCatalogRead("sqlite", selector)).toBe(objects);
+    expect(composeCatalogRead("sqlite", { ...selector, kind: "relations" })).toBe(objects);
+    expect(composeCatalogRead("sqlite", { ...selector, kind: "indexes" })).toBe(
+      "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL AND name NOT LIKE " +
+        "'sqlite@_%' ESCAPE '@' AND tbl_name = 'orders' ORDER BY tbl_name, name",
+    );
+    expect(composeCatalogRead("sqlite", { ...selector, kind: "statistics" })).toBe(
+      "SELECT m.name AS table_name, s.idx AS index_name, s.stat AS stat FROM sqlite_master m LEFT JOIN sqlite_stat1 " +
+        "s ON s.tbl = m.name WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite@_%' ESCAPE '@' AND m.name = 'orders' " +
+        "ORDER BY m.name, s.idx",
+    );
+  });
+
   test("accepts SQLite's only schema name and refuses any other", () => {
     expect(guardAccepts(composeCatalogRead("sqlite", { schema: "main" }))).toBe(true);
 
