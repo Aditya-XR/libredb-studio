@@ -733,8 +733,8 @@ script ([§12.4](#124-optional-verifying-against-a-live-oracle)) holds it agains
 
   `TO_CHAR` in the query is exact for all three.
 - **Library surface:** an in-process consumer now receives strings, not `Date` objects, for these two
-  types. The SQL export reads the text back into an Oracle literal
-  ([§5.5](#the-sql-export-writes-an-oracle-date-literal-not-an-iso-string)).
+  types. The SQL export reads the text back into an Oracle literal, and inline row editing binds `:n`
+  through the same conversion functions ([§5.5](#the-sql-export-writes-an-oracle-date-literal-not-an-iso-string)).
 
 #### `NUMBER` still loses digits, and that is a separate defect
 
@@ -1003,6 +1003,20 @@ about which fields of the `Date` are the value:
   fractional second at all. Both were measured: a `TO_TIMESTAMP` literal inserted into a `DATE`
   column is accepted and silently truncated to the whole second, so the explicit function only says
   what the column already is.
+- **Inline grid editing** ([`use-inline-editing.ts`](../../src/hooks/use-inline-editing.ts), #1807)
+  opens its editor on those same three text forms: the wall-clock text of a `DATE` or `TIMESTAMP`
+  (#1131) and the ISO instant text of a `TIMESTAMP WITH [LOCAL] TIME ZONE` over HTTP (#1224). And
+  `oracledb` binds a string parameter as `DB_TYPE_VARCHAR`, which Oracle reads into a date or
+  timestamp column through the session's `NLS_DATE_FORMAT` (`DD-MON-RR`), `NLS_TIMESTAMP_FORMAT`
+  (`DD-MON-RR HH.MI.SSXFF AM`), or `NLS_TIMESTAMP_TZ_FORMAT` (`DD-MON-RR HH.MI.SSXFF AM TZR`).
+  Measured on 26ai Free 23.26.3.0.0 (`oracledb` 26.0.0, `TZ=Europe/Istanbul`): a bare `SET "COL" = :1`
+  is refused with `ORA-01861: literal does not match format string` on `DATE` and `ORA-01843: An
+  invalid month was specified.` on `TIMESTAMP` and both zoned timestamp types. So an edit still in the
+  column's form (`oracleBoundEdit`, sharing the masks and regexes in
+  [`result-export.ts`](../../src/lib/export/result-export.ts)) binds `:n` inside `TO_DATE(:n,
+  '[S]YYYY-MM-DD HH24:MI:SS')`, `TO_TIMESTAMP(:n, '[S]YYYY-MM-DD HH24:MI:SS[.FF]')`, or
+  `FROM_TZ(TO_TIMESTAMP(:n, 'YYYY-MM-DD HH24:MI:SS.FF3'), 'UTC')` (binding `YYYY-MM-DD HH:MM:SS.sss`).
+  Text in any other shape, or in a column declared as another type, is bound as `:n` untouched.
 
 Verified end to end — read through the provider, exported, replayed into a fresh table, compared **by
 the server**. This run predates #1131, so `D` and `TS` are still the driver's `Date` in it, read by a
@@ -2221,7 +2235,7 @@ is what lets the Operations tab render those words and send an operation Oracle 
 | `supportsExplain` | **`false`** (intentionally disabled — see [Known limitations](#14-known-limitations--future-work)) |
 | `supportsExternalQueryLimiting` | `true` (from base) |
 | `createTable` | declared, see [Create Table form](#create-table-form) |
-| `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core Oracle DML |
+| `supportsInlineRowEdit` | `true` — `UPDATE t SET c = v WHERE pk = v` is core Oracle DML; an edit of a `DATE`, `TIMESTAMP`, or `TIMESTAMP WITH [LOCAL] TIME ZONE` cell still in the provider's text form binds `:n` through `TO_DATE`, `TO_TIMESTAMP`, or `FROM_TZ(TO_TIMESTAMP(:n, …), 'UTC')` ([§5.5](#the-sql-export-writes-an-oracle-date-literal-not-an-iso-string)) |
 | `supportsTestDataGeneration` | `true` - the row menus offer Generate Test Data on tables, which writes one multi-row `INSERT INTO ... VALUES`. A `DATE` value is written as `TO_DATE('2026-01-27', 'YYYY-MM-DD')` and a `TIMESTAMP` value as `TO_TIMESTAMP('2026-01-27 14:30:00', 'YYYY-MM-DD HH24:MI:SS')`, the form the SQL export writes, because the quoted ISO text is read through `NLS_DATE_FORMAT` and refused with `ORA-01861`; a `NUMBER` column is generated as an integer and written unquoted (#1400) |
 | `supportsResultPagination` | `true` — `OFFSET m ROWS FETCH NEXT n ROWS ONLY` from this provider's own `prepareQuery` override; page one is `FETCH FIRST n ROWS ONLY` (#816) |
 | `supportsTransactions` | `true` — Oracle is always in a transaction and the held connection commits or rolls back, so the trio and the SANDBOX toggle are offered (#464) |
