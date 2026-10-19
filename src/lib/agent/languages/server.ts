@@ -19,6 +19,7 @@ import { KUBECTL_SERVER_PACK } from "./kubectl/server";
 import { MONGO_SERVER_PACK } from "./mongo/server";
 import type { AgentLanguageServerAdapter, AgentLanguageServerPack } from "./pack";
 import { SQL_STATEMENT_DEFINITIONS } from "./sql/definitions";
+import { SQL_RECOMMEND_CHANGE } from "./sql/recommendation";
 import { SQL_SERVER_PACK } from "./sql/server";
 
 /**
@@ -50,6 +51,14 @@ export function languageServer(language: AgentStatementLanguageId): AgentLanguag
  * `profile_table`. `AGENT_TOOL_DEFINITIONS` spreads them first, and every family's `toolOverrides` replace them by name.
  */
 export const REFERENCE_STATEMENT_DEFINITIONS = SQL_STATEMENT_DEFINITIONS;
+
+/**
+ * The default family's `recommend_change` definition and the statement card it offers. `AGENT_TOOL_DEFINITIONS` holds
+ * the definition, and `recommendChangeTool` reads a call with the card wherever the offered definition is this one:
+ * every workflow whose family's `toolOverrides` leave `recommend_change` alone.
+ */
+export const REFERENCE_RECOMMEND_CHANGE = SQL_RECOMMEND_CHANGE;
+export const REFERENCE_RECOMMENDATION_CARD = SQL_SERVER_PACK.recommendationCard;
 
 /**
  * Every pack's base definitions, the tools only one language offers. Global by tool name, because

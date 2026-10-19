@@ -763,10 +763,14 @@ describe("planted violations yield exactly their findings", () => {
     // The manifest loads the client packs, and the verifiers load the manifest, so the verifier closure fails too.
     // `tools.ts` reads the engine server dialects, whose run resolver reads `statementFamilyOf`: a cycle closes there.
     // `tools.ts` reads `statementFamilyOf` itself too, so the shortest cycle through the client packs closes on it.
+    // The SQL statement card reads the manifest's plan operations, so a cycle closes there from both of its importers.
+    const toCard = `${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${LANGUAGES}/server.ts`;
     expect(layeringFindings(planted)).toEqual([
       `R3 client: ${clients} reaches ${TOOLS} through ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${engines} reaches ${TOOLS} through ${engines} -> ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${client} reaches ${TOOLS} through ${client} -> ${TOOLS}`,
+      `R3 cycle: ${toCard} -> ${LANGUAGES}/sql/recommendation.ts -> ${manifest}`,
+      `R3 cycle: ${toCard} -> ${LANGUAGES}/sql/server.ts -> ${LANGUAGES}/sql/recommendation.ts -> ${manifest}`,
       `R3 cycle: ${manifest} -> ${engines} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
       `R3 cycle: ${clients} -> ${client} -> ${TOOLS} -> ${clients}`,
       `R3 cycle: ${clients} -> ${client} -> ${TOOLS} -> ${LANGUAGES}/engines/server.ts -> ${clients}`,
@@ -825,9 +829,13 @@ describe("planted violations yield exactly their findings", () => {
     const toServer = `${AGENT}/agent-manifest.ts -> ${engines} -> ${client} -> ${server}`;
     // The manifest reads the engines' client dialects, and the verifiers load the manifest, so their closure fails too.
     // The run resolver reads each engine's family from `engines/client.ts`, so a cycle closes there.
+    // The SQL statement card reads the manifest's plan operations, so a cycle closes there from both of its importers.
+    const toCard = `${toServer} -> ${LANGUAGES}/server.ts`;
     expect(layeringFindings(prepend(client, 'import "../../engines/server";'))).toEqual([
       `R3 client: ${engines} reaches ${server} through ${engines} -> ${client} -> ${server}`,
       `R3 client: ${client} reaches ${server} through ${client} -> ${server}`,
+      `R3 cycle: ${toCard} -> ${LANGUAGES}/sql/recommendation.ts -> ${AGENT}/agent-manifest.ts`,
+      `R3 cycle: ${toCard} -> ${LANGUAGES}/sql/server.ts -> ${LANGUAGES}/sql/recommendation.ts -> ${AGENT}/agent-manifest.ts`,
       `R3 cycle: ${engines} -> ${client} -> ${server} -> ${engines}`,
       `R3 verifier: ${claims} reaches ${server} through ${claims} -> ${toServer}`,
       `R3 verifier: ${GOAL_VERIFIER} reaches ${server} through ${GOAL_VERIFIER} -> ${toServer}`,

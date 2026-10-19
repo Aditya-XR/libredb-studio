@@ -149,10 +149,11 @@ export interface AgentLanguageServerAdapter {
 }
 
 /**
- * A `recommend_change` card a language offers in place of the statement card: a change stated as data, for a
- * language whose change is no statement an editor runs. `recommendChangeTool` in `tools.ts` parses the call with the
- * offered definition's schema, and where that schema is this card's, it checks every evidence reference against the
- * run's ledger and refuses an unverifiable one before the card is read, so `record` only ever sees verified evidence.
+ * A `recommend_change` card: the schema a call is parsed with, and how a parsed call is recorded. SQL's statement card
+ * (`sql/recommendation.ts`) is the reference one, a change stated as a statement an editor runs; a language whose change
+ * is no such statement offers its own card, a change stated as data. `recommendChangeTool` in `tools.ts` reads a call
+ * with the card that owns the offered definition's schema, and checks every evidence reference against the run's
+ * ledger and refuses an unverifiable one before `record` is called, so `record` only ever sees verified evidence.
  */
 export interface AgentRecommendationCard<
   Card extends { readonly evidence: readonly AgentEvidenceReference[] } = {
@@ -160,6 +161,24 @@ export interface AgentRecommendationCard<
   },
 > {
   readonly inputSchema: z.ZodType<Card>;
+  /** The call as models send it, read back into the call the schema accepts before it is parsed. Absent: as sent. */
+  readonly prepare?: (input: unknown) => unknown;
+  /**
+   * What a call that did not parse is told on top of the failing paths: a worked call and the card's own shape
+   * sentence, each where the card has one. `input` is the call as sent, before `prepare`. Absent: the paths alone.
+   */
+  refuseParse?(
+    input: unknown,
+    problems: string,
+    events: readonly AgentRunEvent[],
+    modelId: string,
+  ): { readonly example: string | undefined; readonly shape: string | undefined };
+  /** A refusal of a parsed card, made before the core checks its evidence, or undefined when there is none. */
+  refuseBeforeEvidence?(
+    card: Card,
+    events: readonly AgentRunEvent[],
+    modelId: string,
+  ): AgentRecommendationOutcome | undefined;
   /** Called after the core verified the card's evidence; returns the outcome verbatim. */
   record(events: readonly AgentRunEvent[], card: Card): AgentRecommendationOutcome;
 }
@@ -248,7 +267,7 @@ export interface AgentLanguageServerPack {
    * connection is, or undefined when the message names no foreign catalog. Absent for a language with no such mistake.
    */
   readonly catalogAdvice?: (message: string, engine: string) => string | undefined;
-  /** The card this language's `recommend_change` offers instead of the statement card. Absent for SQL. */
+  /** The card this language's `recommend_change` offers. Absent for a language that offers only the reference card. */
   readonly recommendationCard?: AgentRecommendationCard;
   /** How an agent-mode run of this language is grounded in words its own tools can act on. */
   readonly grounding: AgentLanguageGrounding;
