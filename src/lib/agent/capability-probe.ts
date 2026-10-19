@@ -49,7 +49,7 @@
  * actually do — and refuses to guess at the rest.
  */
 
-import { APICallError, streamText, tool } from "ai";
+import { APICallError, streamText, ToolChoiceViolationError, tool } from "ai";
 import { z } from "zod";
 import { type LLMProviderType, LLMError, LLMStreamError } from "@/lib/llm/types";
 // The labels moved out so the rail can name a missing capability without importing
@@ -282,6 +282,11 @@ async function observeProbe(agentModel: AgentModel, abortSignal?: AbortSignal): 
         }
         break;
       case "error":
+        // The SDK enforces `toolChoice: "required"` itself (since `ai` 7.0.94) and reports an
+        // answer that finished without a tool call as an error part. That is not a failure of the
+        // request: it is the very observation the probe exists to make, and it is already recorded
+        // above as a probe tool that was never called.
+        if (ToolChoiceViolationError.isInstance(part.error)) break;
         // First failure wins: later parts describe the aftermath, not the cause.
         observation.failure = observation.failure ?? part.error;
         break;

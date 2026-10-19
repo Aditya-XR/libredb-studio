@@ -534,6 +534,56 @@ describe("mapAgentModelError maps SDK failures onto src/lib/llm's error classes"
     expect(mapped.message).toBe("kernel panic");
   });
 
+  test("a body that breaks mid-stream keeps the transport's own words", async () => {
+    // The SDK wraps a failed body read in a generic "Failed to process successful response"
+    // and keeps the socket's message only on `cause`; without it the user is told nothing.
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode(await chatCompletionStream("partial").text()));
+        controller.error(new Error("socket reset mid-stream"));
+      },
+    });
+    const broken = new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    const { model } = await createAgentModel({ config: OPENAI_CONFIG, fetch: recordingFetch(broken).fetch });
+
+    let failure: unknown;
+    const stream = streamText({ model, prompt: "ping", maxRetries: 0, onError: () => {} });
+    for await (const part of stream.fullStream) if (part.type === "error") failure ??= part.error;
+    const mapped = mapAgentModelError(failure, "ollama");
+
+    expect(mapped).toBeInstanceOf(LLMStreamError);
+    expect(mapped.message).toContain("socket reset mid-stream");
+  });
+
+  test("a cause the message already quotes is not repeated", async () => {
+    const recording: AgentFetch = async () => {
+      throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED 127.0.0.1:11434") });
+    };
+    const { model } = await createAgentModel({ config: OPENAI_CONFIG, fetch: recording });
+
+    let failure: unknown;
+    try {
+      await generateText({ model, prompt: "ping", maxRetries: 0 });
+    } catch (error) {
+      failure = error;
+    }
+    const mapped = mapAgentModelError(failure, "ollama");
+
+    expect(mapped.message).toBe("Cannot connect to API: connect ECONNREFUSED 127.0.0.1:11434");
+  });
+
+  test("a cause the SDK itself raised is not appended, since it can quote the response body", async () => {
+    const malformed = new Response("<html>not json</html>", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+    const mapped = mapAgentModelError(await sdkFailure(malformed), "custom");
+
+    expect(mapped.message).not.toContain("not json");
+  });
+
   test("every mapped failure is an LLMError, so callers need one catch shape", async () => {
     const mapped = mapAgentModelError(await sdkFailure(jsonResponse({}, 503)), "openai");
 

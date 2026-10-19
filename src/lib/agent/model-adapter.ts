@@ -13,7 +13,7 @@
  * fallbacks stay unread, is the registry's concern and is documented there.
  */
 
-import { APICallError, LoadAPIKeyError } from "ai";
+import { AISDKError, APICallError, LoadAPIKeyError } from "ai";
 import {
   type LLMConfig,
   type LLMProviderType,
@@ -70,6 +70,23 @@ export async function createAgentModel(options: AgentModelOptions = {}): Promise
 }
 
 /**
+ * An `APICallError`'s message, plus the transport's own words when only its `cause` carries them.
+ *
+ * Since `@ai-sdk/provider-utils` 5.0.33 a body that breaks mid-stream (a dropped socket, an Ollama
+ * server killed while answering) surfaces as "Failed to process successful response" with the
+ * socket's message on `cause` alone, so the user would be told nothing about what broke. Only a
+ * cause the SDK did not raise itself is appended: an SDK cause such as a JSON parse failure can
+ * quote the response body, and a cause the message already quotes ("Cannot connect to API: ...")
+ * is not repeated.
+ */
+function withTransportCause(error: APICallError): string {
+  const { cause } = error;
+  if (!(cause instanceof Error) || AISDKError.isInstance(cause)) return error.message;
+  if (error.message.includes(cause.message)) return error.message;
+  return `${error.message}: ${cause.message}`;
+}
+
+/**
  * Translate an SDK failure into this repository's error vocabulary, so the agent
  * run loop catches the same classes every other LLM caller does. Errors already
  * in that vocabulary pass through unchanged.
@@ -84,7 +101,7 @@ export function mapAgentModelError(error: unknown, provider: LLMProviderType): L
   if (APICallError.isInstance(error)) {
     if (error.statusCode === 401 || error.statusCode === 403) return new LLMAuthError(error.message, provider);
     if (error.statusCode === 429) return new LLMRateLimitError(error.message, provider);
-    return new LLMStreamError(error.message, provider);
+    return new LLMStreamError(withTransportCause(error), provider);
   }
 
   return new LLMStreamError(error instanceof Error ? error.message : String(error), provider);

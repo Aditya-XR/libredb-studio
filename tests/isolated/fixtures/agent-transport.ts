@@ -9,7 +9,7 @@
  *
  * Every fixture below was checked against the installed packages rather than
  * written from the vendors' documentation — the frame shapes here are the ones
- * `@ai-sdk/openai@4.0.37` and `@ai-sdk/google@4.0.40` actually parse.
+ * `@ai-sdk/openai@4.0.96` and `@ai-sdk/google@4.0.99` actually parse.
  *
  * `tests/isolated/agent-model-adapter.test.ts` (T4) keeps its own local copies of
  * the doubles it needs: rewriting a reviewed test file to import from here would
