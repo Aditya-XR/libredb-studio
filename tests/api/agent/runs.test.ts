@@ -20,6 +20,7 @@ import * as realGate from "@/lib/agent/capability-gate";
 import * as realDb from "@/lib/db";
 import * as realManifest from "@/lib/agent/agent-manifest";
 import { DatabaseConfigError } from "@/lib/db/errors";
+import { LLMConfigError } from "@/lib/llm/types";
 import { AgentRunStoreError } from "@/lib/agent/run-store";
 import { agentPosture } from "@/lib/agent/posture";
 import { AGENT_WORKFLOW_SENDS_STATEMENTS, type AgentRunWorkflowType } from "@/lib/agent/types";
@@ -586,6 +587,29 @@ describe("POST /api/agent/runs", () => {
     expect(res.status).toBe(422);
     expect(body.error).toContain("does not call tools");
     expect(body.missing).toEqual(["toolCalling"]);
+    expect(mockStart).not.toHaveBeenCalled();
+    expect(mockDriveAgentRun).not.toHaveBeenCalled();
+  });
+
+  /*
+    A configuration the model refuses (an `LLM_MODEL_EFFORT` the model does not take) is not
+    a capability verdict: the gate throws the configuration error, and the route answers it
+    the way every route answers one, so the rail shows the sentence and offers no other mode.
+  */
+  test("a reasoning effort the model refuses is answered as a configuration error before a run opens", async () => {
+    const message =
+      'LLM_MODEL_EFFORT "none" was refused for the model "gpt-6.1-sol" (openai). Change LLM_MODEL_EFFORT or unset it.';
+    mockAdmitAgentModel.mockImplementation(async () => {
+      throw new LLMConfigError(message, "openai");
+    });
+
+    const res = await POST(startRequest(VALID_BODY));
+    const body = await parseResponseJSON<{ error: string; code: string; missing?: unknown }>(res);
+
+    expect(res.status).toBe(503);
+    expect(body.error).toBe(message);
+    expect(body.code).toBe("LLM_CONFIG");
+    expect(body.missing).toBeUndefined();
     expect(mockStart).not.toHaveBeenCalled();
     expect(mockDriveAgentRun).not.toHaveBeenCalled();
   });

@@ -215,7 +215,9 @@ The `openai` kind posts to `{LLM_API_URL}/responses`, because GPT-6 tool calling
 Every call is sent `store: false`, so OpenAI keeps nothing a run sends, and the encrypted reasoning each turn returns is replayed with the next.
 `ollama` and `custom` stay on `{LLM_API_URL}/chat/completions`, which a self-hosted endpoint serves and the Responses API is not.
 `LLM_MODEL_EFFORT` (openai only: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`) sets the reasoning effort and wins over a model profile's quiet switch.
-An effort the configured model does not take is refused at the capability probe, and fails a Plan mode run on its first turn as `model-unavailable`, rather than being sent at another effort.
+An effort the configured model does not take is never sent at another effort.
+The capability probe raises it as a configuration error, so an agent run is refused at start with HTTP 503 and the sentence naming the efforts the model takes, not with a capability refusal that would blame the model and offer Plan mode.
+Plan mode is not probed, and fails on its first turn as `model-unavailable`.
 `agentProviderOptions` in `src/lib/agent/model-adapter.ts` is the one place these options are built.
 
 **"Configured" is a network-free check, and it has one blind spot worth naming.** `validateConfig`
@@ -2066,6 +2068,9 @@ shape what that costs:
   the probe merely failed on starts as before, so the start path gained no new way to fail — and since
   a drive now reports `model-rate-limited`, `model-unauthorized` or `model-unavailable`, those runs
   say what happened rather than sitting at `queued`.
+  The one exception is a configuration the model refused, an `LLM_MODEL_EFFORT` it does not take:
+  the probe raises it as a configuration error and the start answers `503` with its sentence, since
+  the run's first turn would raise the same one.
 - **Positive verdicts are cached for the life of the process; refusals are not.** A model that called
   a tool keeps calling tools, so that round trip is paid once. A refusal is re-probed because an
   operator can fix the server without changing the model id — an `ollama` endpoint serving something

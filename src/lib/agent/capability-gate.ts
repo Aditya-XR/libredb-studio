@@ -23,7 +23,10 @@
  * no new way to fail, because the only new refusal is one the probe positively
  * established. What happens to those runs is no longer a mystery either — since Phase A
  * a drive reports `model-rate-limited`, `model-unauthorized` or `model-unavailable`
- * rather than sitting at `queued`.
+ * rather than sitting at `queued`. The one throw that is passed on is an
+ * `LLMConfigError`, a configuration the model refused (a reasoning effort it does not
+ * take): the run's first turn would raise the same error, so the start answers it as
+ * the configuration error it is.
  *
  * **Positive verdicts are cached, and nothing else is.** A model that called a tool
  * will keep calling tools, so that round trip is worth paying once — the alternative is
@@ -45,6 +48,7 @@ import type { AgentRunMode, AgentToolProtocol } from "./types";
 import type { AgentCapabilityRefusal } from "./capability-probe";
 import { probeAgentModel } from "./capability-probe";
 import { type AgentModel, createAgentModel } from "./model-adapter";
+import { LLMConfigError } from "@/lib/llm/types";
 import { logger } from "@/lib/logger";
 
 export type AgentCapabilityGateVerdict =
@@ -116,6 +120,11 @@ export async function admitAgentModel(mode: AgentRunMode): Promise<AgentCapabili
   try {
     result = await probeAgentModel(model);
   } catch (error) {
+    // A configuration error is not inconclusive: the model refused what the configuration
+    // sends (an `LLM_MODEL_EFFORT` it does not take), and the run's first turn would raise the
+    // same error. It goes to the route, which answers it as a configuration error; a capability
+    // refusal would blame the model and offer plan mode, which sends the same configuration.
+    if (error instanceof LLMConfigError) throw error;
     // Not a verdict about the model. Logged rather than surfaced, because the run is
     // about to be started and its own failure will carry the reason.
     logger.warn("Model capability probe was inconclusive; starting the run anyway", {

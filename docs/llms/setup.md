@@ -60,7 +60,8 @@ LLM_MODEL_EFFORT=low    # optional: none, minimal, low, medium, high, xhigh, max
 
 Agent mode calls OpenAI through the Responses API with `store: false`, because GPT-6 tool calling needs that API and OpenAI then keeps nothing a run sends.
 Which efforts a model takes is the model's own: GPT-6.1 Sol and GPT-6 Astra have no `none`, and a model that does not reason (`gpt-4o`) takes none at all.
-A value the model does not take is never sent at another effort: Agent mode refuses it at the capability probe, naming the efforts the model does take, and a Plan mode run fails as `model-unavailable` with the same sentence in the server log.
+A value the model does not take is never sent at another effort: Agent mode refuses to start the run with a configuration error naming the efforts the model does take, and a Plan mode run fails as `model-unavailable` with the same sentence in the server log.
+The chat surface sends the value as it is, so there the refusal is OpenAI's own error.
 Leave the variable unset for the model's default; set with any other provider it is refused as a configuration error.
 
 Restart the server after editing the file: these are read at startup, so an edit under a running

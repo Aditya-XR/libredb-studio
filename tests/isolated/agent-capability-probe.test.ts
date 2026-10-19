@@ -11,6 +11,7 @@ import {
   type LLMConfig,
   type LLMModelEffort,
   LLMAuthError,
+  LLMConfigError,
   LLMError,
   LLMRateLimitError,
   LLMStreamError,
@@ -77,9 +78,9 @@ async function probe(config: LLMConfig, ...responses: Response[]) {
 }
 
 /** Probes against a transport that fails outright. */
-async function probeFailure(config: LLMConfig, fetchImpl: FetchDouble): Promise<unknown> {
+async function probeFailure(config: LLMConfig, fetchImpl: FetchDouble, effort?: LLMModelEffort): Promise<unknown> {
   try {
-    await probeAgentModel(await agentModelWith(config, fetchImpl));
+    await probeAgentModel(await agentModelWith(config, fetchImpl, effort));
   } catch (error) {
     return error;
   }
@@ -555,18 +556,17 @@ describe("the openai kind is probed over the Responses API with a run's own opti
     expect(refusal.capabilities.streaming).toBe(true);
   });
 
-  test("an effort the model does not take is refused at the probe, naming the effort and the model", async () => {
+  test("an effort the model does not take is raised as a configuration error, not a capability refusal", async () => {
     const recording = recordingFetch(responsesToolCallStream(PROBE_TOOL_NAME, JSON.stringify({ acknowledged: true })));
-    const refusal = refusalOf(await probeAgentModel(await agentModelWith(SOL, recording.fetch, "none")));
+    const error = await probeFailure(SOL, recording.fetch, "none");
 
-    // Refused rather than thrown as inconclusive: a thrown probe lets the run start, and the run
-    // would then fail on its first turn for a reason the probe already knew.
-    expect(refusal.provider).toBe("openai");
-    expect(refusal.modelId).toBe("gpt-6.1-sol");
-    expect(refusal.disproved).toEqual([]);
-    expect(refusal.detail).toBe(
+    // Not a refusal: a refusal names capabilities the probe could not establish and sends the
+    // operator to another model, while the probe stopped before the model said a word and the
+    // model is fine. The fix is the configuration, so the error is the configuration's.
+    expect(error).toBeInstanceOf(LLMConfigError);
+    expect((error as LLMConfigError).provider).toBe("openai");
+    expect((error as LLMConfigError).message).toBe(
       'LLM_MODEL_EFFORT "none" was refused for the model "gpt-6.1-sol" (openai): gpt-6.1-sol only supports the following reasoning efforts: low, medium, high, xhigh, max. Change LLM_MODEL_EFFORT or unset it.',
     );
-    expect(refusal.message).toContain(refusal.detail ?? "missing detail");
   });
 });

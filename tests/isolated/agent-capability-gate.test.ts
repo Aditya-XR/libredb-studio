@@ -17,7 +17,8 @@
  *     quota, a 5xx or a dropped socket — none of which say anything about the model —
  *     and the gate lets those through rather than adding a failure mode to the start
  *     path. The drive then reports them honestly (`model-rate-limited`,
- *     `model-unavailable`), which it did not do before Phase A and does now.
+ *     `model-unavailable`), which it did not do before Phase A and does now. The one
+ *     throw passed on is a configuration error the run's first turn would raise too.
  *  3. **Positive verdicts are cached; nothing else is.** A model that called a tool
  *     will keep calling tools, so paying for that round trip once is enough. A refusal
  *     is not cached because an operator can fix the server without changing the model
@@ -172,6 +173,29 @@ describe("the model gate on the start path", () => {
     const verdict = await admitAgentModel("agent");
 
     expect(verdict.kind).toBe("allowed");
+  });
+
+  test("a configuration the model refuses refuses the start, because the run would hit it on turn one", async () => {
+    // Not inconclusive: the probe established that the configured effort is refused, and
+    // a run sends the same one. Thrown rather than returned as a capability refusal so the
+    // route answers with a configuration error, which offers no other mode and blames no model.
+    const refused = new LLMConfigError(
+      'LLM_MODEL_EFFORT "none" was refused for the model "gpt-6.1-sol" (openai).',
+      "openai",
+    );
+    probeAgentModel.mockImplementation(async () => {
+      throw refused;
+    });
+
+    await expect(admitAgentModel("agent")).rejects.toBe(refused);
+
+    // Not cached either way: the next start asks again, so a fixed setting is seen at once.
+    probeAgentModel.mockImplementation(async () => ({
+      supported: true,
+      capabilities: { toolCalling: true, structuredOutput: true, streaming: true },
+    }));
+    expect((await admitAgentModel("agent")).kind).toBe("allowed");
+    expect(probeAgentModel).toHaveBeenCalledTimes(2);
   });
 
   test("a capable model is probed once, however many runs follow", async () => {
