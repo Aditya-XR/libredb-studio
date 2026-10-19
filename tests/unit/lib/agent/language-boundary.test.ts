@@ -645,6 +645,7 @@ describe("planted violations yield exactly their findings", () => {
       `R3 client: ${engines} reaches ${TOOLS} through ${engines} -> ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${client} reaches ${TOOLS} through ${client} -> ${TOOLS}`,
       `R3 cycle: ${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
+      `R3 cycle: ${manifest} -> ${engines} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
       `R3 verifier: ${claims} reaches ${TOOLS} through ${claims} -> ${toTools}`,
       `R3 verifier: ${GOAL_VERIFIER} reaches ${TOOLS} through ${GOAL_VERIFIER} -> ${toTools}`,
       `R3 verifier: ${LANGUAGES}/kubectl/verifiers.ts reaches ${TOOLS} through ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toTools}`,
@@ -696,9 +697,17 @@ describe("planted violations yield exactly their findings", () => {
     const client = `${LANGUAGES}/sql/engines/client.ts`;
     const engines = `${LANGUAGES}/engines/client.ts`;
     const server = `${LANGUAGES}/engines/server.ts`;
+    const claims = `${AGENT}/goal-claims.ts`;
+    const toServer = `${AGENT}/agent-manifest.ts -> ${engines} -> ${client} -> ${server}`;
+    // The manifest reads the engines' client dialects, and the verifiers load the manifest, so their closure fails too.
     expect(layeringFindings(prepend(client, 'import "../../engines/server";'))).toEqual([
       `R3 client: ${engines} reaches ${server} through ${engines} -> ${client} -> ${server}`,
       `R3 client: ${client} reaches ${server} through ${client} -> ${server}`,
+      `R3 verifier: ${claims} reaches ${server} through ${claims} -> ${toServer}`,
+      `R3 verifier: ${GOAL_VERIFIER} reaches ${server} through ${GOAL_VERIFIER} -> ${toServer}`,
+      `R3 verifier: ${LANGUAGES}/kubectl/verifiers.ts reaches ${server} through ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toServer}`,
+      `R3 verifier: ${LANGUAGES}/mongo/verifiers.ts reaches ${server} through ${LANGUAGES}/mongo/verifiers.ts -> ${claims} -> ${toServer}`,
+      `R3 verifier: ${LANGUAGES}/verifiers.ts reaches ${server} through ${LANGUAGES}/verifiers.ts -> ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toServer}`,
     ]);
   }, 60_000);
 

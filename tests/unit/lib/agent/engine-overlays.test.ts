@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { AGENT_STATEMENT_LANGUAGE } from "@/lib/agent/agent-manifest";
 import { composeEstimatingExplain } from "@/lib/agent/composed-sql";
 import { languageClientPack } from "@/lib/agent/languages/client";
-import { engineClientPack } from "@/lib/agent/languages/engines/client";
+import { engineClientPack, enginesSupporting } from "@/lib/agent/languages/engines/client";
 import { agentEnginePack } from "@/lib/agent/languages/engines/index";
 import { engineServerDialect, engineServerOverlay } from "@/lib/agent/languages/engines/server";
 import * as KUBECTL_CLIENT_OVERLAYS from "@/lib/agent/languages/kubectl/engines/client";
@@ -12,7 +12,7 @@ import * as MONGO_CLIENT_OVERLAYS from "@/lib/agent/languages/mongo/engines/clie
 import * as MONGODB from "@/lib/agent/languages/mongo/engines/mongodb";
 import { MONGO_PACK } from "@/lib/agent/languages/mongo/index";
 import { defineOverlay } from "@/lib/agent/languages/overlay";
-import type { AgentEngineServerDialect } from "@/lib/agent/languages/pack";
+import type { AgentEngineClientDialect, AgentEngineServerDialect } from "@/lib/agent/languages/pack";
 import { languageServerPack } from "@/lib/agent/languages/server";
 import * as SQL_CLIENT_OVERLAYS from "@/lib/agent/languages/sql/engines/client";
 import * as DUCKDB from "@/lib/agent/languages/sql/engines/duckdb";
@@ -45,6 +45,13 @@ const SERVER_DIALECT_MEMBERS: readonly (keyof AgentEngineServerDialect)[] = [
   "catalogCapture",
 ];
 
+/** The client view's members: the server members a browser asks about, each only as present or not. */
+const CLIENT_DIALECT_MEMBERS: readonly (keyof AgentEngineClientDialect)[] = [
+  "catalogRead",
+  "planEstimate",
+  "catalogCapture",
+];
+
 const ENGINE_MODULES: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
   "sql/engines/postgres": POSTGRES,
   "sql/engines/sqlite": SQLITE,
@@ -71,8 +78,17 @@ describe("the engine registry", () => {
     const language = AGENT_STATEMENT_LANGUAGE[type];
     if (language === null) {
       expect(() => engineClientPack(type)).toThrow(new Error(`no engine pack for ${type}`));
+    } else if (language === "sql") {
+      // A SQL engine's client overlay holds its client dialect, laid over SQL's own facet member for member.
+      const pack = engineClientPack(type);
+      const client = languageClientPack(language);
+      expect(Object.keys(without(pack, "dialect"))).toEqual(Object.keys(client));
+      for (const [member, value] of Object.entries(without(pack, "dialect"))) {
+        expect(value).toBe((client as unknown as Record<string, unknown>)[member]);
+      }
+      expect(pack.dialect).toBeDefined();
     } else {
-      // Every client overlay is empty, so the engine's client facet is its family's own object.
+      // A family with no client dialect gives its engines an empty overlay, so the facet is the family's own object.
       expect(engineClientPack(type)).toBe(languageClientPack(language));
     }
   });
@@ -122,6 +138,7 @@ describe("the engine packs", () => {
       expect(value).toBe((client as unknown as Record<string, unknown>)[member]);
     }
     expect(pack.server.dialect).toBe(engineServerDialect(type));
+    expect(pack.client.dialect).toBe(engineClientPack(type).dialect);
     expect(Object.isFrozen(pack)).toBe(true);
     expect(Object.isFrozen(pack.server)).toBe(true);
     expect(Object.isFrozen(pack.client)).toBe(true);
@@ -278,6 +295,50 @@ describe("engineServerDialect", () => {
   });
 });
 
+describe("the client dialect", () => {
+  const clientDialect = (type: DatabaseType): AgentEngineClientDialect => {
+    const dialect = engineClientPack(type).dialect;
+    if (dialect === undefined) throw new Error(`${type} has no client dialect`);
+    return dialect;
+  };
+
+  test("each SQL engine says which of its server members it supplies, and nothing it does not", () => {
+    expect(Object.fromEntries(SQL_ENGINES.map((type) => [type, clientDialect(type)]))).toEqual({
+      postgres: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "supported" },
+      mysql: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
+      sqlite: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "supported" },
+      duckdb: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
+      mssql: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
+    });
+    for (const type of SQL_ENGINES) expect(Object.isFrozen(clientDialect(type))).toBe(true);
+    for (const type of ["mongodb", "kubernetes"] as const) expect(engineClientPack(type).dialect).toBeUndefined();
+  });
+
+  test.each(ENGINES)("%s holds each client member exactly when its server dialect supplies it", (type) => {
+    const server = engineServerDialect(type);
+    const presence = Object.fromEntries(
+      CLIENT_DIALECT_MEMBERS.map((member) => [member, server[member] === "unsupported" ? "unsupported" : "supported"]),
+    );
+    const client = engineClientPack(type).dialect;
+    if (client === undefined) {
+      // An engine with no client dialect supplies no server member a client asks about.
+      expect(Object.values(presence).every((value) => value === "unsupported")).toBe(true);
+    } else {
+      expect({ ...client } as Record<string, string>).toEqual(presence);
+    }
+  });
+
+  test("enginesSupporting answers frozen, in registry order, the engines supplying every member asked", () => {
+    const composers = enginesSupporting("catalogRead", "planEstimate");
+    expect(composers).toEqual(["postgres", "sqlite", "duckdb", "mssql", "mysql"]);
+    expect(Object.isFrozen(composers)).toBe(true);
+    const capture = enginesSupporting("catalogCapture");
+    expect(capture).toEqual(["postgres", "sqlite"]);
+    expect(Object.isFrozen(capture)).toBe(true);
+    expect(enginesSupporting("catalogRead", "catalogCapture")).toEqual(["postgres", "sqlite"]);
+  });
+});
+
 /**
  * The estimating EXPLAIN prefix is restated in the agent rather than read from the provider (#1821 ruling 4): MySQL
  * measures its format on the agent connection too, so the format is not known until connect. What is known before
@@ -367,6 +428,7 @@ describe("the resolvers and their readers load alone", () => {
     "src/lib/agent/languages/engines/server.ts",
     "src/lib/agent/languages/engines/index.ts",
     "src/lib/agent/table-profile.ts",
+    "src/lib/agent/agent-manifest.ts",
     "src/lib/agent/posture.ts",
   ])("%s loads alone in a fresh process", (module) => {
     const run = Bun.spawnSync(

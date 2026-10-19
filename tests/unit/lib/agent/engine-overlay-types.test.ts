@@ -2,12 +2,16 @@ import { describe, expect, test } from "bun:test";
 import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { defineOverlay } from "@/lib/agent/languages/overlay";
 import type {
+  AgentEngineClientOverlay,
   AgentEngineServerOverlay,
   AgentEngineServerOverlays,
   AgentFamilyDialect,
   AgentLanguageServerAdapter,
+  ClientDialectOf,
   MemberOverride,
 } from "@/lib/agent/languages/pack";
+import type { DUCKDB_SERVER_OVERLAY } from "@/lib/agent/languages/sql/engines/duckdb";
+import type { POSTGRES_SERVER_OVERLAY } from "@/lib/agent/languages/sql/engines/postgres";
 import { SQL_SERVER_PACK } from "@/lib/agent/languages/sql/server";
 
 /**
@@ -129,6 +133,48 @@ describe("the engine overlay types", () => {
       } as const satisfies AgentEngineServerOverlay<"sql">,
     ];
     expect(fixtures).toHaveLength(12);
+  });
+
+  test("hold a client overlay to what its engine's server overlay supplies", () => {
+    type PostgresClient = { readonly dialect: ClientDialectOf<(typeof POSTGRES_SERVER_OVERLAY)["dialect"]> };
+    type DuckdbClient = { readonly dialect: ClientDialectOf<(typeof DUCKDB_SERVER_OVERLAY)["dialect"]> };
+    const fixtures: readonly unknown[] = [
+      {
+        dialect: {
+          // @ts-expect-error: PostgreSQL's server overlay reads its catalog, so its client cannot say it does not.
+          catalogRead: "unsupported",
+          planEstimate: "supported",
+          catalogCapture: "supported",
+        },
+      } as const satisfies PostgresClient,
+      {
+        dialect: {
+          catalogRead: "supported",
+          planEstimate: "supported",
+          // @ts-expect-error: DuckDB's server overlay captures no catalog, so its client cannot claim one.
+          catalogCapture: "supported",
+        },
+      } as const satisfies DuckdbClient,
+      {
+        dialect: {
+          catalogRead: "supported",
+          planEstimate: "supported",
+          catalogCapture: "supported",
+          // @ts-expect-error: a client holds only the members a browser asks about, never a server-only one.
+          statistics: "supported",
+        },
+      } as const satisfies PostgresClient,
+      {
+        // @ts-expect-error: a SQL client overlay must say every client member, `catalogCapture` included.
+        dialect: { catalogRead: "supported", planEstimate: "supported" },
+      } as const satisfies AgentEngineClientOverlay<"sql">,
+      // @ts-expect-error: a family with no client dialect takes no `dialect`.
+      { dialect: { catalogRead: "supported" } } as const satisfies AgentEngineClientOverlay<"kubectl">,
+      {
+        dialect: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
+      } as const satisfies DuckdbClient & AgentEngineClientOverlay<"sql">,
+    ];
+    expect(fixtures).toHaveLength(6);
   });
 
   test("refuse a registry that misses an engine", () => {

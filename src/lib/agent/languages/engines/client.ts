@@ -11,7 +11,7 @@ import { languageClientPack } from "../client";
 import { KUBERNETES_CLIENT_OVERLAY } from "../kubectl/engines/client";
 import { MONGODB_CLIENT_OVERLAY } from "../mongo/engines/client";
 import { defineOverlay } from "../overlay";
-import type { AgentEngineClientOverlays, AgentEnginePack, AgentEngineType } from "../pack";
+import type { AgentEngineClientDialect, AgentEngineClientOverlays, AgentEnginePack, AgentEngineType } from "../pack";
 import {
   DUCKDB_CLIENT_OVERLAY,
   MSSQL_CLIENT_OVERLAY,
@@ -37,5 +37,22 @@ const CLIENT_OVERLAYS: AgentEngineClientOverlays = Object.freeze({
 export function engineClientPack(type: DatabaseType): AgentEnginePack["client"] {
   const entry = Object.hasOwn(CLIENT_OVERLAYS, type) ? CLIENT_OVERLAYS[type as AgentEngineType] : undefined;
   if (entry === undefined) throw new Error(`no engine pack for ${type}`);
-  return defineOverlay(languageClientPack(entry.family), entry.overlay);
+  const overlay: { readonly dialect?: AgentEngineClientDialect } = entry.overlay;
+  return defineOverlay(languageClientPack(entry.family), overlay);
+}
+
+/**
+ * The engines whose client dialect says `"supported"` for every member asked, in registry order and frozen: the
+ * client's answer to which engines compose what, read from the overlays rather than restated beside them. An engine
+ * whose family has no client dialect supports none.
+ */
+export function enginesSupporting(
+  ...members: readonly [keyof AgentEngineClientDialect, ...(keyof AgentEngineClientDialect)[]]
+): readonly DatabaseType[] {
+  return Object.freeze(
+    (Object.keys(CLIENT_OVERLAYS) as AgentEngineType[]).filter((type) => {
+      const dialect: AgentEngineClientDialect | undefined = CLIENT_OVERLAYS[type].overlay.dialect;
+      return dialect !== undefined && members.every((member) => dialect[member] === "supported");
+    }),
+  );
 }

@@ -2,10 +2,11 @@
  * What agent mode knows about each engine's STATEMENT LANGUAGE, and what each workflow is on each language, as data a
  * browser bundle may hold.
  *
- * Client-safe on purpose, like `engine-support.ts`: besides types it imports only the language packs' client facets
- * (`languages/client.ts`) and the leaf `workflow-tool-sets.ts`, which are client-safe themselves, because the rail, the
- * safety strip and the posture read it, and a provider module or `node:crypto` here would reach a browser bundle. What a
- * language DOES (its fingerprint, its advice, its admission) is server code and lives in `languages/server.ts`.
+ * Client-safe on purpose, like `engine-support.ts`: besides types it imports only the language packs' and the engines'
+ * client facets (`languages/client.ts`, `languages/engines/client.ts`) and the leaf `workflow-tool-sets.ts`, which are
+ * client-safe themselves, because the rail, the safety strip and the posture read it, and a provider module or
+ * `node:crypto` here would reach a browser bundle. What a language DOES (its fingerprint, its advice, its admission) is
+ * server code and lives in `languages/server.ts`.
  *
  * `AGENT_STATEMENT_LANGUAGE` is the list of engines agent mode reads statements on, keyed by type-id so no dialect
  * comparison is written anywhere. `tests/unit/lib/agent/agent-manifest.test.ts` holds it to every provider: an engine
@@ -14,6 +15,7 @@
 import type { DatabaseType } from "@/lib/types";
 import type { AgentGoalVerifierId } from "./goal-verifier";
 import { projectClientPacks } from "./languages/client";
+import { enginesSupporting } from "./languages/engines/client";
 import type { AgentOperationId, AgentToolName } from "./tools";
 import type { AgentRunMode, AgentRunWorkflowType } from "./types";
 import { OPERATIONS_VARIANT } from "./workflow-tool-sets";
@@ -118,13 +120,15 @@ export const PLAN_ESTIMATE_OPERATIONS: ReadonlySet<string> = new Set(
 export type AgentVariantRequirement = "sql-composers" | "cluster-usage-reading" | "cluster-workload-reading";
 
 /**
- * The engines each requirement holds on. Mirrored rather than computed, for the reason `posture.ts` mirrors
- * `CATALOG_PLANS`: the registries it mirrors reach server code. `agent-manifest.test.ts` holds `sql-composers` to the
- * composer registries in `composed-sql.ts` and each cluster reading to the providers declaring `agentReadings`.
+ * The engines each requirement holds on. `sql-composers` is read from the engines' client dialects
+ * (`enginesSupporting` in `languages/engines/client.ts`), which say client-safe what each server overlay supplies:
+ * the engines that compose both a catalog read and an estimating plan. The cluster readings are mirrored, because the
+ * providers declaring `agentReadings` reach server code. `agent-manifest.test.ts` holds `sql-composers` to the
+ * composed-SQL entry points in `composed-sql.ts` and each cluster reading to those providers.
  */
 export const AGENT_REQUIREMENT_ENGINES: Readonly<Record<AgentVariantRequirement, readonly DatabaseType[]>> =
   Object.freeze({
-    "sql-composers": Object.freeze<DatabaseType[]>(["postgres", "sqlite", "duckdb", "mssql", "mysql"]),
+    "sql-composers": enginesSupporting("catalogRead", "planEstimate"),
     "cluster-usage-reading": Object.freeze<DatabaseType[]>(["kubernetes"]),
     "cluster-workload-reading": Object.freeze<DatabaseType[]>(["kubernetes"]),
   } satisfies Record<AgentVariantRequirement, readonly DatabaseType[]>);

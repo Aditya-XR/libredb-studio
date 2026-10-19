@@ -39,8 +39,8 @@ const STATEMENT_BUDGETS = AGENT_WORKFLOW_BUDGETS.investigation.policy.budgets;
  *
  * The server dialect is server tier, so a posture module that imported it would stop being
  * client-safe - which is the rule `engine-support.ts` records in its own header. So the
- * production module mirrors the set, and this reads the real one to keep the mirror honest:
- * an engine that gains a `catalogCapture` fails this file until the posture copy names it.
+ * production module reads the client dialects, and this reads the real server one to keep
+ * them honest: an engine that gains a `catalogCapture` fails this file until the copy names it.
  */
 function catalogPlanDialects(): string[] {
   return (Object.keys(manifest.AGENT_STATEMENT_LANGUAGE) as DatabaseType[]).filter(

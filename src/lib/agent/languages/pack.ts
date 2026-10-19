@@ -339,6 +339,9 @@ export interface AgentLanguagePack {
 /** What an engine overlay says of a dialect-bound member it has no verified composition for. */
 export type Unsupported = "unsupported";
 
+/** What a client overlay says of a server member: present or not, as data a browser may hold. */
+export type Supported = "supported" | Unsupported;
+
 /**
  * One member of a facet as an overlay may give it: the value itself, or a derivation from the base value. A function
  * in an overlay is always a derivation, so a member whose value is a function is only ever derived.
@@ -376,8 +379,24 @@ export interface SqlServerDialect {
   readonly catalogCapture: AgentCatalogCapture | Unsupported;
 }
 
-/** The client view of a SQL engine's dialect: nothing yet. */
-export type SqlClientDialect = Record<never, never>;
+/**
+ * The client view of a server dialect: the members a browser asks about, each only as present or not, so a client
+ * learns which engines compose a catalog read or capture without loading the composition. Typed from the server
+ * overlay itself (`languages/sql/engines/client.ts`), so a client `"unsupported"` beside a supplied member, or a
+ * `"supported"` beside an unsupported one, does not compile.
+ */
+export type ClientDialectOf<D> = {
+  readonly [K in keyof D as K extends "catalogRead" | "planEstimate" | "catalogCapture"
+    ? K
+    : never]: D[K] extends Unsupported ? Unsupported : "supported";
+};
+
+/** The client view of a SQL engine's dialect: which of its catalog read, plan estimate and catalog capture it supplies. */
+export interface SqlClientDialect {
+  readonly catalogRead: Supported;
+  readonly planEstimate: Supported;
+  readonly catalogCapture: Supported;
+}
 
 /** One explicit row per family, no default branch: a fourth `AgentStatementLanguageId` fails to compile until its row exists. */
 interface AgentFamilyDialectRows {
