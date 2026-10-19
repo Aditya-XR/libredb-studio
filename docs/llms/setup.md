@@ -49,6 +49,20 @@ LLM_API_KEY=<your key>
 The key is read server-side only. It is never sent to the browser and never written to a run's
 ledger, so a key configured here does not travel with the artefacts a run produces.
 
+OpenAI is configured the same way, and it is the one provider that also takes a reasoning effort:
+
+```bash
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-6-luna
+LLM_API_KEY=<your key>
+LLM_MODEL_EFFORT=low    # optional: none, minimal, low, medium, high, xhigh, max
+```
+
+Agent mode calls OpenAI through the Responses API with `store: false`, because GPT-6 tool calling needs that API and OpenAI then keeps nothing a run sends.
+Which efforts a model takes is the model's own: GPT-6.1 Sol and GPT-6 Astra have no `none`, and a model that does not reason (`gpt-4o`) takes none at all.
+A value the model does not take is never sent at another effort: Agent mode refuses it at the capability probe, naming the efforts the model does take, and a Plan mode run fails as `model-unavailable` with the same sentence in the server log.
+Leave the variable unset for the model's default; set with any other provider it is refused as a configuration error.
+
 Restart the server after editing the file: these are read at startup, so an edit under a running
 server changes nothing until it restarts.
 

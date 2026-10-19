@@ -715,6 +715,7 @@ bun run test:coverage
 | `LLM_API_KEY` | 否 | AI 功能的 API key |
 | `LLM_MODEL` | 否 | 模型名（例如 `gemini-2.5-flash`） |
 | `LLM_API_URL` | 否 | `ollama` 和 `custom` 的 API URL；`custom` 必填，`ollama` 默认为 `http://localhost:11434/v1` |
+| `LLM_MODEL_EFFORT` | 否 | 仅限 `openai` 的推理强度：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；不设置则使用模型默认值，用于其他 provider 时视为配置错误 |
 | `STORAGE_PROVIDER` | 否 | 存储 provider：`local`（默认）、`sqlite` 或 `postgres` |
 | `STORAGE_SQLITE_PATH` | 否 | SQLite 文件路径（例如 `/app/data/libredb-storage.db`） |
 | `STORAGE_POSTGRES_URL` | 否 | PostgreSQL 连接 URL（`STORAGE_PROVIDER=postgres` 时必填） |

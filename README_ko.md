@@ -743,6 +743,7 @@ DigitalOcean, Koyeb, Render, Railway, Sealos, CapRover 또는 Dokploy에서 클�
 | `LLM_API_KEY`               | 아니요       | AI 기능에서 사용할 API key                                                                                                                                        |
 | `LLM_MODEL`                 | 아니요       | 모델명 (예: `gemini-2.5-flash`)                                                                                                                                |
 | `LLM_API_URL`               | 아니요       | `ollama`와 `custom`에서 사용할 API URL. `custom`에서는 필수이며, `ollama`의 기본값은 `http://localhost:11434/v1`입니다.                                                         |
+| `LLM_MODEL_EFFORT`          | 아니요       | `openai` 전용 reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. 설정하지 않으면 모델 기본값을 사용하며, 다른 provider에서는 설정 오류입니다.                     |
 | `STORAGE_PROVIDER`          | 아니요       | Storage provider: `local`(기본값), `sqlite` 또는 `postgres`                                                                                                     |
 | `STORAGE_SQLITE_PATH`       | 아니요       | SQLite 파일 경로 (예: `/app/data/libredb-storage.db`)                                                                                                           |
 | `STORAGE_POSTGRES_URL`      | 아니요       | PostgreSQL Connection URL (`STORAGE_PROVIDER=postgres` 사용 시 필수)                                                                                            |

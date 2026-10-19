@@ -202,13 +202,21 @@ sets it and `WORKFLOW_TARGET_WORLD` is absent, the runtime would silently pick t
 hosted backend, so the agent refuses to start until the backend is stated explicitly.
 
 **Model configuration is the existing one.** The agent resolves its model through `src/lib/llm`'s
-own resolution (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_URL`) — the same keys that used
+own resolution (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_URL`, `LLM_MODEL_EFFORT`), the same keys that used
 to power NL2SQL, and the same resolution `src/lib/agent/config.ts` asks whether a model is configured
 at all, so there is one answer rather than two that can disagree. There is deliberately no second
 settings surface
 and no agent-specific provider variable, and the provider packages' own ambient fallbacks
 (`OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_BASE_URL`) are explicitly neutralised so
 an ambient key cannot authenticate a run against a provider nobody configured.
+
+**OpenAI is called through the Responses API; every other kind is not.**
+The `openai` kind posts to `{LLM_API_URL}/responses`, because GPT-6 tool calling lives there: GPT-6.1 Sol and GPT-6 Astra take no function tools on Chat Completions, and GPT-6 Sol and Luna take them there only without reasoning.
+Every call is sent `store: false`, so OpenAI keeps nothing a run sends, and the encrypted reasoning each turn returns is replayed with the next.
+`ollama` and `custom` stay on `{LLM_API_URL}/chat/completions`, which a self-hosted endpoint serves and the Responses API is not.
+`LLM_MODEL_EFFORT` (openai only: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`) sets the reasoning effort and wins over a model profile's quiet switch.
+An effort the configured model does not take is refused at the capability probe, and fails a Plan mode run on its first turn as `model-unavailable`, rather than being sent at another effort.
+`agentProviderOptions` in `src/lib/agent/model-adapter.ts` is the one place these options are built.
 
 **"Configured" is a network-free check, and it has one blind spot worth naming.** `validateConfig`
 requires no key for `LLM_PROVIDER=ollama` and defaults the URL to `localhost:11434`, so that
