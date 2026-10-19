@@ -2,6 +2,7 @@
  * SQL Server's server overlay (#1821): the dialect-bound members of the SQL server facet, as agent mode composes them
  * on SQL Server. Server tier, read only through `engineServerDialect` in `languages/engines/server.ts`.
  */
+import type { AgentPlanEstimate } from "../../../composed-sql-primitives";
 import type { AgentProfileComposition } from "../../../table-profile";
 import type { AgentEngineServerOverlay } from "../../pack";
 
@@ -34,6 +35,19 @@ const MSSQL_PROFILE_COMPOSITION: AgentProfileComposition = Object.freeze({
   uncountableType: /\b(text|ntext|image)\b/i,
 });
 
+/**
+ * SQL Server's estimating plan is a SESSION MODE rather than a statement prefix, so it
+ * composes no prefix at all.
+ *
+ * That is not an oversight of its dialect: T-SQL has no
+ * `EXPLAIN` keyword. Its estimating plan is `SET SHOWPLAN_ALL ON`, which must be the
+ * only statement in its batch and has to be turned off again on the SAME connection,
+ * neither of which a prefix can say. So the statement travels unchanged and the MODE
+ * says what to do with it (`ReadOnlyStatementMode`), which is a contract the provider
+ * layer already has to honour rather than a marker hidden in the text.
+ */
+const MSSQL_PLAN_ESTIMATE: AgentPlanEstimate = Object.freeze({ kind: "session-mode", mode: "estimate-plan" });
+
 export const MSSQL_SERVER_OVERLAY = {
-  dialect: Object.freeze({ profileComposition: MSSQL_PROFILE_COMPOSITION }),
+  dialect: Object.freeze({ planEstimate: MSSQL_PLAN_ESTIMATE, profileComposition: MSSQL_PROFILE_COMPOSITION }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

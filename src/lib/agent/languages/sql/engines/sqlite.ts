@@ -2,6 +2,7 @@
  * SQLite's server overlay (#1821): the dialect-bound members of the SQL server facet, as agent mode composes them on
  * SQLite. Server tier, read only through `engineServerDialect` in `languages/engines/server.ts`.
  */
+import type { AgentPlanEstimate } from "../../../composed-sql-primitives";
 import type { AgentProfileComposition } from "../../../table-profile";
 import type { AgentEngineServerOverlay } from "../../pack";
 
@@ -15,6 +16,9 @@ const SQLITE_PROFILE_COMPOSITION: AgentProfileComposition = Object.freeze({
   incomparableType: /\b(jsonb?|xml|point|line|lseg|box|path|polygon|circle)\b/i,
 });
 
+/** `EXPLAIN QUERY PLAN` reports the plan the compiler produced, without running it. */
+const SQLITE_PLAN_ESTIMATE: AgentPlanEstimate = Object.freeze({ kind: "prefix", prefix: "EXPLAIN QUERY PLAN" });
+
 export const SQLITE_SERVER_OVERLAY = {
-  dialect: Object.freeze({ profileComposition: SQLITE_PROFILE_COMPOSITION }),
+  dialect: Object.freeze({ planEstimate: SQLITE_PLAN_ESTIMATE, profileComposition: SQLITE_PROFILE_COMPOSITION }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

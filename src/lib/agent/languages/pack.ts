@@ -9,6 +9,7 @@ import type {
   AgentStatementLanguageId,
   AgentWorkflowVariant,
 } from "../agent-manifest";
+import type { AgentPlanEstimate } from "../composed-sql-primitives";
 import type { AgentGoalShortfall, VerifiableAgentRun } from "../goal-verifier";
 import type { AgentInventoryNoun } from "../inventory-noun";
 import type { PlanStatementIdentifiers } from "../plan-statement";
@@ -361,6 +362,8 @@ export type AgentEngineFamily<T extends AgentEngineType> = NonNullable<(typeof A
  * member, so an engine that composes nothing has to say so.
  */
 export interface SqlServerDialect {
+  /** The estimating plan request (`composeEstimatingExplain` in `composed-sql.ts`). */
+  readonly planEstimate: AgentPlanEstimate | Unsupported;
   /** The `profile_table` composition (`composeTableProfile` in `table-profile.ts`). */
   readonly profileComposition: AgentProfileComposition | Unsupported;
 }

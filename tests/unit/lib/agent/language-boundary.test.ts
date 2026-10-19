@@ -707,15 +707,17 @@ describe("planted violations yield exactly their findings", () => {
     const server = `${LANGUAGES}/engines/server.ts`;
     const index = `${LANGUAGES}/sql/index.ts`;
     const profile = `${AGENT}/table-profile.ts`;
-    const toIndex = `${profile} -> ${server} -> ${postgres} -> ${index}`;
+    const composed = `${AGENT}/composed-sql.ts`;
+    const toIndex = `${server} -> ${postgres} -> ${index}`;
     expect(layeringFindings(prepend(postgres, 'import "../index";'))).toEqual([
-      `R3 cycle: ${server} -> ${postgres} -> ${index} -> ${TOOLS} -> ${profile} -> ${server}`,
-      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${toIndex}`,
-      `R3 server: ${server} reaches ${index} through ${server} -> ${postgres} -> ${index}`,
+      `R3 cycle: ${composed} -> ${server} -> ${postgres} -> ${index} -> ${TOOLS} -> ${composed}`,
+      `R3 server: ${composed} reaches ${index} through ${composed} -> ${toIndex}`,
+      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${composed} -> ${toIndex}`,
+      `R3 server: ${server} reaches ${index} through ${toIndex}`,
       `R3 server: ${postgres} reaches ${index} through ${postgres} -> ${index}`,
-      `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${TOOLS} -> ${toIndex}`,
-      `R3 server: ${profile} reaches ${index} through ${toIndex}`,
-      `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${toIndex}`,
+      `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${composed} -> ${toIndex}`,
+      `R3 server: ${profile} reaches ${index} through ${profile} -> ${toIndex}`,
+      `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${composed} -> ${toIndex}`,
     ]);
   }, 60_000);
 
@@ -728,6 +730,15 @@ describe("planted violations yield exactly their findings", () => {
     ]);
     // The overlays read the core through type-only imports, which load nothing.
     expect(read(postgres)).toContain('import type { AgentProfileComposition } from "../../../table-profile";');
+  }, 60_000);
+
+  test("the plan dispatcher imported at run time by an engine overlay closes a cycle", () => {
+    const postgres = `${LANGUAGES}/sql/engines/postgres.ts`;
+    const server = `${LANGUAGES}/engines/server.ts`;
+    const composed = `${AGENT}/composed-sql.ts`;
+    expect(layeringFindings(prepend(postgres, 'import "../../../composed-sql";'))).toEqual([
+      `R3 cycle: ${composed} -> ${server} -> ${postgres} -> ${composed}`,
+    ]);
   }, 60_000);
 
   test("an engine server overlay imported by a language verifier fails the verifier closure", () => {

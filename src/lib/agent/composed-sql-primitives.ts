@@ -21,6 +21,14 @@ export interface AgentEstimatingExplain {
   readonly mode: ReadOnlyStatementMode;
 }
 
+/**
+ * How an engine asks for its estimating plan: a statement prefix, or a session mode the provider sets around the
+ * statement it is given unchanged (`composeEstimatingExplain` in `composed-sql.ts`).
+ */
+export type AgentPlanEstimate =
+  | { readonly kind: "prefix"; readonly prefix: string }
+  | { readonly kind: "session-mode"; readonly mode: "estimate-plan" };
+
 export type AgentComposedSqlDenyCode =
   /**
    * This dialect has no verified composition. `CATALOG_COMPOSERS` in `composed-sql.ts` is the list, and it

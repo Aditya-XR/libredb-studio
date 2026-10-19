@@ -39,7 +39,10 @@ const SERVER_OVERLAYS: AgentEngineServerOverlays = Object.freeze({
 } satisfies AgentEngineServerOverlays);
 
 /** What an engine with no dialect answers: every member unsupported. */
-const NO_SERVER_DIALECT: AgentEngineServerDialect = Object.freeze({ profileComposition: "unsupported" });
+const NO_SERVER_DIALECT: AgentEngineServerDialect = Object.freeze({
+  planEstimate: "unsupported",
+  profileComposition: "unsupported",
+});
 
 /** What an engine with no overlay holds: nothing, so its server facet is its family's own. */
 const NO_SERVER_OVERLAY: { readonly dialect?: AgentEngineServerDialect } = Object.freeze({});

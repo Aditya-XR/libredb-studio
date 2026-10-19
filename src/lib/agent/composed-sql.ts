@@ -44,6 +44,7 @@ import {
   assertSelector,
   equalsClause,
 } from "./composed-sql-primitives";
+import { engineServerDialect } from "./languages/engines/server";
 import type { DatabaseType } from "@/lib/types";
 
 /**
@@ -1056,47 +1057,6 @@ export function composeStatisticsAvailabilityProbe(dialect: DatabaseType): strin
 }
 
 /**
- * The dialect's estimating EXPLAIN prefix. Every form here DESCRIBES without running:
- * PostgreSQL's `EXPLAIN` executes only with `ANALYZE`, SQLite's `EXPLAIN QUERY PLAN`
- * reports the plan the compiler produced, and DuckDB's `EXPLAIN (FORMAT JSON)` answers
- * the physical plan without touching a row.
- *
- * DuckDB's executing form is not merely unhelpful, it is a hazard: measured on v1.5.5,
- * `EXPLAIN ANALYZE` RUNS the statement (a probe table went from 0 rows to 1), and its
- * JSON variant answers `{"result": "error"}` rather than a plan. So the estimating form
- * is the only one this layer will ever compose for it, whatever a later version does to
- * the JSON.
- */
-const ESTIMATING_EXPLAIN_PREFIX: Partial<Record<DatabaseType, string>> = {
-  postgres: "EXPLAIN (FORMAT JSON)",
-  sqlite: "EXPLAIN QUERY PLAN",
-  duckdb: "EXPLAIN (FORMAT JSON)",
-  // One spelling for MySQL and MariaDB: both accept `EXPLAIN FORMAT=JSON` with no
-  // privilege beyond SELECT (measured as the least-privilege account on 26.7.0 and
-  // 13.0.2), and the JSON shapes differ (`query_plan` on MySQL, `query_block` on
-  // MariaDB) without either refusing the prefix. `EXPLAIN ANALYZE` is deliberately
-  // not composed: it EXECUTES, see `withoutEstimatingPrefix`.
-  mysql: "EXPLAIN FORMAT=JSON",
-};
-
-/**
- * The engines whose estimating plan is a SESSION MODE rather than a statement prefix,
- * and which therefore compose no prefix at all.
- *
- * SQL Server is the only one, and it is not an oversight of its dialect: T-SQL has no
- * `EXPLAIN` keyword. Its estimating plan is `SET SHOWPLAN_ALL ON`, which must be the
- * only statement in its batch and has to be turned off again on the SAME connection,
- * neither of which a prefix can say. So the statement travels unchanged and the MODE
- * says what to do with it (`ReadOnlyStatementMode`), which is a contract the provider
- * layer already has to honour rather than a marker hidden in the text.
- *
- * Kept as a separate set rather than as a sentinel VALUE in the map above, so that the
- * refusal below still means what it says: a dialect absent from BOTH is a dialect whose
- * estimating plan nobody has verified, and it is refused rather than guessed at.
- */
-const ESTIMATING_EXPLAIN_SESSION_MODE: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mssql"]);
-
-/**
  * The catalog statement for this dialect and selector.
  *
  * The result is a bounded read like any other: it carries no LIMIT, so a schema
@@ -1128,22 +1088,28 @@ export function composeCatalogRead(dialect: DatabaseType, selector: AgentCatalog
  * model smuggled in is refused with the prefix already attached. Composing it first
  * and letting the guard refuse it is deliberate — one place decides what a
  * statement may be.
+ *
+ * The form is the engine's `planEstimate` (`languages/sql/engines/<id>.ts`): a prefix that
+ * DESCRIBES without running, or a session mode the statement travels under unchanged. An
+ * engine that declares it `"unsupported"` is one whose estimating plan nobody has verified,
+ * and it is refused rather than guessed at.
  */
 export function composeEstimatingExplain(dialect: DatabaseType, sql: string): AgentEstimatingExplain {
   const statement = typeof sql === "string" ? sql.trim() : "";
   if (statement.length === 0) {
     throw new AgentComposedSqlError("there is no statement to explain", "INVALID_STATEMENT");
   }
-  if (ESTIMATING_EXPLAIN_SESSION_MODE.has(dialect)) {
-    return { sql: withoutEstimatingPrefix(statement), mode: "estimate-plan" };
-  }
-  if (!Object.hasOwn(ESTIMATING_EXPLAIN_PREFIX, dialect)) {
+  const estimate = engineServerDialect(dialect).planEstimate;
+  if (estimate === "unsupported") {
     throw new AgentComposedSqlError(
       `no verified estimating EXPLAIN for provider type "${dialect}"`,
       "UNSUPPORTED_DIALECT",
     );
   }
-  return { sql: `${ESTIMATING_EXPLAIN_PREFIX[dialect]} ${withoutEstimatingPrefix(statement)}`, mode: "execute" };
+  if (estimate.kind === "session-mode") {
+    return { sql: withoutEstimatingPrefix(statement), mode: estimate.mode };
+  }
+  return { sql: `${estimate.prefix} ${withoutEstimatingPrefix(statement)}`, mode: "execute" };
 }
 
 /** Whether this dialect has a verified catalog composition for every kind. The manifest's `sql-composers` mirror is pinned to it. */
@@ -1153,7 +1119,7 @@ export function composesCatalogFor(dialect: DatabaseType): boolean {
 
 /** Whether this dialect has a verified estimating plan, as a prefix or as a session mode. */
 export function composesEstimatingExplainFor(dialect: DatabaseType): boolean {
-  return ESTIMATING_EXPLAIN_SESSION_MODE.has(dialect) || Object.hasOwn(ESTIMATING_EXPLAIN_PREFIX, dialect);
+  return engineServerDialect(dialect).planEstimate !== "unsupported";
 }
 
 /**

@@ -20,22 +20,36 @@ describe("the engine overlay types", () => {
   test("refuse an overlay that leaves a member out, widens one, or reaches past its dialect", () => {
     const fixtures: readonly unknown[] = [
       // @ts-expect-error: a SQL overlay must say every dialect-bound member, `profileComposition` included.
-      { dialect: {} } as const satisfies AgentEngineServerOverlay<"sql">,
-      // @ts-expect-error: `undefined` is neither a composition nor "unsupported".
-      { dialect: { profileComposition: undefined } } as const satisfies AgentEngineServerOverlay<"sql">,
+      { dialect: { planEstimate: "unsupported" } } as const satisfies AgentEngineServerOverlay<"sql">,
+      // @ts-expect-error: a SQL overlay must say every dialect-bound member, `planEstimate` included.
+      { dialect: { profileComposition: "unsupported" } } as const satisfies AgentEngineServerOverlay<"sql">,
+      {
+        dialect: {
+          planEstimate: "unsupported",
+          // @ts-expect-error: `undefined` is neither a composition nor "unsupported".
+          profileComposition: undefined,
+        },
+      } as const satisfies AgentEngineServerOverlay<"sql">,
+      {
+        dialect: {
+          // @ts-expect-error: a session mode is the estimating plan's own, never a prefix's.
+          planEstimate: { kind: "prefix", mode: "estimate-plan" },
+          profileComposition: "unsupported",
+        },
+      } as const satisfies AgentEngineServerOverlay<"sql">,
       // @ts-expect-error: a family with no dialect-bound member takes no `dialect`.
       { dialect: { profileComposition: "unsupported" } } as const satisfies AgentEngineServerOverlay<"mongo">,
       {
-        dialect: { profileComposition: "unsupported" },
+        dialect: { planEstimate: "unsupported", profileComposition: "unsupported" },
         // @ts-expect-error: a Shared member is not overridable from an engine overlay (ruling 2).
         grounding: {},
       } as const satisfies AgentEngineServerOverlay<"sql">,
     ];
-    expect(fixtures).toHaveLength(4);
+    expect(fixtures).toHaveLength(6);
   });
 
   test("refuse a registry that misses an engine", () => {
-    const sql = { dialect: { profileComposition: "unsupported" } } as const;
+    const sql = { dialect: { planEstimate: "unsupported", profileComposition: "unsupported" } } as const;
     // @ts-expect-error: the registry is total over the engines that speak a statement language, mysql included.
     const missing: AgentEngineServerOverlays = {
       postgres: sql,
@@ -66,7 +80,7 @@ describe("the engine overlay types", () => {
 
   test("accept 'unsupported' for every member, and a dialect laid over a family facet", () => {
     const unsupported = {
-      dialect: { profileComposition: "unsupported" },
+      dialect: { planEstimate: "unsupported", profileComposition: "unsupported" },
     } as const satisfies AgentEngineServerOverlay<"sql">;
     const overlaid = defineOverlay(SQL_SERVER_PACK, { dialect: unsupported.dialect });
     expect(overlaid.dialect).toBe(unsupported.dialect);

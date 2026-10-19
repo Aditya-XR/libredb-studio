@@ -2,6 +2,7 @@
  * MySQL's server overlay (#1821): the dialect-bound members of the SQL server facet, as agent mode composes them on
  * MySQL and MariaDB. Server tier, read only through `engineServerDialect` in `languages/engines/server.ts`.
  */
+import type { AgentPlanEstimate } from "../../../composed-sql-primitives";
 import type { AgentProfileComposition } from "../../../table-profile";
 import type { AgentEngineServerOverlay } from "../../pack";
 
@@ -33,6 +34,15 @@ const MYSQL_PROFILE_COMPOSITION: AgentProfileComposition = Object.freeze({
   incomparableType: /\b\B/,
 });
 
+/**
+ * One spelling for MySQL and MariaDB: both accept `EXPLAIN FORMAT=JSON` with no
+ * privilege beyond SELECT (measured as the least-privilege account on 26.7.0 and
+ * 13.0.2), and the JSON shapes differ (`query_plan` on MySQL, `query_block` on
+ * MariaDB) without either refusing the prefix. `EXPLAIN ANALYZE` is deliberately
+ * not composed: it EXECUTES, see `withoutEstimatingPrefix` in `composed-sql.ts`.
+ */
+const MYSQL_PLAN_ESTIMATE: AgentPlanEstimate = Object.freeze({ kind: "prefix", prefix: "EXPLAIN FORMAT=JSON" });
+
 export const MYSQL_SERVER_OVERLAY = {
-  dialect: Object.freeze({ profileComposition: MYSQL_PROFILE_COMPOSITION }),
+  dialect: Object.freeze({ planEstimate: MYSQL_PLAN_ESTIMATE, profileComposition: MYSQL_PROFILE_COMPOSITION }),
 } as const satisfies AgentEngineServerOverlay<"sql">;
