@@ -50,6 +50,7 @@
  */
 
 import { generateText } from "ai";
+import { LLMConfigError } from "@/lib/llm/types";
 import { logger } from "@/lib/logger";
 import type { AgentRunWorkflowType } from "./types";
 import { DEFAULT_AGENT_WORKFLOW_TYPE } from "./types";
@@ -205,11 +206,19 @@ export async function classifyAgentWorkflow(
   } catch (error) {
     // An unconfigured provider is not a classification failure, and it is not this
     // module's to report: the run the user is starting will reach the same
-    // configuration moments later and fail with its own, better message.
-    logger.warn("No model to classify the objective with; the run opens as an unclassified investigation", {
-      route: "agent/workflow-classifier",
-      error: error instanceof Error ? error.name : "unknown",
-    });
+    // configuration moments later and fail with its own, better message. A refused effort
+    // still has a model, so it gets its own sentence; the error's message stays out of the
+    // log either way.
+    const effortRefused = error instanceof LLMConfigError && error.reason === "effort_refused";
+    logger.warn(
+      effortRefused
+        ? "The configured LLM_MODEL_EFFORT was refused for the model, so the objective was not classified; the run opens as an unclassified investigation"
+        : "No model to classify the objective with; the run opens as an unclassified investigation",
+      {
+        route: "agent/workflow-classifier",
+        error: error instanceof Error ? error.name : "unknown",
+      },
+    );
     return UNCLASSIFIED;
   }
 

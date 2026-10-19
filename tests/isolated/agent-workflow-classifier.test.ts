@@ -12,7 +12,8 @@
  * shared module poisons every other file sharing its process.
  */
 
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { logger } from "@/lib/logger";
 import { LLMConfigError, LLMStreamError } from "@/lib/llm/types";
 import type { AgentModel } from "@/lib/agent/model-adapter";
 
@@ -282,6 +283,48 @@ describe("everything that can go wrong resolves to an unclassified investigation
 
     expect(await classifyAgentWorkflow("anything")).toEqual(FALLBACK as never);
     expect(generateText).not.toHaveBeenCalled();
+  });
+
+  describe("a model that cannot be built logs why", () => {
+    const ROUTE = { route: "agent/workflow-classifier" };
+    let warn: ReturnType<typeof spyOn<typeof logger, "warn">>;
+
+    beforeEach(() => {
+      warn = spyOn(logger, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    test("a reasoning effort the configured model refuses is logged as that, not as a missing model", async () => {
+      createAgentModel.mockImplementation(async () => {
+        throw new LLMConfigError('LLM_MODEL_EFFORT "none" is not one gpt-6.1-sol takes', "openai", "effort_refused");
+      });
+
+      expect(await classifyAgentWorkflow("anything")).toEqual(FALLBACK as never);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "The configured LLM_MODEL_EFFORT was refused for the model, so the objective was not classified; the run opens as an unclassified investigation",
+        { ...ROUTE, error: "LLMConfigError" },
+      );
+    });
+
+    test.each([
+      ["missing credentials", new LLMConfigError("no api key", "openai", "missing_credentials")],
+      ["a config error with no reason", new LLMConfigError("no model", "openai")],
+      ["any other error", new LLMStreamError("no api key", "gemini")],
+    ])("%s keeps the no-model sentence", async (_, error) => {
+      createAgentModel.mockImplementation(async () => {
+        throw error;
+      });
+
+      expect(await classifyAgentWorkflow("anything")).toEqual(FALLBACK as never);
+      expect(warn).toHaveBeenCalledWith(
+        "No model to classify the objective with; the run opens as an unclassified investigation",
+        { ...ROUTE, error: error.name },
+      );
+    });
   });
 
   test("a caller that has already cancelled never reaches a verdict either", async () => {

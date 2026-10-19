@@ -805,10 +805,11 @@ describe("the workflow classifier sends a run's options too", () => {
 
       expect(classification).toEqual({ workflowType: "investigation", outcome: "unclassified" });
       // Why it fell back: the model was refused when it was built, so there was nothing to ask.
-      // The start that follows answers the same configuration error with its sentence.
+      // The start that follows answers the same configuration error with its sentence, and the
+      // log says the effort was refused rather than that no model is configured.
       expect(recording.requests).toHaveLength(0);
       expect(warn).toHaveBeenCalledWith(
-        "No model to classify the objective with; the run opens as an unclassified investigation",
+        "The configured LLM_MODEL_EFFORT was refused for the model, so the objective was not classified; the run opens as an unclassified investigation",
         { route: "agent/workflow-classifier", error: "LLMConfigError" },
       );
     } finally {
