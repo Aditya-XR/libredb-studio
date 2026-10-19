@@ -709,8 +709,8 @@ another's.
 **String literals double the quote and read a backslash as data.** Measured: `SELECT 'a''b'` → `a'b`;
 `SELECT 'a\\b'` → the two characters `a\b`; `SELECT 'a\'b'` is a `parsing_exception` at the character
 *after* the backslash, which is only possible if the `\` did not escape the quote. Hence
-`elasticsearch: "standard"` in `LITERAL_ESCAPE` ([`src/lib/sql/values.ts`](../../src/lib/sql/values.ts)) — and note
-the fork does **both** forms, so the two ids do not share that row either.
+`escapeLiteral: literalStandard` in `ELASTICSEARCH_SQL_WRITING` ([`elasticsearch-sql-writing.ts`](../../src/lib/db/providers/sql/search/elasticsearch-sql-writing.ts)) — and note
+the fork does **both** forms, so the two ids do not share that answer either.
 
 **`_id` is not a column.** `SELECT _id FROM probe_orders` answers `verification_exception`, "Unknown
 column [_id], did you mean [id]?". The fork returns it. So the document identity is not portable
@@ -1505,6 +1505,23 @@ lives on the card that does not render (measured in the browser, 2026-08-19).
 [`TableItem.tsx`](../../src/components/schema-explorer/TableItem.tsx) now asks for both an addressable
 row **and** a declared maintenance capability.
 
+### SQL writing
+
+[`search/elasticsearch-sql-writing.ts`](../../src/lib/db/providers/sql/search/elasticsearch-sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalStandard` and read back by `unquoteStandard`: the quote is doubled and a backslash is data.
+A name is quoted by `identifierDoubleQuoted`, the SQL standard form: a double-quoted name with an inner double quote doubled.
+There is no placeholder (`placeholder: null`), so a generator quotes the value with `quoteLiteral` instead of emitting a bind.
+Elasticsearch doubles the quote and reads a backslash as data.
+Measured on 9.1.4 (2026-08-19): `SELECT 'a''b'` answers `a'b`; `SELECT 'a\\b'` answers the two characters `a\b`; `SELECT 'a\'b'` is a `parsing_exception` at the character after the backslash, which is only possible if the `\` did not escape the quote that closed the literal; and `SELECT 'a\'` returns `a\`.
+The name quote is measured as well: `FROM "probe_orders"` and `SELECT "note.keyword"` both answer 200, and a backtick is refused outright.
+Elasticsearch 9.1.4 is the exact opposite of OpenSearch, answering a backtick with "backquoted identifiers not supported; please use double quotes instead", so the two search ids cannot share a form.
+Both search endpoints do bind `?` (measured: Elasticsearch takes `{"query":"… WHERE id = ?","params":[1]}`, OpenSearch takes a `parameters` array of `{type,value}` objects, both HTTP 200), but they spell the request differently and the provider's seam carries the statement alone, so its `query()` refuses positional parameters outright.
+Emitting `?` would produce a statement whose placeholder the provider then declines to fill.
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`, and binds every edit as typed.
+
+The module's `export` field writes a result export's CREATE TABLE and INSERT from the shared building blocks alone: `STANDARD_DDL_TYPES` for the column types, `NOTHING_STANDS_ALONE` and `NO_BARE_SPELLING`, so every bare declared name is re-spelled from its family, `NULL_NON_FINITE` for NaN and the infinities, and `binaryStandardHex` for a binary cell (`X'0102'`).
+The SQL endpoint parses no CREATE TABLE, so a file written from it is meant to run somewhere else, and every bare name in it is re-spelled from its family, portably.
+
 ---
 
 ## 10. Error handling
@@ -1769,7 +1786,7 @@ The refusal reason it prints, verbatim:
 - Interface & DTOs: [`src/lib/db/types.ts`](../../src/lib/db/types.ts)
 - Errors: [`src/lib/db/errors.ts`](../../src/lib/db/errors.ts)
 - Connection form config: [`src/lib/db-ui-config.ts`](../../src/lib/db-ui-config.ts)
-- Dialect facts elsewhere in the codebase: `ELASTICSEARCH_GRAMMAR` in [`src/lib/db/providers/sql/search/elasticsearch-sql-grammar.ts`](../../src/lib/db/providers/sql/search/elasticsearch-sql-grammar.ts) (`#`, `[`, block comments) · `quoteIdentifier()` in [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) (double quotes) · `LITERAL_ESCAPE` in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) (literal escaping) · [`src/lib/sql/fence-tags.ts`](../../src/lib/sql/fence-tags.ts) (the fence tag)
+- Dialect facts elsewhere in the codebase: `ELASTICSEARCH_GRAMMAR` in [`src/lib/db/providers/sql/search/elasticsearch-sql-grammar.ts`](../../src/lib/db/providers/sql/search/elasticsearch-sql-grammar.ts) (`#`, `[`, block comments) · `quoteIdentifier()` in [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) (double quotes) · `ELASTICSEARCH_SQL_WRITING` in [`elasticsearch-sql-writing.ts`](../../src/lib/db/providers/sql/search/elasticsearch-sql-writing.ts) (literal escaping) · [`src/lib/sql/fence-tags.ts`](../../src/lib/sql/fence-tags.ts) (the fence tag)
 - Local cluster: [`database-compose.yml`](../../database-compose.yml) (`elasticsearch` service, 9200)
 - Tests: [`tests/integration/db/elasticsearch-provider.test.ts`](../../tests/integration/db/elasticsearch-provider.test.ts) · [`tests/unit/db/search/`](../../tests/unit/db/search/)
 - API contract: [`docs/API_DOCS.md`](../API_DOCS.md)

@@ -1658,6 +1658,19 @@ grid speak a dialect the cluster does not. The maintenance labels are irrelevant
 stay as inherited rather than naming operations that do not exist. `selectAction` ("Select Top 50")
 and the generate action are inherited unchanged and are correct for Druid.
 
+### SQL writing
+
+[`druid/sql-writing.ts`](../../src/lib/db/providers/sql/druid/sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalStandard` and read back by `unquoteStandard`: the quote is doubled and a backslash is data.
+A name is quoted by `identifierDoubleQuoted`, the SQL standard form: a double-quoted name with an inner double quote doubled.
+A bind is spelled by `placeholderQuestion`, as `?` at every position.
+Druid quotes a string with single quotes and puts its backslash escapes in the separate `U&'fo\00F6'` form, so a backslash in a plain literal is data.
+Druid binds a `parameters` array against `?`, live-verified when the provider was written ([`index.ts`](../../src/lib/db/providers/sql/druid/index.ts)).
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`, and binds every edit as typed.
+
+The module's `export` field writes a result export's CREATE TABLE and INSERT from the shared building blocks alone: `STANDARD_DDL_TYPES` for the column types, `NOTHING_STANDS_ALONE` and `NO_BARE_SPELLING`, so every bare declared name is re-spelled from its family, `NULL_NON_FINITE` for NaN and the infinities, and `binaryStandardHex` for a binary cell (`X'0102'`).
+Druid takes no INSERT at all without the MSQ extension, so every bare name in a file written from it is re-spelled from its family, portably.
+
 ---
 
 ## 10. Error handling

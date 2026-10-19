@@ -538,13 +538,13 @@ round, a string exporting as text and a number as a float. All three execution p
 ### 5.5 What the SQL INSERT export writes for a BIT
 
 `mssql` returns a BIT as a JS boolean, and T-SQL has no boolean literal: an exported `true` is `Msg 207: Invalid column name 'true'`, and that fails the whole batch.
-The SQL INSERT export writes a boolean as `1` / `0` for this dialect (#1386, [`typed-literals.ts`](../../src/lib/export/typed-literals.ts)).
+The SQL INSERT export writes a boolean as `1` / `0` for this dialect (#1386, `typedLiteral` in [`mssql-sql-writing.ts`](../../src/lib/db/providers/sql/mssql-sql-writing.ts)).
 Dates need nothing: the ISO text a `Date` becomes (`2024-12-31T23:59:59.997Z`) replays into `datetime`, `datetime2`, `smalldatetime`, `datetimeoffset` and `date`.
 The one exception is the engine text `datetime` and `smalldatetime` are read as since #1452 ([§5.3](#53-data-type--parameter-handling)): those two types read `yyyy-mm-dd hh:mi:ss` through the session's DATEFORMAT, so the export writes that text with its space as a `T` (`N'2026-10-04T12:34:56.123'`), the ISO 8601 form every DATEFORMAT reads the same.
 Measured 2026-10-08 on SQL Server 2022 CU27 (16.0.4295.3), the same two rows read through the provider, exported and replayed under `SET LANGUAGE us_english` and `british`: written with the space, `2026-10-04 12:34:56.123` came back as `2026-04-10` under `british` and `2026-10-25 23:59:59.997` was refused as out of range; written with the `T`, both came back equal under both languages, as they did under `Deutsch`, `Français` and `Japanese` in a direct `CAST`.
 A `datetime2` and a `date` text are written as they are, since those two read `yyyy-mm-dd` the same under every DATEFORMAT.
 
-The inline grid edit opens its editor on that same text and binds the edit as an nvarchar parameter, which those two types also read through DATEFORMAT, so [`use-inline-editing.ts`](../../src/hooks/use-inline-editing.ts) binds an edit still in that form with its space as a `T` too, by the same `MSSQL_DATETIME_TEXT`. A `datetime2` edit, and text in any other shape, is bound as typed.
+The inline grid edit opens its editor on that same text and binds the edit as an nvarchar parameter, which those two types also read through DATEFORMAT, so the inline edit's `boundEdit` in [`sql/mssql-sql-writing.ts`](../../src/lib/db/providers/sql/mssql-sql-writing.ts) binds an edit still in that form with its space as a `T` too, by the same `MSSQL_DATETIME_TEXT`. A `datetime2` edit, and text in any other shape, is bound as typed.
 Measured 2026-10-12 on SQL Server 2022 CU27 (16.0.4295.3), the hook's own `UPDATE … SET [dt] = @p1 WHERE [id] = @p2` with `SET LANGUAGE british` in the same call: `2026-10-04 12:34:57.123` was stored as `2026-04-10` and `2026-10-25 23:59:58.997` was refused as out of range, a `smalldatetime` the same, and each of them with the `T` was stored as written.
 This provider's own sessions read `mdy` today whatever the login's default language: tedious opens every connection with `set dateformat mdy` and `set language us_english`, and `query()` runs each statement through `sp_executesql`, so a `SET LANGUAGE` a user runs ends with that statement (measured on the same server with a login whose default language is `british`). The `T` keeps the edit correct without leaning on that driver default.
 
@@ -1505,6 +1505,32 @@ SERVER STATE permission."* The monitoring Queries panel's empty state was hardco
 `pg_stat_statements` advice on every engine (#463); `getSlowQueries()` here reads
 that DMV ([§8](#8-monitoring--health)) and returns `[]` when the read is refused, so the permission
 is the thing a DBA can act on.
+
+### SQL writing
+
+[`sql/mssql-sql-writing.ts`](../../src/lib/db/providers/sql/mssql-sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalUnicode` and read back by `unquoteUnicode`: the quote is doubled, a backslash is data, and the `N` prefix decides that the server reads the text as Unicode.
+A name is quoted by `identifierBracket`: a bracketed name with an inner `]` doubled.
+A bind is spelled by `placeholderAtP`, as `@p1`, `@p2`.
+SQL Server parses a bare literal in the database's collation code page and only an `N`-prefixed one as Unicode, so the prefix is not decoration: every catalog name in `sys` is `sysname`, which is `nvarchar(128)`.
+Measured on SQL Server 2022 CU26, database AdventureWorks2022, collation `SQL_Latin1_General_CP1_CI_AS` (code page 1252), with schemas `Müşteri` and `Müsteri` both present: `SELECT 'Müşteri'` answers `Müsteri`, because `ş` (U+015F) is not in 1252 and the server best-fits it to `s`.
+So `… WHERE s.name = 'Müşteri'` matched `Müsteri.Siparis`, the wrong object, while `… WHERE s.name = N'Müşteri'` matched `Müşteri.Sipariş`.
+With no `Müsteri` present the bare form matched nothing at all.
+Both failures are silent, which is why this dialect does not share the standard literal: the escaping is the same, the code page is not.
+The mssql provider registers its inputs as `p1`, `p2`, … which the statement spells `@p1`, `@p2`.
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`.
+Its `boundEdit` binds a `datetime` or `smalldatetime` edit still in the provider's `yyyy-mm-dd hh:mi:ss[.mmm]` text (#1452) with its space as a `T`, because the nvarchar parameter reaches those two types through the session's DATEFORMAT.
+Measured 2026-10-12 on SQL Server 2022 CU27 (16.0.4295.3), the inline edit's own `UPDATE … SET [dt] = @p1` under `british`: `2026-10-04 12:34:57.123` was stored as April 10th and `2026-10-25 23:59:58.997` was refused as out of range, while the same text with a `T` was stored as written, and a `smalldatetime` the same ([§5.5](#55-what-the-sql-insert-export-writes-for-a-bit)).
+Every other edit is bound as typed.
+
+The module's `export` field spells a result export's column types through `ddlTypes`: `NVARCHAR(MAX)`, `BIGINT`, `FLOAT`, `BIT`, `DATETIME2` and `VARBINARY(MAX)`, since SQL Server has no `BOOLEAN`, `BLOB` is not a T-SQL type name at all, and `IMAGE` has been deprecated since 2005.
+Each name in `standsAlone` was measured, one `CREATE TABLE probe (c <name>)` per name on SQL Server 2022 CU26, read back out of `INFORMATION_SCHEMA.COLUMNS`, and is listed only because SQL Server both accepted it and stored it unnarrowed.
+`nvarchar` is absent because it came back as length 1.
+SQL Server's `timestamp` is absent because it is not a moment in time at all: measured, `CREATE TABLE t (c timestamp)` on 2022 CU26 creates a `rowversion`, which no INSERT may name, so keeping a foreign engine's `timestamp` would produce a file that parses and then fails on its own INSERT.
+A binary cell is written by `binaryZeroX`: measured on SQL Server 2022, `SELECT CONVERT(varchar(64), 0x0102deadbeef, 2)` answers `0102DEADBEEF`, `DATALENGTH(0x)` answers 0, so the empty case is spelled, and `SELECT X'0102'` is `Msg 207 … Invalid column name 'X'`.
+`typedLiteral` writes a boolean as `1` / `0`, because T-SQL has no boolean literal: `true` parses as a column name (`Msg 207: Invalid column name 'true'`, measured on SQL Server 2025 17.0.5005.3) and fails the whole batch.
+It writes a `datetime` or `smalldatetime` cell's `yyyy-mm-dd hh:mi:ss[.mmm]` text with a `T` for the space (#1452), because those two types read the space form through the session's DATEFORMAT: measured on SQL Server 2022 CU27 (16.0.4295.3), under `british`, `Deutsch` and `Français` `'2026-10-04 12:34:56.123'` is stored as April 10th and `'2026-10-25 …'` is refused, while the `T` form is October 4th under those and under `us_english` and `Japanese`.
+`NO_BARE_SPELLING` and `NULL_NON_FINITE` complete it.
 
 ---
 

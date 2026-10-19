@@ -1567,6 +1567,9 @@ const SPEC_3_1_MODULES: readonly string[] = [
   "migration-ddl.ts",
   // The SQL grammar contract's module (engine contract spec 5.3), which every provider directory holds.
   "sql-grammar.ts",
+  // The SQL writing contract's module (engine contract, SQL writing), which the registry under
+  // src/lib/db/sql-writing/ reads.
+  "sql-writing.ts",
 ];
 
 const SPEC_3_1_DIRECTORY = join(import.meta.dir, "../../../../src/lib/db/providers/keyvalue/etcd");

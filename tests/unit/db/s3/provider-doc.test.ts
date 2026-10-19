@@ -192,6 +192,7 @@ const OUTLINE: readonly string[] = [
   "## 7. Monitoring & health",
   "## 8. Maintenance",
   "## 9. Capabilities & labels",
+  "### 9.1 SQL writing",
   "## 10. Error handling",
   "## 11. Testing",
   "### 11.1 How the tests work",
@@ -677,6 +678,7 @@ const BROWSER_SET: ReadonlySet<string> = new Set([
   "parquet-thrift-guard.ts",
   "preview-cells.ts",
   "preview-render.ts",
+  "sql-writing.ts",
 ]);
 
 /** Every `.ts` file under `directory`, as a path relative to it. */

@@ -650,7 +650,7 @@ This is a declared boundary, not a default: `endOpenQueryTransaction` is optiona
 ### 3.14 What the SQL INSERT and DDL exports write for composite types
 
 A result reaches the export through JSON, where an `Array` is a JS array, a `Map` an object, an unnamed `Tuple` an array and a named one an object.
-Written as quoted JSON those were `Code: 26 ... Cannot parse quoted string` on replay, so the SQL INSERT export reads the declared type ([§3.9](#39-column-types-are-the-declared-strings-verbatim)) and writes `[1, 2, 3]`, `map('k', 1)` and `tuple(7, ['p', 'q'])`, recursing through the element types, `Nullable` and `LowCardinality` included (#1386, [`typed-literals.ts`](../../src/lib/export/typed-literals.ts)).
+Written as quoted JSON those were `Code: 26 ... Cannot parse quoted string` on replay, so the SQL INSERT export reads the declared type ([§3.9](#39-column-types-are-the-declared-strings-verbatim)) and writes `[1, 2, 3]`, `map('k', 1)` and `tuple(7, ['p', 'q'])`, recursing through the element types, `Nullable` and `LowCardinality` included (#1386, [`clickhouse/typed-literals.ts`](../../src/lib/db/providers/sql/clickhouse/typed-literals.ts)).
 A named tuple's elements are written in the declared order, and a 64-bit integer or a decimal that `output_format_json_quote_64bit_integers` / `output_format_json_quote_decimals` turned into a string is written bare inside a container (a scalar column takes the quoted form as it is).
 
 A composite that does not have its declared shape (a tuple of the wrong length, a scalar where an `Array` belongs) is skipped with a `-- Row N skipped` comment naming the column, and a non-finite word in a `Float` column or inside a `Float` element is written as `nan`, `inf` or `-inf`.
@@ -1568,6 +1568,26 @@ One more label, and it is about the monitoring tab rather than maintenance:
 log_queries is off."* The Queries panel's empty state was hardcoded to PostgreSQL's
 `pg_stat_statements` advice for every engine (#463), and `system.query_log`
 ([§7](#7-monitoring--health)) is what an operator here can actually act on.
+
+### SQL writing
+
+[`clickhouse/sql-writing.ts`](../../src/lib/db/providers/sql/clickhouse/sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalDoubleAndBackslash` and read back by `unquoteDoubleAndBackslash`: the quote is doubled and a backslash escapes, so the backslash is doubled first.
+A name is quoted by `identifierDoubleQuoted`, the SQL standard form: a double-quoted name with an inner double quote doubled.
+There is no placeholder (`placeholder: null`), so a generator quotes the value with `quoteLiteral` instead of emitting a bind.
+This matches what the ClickHouse provider already does when it builds its own literals ([`index.ts`](../../src/lib/db/providers/sql/clickhouse/index.ts)).
+ClickHouse binds named parameters only, and its provider refuses positional ones outright.
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`, and binds every edit as typed.
+
+The module's `export` field spells a result export's column types through `ddlTypes`, the standard spelling with `String` for a binary column: ClickHouse has no BLOB, and its byte container is `String`, a byte sequence rather than a text encoding.
+Measured on 26.7.1, the other standard spellings all resolve to a whole type (`TEXT` to `String`, `BIGINT` to `Int64`, `DOUBLE PRECISION` to `Float64`, `TIMESTAMP` to `DateTime`).
+Each name in `standsAlone` was measured, one `CREATE TABLE probe (c <name>)` per name on ClickHouse 26.7.1, read back out of `system.columns`, and is listed only because ClickHouse both accepted it and stored it unnarrowed.
+ClickHouse resolves every character and byte alias it knows to `String`.
+ClickHouse's `decimal` is absent because it is stored as `Decimal(10, 0)`, the MySQL narrowing again, and so is `set`: MySQL's SET is a character type, while ClickHouse accepts the word and stores `UInt64`, the widest silent mistranslation measured.
+A binary cell is written by `binaryUnhex`: measured on 26.7.1, `unhex('0102deadbeef')` into a `String` column reads back as `hex(payload)` = `0102DEADBEEF` with `length(payload)` 6, and `length(unhex(''))` is 0.
+`nonFinite` writes the bare `nan`, `inf` and `-inf`, which ClickHouse 26.9.18.11 read back into `Float64` and `Float32` (2026-10-14).
+`typedLiteral` writes arrays, maps, tuples and the other cells whose quoted JSON form ClickHouse refuses, from the engine's own [`clickhouse/typed-literals.ts`](../../src/lib/db/providers/sql/clickhouse/typed-literals.ts).
+`NO_BARE_SPELLING` completes it.
 
 ---
 

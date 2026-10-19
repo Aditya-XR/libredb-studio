@@ -934,7 +934,7 @@ TLTZ  REFUSED  ORA-01843: An invalid month was specified.
 ```
 
 So a DDL+INSERT export of any ordinary Oracle table with a date column was unreplayable. The fix is
-in the shared export (`src/lib/export/result-export.ts`), not in this provider, and the conversion
+in this engine's SQL writing module ([`oracle-sql-writing.ts`](../../src/lib/db/providers/sql/oracle-sql-writing.ts), `export.columnWriters`), not in this provider, and the conversion
 function IS the literal — the way `HEXTORAW` already is for a `RAW`. Which function comes from the
 **declared** type (`columnTypes`, [§5.4](#54-declared-column-types)), because the two shapes disagree
 about which fields of the `Date` are the value:
@@ -1023,8 +1023,9 @@ about which fields of the `Date` are the value:
   Measured on 26ai Free 23.26.3.0.0 (`oracledb` 26.0.0, `TZ=Europe/Istanbul`): a bare `SET "COL" = :1`
   is refused with `ORA-01861: literal does not match format string` on `DATE` and `ORA-01843: An
   invalid month was specified.` on `TIMESTAMP` and both zoned timestamp types. So an edit still in the
-  column's form (`oracleBoundEdit`, sharing the masks and regexes in
-  [`result-export.ts`](../../src/lib/export/result-export.ts)) binds `:n` inside `TO_DATE(:n,
+  column's form (`inlineEdit.boundEdit` in
+  [`oracle-sql-writing.ts`](../../src/lib/db/providers/sql/oracle-sql-writing.ts), sharing the
+  masks and regexes the SQL INSERT export reads there) binds `:n` inside `TO_DATE(:n,
   '[S]YYYY-MM-DD HH24:MI:SS')`, `TO_TIMESTAMP(:n, '[S]YYYY-MM-DD HH24:MI:SS[.FF]')`, or
   `FROM_TZ(TO_TIMESTAMP(:n, 'YYYY-MM-DD HH24:MI:SS.FF3'), 'UTC')` (binding `YYYY-MM-DD HH:MM:SS.sss`).
   Text in any other shape, or in a column declared as another type, is bound as `:n` untouched.
@@ -2307,6 +2308,35 @@ The monitoring Queries panel's empty state was hardcoded to PostgreSQL's `pg_sta
 on every engine (#463); `getSlowQueries()` here reads `V$SQL`
 ([§8](#8-monitoring--health)) and returns `[]` when that read is refused, so the grant is the thing a
 DBA can act on.
+
+### SQL writing
+
+[`sql/oracle-sql-writing.ts`](../../src/lib/db/providers/sql/oracle-sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalStandard` and read back by `unquoteStandard`: the quote is doubled and a backslash is data.
+A name is quoted by `identifierDoubleQuoted`, the SQL standard form: a double-quoted name with an inner double quote doubled.
+A bind is spelled by `placeholderColon`, as `:1`, `:2`.
+`oracledb` binds an array to `:n`.
+The module also declares a `temporalLiteral` form.
+Oracle reads a quoted string in a date position through the session's `NLS_DATE_FORMAT`, `DD-MON-RR` by default, and refuses the ISO text with `ORA-01861: literal does not match format string` (#1400, on Oracle 23.26.3.0.0; the SQL export measured the same refusal for all four date types).
+So a `YYYY-MM-DD` date goes through `TO_DATE` and a `YYYY-MM-DD HH24:MI:SS` timestamp through `TO_TIMESTAMP`, with a mask that spells the text's own form, as the export writes the same types, and the session's format moves nothing.
+Text that is not in that form is quoted as it is: the mask would refuse it, and a plain literal says what the caller had.
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`.
+Its `boundEdit` wraps the `:n` bind of a `DATE`, `TIMESTAMP` or `TIMESTAMP WITH [LOCAL] TIME ZONE` edit still in the provider's text in `TO_DATE`, `TO_TIMESTAMP` or `FROM_TZ(TO_TIMESTAMP(…), 'UTC')`, with the masks the SQL INSERT export uses (#1818).
+`oracledb` binds a string as `DB_TYPE_VARCHAR`, which Oracle reads into those columns through the session's `NLS_DATE_FORMAT`, `NLS_TIMESTAMP_FORMAT` or `NLS_TIMESTAMP_TZ_FORMAT`.
+Measured 2026-10-18 on Oracle AI Database 26ai Free 23.26.3.0.0 (`oracledb` 26.0.0, `TZ=Europe/Istanbul`): a bare `:1` was refused with `ORA-01861: literal does not match format string` on `DATE` and `ORA-01843: An invalid month was specified.` on the three timestamp types, while the wrapped bind stored each value equal on the server, BC dates included.
+Every other edit is bound as `:n` untouched.
+
+The module's `export` field spells a result export's column types through `ddlTypes`: `VARCHAR2(4000)`, `NUMBER(19)`, `BINARY_DOUBLE`, `NUMBER(1)`, `TIMESTAMP` and `BLOB`, since Oracle has no `TEXT` and no `BOOLEAN` before 23c.
+Each name in `standsAlone` was measured, one `CREATE TABLE probe (c <name>)` per name on Oracle Free 23ai, read back out of `USER_TAB_COLUMNS`, and is listed only because Oracle both accepted it and stored it unnarrowed.
+`NUMBER` there is the full 38 digits.
+A binary cell is written by `binaryHexToRaw`, because Oracle parses neither `X'…'` nor `0x…` as a binary literal (`SELECT rawtohex(x'0102') FROM dual` is `ORA-00907`), so the conversion function is the literal.
+`HEXTORAW('')` is NULL, which is also what Oracle stores for a zero-length RAW, so the empty case needs no special spelling.
+`nonFinite` writes `BINARY_DOUBLE_NAN`, `BINARY_DOUBLE_INFINITY` and `-BINARY_DOUBLE_INFINITY`: replayed into Oracle AI Database 23.26.3 (2026-10-04), its own constants read back into `BINARY_DOUBLE` and `BINARY_FLOAT`.
+`columnWriters` writes a date or timestamp cell through a conversion function chosen by the column's declared type, because Oracle parses none of the literal forms a `Date` stringifies to.
+Measured through the real export path on Oracle AI Database 26ai Free 23.26.2.0.0, an exported `'2026-08-24T07:11:12.345Z'` is `ORA-01843: An invalid month was specified` for all three timestamp types and `ORA-01861: literal does not match format string` for a `DATE`.
+A naive `DATE` or `TIMESTAMP` is written from the local fields of the `Date`: a `DATE` holding `2026-08-24 10:11:12` arrived as `2026-08-24T07:11:12.000Z` from a process at `+03:00`, so writing the ISO text would move every such value by the exporter's own offset.
+A zoned column is written through `FROM_TZ(..., 'UTC')`, which keeps the instant whatever zone the replaying session runs in, and a declared `DATE` through `TO_DATE`, since a `TO_TIMESTAMP` literal inserted into a `DATE` is accepted and silently truncated to the whole second.
+`NO_BARE_SPELLING` completes it.
 
 ---
 

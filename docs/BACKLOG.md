@@ -30,7 +30,7 @@ None of it is a GitHub issue.
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
 - [Drivers and connections](#drivers-and-connections) — D1-D375, U17 · 272
 - [Value interpolation](#value-interpolation) — V1
-- [Row editing](#row-editing) — R1–R4 · 4
+- [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U147 · 133
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC35 · 31
@@ -269,8 +269,9 @@ one over as text of its own accord - and rounds only its decimal family. Oracle'
 five that reaches the grid already wrong, and that is D18, not a sixth thing. What the rounding
 costs the row editor is now one case rather than two: a FRACTIONAL key out of a column declared
 `NUMBER`, `decimal`, `numeric` or `money` is refused before the engine is asked, because the
-declaration says the driver rounded it - `describeFraction` and `EXACT_DECIMAL_TYPE_NAMES` in
-`src/hooks/use-inline-editing.ts`, measured 2026-09-19 on Oracle 26ai Free and SQL Server 2022 CU27.
+declaration says the driver rounded it - `describeFraction` in `src/hooks/use-inline-editing.ts` and
+`EXACT_DECIMAL_TYPE_NAMES` in `src/lib/db/sql-writing/shared.ts`, measured 2026-09-19 on Oracle 26ai
+Free and SQL Server 2022 CU27.
 The key whose digits round to a WHOLE number is still open, and that is R3.
 
 **What is new is that one sentence in the tree is false.** `docs/providers/mssql.md` §5.3 says
@@ -3899,9 +3900,10 @@ the LIMIT case in `tests/unit/sql/update-target.test.ts`, with the engine each s
 
 #969 closed the fractional half of this: a number read out of a column the engine declares `NUMBER`,
 `decimal`, `numeric` or `money` is refused before the engine is asked, because the declaration says
-the driver rounded it - `describeFraction` and `EXACT_DECIMAL_TYPE_NAMES` in
-`src/hooks/use-inline-editing.ts`. Measured 2026-09-19 on Oracle AI Database 26ai Free 23.26.3.0.0
-and SQL Server 2022 CU27: the `NUMBER(20,4)` pair that used to write to `the-neighbour` is refused
+the driver rounded it - `describeFraction` in `src/hooks/use-inline-editing.ts` and
+`EXACT_DECIMAL_TYPE_NAMES` in `src/lib/db/sql-writing/shared.ts`. Measured 2026-09-19 on Oracle AI
+Database 26ai Free 23.26.3.0.0 and SQL Server 2022 CU27: the `NUMBER(20,4)` pair that used to write
+to `the-neighbour` is refused
 with nothing asked of the engine, while `BINARY_DOUBLE`, a whole `NUMBER(10)` key, a SQLite
 `DECIMAL` (that engine has no exact decimal - it stores a double) and the STRING a `numeric` takes
 over `pg`, mysql2 and DuckDB all still write.
@@ -3927,16 +3929,6 @@ writes correctly and must keep doing so.
 point on the engines whose drivers round - the scale beside the word, or a second field that says
 it - a whole key is refused only where it can, and a test carries the Oracle and SQL Server pairs
 above beside the fractional ones #969 added.
-
-### R4. Three of the inline editor's value rules are tables keyed by type id
-
-`NO_INSTANT_TYPE_DIALECTS`, `FLOAT64_ONLY_DIALECTS` and `NO_EXACT_DECIMAL_DIALECTS` in `src/hooks/use-inline-editing.ts` are `ReadonlySet<DatabaseConnection["type"]>` tables holding `sqlite` and `libsql`: an engine with no instant type, an engine where `REAL` and `FLOAT` are 64-bit, and an engine with no exact decimal.
-Each is a fact about the engine kept in a UI hook, so a new engine that shares one of them (or a third SQLite-family id) is wrong until someone edits the hook.
-`tests/unit/lib/no-engine-branches.test.ts` allows exactly these three, and the two bound-edit branches beside them, by file and declaration name, and fails when a listed one no longer exists.
-
-Found 2026-10-18 while designing #1822.
-
-**Done when:** the three facts are declared on the provider's capabilities and read from there, the measurements in their docblocks move to `docs/providers/sqlite.md` and `docs/providers/libsql.md`, the inline-editing tests pass unchanged, and the guard's allowlist is empty.
 
 ---
 
@@ -3997,7 +3989,7 @@ likely to meet.
 ### X12. A declared type the export cannot map still reaches every target verbatim
 
 `completeDeclaredType` re-spells a bare declared type the target dialect does not stand behind, and it
-can only re-spell a name that is in `BARE_TYPE_FAMILY` - the four families whose parameters the wire
+can only re-spell a name that is in `BARE_TYPE_FAMILY` (`src/lib/db/sql-writing/shared.ts`) - the four families whose parameters the wire
 drops. Everything else goes through as the declaring engine wrote it, which is fine for a target that
 happens to know the word and fatal for one that does not. Measured 2026-08-24, a Postgres result under
 each target after the stands-alone work landed:
@@ -5678,7 +5670,7 @@ Found 2026-10-13 while building the Apache Spark provider (#1759); a known upcom
 
 When a cell has no literal in the target dialect, the SQL INSERT export writes `-- Row N skipped: column X holds <held>, which <dialect> has no literal for.` (`skippedRow` in `src/lib/export/result-export.ts`).
 `<dialect>` is the `DatabaseType` id, so the file reads "which snowflake has no literal for", "which trino ...", "which cassandra ...", where every other sentence a user reads names the engine by its display label ("Snowflake", "Trino", "Apache Cassandra").
-On `main` no held phrase (`UnwritableValue` in `src/lib/export/typed-literals.ts`) ends in a "which" clause of its own, so the line does not yet read "which" twice; a held phrase that adds one would.
+On `main` no held phrase (`UnwritableValue` in `src/lib/db/sql-writing/export-shared.ts`) ends in a "which" clause of its own, so the line does not yet read "which" twice; a held phrase that adds one would.
 
 Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 
@@ -5686,7 +5678,7 @@ Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 
 ### U144. Nothing ties the SQL export's Spark literal shapes to the text forms Spark's decoder writes
 
-`SPARK_TEMPORAL` and `SPARK_ANSI_INTERVAL` in `src/lib/export/typed-literals.ts` accept a Spark temporal or ANSI interval cell only in the text form that `dateText`, `timestampText`, `timeText`, `yearMonthText` and `dayTimeText` in `src/lib/db/providers/sql/spark/temporal.ts` write, and refuse any other as `UnwritableValue`, which skips the row.
+`SPARK_TEMPORAL` and `SPARK_ANSI_INTERVAL` in `src/lib/db/providers/sql/spark/typed-literals.ts` accept a Spark temporal or ANSI interval cell only in the text form that `dateText`, `timestampText`, `timeText`, `yearMonthText` and `dayTimeText` in `src/lib/db/providers/sql/spark/temporal.ts` write, and refuse any other as `UnwritableValue`, which skips the row.
 `tests/unit/lib/export/typed-literals.test.ts` imports only `@/lib/export/typed-literals` and uses hand-typed strings, and no test under `tests/` feeds the decoder's output to `typedLiteral`.
 So a change to one form in `temporal.ts` (for example `Z` for `+00:00`) would make the SQL INSERT export skip every row holding such a cell, with every test green.
 The two agree today: the review passed decoder output for years 0, -1 and +10000, a zoned timestamp at year 0, `timeText` at 23:59:59.999999999 and negative intervals through `typedLiteral(..., "spark")`, and each came back as a literal.

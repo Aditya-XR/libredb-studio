@@ -314,7 +314,7 @@ These partial records deliberately have none:
 
 | Record | Where | Why there is no entry |
 |---|---|---|
-| `DIALECT_TYPES` | `src/lib/export/result-export.ts` | An export's column types map SQL DDL spellings; PromQL has no DDL, so the standard spellings stand |
+| `export.ddlTypes` (`STANDARD_DDL_TYPES`) | `src/lib/db/providers/timeseries/prometheus/sql-writing.ts` | An export's column types map SQL DDL spellings; PromQL has no DDL, so the standard spellings stand |
 | The engine overlays' `catalogCapture` | `src/lib/agent/languages/sql/engines/` | Plan mode grounds Prometheus through the provider's own object surface, not through composed catalog statements |
 | The engine overlays' `catalogRead`, `planEstimate` | `src/lib/agent/languages/sql/engines/` | They serve `AGENT_EXECUTION_ENGINES`, and agent execute mode is out of scope for PromQL (#1085, section 2) |
 | The engine overlays' `statistics` | `src/lib/agent/languages/sql/engines/` | Prometheus holds no table statistics a run knows how to read; its series counts are TSDB top-N figures, not estimates |
@@ -618,6 +618,19 @@ A direct call of `runMaintenance` is refused with a `QueryError` saying that com
 
 `entityName` "Metric" and "Metrics", `rowName` and `rowNamePlural` "series" and "series", `selectAction` "Run Instant Query", `generateAction` "Generate Query", `statementLanguage` "PromQL", and the two empty-state sentences of [§7](#7-monitoring--health).
 The maintenance labels carry PromQL-true wording although they are never rendered.
+
+### SQL writing
+
+[`prometheus/sql-writing.ts`](../../src/lib/db/providers/timeseries/prometheus/sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalStandard` and read back by `unquoteStandard`: the quote is doubled and a backslash is data.
+A name is quoted by `identifierDoubleQuoted`, the SQL standard form: a double-quoted name with an inner double quote doubled.
+There is no placeholder (`placeholder: null`), so a generator quotes the value with `quoteLiteral` instead of emitting a bind.
+PromQL is not SQL (#1085), so this is the same reading as the engines that declare `queryLanguage: "json"`.
+A PromQL string escapes with a backslash, but that is not a SQL literal and nothing here builds one.
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`, and binds every edit as typed.
+
+The module's `export` field writes a result export's CREATE TABLE and INSERT from the shared building blocks alone: `STANDARD_DDL_TYPES` for the column types, `NOTHING_STANDS_ALONE` and `NO_BARE_SPELLING`, so every bare declared name is re-spelled from its family, `NULL_NON_FINITE` for NaN and the infinities, and `binaryStandardHex` for a binary cell (`X'0102'`).
+The engine declares `queryLanguage: "promql"`, so no SQL statement is ever built for it to read, and a file exported from it is meant to run somewhere else: every bare name in it is re-spelled portably rather than kept as one engine's private word.
 
 ---
 

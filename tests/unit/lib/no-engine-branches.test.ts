@@ -50,17 +50,6 @@ export interface Debt extends Listed {
   readonly pr: 2 | 3 | 4 | 5 | 6 | 7 | 8;
 }
 
-/** What each later PR of the engine contract plan moves. */
-const MOVES_IN: Readonly<Record<Debt["pr"], string>> = {
-  2: "SQL writing, values: the literal, identifier and placeholder rules",
-  3: "SQL writing, inline editing: the editor's per-engine value rules (docs/BACKLOG.md R4)",
-  4: "SQL writing, export: the per-engine export tables",
-  5: "the SQL grammar: tokenizer, update target, redaction and completion quoting",
-  6: "migration DDL (engine contract spec 5.5, MigrationDdlSpec)",
-  7: "the connection form, connection string and seed checks",
-  8: "execution UI and the explain request default",
-};
-
 const DISPLAY_ORDER = "display order only";
 const INBOUND = "an inbound mapping from an outside name to a type id";
 const AGENT_LEG = "the agent-leg pattern, guarded by its own tests";
@@ -220,62 +209,7 @@ export const FALSE_POSITIVES: readonly Listed[] = [
 
 /** Every branch of spec 2.6 not yet moved, with the PR that moves it. */
 export const DEBT: readonly Debt[] = [
-  { path: "src/lib/sql/values.ts", declaration: "LITERAL_ESCAPE", count: 1, pr: 2, reason: MOVES_IN[2] },
-  { path: "src/lib/sql/values.ts", declaration: "temporalLiteral", count: 1, pr: 2, reason: MOVES_IN[2] },
-  { path: "src/lib/sql/values.ts", declaration: "positionalPlaceholder", count: 9, pr: 2, reason: MOVES_IN[2] },
-  { path: "src/lib/sql/identifier.ts", declaration: "quoteIdentifier", count: 6, pr: 2, reason: MOVES_IN[2] },
-  {
-    path: "src/hooks/use-inline-editing.ts",
-    declaration: "NO_INSTANT_TYPE_DIALECTS",
-    count: 2,
-    pr: 3,
-    reason: MOVES_IN[3],
-  },
-  {
-    path: "src/hooks/use-inline-editing.ts",
-    declaration: "FLOAT64_ONLY_DIALECTS",
-    count: 2,
-    pr: 3,
-    reason: MOVES_IN[3],
-  },
-  {
-    path: "src/hooks/use-inline-editing.ts",
-    declaration: "NO_EXACT_DECIMAL_DIALECTS",
-    count: 2,
-    pr: 3,
-    reason: MOVES_IN[3],
-  },
-  { path: "src/hooks/use-inline-editing.ts", declaration: "boundEditText", count: 1, pr: 3, reason: MOVES_IN[3] },
-  { path: "src/hooks/use-inline-editing.ts", declaration: "boundEditValue", count: 1, pr: 3, reason: MOVES_IN[3] },
-  { path: "src/lib/export/result-export.ts", declaration: "DIALECT_TYPES", count: 1, pr: 4, reason: MOVES_IN[4] },
-  { path: "src/lib/export/result-export.ts", declaration: "STANDS_ALONE", count: 1, pr: 4, reason: MOVES_IN[4] },
-  {
-    path: "src/lib/export/result-export.ts",
-    declaration: "DIALECT_BARE_SPELLING",
-    count: 1,
-    pr: 4,
-    reason: MOVES_IN[4],
-  },
-  {
-    path: "src/lib/export/result-export.ts",
-    declaration: "DECLARED_TYPE_REWRITE",
-    count: 1,
-    pr: 4,
-    reason: MOVES_IN[4],
-  },
-  { path: "src/lib/export/result-export.ts", declaration: "sqlTypeOf", count: 1, pr: 4, reason: MOVES_IN[4] },
-  { path: "src/lib/export/result-export.ts", declaration: "BINARY_LITERAL", count: 1, pr: 4, reason: MOVES_IN[4] },
-  { path: "src/lib/export/result-export.ts", declaration: "NON_FINITE_LITERALS", count: 1, pr: 4, reason: MOVES_IN[4] },
-  {
-    path: "src/lib/export/result-export.ts",
-    declaration: "INSERT_SELECT_DIALECTS",
-    count: 3,
-    pr: 4,
-    reason: MOVES_IN[4],
-  },
-  { path: "src/lib/export/result-export.ts", declaration: "oracleColumns", count: 1, pr: 4, reason: MOVES_IN[4] },
-  { path: "src/lib/export/result-export.ts", declaration: "buildResultExport", count: 1, pr: 4, reason: MOVES_IN[4] },
-  { path: "src/lib/export/typed-literals.ts", declaration: "TYPED_WRITERS", count: 1, pr: 4, reason: MOVES_IN[4] },
+  // Empty: every engine-contract move has landed.
 ];
 
 /** Every file git lists under `paths`: tracked, or untracked and not ignored. */

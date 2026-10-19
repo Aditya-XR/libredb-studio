@@ -19,6 +19,9 @@
  *    `src/lib/db/sql-grammar/`. Each type-id's migration DDL module (`<type-id>-migration-ddl.ts`) is a contract layer
  *    of its own: it may import values only from `@/lib/db/migration-ddl/*`, its contract's shared building blocks,
  *    and from none of this directory's modules.
+ *    Each type-id's SQL writing module (`<type-id>-sql-writing.ts`) is a layer of its own in the same way: it may
+ *    import values only from `@/lib/db/sql-writing/*`, its contract's shared building blocks, and from none of this
+ *    directory's modules.
  *
  * Rules 1 to 3 count a type-only import too: they keep modules apart, not values. Module names are resolved as
  * TypeScript resolves them, so an alias counts; a planted module that does not exist yet resolves by its spelling.
@@ -55,8 +58,10 @@ const INFLUXQL_SERVER = ["influxql-results", "influxql-objects", "influxql-provi
 const GRAMMAR = ["influxdb-sql-grammar", "influxdb3-sql-grammar"];
 /** Each type-id's declaration of a per-engine contract, which reads its contract and nothing of this directory. */
 const CONTRACT = ["influxdb-migration-ddl", "influxdb3-migration-ddl"];
+/** Each type-id's SQL writing row, which reads its contract's building blocks and nothing of this directory. */
+const WRITING = ["influxdb-sql-writing", "influxdb3-sql-writing"];
 
-type Layer = "connection" | "browser" | "influxql-server" | "sql" | "grammar" | "contract";
+type Layer = "connection" | "browser" | "influxql-server" | "sql" | "grammar" | "contract" | "writing";
 
 const canonical = (path: string): string => realpathSync.native(path).split("\\").join("/");
 const relative = (path: string): string => path.slice(canonical(ROOT).length + 1);
@@ -68,6 +73,7 @@ function layerOf(file: string): Layer | undefined {
   if (BROWSER.includes(name)) return "browser";
   if (INFLUXQL_SERVER.includes(name)) return "influxql-server";
   if (GRAMMAR.includes(name)) return "grammar";
+  if (WRITING.includes(name)) return "writing";
   if (name.startsWith("sql-")) return "sql";
   if (CONTRACT.includes(name)) return "contract";
   return undefined;
@@ -125,6 +131,7 @@ const OUTSIDE_VALUES: Readonly<Record<Layer, readonly string[]>> = {
   ],
   grammar: ["src/lib/db/sql-grammar/"],
   contract: ["src/lib/db/migration-ddl/"],
+  writing: ["src/lib/db/sql-writing/"],
 };
 
 /** Which of this directory's modules each layer may import a value from. */
@@ -142,6 +149,7 @@ function insideAllowed(file: string, layer: Layer, target: string): boolean {
       return shared || name.startsWith("sql-");
     case "grammar":
     case "contract":
+    case "writing":
       return false;
   }
 }
@@ -501,6 +509,24 @@ describe("planted violations fail by name", () => {
       'import { standardDropTable } from "@/lib/db/migration-ddl/shared";\n',
       `layer: ${DIR}/sql-objects.ts imports a value from @/lib/db/migration-ddl/shared, which its layer may not`,
     ],
+    [
+      "sql-objects.ts",
+      "sql-policy.ts",
+      'import { literalStandard } from "@/lib/db/sql-writing/shared";\n',
+      `layer: ${DIR}/sql-objects.ts imports a value from @/lib/db/sql-writing/shared, which its layer may not`,
+    ],
+    [
+      "influxdb-sql-writing.ts",
+      "influxdb-sql-writing.ts",
+      'import { INFLUX_LIST_CAP } from "./connection-options";\n',
+      `layer: ${DIR}/influxdb-sql-writing.ts imports a value from ./connection-options, which its layer may not`,
+    ],
+    [
+      "influxdb3-sql-writing.ts",
+      "influxdb3-sql-writing.ts",
+      'import { standardDropTable } from "@/lib/db/migration-ddl/shared";\n',
+      `layer: ${DIR}/influxdb3-sql-writing.ts imports a value from @/lib/db/migration-ddl/shared, which its layer may not`,
+    ],
   ])("%s (from %s) with %p fails", (as, from, line, finding) => {
     expect(plant(as, from, line)).toContain(finding);
   });
@@ -531,6 +557,11 @@ describe("planted violations fail by name", () => {
       "influxdb3-migration-ddl.ts",
       "influxdb3-migration-ddl.ts",
       'import { standardDropTable } from "@/lib/db/migration-ddl/shared";\n',
+    ],
+    [
+      "influxdb3-sql-writing.ts",
+      "influxdb3-sql-writing.ts",
+      'import { binaryStandardHex } from "@/lib/db/sql-writing/export-shared";\n',
     ],
   ])("%s (from %s) with %p passes", (as, from, line) => {
     expect(plant(as, from, line)).toEqual([]);

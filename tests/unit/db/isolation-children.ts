@@ -1,5 +1,6 @@
 /**
- * The child processes of the per-engine isolation tests (connection-form, connection-string and execution-ui).
+ * The child processes of the per-engine isolation tests (connection-form, connection-string, execution-ui and
+ * sql-writing).
  *
  * Each of those tests replaces some engines' declarations in a fresh `bun test` process and holds every other engine
  * to its golden. One child per engine renders every engine once per engine, which grows with the square of the

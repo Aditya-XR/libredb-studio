@@ -82,6 +82,7 @@ The console's modules are pure and shipped to the browser, because the editor, t
 | `connection-string.ts` | The engine's connection string row: no scheme, no TLS read from a URL query, no seed load check | browser |
 | `execution-ui.ts` | The engine's execution UI row: the rolled-back notice names `COMMIT`, no consent deadline | browser |
 | `generators.ts` | The commands Generate Command writes | browser |
+| `sql-writing.ts` | The SQL writing row, the inert standard answer no generator calls | browser |
 | `sql-grammar.ts` | The SQL grammar facts the editor and the query log read: not SQL text, nothing kept when redacted | browser |
 | `index.ts` | The composition root: the session, the declarations, the snapshot cache, the order verdict's lifetime, the run registry and the one failure path | server |
 
@@ -652,6 +653,18 @@ Every capability is written, since the base's defaults are SQL's:
 | `tableStatsCaption` | Oxia has no tables: its shards are listed under Shards, and its keys in the Keys panel and with list in the console. |
 
 `statementLanguage`, the sentence plan mode states for the grammar, is built from the command table of section 5.2, so it names every verb and flag the parser takes.
+
+### 9.1 SQL writing
+
+[`oxia/sql-writing.ts`](../../src/lib/db/providers/keyvalue/oxia/sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalStandard` and read back by `unquoteStandard`: the quote is doubled and a backslash is data.
+A name is quoted by `identifierDoubleQuoted`, the SQL standard form: a double-quoted name with an inner double quote doubled.
+There is no placeholder (`placeholder: null`), so a generator quotes the value with `quoteLiteral` instead of emitting a bind.
+No generator calls `quoteLiteral` for Oxia: the command table's own quoting writes every word (O10), so the row is the inert answer etcd's is.
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`, and binds every edit as typed.
+
+The module's `export` field writes a result export's CREATE TABLE and INSERT from the shared building blocks alone: `STANDARD_DDL_TYPES` for the column types, `NOTHING_STANDS_ALONE` and `NO_BARE_SPELLING`, so every bare declared name is re-spelled from its family, `NULL_NON_FINITE` for NaN and the infinities, and `binaryStandardHex` for a binary cell (`X'0102'`).
+The engine declares `queryLanguage: "json"`, so no SQL statement is ever built for it to read, and a file exported from it is meant to run somewhere else: every bare name in it is re-spelled portably rather than kept as one engine's private word.
 
 ## 10. Error handling
 

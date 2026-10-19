@@ -398,6 +398,19 @@ None: `supportsMaintenance` is false, no operation is declared, and a maintenanc
 Each object of the tree is a "graph object", the noun plan mode counts the whole inventory under, and a label's rows are each a "node"; its read is "Match Nodes" and its generator "Generate Cypher".
 The editor's Cypher language is the shared lexer as a Monaco tokens provider, with completion of the schema's labels and relationship types, the allowlisted procedures after `CALL` and the allowed forms after `SHOW`; there is no Cypher formatter, so the SQL Format action does not apply to a Cypher tab.
 
+### SQL writing
+
+[`neo4j/sql-writing.ts`](../../src/lib/db/providers/graph/neo4j/sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalBackslash` and read back by `unquoteBackslash`: every escape, the quote's included, is spelled with a backslash, and doubling is not part of the grammar.
+A name is quoted by `identifierDoubleQuoted`, the SQL standard form: a double-quoted name with an inner double quote doubled.
+There is no placeholder (`placeholder: null`), so a generator quotes the value with `quoteLiteral` instead of emitting a bind.
+Cypher spells its escapes with a backslash (`\'`, `\"`, `\\`, `\n`, `\uXXXX`), and a doubled quote is not one of them: it closes one string and opens the next.
+The graph lexer ([`src/lib/db/graph/cypher/lexer.ts`](../../src/lib/db/graph/cypher/lexer.ts)) decodes the same set, so the two read a literal alike.
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`, and binds every edit as typed.
+
+The module's `export` field writes a result export's CREATE TABLE and INSERT from the shared building blocks alone: `STANDARD_DDL_TYPES` for the column types, `NOTHING_STANDS_ALONE` and `NO_BARE_SPELLING`, so every bare declared name is re-spelled from its family, `NULL_NON_FINITE` for NaN and the infinities, and `binaryStandardHex` for a binary cell (`X'0102'`).
+The engine declares `queryLanguage: "cypher"`, so no SQL statement is ever built for it to read, and a file exported from it is meant to run somewhere else: every bare name in it is re-spelled portably rather than kept as one engine's private word.
+
 ## 10. Error handling
 
 The Bolt client classifies every failure by the server's status code where there is one, and `errors.ts` turns each class into the repository's error class:

@@ -1799,7 +1799,7 @@ The SQL INSERT export writes them as quoted literals, `'NaN'`, which PostgreSQL 
 
 ### 5.7 What the SQL INSERT and DDL exports write
 
-The result export reads each cell's declared type ([§5.4](#54-declared-column-types)) for the values whose generic form PostgreSQL refuses (#1386, [`typed-literals.ts`](../../src/lib/export/typed-literals.ts)):
+The result export reads each cell's declared type ([§5.4](#54-declared-column-types)) for the values whose generic form PostgreSQL refuses (#1386, [`postgres-typed-literals.ts`](../../src/lib/db/providers/sql/postgres-typed-literals.ts)):
 
 | Declared | Arrives as | Written as |
 |---|---|---|
@@ -2369,6 +2369,25 @@ other providers that offer `reindex`, such as SQLite, libSQL and Couchbase, say 
 | `reindexGlobalLabel` | *Run Reindex* |
 | `reindexGlobalTitle` | *Rebuild Indexes* |
 | `reindexGlobalDesc` | *Runs REINDEX DATABASE, reconstructing every index in the database.* |
+
+### SQL writing
+
+[`sql/postgres-sql-writing.ts`](../../src/lib/db/providers/sql/postgres-sql-writing.ts) declares how a generated statement spells a literal, a name and a bind for this engine, and it is this engine's row of `SQL_WRITING` ([`src/lib/db/sql-writing/index.ts`](../../src/lib/db/sql-writing/index.ts)), which the readers in [`src/lib/sql/values.ts`](../../src/lib/sql/values.ts) and [`src/lib/sql/identifier.ts`](../../src/lib/sql/identifier.ts) look up.
+A literal is written by `literalStandard` and read back by `unquoteStandard`: the quote is doubled and a backslash is data.
+A name is quoted by `identifierDoubleQuoted`, the SQL standard form: a double-quoted name with an inner double quote doubled.
+A bind is spelled by `placeholderDollar`, as `$1`, `$2`.
+`standard_conforming_strings` has been on by default since PostgreSQL 9.1, so a backslash in a plain literal is data.
+`pg` takes `$n`.
+Inline row editing reads a key column's kind through the shared `INSTANT_TYPE_NAMES`, `FLOAT64_TYPE_NAMES` and `EXACT_DECIMAL_TYPE_NAMES` of the module's `inlineEdit`, and binds every edit as typed.
+
+The module's `export` field spells a result export's column types through `ddlTypes`, the standard spelling with `BYTEA` for a binary column, and writes a binary cell with `binaryPgBytea`, `'\x0102'::bytea`.
+PostgreSQL's `X'…'` is a bit string, not `bytea`, and there is no cast between the two: measured on 18.4, `SELECT pg_typeof(X'0102')` answers `bit` and `SELECT X'0102'::bytea` is `ERROR: cannot cast type bit to bytea`.
+The hex-input form is written as a plain literal rather than `E'\\x…'` because it survives `standard_conforming_strings` in both positions: with the setting `off`, `SELECT length('\x0102deadbeef'::bytea)` still answers 6.
+Each name in `standsAlone` was measured, one `CREATE TABLE probe (c <name>)` per name on PostgreSQL 18.4, read back out of `format_type`, and is listed only because PostgreSQL both accepted it and stored it unnarrowed.
+`character varying` is unbounded there.
+`bareSpelling` writes a bare `bit` as `bit varying`: `pg` hands a bit string back as text such as `1010`, which a bare `bit` (`bit(1)`) refuses with `bit string length 4 does not match type bit(1)`, and `bit varying` takes at any length (#1386).
+`nonFinite` is `QUOTED_WORD_NON_FINITE`, which writes NaN and the infinities as the quoted words `'NaN'`, `'Infinity'` and `'-Infinity'`: replayed into PostgreSQL 18.6 (2026-10-04), they read back into `real`, `double precision` and `timestamptz`.
+`typedLiteral` writes the cells whose generic form PostgreSQL refuses, arrays and intervals among them, from the engine's own [`postgres-typed-literals.ts`](../../src/lib/db/providers/sql/postgres-typed-literals.ts).
 
 ---
 
