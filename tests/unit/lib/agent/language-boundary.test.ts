@@ -27,13 +27,13 @@
  *   verifier id.
  * - R8a: a string literal or literal type whose whole text is an engine id, a key of `AGENT_STATEMENT_LANGUAGE`.
  * - R8b: a property named by an engine id, except the keys of `AGENT_STATEMENT_LANGUAGE` itself.
- * - R8c: any other identifier with a whole segment (split at `_` and at case changes, then lowercased) that is an
- *   engine id: `postgresThing` is one, `redistribute` is not. An import or export specifier is no reference, as for
+ * - R8c: any other identifier with a whole segment, or a run of adjacent segments, (split at `_` and at case changes,
+ *   then lowercased) that is an engine id: `postgresThing` and `duckDbPlan` are, `redistribute` is not. An import or export specifier is no reference, as for
  *   R5c, so an imported name is read where the file uses it.
  * - R9: a read of a server member an engine overlay may override (`ENGINE_OVERRIDABLE_SERVER_MEMBERS`) through a
  *   family resolver, so an engine's override is never bypassed: the receiver chain starts at a call to
- *   `agentLanguagePack`, `languageServerPack` or `languageServer`, or at a name bound to such a chain, by a declarator
- *   or a binding pattern.
+ *   `agentLanguagePack`, `languageServerPack` or `languageServer`, under any import name or off a namespace, or at a
+ *   name bound to such a chain, by a declarator or a binding pattern.
  *   An import of `WORKFLOW_TOOL_RULES`, a family projection of one, or a namespace member of that name, is R9 too.
  * - R3: the tiers, each finding the first forbidden module a chain meets, not every module past it. The server modules never reach the execution tier; the client packs never reach a server module, an
  *   execution module or a `node:`/`bun:` builtin; the language verifiers and `goal-claims.ts` never reach
@@ -350,6 +350,17 @@ const segmentsOf = (name: string): string[] =>
     .flatMap((part) => part.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/))
     .map((segment) => segment.toLowerCase());
 
+/**
+ * True when a run of adjacent segments of `name` is an engine id: `postgresThing` holds `postgres` as one segment, and
+ * `duckDbPlan` holds `duckdb` across two, because an id is spelled in camel case across its own words too.
+ */
+const namesEngine = (name: string): boolean => {
+  const segments = segmentsOf(name);
+  return segments.some((_, start) =>
+    segments.slice(start).some((_, length) => ENGINE_IDS.has(segments.slice(start, start + length + 1).join(""))),
+  );
+};
+
 /** The key a binding element reads: `sql` in `{ sql }` and in `{ sql: x }`. */
 function bindingKey(element: ts.BindingElement): string | undefined {
   const key = element.propertyName ?? element.name;
@@ -377,6 +388,8 @@ function coreFileFindings(file: string, text: string, exemptEngineMap = true): s
   // The file's names for a language-keyed table (R5b) and for a family resolver's answer (R9), in source order.
   const tables = new Set(LANGUAGE_TABLES);
   const resolved = new Set<string>();
+  // The file's names for a family resolver: its own, and any import that renames one.
+  const resolvers = new Set(FAMILY_RESOLVERS);
   const isTable = (expression: ts.Expression): boolean => {
     const at = unwrap(expression);
     return (
@@ -389,13 +402,18 @@ function coreFileFindings(file: string, text: string, exemptEngineMap = true): s
     while (ts.isPropertyAccessExpression(at) || ts.isElementAccessExpression(at)) at = unwrap(at.expression);
     if (ts.isCallExpression(at)) {
       const callee = unwrap(at.expression);
-      return ts.isIdentifier(callee) && FAMILY_RESOLVERS.has(callee.text);
+      return (
+        (ts.isIdentifier(callee) && resolvers.has(callee.text)) ||
+        (ts.isPropertyAccessExpression(callee) && FAMILY_RESOLVERS.has(callee.name.text))
+      );
     }
     return ts.isIdentifier(at) && resolved.has(at.text);
   };
   const bind = (node: ts.Node): void => {
     if (ts.isImportSpecifier(node) && LANGUAGE_TABLES.has((node.propertyName ?? node.name).text))
       tables.add(node.name.text);
+    if (ts.isImportSpecifier(node) && FAMILY_RESOLVERS.has((node.propertyName ?? node.name).text))
+      resolvers.add(node.name.text);
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
       if (isTable(node.initializer)) tables.add(node.name.text);
       if (isResolved(node.initializer)) resolved.add(node.name.text);
@@ -458,8 +476,7 @@ function coreFileFindings(file: string, text: string, exemptEngineMap = true): s
       }
       if (DEFAULT_LANGUAGE_CONSTANTS.has(node.text) && !isSpecifierName(node)) add(node, "R5c", node.text);
       if (ENGINE_IDS.has(node.text) && isPropertyName(node)) engineProperty(node, node.text);
-      else if (!isSpecifierName(node) && segmentsOf(node.text).some((segment) => ENGINE_IDS.has(segment)))
-        add(node, "R8c", node.text);
+      else if (!isSpecifierName(node) && namesEngine(node.text)) add(node, "R8c", node.text);
       if (
         OVERRIDABLE_SERVER_MEMBERS.has(node.text) &&
         ts.isPropertyAccessExpression(parent) &&
@@ -1078,6 +1095,11 @@ describe("planted violations yield exactly their findings", () => {
       `${posture}#postgresThing: R8c postgresThing`,
     ]);
     expect(boundaryFindings(prepend(posture, "const redistribute = 1;"))).toEqual([]);
+    // An engine id written in camel case across its own words is still that id: `duckDb` is `duckdb`.
+    expect(boundaryFindings(prepend(posture, "function duckDbPlan() {}"))).toEqual([
+      `${posture}#duckDbPlan: R8c duckDbPlan`,
+    ]);
+    expect(boundaryFindings(prepend(posture, "const MsSqlCap = 2;"))).toEqual([`${posture}#MsSqlCap: R8c MsSqlCap`]);
   });
 
   test("an overridable member read through a family resolver, an alias, a pattern or a projection fails R9", () => {
@@ -1109,6 +1131,17 @@ describe("planted violations yield exactly their findings", () => {
       'import * as rules from "./languages/server"; void rules.WORKFLOW_TOOL_RULES;',
     );
     expect(boundaryFindings(namespaced)).toEqual([`${INVESTIGATION}#<module>: R9 WORKFLOW_TOOL_RULES`]);
+    // A resolver imported under another name, or called off a namespace, is the same resolver.
+    const renamed = prepend(
+      INVESTIGATION,
+      'import { languageServerPack as lsp } from "./languages/server"; void lsp(x).grounding;',
+    );
+    expect(boundaryFindings(renamed)).toEqual([`${INVESTIGATION}#<module>: R9 grounding`]);
+    const called = prepend(
+      INVESTIGATION,
+      'import * as L from "./languages/server"; void L.languageServerPack(x).grounding;',
+    );
+    expect(boundaryFindings(called)).toEqual([`${INVESTIGATION}#<module>: R9 grounding`]);
     // A member no overlay may override is read by family.
     expect(scan("void languageServerPack(x).adapter;")).toEqual([]);
   });
