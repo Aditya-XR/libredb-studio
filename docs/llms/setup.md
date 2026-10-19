@@ -62,6 +62,7 @@ Agent mode calls OpenAI through the Responses API with `store: false`, because G
 Which efforts a model takes is the model's own: GPT-6.1 Sol and GPT-6 Astra have no `none`, and a model that does not reason (`gpt-4o`) takes none at all.
 A value the model does not take is never sent at another effort: Agent and Plan mode both refuse to start the run with a configuration error naming the efforts the model does take, before any request reaches OpenAI.
 The chat surface sends the value as it is, so there the refusal is OpenAI's own error.
+Automatic workflow selection works on GPT-6 Luna and Sol as on any other model: its one call leaves a reasoning model room to think before it answers.
 Leave the variable unset for the model's default; set with any other provider it is refused as a configuration error.
 
 Restart the server after editing the file: these are read at startup, so an edit under a running

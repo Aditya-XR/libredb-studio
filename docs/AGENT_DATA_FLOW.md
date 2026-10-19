@@ -183,6 +183,7 @@ Four bounds, all of them properties of the code rather than of intent:
 - **One call, no tools, no streaming, no retries.** `generateText` with `maxRetries: 0`.
 - **At most 16 output tokens** (`CLASSIFY_MAX_OUTPUT_TOKENS`), because the answer is one
   identifier.
+  The `openai` kind gets 1024 (`CLASSIFY_MAX_OUTPUT_TOKENS_RESPONSES`), because the Responses API counts a reasoning model's thinking against that cap: at 16, `gpt-6-luna` spent all of it reasoning and every run opened unclassified.
 - **Eight seconds** (`AGENT_WORKFLOW_CLASSIFY_TIMEOUT_MS`), after which the run opens unclassified;
   the browser holds a longer ceiling of its own so it never preempts the server's.
 - **It is skipped entirely when you name the workflow yourself** under **Advanced**. That is not an

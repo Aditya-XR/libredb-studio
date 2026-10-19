@@ -219,6 +219,7 @@ An effort the configured model does not take is never sent at another effort.
 Building the model raises it as a configuration error, before any request: `createAgentModel` asks the AI SDK's own request preparation, offline, whether the model takes the effort, so the SDK's per-model table decides and no copy of it lives here.
 The start gate builds the model in every mode, so an Agent or Plan run is refused at start with HTTP 503 and the sentence naming the efforts the model takes, not with a capability refusal that would blame the model and offer Plan mode.
 A turn still reads its own call's warnings and raises the same error, for an effort that reaches a call some other way, a profile's quiet switch.
+The workflow classifier's one call is capped at 1024 output tokens on the `openai` kind and 16 on every other, because the Responses API counts reasoning against the cap and a reasoning model spent 16 thinking (`CLASSIFY_MAX_OUTPUT_TOKENS_RESPONSES` in `workflow-classifier.ts`, with the measurement).
 `agentProviderOptions` in `src/lib/agent/model-adapter.ts` is the one place these options are built.
 
 **"Configured" is a network-free check, and it has one blind spot worth naming.** `validateConfig`

@@ -110,6 +110,25 @@ export const AGENT_WORKFLOW_CLASSIFY_TIMEOUT_MS = 8_000;
  */
 const CLASSIFY_MAX_OUTPUT_TOKENS = 16;
 
+/**
+ * The cap for the `openai` kind, whose Responses API counts reasoning tokens against
+ * `max_output_tokens`: at 16 a reasoning model spends the cap thinking and returns no text.
+ *
+ * Measured 2026-10-19 on 5 objectives at each model's default effort. At 16, `gpt-6-luna`
+ * answered none of 5 (every reply empty, `finish: length`), `gpt-6.1-sol` 3 of 5, and
+ * `gpt-5.4-mini`, which reasons at no tokens by default, 4 of 5. At 1024, through this function,
+ * two rounds each, every objective was classified, 4 or 5 of 5 as written (every miss the one
+ * objective all three read as `data-analysis`), at a median of 1.2 s on Luna, 1.5 to 2.1 s on
+ * Sol and 0.9 to 1.0 s on 5.4 mini. The most any of them reasoned was 383 tokens, Sol at
+ * `LLM_MODEL_EFFORT=max`, so 1024 leaves room at every effort. Sending the lowest effort instead
+ * was measured and not taken: `none` fixes Luna alone, Sol takes nothing below `low` and still
+ * answered 3 of 5 at 16, and which effort is lowest is a per-model table this module would have
+ * to copy. A model that answers at once (gpt-4o) stops after its few tokens either way, and the
+ * eight-second ceiling above still bounds the wait. Other kinds keep 16: Chat Completions on
+ * `ollama` and `custom`, and Gemini, are not this API.
+ */
+const CLASSIFY_MAX_OUTPUT_TOKENS_RESPONSES = 1024;
+
 const classifySystems = new Map<AgentStatementLanguageId, string>();
 
 /**
@@ -200,7 +219,8 @@ export async function classifyAgentWorkflow(
       model: agentModel.model,
       system,
       prompt: objective,
-      maxOutputTokens: CLASSIFY_MAX_OUTPUT_TOKENS,
+      maxOutputTokens:
+        agentModel.provider === "openai" ? CLASSIFY_MAX_OUTPUT_TOKENS_RESPONSES : CLASSIFY_MAX_OUTPUT_TOKENS,
       // A run's own options, `store: false` among them: the objective is the user's words about
       // their database, and OpenAI keeps it no more than it keeps a run's turns.
       providerOptions: agentProviderOptions(agentModel),

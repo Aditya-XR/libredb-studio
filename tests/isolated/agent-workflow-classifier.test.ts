@@ -105,6 +105,22 @@ describe("classifying an objective into a workflow", () => {
     expect(lastCall?.abortSignal?.aborted).toBe(false);
   });
 
+  test.each([
+    // On the Responses API max_output_tokens counts reasoning tokens too. Measured 2026-10-19 at
+    // the old cap of 16, gpt-6-luna spent all 16 reasoning and answered nothing on 5 objectives of
+    // 5, and gpt-6.1-sol on 2 of 5; at 1024 the most any of them reasoned was 383 tokens.
+    ["openai", 1024],
+    ["gemini", 16],
+    ["ollama", 16],
+    ["custom", 16],
+  ] as const)("the %s kind's one call is capped at %d output tokens", async (provider, cap) => {
+    createAgentModel.mockImplementationOnce(async () => ({ provider, modelId: "m", model: {} }) as AgentModel);
+
+    await classifyAgentWorkflow("count the rows in public.orders");
+
+    expect(lastCall?.maxOutputTokens).toBe(cap);
+  });
+
   test("an injected fetch reaches the model adapter", async () => {
     // The route's test seam, and the same one `AgentModelOptions` documents.
     const injected = async (): Promise<Response> => new Response("{}");
