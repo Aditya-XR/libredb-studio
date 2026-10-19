@@ -246,7 +246,7 @@ Verified with a purpose-made restricted user granted `SELECT` on one table only:
 
 | Surface as a restricted user | Status | Code |
 |---|---|---|
-| `system.query_log`, `system.processes`, `system.metrics`, `system.data_skipping_indices` | **`500`** | `497` `ACCESS_DENIED` |
+| `system.query_log`, `system.processes`, `system.metrics`, `system.data_skipping_indices`, `system.dictionaries` | **`500`** | `497` `ACCESS_DENIED` |
 | `OPTIMIZE TABLE`, `KILL QUERY` | **`500`** | `497` |
 | `system.tables`, `system.columns` | `200` | — implicitly filtered to what the user may see |
 | `uptime()`, `version()` | `200` | — needs no grant |
@@ -262,6 +262,24 @@ miss every real denial.
 The upside is real: **the schema tree and the overview panel survive a restricted user** — only the
 monitoring panels and maintenance operations that need their own grant degrade
 ([§7](#7-monitoring--health)).
+
+#### Privileges and grants for schema inspection (#1768)
+
+Restricted users without server-wide administrative privileges can browse databases and inspect tables safely. Three grants govern what is unlocked in the object tree and schema explorer:
+
+1. **`GRANT SELECT ON system.dictionaries TO <user>`**
+   - **What it unlocks:** Querying the `system.dictionaries` catalog.
+   - When granted, Studio queries `system.dictionaries` to count dictionaries and check dictionary names for the folder split.
+   - When denied (code `497`), only the Dictionaries folder count is marked `{ unavailable: "<refusal reason>" }`, while `listObjects(..., "dictionary")` rejects with `AuthenticationError` (because it queries `system.dictionaries` directly). Tables, views, materialized views, and user-defined functions remain fully usable, and DDL dictionaries (or tables with `ENGINE = Dictionary(...)`) remain listed under the Tables folder rather than breaking the tree or crashing the provider.
+
+2. **`GRANT dictGet ON <database>.* TO <user>`** (or `GRANT SHOW DICTIONARIES ON <database>.* TO <user>`)
+   - **What it unlocks:** The table / dictionary folder split.
+   - **Why this grant is needed for the split:** Measured in #1768, `SELECT ON system.dictionaries` alone returns 0 rows (`dictionary: 0`) for dictionaries in `<database>` if the user lacks dictionary access privileges, so DDL dictionaries still list under the Tables folder. Granting `dictGet ON <database>.*` (or `SHOW DICTIONARIES`) allows ClickHouse to return the database's dictionary rows from `system.dictionaries`, which enables Studio to pull DDL dictionaries out of the Tables folder and list them in the Dictionaries folder.
+
+3. **`GRANT SELECT ON system.data_skipping_indices TO <user>`**
+   - **What it unlocks:** Data-skipping index details on tables.
+   - When granted, skipping indexes defined on MergeTree tables are read and rendered under the Indexes section.
+   - When denied (code `497`), Studio does not fail table description or falsely assert that the table has 0 indexes: visible columns are returned intact with `indexes: { readonly unavailable: string }`, displaying a refusal notice in the UI and preserving the refusal shape across schema diffs, Agent inventories, and MCP tools.
 
 ### 3.4 `default_format=JSONCompact` as a URL parameter, never appended to the SQL
 
@@ -899,7 +917,7 @@ the engine's own word, Database.
 | `table` | `relation` | `system.tables`, the DEFAULT arm |
 | `view` | `relation` | `system.tables`, `engine = 'View'` |
 | `materialized_view` | `relation` | `system.tables`, `engine = 'MaterializedView'` |
-| `dictionary` | `config` | `system.tables` joined to `system.dictionaries`, plus a union arm for the config-file ones |
+| `dictionary` | `config` | `system.dictionaries`, covering both DDL and config-file ones |
 | `function` | `routine` | `system.functions`, `origin != 'System'` |
 
 Two kinds are **absent rather than declared and zero**: ClickHouse has no trigger and no stored
@@ -943,11 +961,9 @@ So sourcing dictionaries from `system.tables` alone loses every config-file dict
 and the listing **together**. That is standing ruling 5a's exact absence: invisible in the tree while
 the badge keeps agreeing with its own folder, so ruling 5f still holds and nothing detects it.
 
-`system.dictionaries` is therefore unioned into the same kind-tagged subquery, on the arm
-`WHERE d.database = ''`, which is the config-file dictionary's whole address: a database cannot be
-named the empty string, so that arm can never duplicate a DDL dictionary, and the count and the
-listing still read **one text**. Like a function, such a dictionary is server-global: it appears under
-every database, and its path records the container it was reached through.
+`system.dictionaries` is therefore read in its own statement for the dictionary kind (`WHERE database = {database} OR database = ''`),
+which captures both DDL dictionaries and server-global config-file ones without joining `system.dictionaries` into the
+`system.tables` query.
 
 The engine name is not what identifies a dictionary either. Measured:
 
@@ -957,10 +973,12 @@ The engine name is not what identifies a dictionary either. Measured:
 
 That produces a `system.tables` row with engine `Dictionary` and **no** `system.dictionaries` row. It
 is a table that reads a dictionary, and `engine = 'Dictionary'` would file it under Dictionaries,
-where its detail read would then find nothing. So the kind expression asks `system.dictionaries` for
-**membership**, `(t.database, t.name) IN (SELECT database, name FROM system.dictionaries)`, and that
-proxy table stays a table. `docker/clickhouse-init/01-object-fixture.sql` carries all three shapes, so
-the rule can be re-measured rather than re-argued.
+where its detail read would then find nothing. So the kind expression checks `system.dictionaries` for
+**membership**, filtering out only tables whose names match verified dictionaries in the database, so that
+proxy table stays a table. Crucially, querying `system.dictionaries` separately ensures that a restricted user
+without grants on `system.dictionaries` only sees `dictionary` marked unavailable: `table` and other kinds
+proceed against `system.tables`, keeping tables (including dictionary-engine tables) intact under `table`.
+`docker/clickhouse-init/01-object-fixture.sql` carries all three shapes, so the rule can be re-measured rather than re-argued.
 
 #### The implicit inner table, and why the obvious rule is wrong
 
@@ -1006,8 +1024,8 @@ never coerced to zero.
 
 A refused count is reported per kind as `{ unavailable }` carrying **the server's own sentence**,
 verbatim and unprefixed, because that text is rendered to a person as the reason a folder has no
-number. It is a live case rather than a defensive arm: `system.functions` needs its own grant and a
-restricted user sees `500` / code `497`.
+number. It is a live case rather than a defensive arm: `system.dictionaries` needs its own grant and a
+restricted user sees code `497` (while `system.functions` needs no catalog grant, measured in the `src_probe` table below).
 
 #### What the last path segment carries
 
@@ -1070,13 +1088,15 @@ has at least one column and an empty answer means the object is not there under 
 
 The index read here **does not degrade to empty**, unlike the object surface's.
 `system.data_skipping_indices` needs its own grant and answers code `497` without it, and "this
-object has no skipping index" is a different fact from "you may not see its indexes". A detail panel
-showing the first when the second is true is a claim nobody measured.
+object has no skipping index" is a different fact from "you may not see its indexes". On refusal,
+`describeObject()` and `describeObjects()` preserve the visible columns and report `indexes: { unavailable: message }`
+instead of failing the entire table detail or claiming the object has no indexes.
 
-#### `describeObjects()` describes a whole folder in three statements (#789)
+#### `describeObjects()` describes a whole folder in four statements (#789)
 
 `describeObjects(container, kind, limit?)` answers columns and indexes for EVERY object of one kind in
-one database, in THREE round trips for a table-backed folder and TWO for a dictionary folder, whatever
+one database, in FOUR round trips for a table folder (dictionary preflight, target tables, columns, and data skipping indexes),
+THREE for views or materialized views, and TWO for a dictionary folder, whatever
 the folder holds. The single read is two statements per table-backed object and one per dictionary, so a
 folder of 200 tables cost 400. Measured on clickhouse-server 26.7.1.1315 against a 200-table database:
 **42 ms for one `describeObjects()` against 614 ms for 200 `describeObject()` calls**, the same 600

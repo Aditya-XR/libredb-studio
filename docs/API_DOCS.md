@@ -1335,6 +1335,22 @@ Oracle answers that shape for every kind whose role is not `relation`, MySQL for
 column predicate rejects, and a caller is expected to render "nothing to show" rather than treat the
 engine as broken.
 
+**Unavailable indexes (`{ unavailable: string }`):**
+When the underlying engine refuses permission to read index metadata (such as ClickHouse answering code `497 ACCESS_DENIED` on `system.data_skipping_indices` for a restricted user), `indexes` is returned as `{ "unavailable": "<reason>" }` rather than an array:
+
+```json
+{
+  "path": ["analytics", "events"],
+  "columns": [
+    { "name": "id", "type": "UInt64", "nullable": false, "isPrimary": true }
+  ],
+  "indexes": { "unavailable": "Not enough privileges. To execute this query, it's necessary to have grant SELECT on system.data_skipping_indices" },
+  "foreignKeys": []
+}
+```
+
+This preserves readable columns while honestly informing clients and the schema browser why indexes are absent, without falsely asserting that the object has no indexes.
+
 **Statuses:**
 
 | Condition | Status | Body |

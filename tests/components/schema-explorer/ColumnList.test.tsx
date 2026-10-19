@@ -134,6 +134,16 @@ describe("ColumnList", () => {
     expect(indexEl!.getAttribute("title")).toBe("email");
   });
 
+  test("renders unavailable indexes banner when indexes are refused", () => {
+    const { getByTestId } = render(
+      <ColumnList columns={columnsWithPrimary} indexes={{ unavailable: "permission denied" }} />,
+    );
+    const element = getByTestId("indexes-unavailable");
+    expect(element).not.toBeNull();
+    expect(element.textContent).toBe("permission denied");
+    expect(element.getAttribute("title")).toBe("permission denied");
+  });
+
   // ── Edge cases ──────────────────────────────────────────────────────────
 
   test("renders empty column list without crashing", () => {
