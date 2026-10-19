@@ -399,7 +399,7 @@ export interface SqlClientDialect {
 }
 
 /** One explicit row per family, no default branch: a fourth `AgentStatementLanguageId` fails to compile until its row exists. */
-interface AgentFamilyDialectRows {
+export interface AgentFamilyDialectRows {
   sql: { client: SqlClientDialect; server: SqlServerDialect };
   mongo: { client: Record<never, never>; server: Record<never, never> };
   kubectl: { client: Record<never, never>; server: Record<never, never> };
