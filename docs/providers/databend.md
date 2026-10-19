@@ -496,7 +496,7 @@ Databend's backslash escapes are a fact of the grammar row (`backslashAlwaysEsca
 
 ### 5.3 The Databend grammar
 
-The statement splitter, the row limiter, the confirmation gate, the guard and the EXPLAIN screen read text under one grammar row, `DATABEND_GRAMMAR` in `src/lib/sql/grammar.ts`.
+The statement splitter, the row limiter, the confirmation gate, the guard and the EXPLAIN screen read text under one grammar row, `DATABEND_GRAMMAR` in `src/lib/db/providers/sql/databend/sql-grammar.ts`.
 
 | Field | Value | Why |
 |---|---|---|
@@ -640,6 +640,20 @@ A statement that waits for a statement slot longer than its deadline sends nothi
 > Studio's Databend statement slots stayed busy for [seconds] seconds, so nothing was sent. Try again when a running statement finishes.
 
 The resuming sentence of section 4.4 and the slot wait above are no statement's timeout: each is a `ConnectionError`, which Studio's routes answer with HTTP 503 and the sentence itself.
+
+### 5.9 SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/sql/databend/sql-grammar.ts`](../../src/lib/db/providers/sql/databend/sql-grammar.ts), the `databend` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+Its grammar is `DATABEND_GRAMMAR`, the one reading the statement splitter, the row limiter, the confirmation gate and query-event redaction share, so they cannot disagree about where a literal or a comment ends.
+Every fact was read off the server's own lexer (`src/query/ast/src/parser/token.rs`) and parser, since there is no driver package to ask; [§5.3](#53-the-databend-grammar) describes the five readings the statement guard refuses instead.
+`#` is code: `#`, `#>`, `#>>` and `#-` are operator tokens, and the only comment forms are `--` and the block form.
+`[` is a subscript and an array literal, and names are quoted with `"` or a backtick.
+Block comments are flat: `lex_comment_block` scans for the first `*/` with no depth count.
+`//` is an operator token.
+A backslash always escapes: the string token is `'([^'\\]|\\.|'')*'` and its `"` twin, and no setting turns the escape off.
+The row bound goes before a trailing `FORMAT` clause, measured on the pinned image over `POST /v1/query`: `SELECT 1 FORMAT JSON LIMIT 5` is 1005 "unexpected `LIMIT`", and `SELECT 1 LIMIT 5 FORMAT JSON` succeeds.
+`readsSqlText` is `true`: the editor text is SQL, and the provider extends `SQLBaseProvider`.
+Redaction is `sql` with no name quote: a redacted statement keeps its words, and every literal and quoted run becomes `?`.
 
 ## 6. Schema introspection
 

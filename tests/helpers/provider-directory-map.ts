@@ -10,8 +10,9 @@ import type { DatabaseType } from "@/lib/types";
  * census attributes a caller file to the type-id its name or directory names, and the connection dialog's field
  * census reads a type's whole directory as that type's source. `timeseries/influxdb/` breaks both, by decision
  * (I2, I23): one directory, two classes, flat prefixed files. So the split is DECLARED here, once, for both censuses,
- * rather than inferred twice: `influxql-*` files are `influxdb`'s, `sql-*` files are `influxdb3`'s, and the
- * unprefixed connection layer is both. `tests/unit/helpers/provider-directory-map.test.ts` holds the table equal to
+ * rather than inferred twice: `influxql-*` files are `influxdb`'s, `sql-*` files are `influxdb3`'s, a per-engine
+ * contract module named after its type-id (`influxdb-*`, `influxdb3-*`) is that type-id's, and the unprefixed
+ * connection layer is both. `tests/unit/helpers/provider-directory-map.test.ts` holds the table equal to
  * the directory on disk, so a new file is claimed the day it lands.
  *
  * `sql/search/` also serves two type-ids, and is absent on purpose: every file there serves both, which is the
@@ -29,7 +30,12 @@ export const PROVIDERS_ROOT = path.resolve(import.meta.dir, "../../src/lib/db/pr
 
 export const PROVIDER_DIRECTORY_MAP: Readonly<Record<string, ProviderDirectoryEntry>> = Object.freeze({
   "timeseries/influxdb": Object.freeze({
-    byPrefix: Object.freeze({ "influxql-": "influxdb", "sql-": "influxdb3" }),
+    byPrefix: Object.freeze({
+      "influxql-": "influxdb",
+      "sql-": "influxdb3",
+      "influxdb-": "influxdb",
+      "influxdb3-": "influxdb3",
+    }),
     shared: Object.freeze([
       "client.ts",
       "connection-options.ts",
@@ -50,9 +56,9 @@ function entryKey(directory: string): string | undefined {
   return Object.hasOwn(PROVIDER_DIRECTORY_MAP, key) ? key : undefined;
 }
 
-/** Every type-id a directory entry serves, in the order its prefixes are declared. */
+/** Every type-id a directory entry serves, once each, in the order its prefixes first name it. */
 function typeIdsOf(entry: ProviderDirectoryEntry): DatabaseType[] {
-  return Object.values(entry.byPrefix);
+  return [...new Set(Object.values(entry.byPrefix))];
 }
 
 /**

@@ -690,6 +690,19 @@ A key column that is not auto-increment carries the plain `INTEGER`.
 
 The type list changes from the shared list only where the engine disagrees; a row that reads like the old shared list is the engine agreeing with it, not a row nobody looked at.
 
+### 5.8 SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/sql/trino/sql-grammar.ts`](../../src/lib/db/providers/sql/trino/sql-grammar.ts), the `trino` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+Its grammar is `TRINO_GRAMMAR`, the one reading the statement splitter, the row limiter, the confirmation gate and query-event redaction share, so they cannot disagree about where a literal or a comment ends.
+Every fact was a statement Trino 476 answered through `POST /v1/statement` on 2026-08-20.
+`#` opens nothing: `SELECT 1 AS a # trailing` is "line 1:15: mismatched input '#'" and `SELECT # x` is "line 1:8: mismatched input '#'".
+`[` is a subscript that nests and no name quote: `SELECT ARRAY[1,2][1]` answers 1, `SELECT ARRAY[ARRAY[1,2],ARRAY[3,4]][1][2]` answers 2, and `SELECT [customer] FROM tpch.sf1.nation` fails with "Column 'customer' cannot be resolved".
+Block comments are flat: `SELECT /* a /* b */ 1 AS a` returns the column.
+`SELECT q'{it''s}'` is "Unknown resolvedType: q", so there is no alternate quoting.
+`//` is code, probed 2026-08-25: `SELECT 1 AS a // note` is "line 1:15: mismatched input '/'", and the same text with a newline before a second column is the same error at the same offset.
+`readsSqlText` is `true`, deliberately: the editor text is the exact bytes `POST /v1/statement` receives, and the provider extends `SQLBaseProvider`.
+Redaction is `sql` with no name quote: a redacted statement keeps its words, and every literal and quoted run becomes `?`.
+
 ## 6. Schema introspection
 
 Two statements, run in parallel against the pinned catalog's `information_schema`: the table list and

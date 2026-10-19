@@ -336,6 +336,14 @@ On the eight routes that take `timeout`, Studio sends the remaining deadline in 
 Stop cancels the request in Studio and on the socket; the server stops a scroll, a facet, a query and a grouped query within a fifth of a second of its timeout, but an exact count keeps working after its timeout, and after a cancel, until it completes, so add `"exact": false` to a slow count.
 The confirmation gate asks about nothing, because every request reads, and it never sends a Qdrant request for an AI analysis.
 
+### 5.9 SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/vector/qdrant/sql-grammar.ts`](../../src/lib/db/providers/vector/qdrant/sql-grammar.ts), the `qdrant` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+`readsSqlText` is `false`: `qdrant` takes one Qdrant console request, a `METHOD /path` line and one JSON body, whose strings escape with a backslash and where `//` opens a comment outside a string; the provider parses it with the shared console parser.
+The confirmation gate therefore answers from this engine's row of `NON_SQL_DESTRUCTIVE_VOCABULARY` in `src/lib/db/destructive-commands.ts` instead of a SQL reading.
+Its grammar is `DEFAULT_SQL_GRAMMAR`, the compatibility default, since no SQL grammar of its own applies to this text.
+Redaction is `none`: a redacted statement is stored as `?`, because a reader guessing where a literal ends in a language it does not read can store the literal.
+
 ## 6. Schema introspection
 
 ### 6.1 The object surface

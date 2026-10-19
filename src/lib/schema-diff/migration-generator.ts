@@ -365,7 +365,7 @@ const NO_DROP_IF_EXISTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["ora
  *
  * The other nine are new, and each reuses a fact this module (or `src/lib/sql/grammar.ts`)
  * already established for a different fallback rather than asserting a fresh one:
- * `mongodb` and `redis` write no SQL text at all (`NON_SQL_DIALECTS` in `grammar.ts`), and
+ * `mongodb` and `redis` write no SQL text at all (`readsSqlText: false` in their `sql-grammar` modules), and
  * wrapping non-SQL command text in SQL statements is wrong regardless of Mongo's own
  * driver-level transaction API; `libredb` "speaks a JSON command grammar, not SQL DDL"
  * (`NO_COLUMN_MODIFICATION`'s own words); `couchbase` HAS distributed ACID transactions,
@@ -389,7 +389,7 @@ const NO_DROP_IF_EXISTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["ora
  * SQL Server is handled separately with BEGIN TRANSACTION.
  *
  * `prometheus` (#1085) joined later, on the fact `mongodb` and `redis` already rest on: its
- * text is PromQL, not SQL (`NON_SQL_DIALECTS`). `NO_TABLE_DDL` declines its whole diff before
+ * text is PromQL, not SQL (`readsSqlText: false`). `NO_TABLE_DDL` declines its whole diff before
  * any wrapper is written, so this entry keeps the two sets agreeing rather than changing output.
  * `kafka` (#1088) joined on the same fact and for the same reason: its text is a JSON read
  * request, not SQL. `etcd` (#1089) joined the same way: its text is an etcdctl command line, and

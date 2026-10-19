@@ -1547,7 +1547,7 @@ and, **only for `SELECT`/CTE-`SELECT` queries that don't already have a `LIMIT`*
   annotated `SELECT` classified as an unknown statement type and returned **every** row while the
   UI badge reported it as not limited (#275).
 - The statement's characters are read under **PostgreSQL's** grammar, which the provider passes down
-  from its own `type` ([`grammar.ts`](../../src/lib/sql/grammar.ts)). PostgreSQL has exactly two
+  from its own `type` ([`postgres-sql-grammar.ts`](../../src/lib/db/providers/sql/postgres-sql-grammar.ts)). PostgreSQL has exactly two
   comment forms, `--` and `/* … */`; `#` is an operator character (`#>` and `#>>` walk a jsonb path,
   `#-` deletes one, `##` is geometric, `#` is integer XOR). The shared reader used to approximate
   that with "a comment unless the next character makes an operator", which kept everyday jsonb queries
@@ -1803,9 +1803,23 @@ Before this, the same file stopped at its first row with `ERROR: malformed array
 
 The editor's confirmation gate asks before the shared destructive keywords, `MERGE` among them ([query-optimization.md](../editor/query-optimization.md#destructive-statement-confirmation)).
 On this dialect it also asks before a `DO` block, whatever the block does: the block's code is a literal, `$$ ... $$` or `'...'`, which the gate does not read.
-The grammar row's `confirmCodeForms` names `DO` followed by a body and `DO LANGUAGE` ([`grammar.ts`](../../src/lib/sql/grammar.ts)), so the `DO` of `INSERT ... ON CONFLICT DO NOTHING` and of `CREATE RULE ... DO INSTEAD`, which a word follows, does not ask.
+The grammar row's `confirmCodeForms` names `DO` followed by a body and `DO LANGUAGE` ([`postgres-sql-grammar.ts`](../../src/lib/db/providers/sql/postgres-sql-grammar.ts)), so the `DO` of `INSERT ... ON CONFLICT DO NOTHING` and of `CREATE RULE ... DO INSTEAD`, which a word follows, does not ask.
 
 ---
+
+### 5.9 SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/sql/postgres-sql-grammar.ts`](../../src/lib/db/providers/sql/postgres-sql-grammar.ts), the `postgres` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+Its grammar is `POSTGRES_GRAMMAR`, the one reading the statement splitter, the row limiter, the confirmation gate and query-event redaction share, so they cannot disagree about where a literal or a comment ends.
+`#` is an operator character (`#>`, `#>>` and `#-` walk or delete a jsonb path), and the only comment forms are `--` and the block form.
+Block comments nest, per the PostgreSQL manual (4.1.5 Comments, checked 2026-08-05).
+`[...]` is a subscript and array constructors nest (manual 4.2.3 and 4.2.12), established from the manual because the undeterminable reading prompted on `ARRAY[[1,2],[3,4]]` and `j['a]b']`, everyday reads in this dialect.
+`//` is code on 18, and the most explicit of the refusals: `SELECT 1 // 2` is "operator does not exist: integer // integer", so `//` is an operator name here.
+The row bound goes before Materialize's `AS OF [AT LEAST] <t>`, which shares this type id (E2E pass of 2026-10-03/04, #1398): `SELECT * FROM ui_mv AS OF AT LEAST 0` with the bound appended is `Expected end of statement, found LIMIT`, and with the bound before the clause it returns rows.
+Completion quotes a catalog name by PostgreSQL's `quote_ident` rule, with the keyword set taken from PostgreSQL 18's `kwlist.h`: a name stays bare only when it is lower case and not a keyword other than an unreserved one, and a qualifier written in double quotes before the dot is read back with its doubled quotes undone.
+Only PostgreSQL completions introduce quoted table names; every other dialect quotes through the connection's capabilities.
+`readsSqlText` is `true`: the editor text is SQL, and the provider extends `SQLBaseProvider`.
+Redaction is `sql` with `"` as its name quote: a redacted statement keeps its words and every name in that quote, and every literal becomes `?`.
 
 ## 6. Schema introspection
 

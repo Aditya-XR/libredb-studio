@@ -503,7 +503,7 @@ Homebrew). Each channel is browser-verified by
 (`DEFAULT_QUERY_LIMIT = 500`). No transactions, no cancellation ([§3.4](#34-no-transactions-api-no-cancellation-no-pool)).
 
 The inherited path reads the statement under **SQLite's** grammar, which the base passes down from the
-provider's own `type` ([`grammar.ts`](../../src/lib/sql/grammar.ts)). SQLite has two comment forms,
+provider's own `type` ([`sqlite-sql-grammar.ts`](../../src/lib/db/providers/sql/sqlite-sql-grammar.ts)). SQLite has two comment forms,
 `--` and `/* … */`; `#` opens neither. Its own tokenizer (the amalgamation bundled with
 `better-sqlite3` classifies `#` as `CC_VARALPHA`) reads `#name` as a bind variable, i.e. code. The
 shared reader used to guess MySQL's rule here, which swallowed the rest of the line and cost the
@@ -626,6 +626,18 @@ than the `Buffer` form the response carries (#1381); that is the same for every 
 hands back bytes.
 
 ---
+
+### SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/sql/sqlite-sql-grammar.ts`](../../src/lib/db/providers/sql/sqlite-sql-grammar.ts), the `sqlite` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+Its grammar is `SQLITE_GRAMMAR`, the one reading the statement splitter, the row limiter, the confirmation gate and query-event redaction share, so they cannot disagree about where a literal or a comment ends.
+`SQLITE_GRAMMAR` lives in `src/lib/db/sql-grammar/shared.ts`, the one grammar two engines share, since libSQL reads SQLite's grammar.
+`#` is code and `[...]` a quoted identifier, from the amalgamation bundled with `better-sqlite3`: `#` is `CC_VARALPHA`, a bind-variable prefix, comments open on `--` and `/*` only, and `[` is `CC_QUOTE2`, scanned to the first `]`.
+Block comments are flat: `case CC_SLASH` scans for the first `*/` with no depth count.
+`//` is code, probed 2026-08-25 through the bundled driver: `SELECT 1 AS a // note` and `SELECT 1 // 2` are both 'near "/": syntax error'.
+`CREATE TRIGGER ... BEGIN ... END` is the one statement with a body: measured through node:sqlite 3.50.4, the trigger cut at its inner `;` was `incomplete input`.
+`readsSqlText` is `true`: the editor text is SQL.
+Redaction is `sql` with no name quote: a redacted statement keeps its words, and every literal and quoted run becomes `?`.
 
 ## 6. Schema introspection
 

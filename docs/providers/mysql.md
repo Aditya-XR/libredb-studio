@@ -920,6 +920,20 @@ A `bigint unsigned` past the signed range still fails the DDL form, because the 
 
 ---
 
+### 5.7 SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/sql/mysql-sql-grammar.ts`](../../src/lib/db/providers/sql/mysql-sql-grammar.ts), the `mysql` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+Its grammar is `MYSQL_GRAMMAR`, the one reading the statement splitter, the row limiter, the confirmation gate and query-event redaction share, so they cannot disagree about where a literal or a comment ends.
+`#` to end of line is MySQL's and MariaDB's second comment form, pinned in the MySQL provider suite (#275).
+Block comments are flat: the MySQL reference manual (11.7 Comments, checked 2026-08-05) states nested comments are not supported and are deprecated.
+`//` is code, probed 2026-08-25 on 26.7.0: `SELECT 1 AS a // note` is ERROR 1064.
+A backslash does not always escape, because `NO_BACKSLASH_ESCAPES` in `sql_mode` turns the escape off per session.
+`[...]` and compound statements (`CREATE PROCEDURE ... BEGIN ... END`, cut with `DELIMITER` by MySQL's own client) are not established and stay at the fail-safe default; the second gap is BACKLOG S7.
+The update-target reader takes `--` as a comment only before a space or a control character, as MySQL and MariaDB do; its measurement on MariaDB 11.8.9 sits beside its regex in `src/lib/sql/update-target.ts`.
+`readsSqlText` is `true`: the editor text is SQL, and the provider extends `SQLBaseProvider`.
+Redaction is `sql` with a backtick as its name quote: a redacted statement keeps its words and every name in that quote, and every literal becomes `?`.
+A double quote is a string unless `ANSI_QUOTES` is set, so it is masked like any literal.
+
 ## 6. Transactions
 
 Identical lifecycle to PostgreSQL, on a **dedicated connection checked out from the pool and held

@@ -1692,13 +1692,13 @@ const TRANSACTION_WRAPPER_COVERAGE: Record<DatabaseType, "BEGIN;" | "BEGIN TRANS
   libsql: false, // SQLite fork, same reasoning, plus its own Hrana-stream note (module docstring)
   cassandra: false, // CQL has no BEGIN/COMMIT — measured on 5.0.9 (module docstring)
   // The remaining twenty-four each have a recorded reason for having no `BEGIN;` to emit, in this
-  // same module (`NO_COLUMN_MODIFICATION`), in `src/lib/sql/grammar.ts` (`NON_SQL_DIALECTS`)
+  // same module (`NO_COLUMN_MODIFICATION`), in each engine's `sql-grammar` module (`readsSqlText: false`)
   // or in the provider doc named on the line — this table applies those established facts to
   // the wrapper fallback rather than asserting fresh ones, so none of the twenty-four needs a new
   // live probe. What none of them means is "the wrapper bracketed nothing": see the
   // added-table fixture below.
-  mongodb: false, // not SQL text at all (`NON_SQL_DIALECTS`); wrapping non-SQL in SQL statements is wrong regardless of Mongo's own transaction API
-  redis: false, // same: command-line grammar, not SQL (`NON_SQL_DIALECTS`)
+  mongodb: false, // not SQL text at all (`readsSqlText: false`); wrapping non-SQL in SQL statements is wrong regardless of Mongo's own transaction API
+  redis: false, // same: command-line grammar, not SQL (`readsSqlText: false`)
   libredb: false, // "a JSON command grammar, not SQL DDL" (NO_COLUMN_MODIFICATION's own words)
   couchbase: false, // has transactions, but spells them `BEGIN TRANSACTION` + a txid every later statement must carry — not something a flat file expresses (docs/providers/couchbase.md §13)
   druid: false, // "Druid SQL has no ALTER TABLE" and no transaction concept at all (NO_COLUMN_MODIFICATION)
@@ -1706,31 +1706,31 @@ const TRANSACTION_WRAPPER_COVERAGE: Record<DatabaseType, "BEGIN;" | "BEGIN TRANS
   elasticsearch: false, // `BEGIN` is not in the grammar (NO_COLUMN_MODIFICATION's measured statement list; docs/providers/elasticsearch.md §9)
   opensearch: false, // same, measured separately on OpenSearch 3.8.0 (docs/providers/opensearch.md §9)
   trino: false, // connector-dependent at best; no portable BEGIN/COMMIT (NO_COLUMN_MODIFICATION)
-  prometheus: false, // not SQL text at all (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  kafka: false, // a JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  etcd: false, // an etcdctl command, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  neo4j: false, // a Cypher statement, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  milvus: false, // a Milvus console request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  qdrant: false, // a Qdrant console request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  influxdb: false, // an InfluxQL statement, not SQL text at all (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  prometheus: false, // not SQL text at all (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  kafka: false, // a JSON read request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  etcd: false, // an etcdctl command, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  neo4j: false, // a Cypher statement, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  milvus: false, // a Milvus console request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  qdrant: false, // a Qdrant console request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  influxdb: false, // an InfluxQL statement, not SQL text at all (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
   influxdb3: false, // SQL, but the 3.x planner takes no DDL, so there is no table DDL to wrap (`NO_TABLE_DDL`)
-  oxia: false, // an `oxia client` read command, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  oxia: false, // an `oxia client` read command, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
   databend: false, // a DDL statement commits the open transaction, so BEGIN; brackets nothing, the Oracle reason (module docstring)
   bigquery: false, // the provider declares no transactions
   snowflake: false, // DDL commits implicitly, and each statement runs in its own session
   spark: false, // no transaction spans two statements (supportsTransactions: false)
-  s3: false, // one AWS CLI subset command, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  kubernetes: false, // one kubectl statement, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  mqtt: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  firestore: false, // one read-only query chain, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  rabbitmq: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  opcua: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  s3: false, // one AWS CLI subset command, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  kubernetes: false, // one kubectl statement, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  mqtt: false, // one JSON read request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  firestore: false, // one read-only query chain, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  rabbitmq: false, // one JSON read request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  opcua: false, // one JSON read request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
   // No wrapper: every request this provider sends is a GET, so there is no statement to wrap (#1722).
-  mtconnect: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  modbus: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
-  netconf: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  mtconnect: false, // one JSON read request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  modbus: false, // one JSON read request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  netconf: false, // one JSON read request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
   snmp: false, // a Get is not SQL text and there is no table DDL to wrap
-  sparkplug: false, // one JSON read request, not SQL text (`NON_SQL_DIALECTS`), and no table DDL to wrap (`NO_TABLE_DDL`)
+  sparkplug: false, // one JSON read request, not SQL text (`readsSqlText: false`), and no table DDL to wrap (`NO_TABLE_DDL`)
 };
 
 // Both creation and modification paths must use the same wrapper policy.

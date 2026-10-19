@@ -212,6 +212,10 @@ The editor's query dialects follow the same rule through three registries, each 
 `DIALECT_GENERATORS` (`src/lib/query-generators.ts`) gives each dialect what a tree click and Generate Query write, and, for a provider that declares `rowActions`, what each declared row action runs.
 A dialect is one record in each, and no reader branches on its name: `tests/unit/lib/dialect-reader-allowlist.test.ts` holds every other reader of `queryDialect`, of the JSON language and of a negated language to a closed list with its owner.
 
+How each engine's statement text is read sits in a registry of the same kind beside `QUERY_DIALECTS`: `SQL_GRAMMAR` in `src/lib/db/sql-grammar/`, a `Record<DatabaseType, SqlGrammarSpec>` the compiler holds total.
+Each row is a module beside its engine's provider that states the grammar facts the statement splitter, the row limiter and the confirmation gate read, whether the text is SQL at all (`readsSqlText`), what a redacted query event keeps, the words the update-target reader adds, and how completion quotes a name.
+`sqlGrammarFor()` answers a missing type with `NO_CONNECTION_SQL_GRAMMAR` and an unknown one with `UNKNOWN_TYPE_SQL_GRAMMAR`, so no reader of these facts names a type id.
+
 ### 4.2. Authentication Flow
 
 ```mermaid

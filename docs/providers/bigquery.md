@@ -169,7 +169,7 @@ In a project with datasets in several regions, set `location` to the region you 
 
 ### 5.4 SQL grammar
 
-The statement reader that decides where a statement ends, whether a keyword is real and whether a run needs a confirmation prompt has a BigQuery grammar (`BIGQUERY_GRAMMAR` in `src/lib/sql/grammar.ts`), every fact of it measured with `jobs.query` dry runs:
+The statement reader that decides where a statement ends, whether a keyword is real and whether a run needs a confirmation prompt has a BigQuery grammar (`BIGQUERY_GRAMMAR` in [`src/lib/db/providers/sql/bigquery/sql-grammar.ts`](../../src/lib/db/providers/sql/bigquery/sql-grammar.ts), the `bigquery` row of the SQL grammar registry in `src/lib/db/sql-grammar/`), every fact of it measured with `jobs.query` dry runs on 2026-10-11:
 
 - `#` and `--` start a line comment, `//` does not, and `/* … */` does not nest.
 - A backslash escapes the next character in `'…'` and `"…"`; a doubled quote is not an escape (BigQuery answers "concatenated string literals must be separated by whitespace or comments").
@@ -178,6 +178,9 @@ The statement reader that decides where a statement ends, whether a keyword is r
 - `[…]` is an array literal or a subscript, never a name.
 
 A script (`BEGIN … END`) is not split: the shared splitter does not model it.
+
+`readsSqlText` is `true`: the editor text is GoogleSQL, and the provider extends `SQLBaseProvider`.
+Redaction is `sql` with no name quote: a redacted statement keeps its words, and every literal and quoted run becomes `?`.
 
 ## 6. Dry run and cost estimate
 

@@ -38,10 +38,12 @@ describe("PROVIDER_DIRECTORY_MAP", () => {
     });
   }
 
-  test("the InfluxDB directory maps influxql-* to influxdb and sql-* to influxdb3", () => {
+  test("the InfluxDB directory maps influxql-* and influxdb-* to influxdb, sql-* and influxdb3-* to influxdb3", () => {
     expect(PROVIDER_DIRECTORY_MAP["timeseries/influxdb"].byPrefix).toEqual({
       "influxql-": "influxdb",
       "sql-": "influxdb3",
+      "influxdb-": "influxdb",
+      "influxdb3-": "influxdb3",
     });
   });
 });
@@ -50,6 +52,11 @@ describe("typeIdsOfProviderFile", () => {
   test("a prefixed file serves the one type-id its prefix names", () => {
     expect(typeIdsOfProviderFile(path.join(INFLUX, "influxql-objects.ts"))).toEqual(["influxdb"]);
     expect(typeIdsOfProviderFile(path.join(INFLUX, "sql-provider.ts"))).toEqual(["influxdb3"]);
+  });
+
+  test("a per-engine contract module is named after its type-id and serves that one type-id", () => {
+    expect(typeIdsOfProviderFile(path.join(INFLUX, "influxdb-migration-ddl.ts"))).toEqual(["influxdb"]);
+    expect(typeIdsOfProviderFile(path.join(INFLUX, "influxdb3-migration-ddl.ts"))).toEqual(["influxdb3"]);
   });
 
   test("a shared file serves every type-id of its directory", () => {

@@ -324,6 +324,14 @@ A field a document lacks and a stored null both show as NULL in the grid, so `wh
 
 Cancel aborts the in-flight request.
 
+### 5.8 SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/document/firestore/sql-grammar.ts`](../../src/lib/db/providers/document/firestore/sql-grammar.ts), the `firestore` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+`readsSqlText` is `false`: the console takes one Firestore read statement in its own grammar ([§5.2](#52-grammar)), which the provider parses itself.
+The confirmation gate therefore answers from this engine's row of `NON_SQL_DESTRUCTIVE_VOCABULARY` in `src/lib/db/destructive-commands.ts` instead of a SQL reading.
+Its grammar is `DEFAULT_SQL_GRAMMAR`, the compatibility default, since no SQL grammar of its own applies to this text.
+Redaction is `none`: a redacted statement is stored as `?`, because a reader guessing where a literal ends in a language it does not read can store the literal.
+
 ## 6. Schema introspection
 
 ### 6.1 The tree

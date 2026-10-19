@@ -18,6 +18,14 @@ Four commands: `get`, `next`, `walk` and `table`. A walk stops when `read.ts` sa
 nothing else decides: the end of a subtree, a budget, an OID that did not move forward, or
 silence. A second place that decides when a walk is over is a second place that can disagree.
 
+### 1.1 SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/network/snmp/sql-grammar.ts`](../../src/lib/db/providers/network/snmp/sql-grammar.ts), the `snmp` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+`readsSqlText` is `false`: the console takes one of the four commands `get`, `next`, `walk` and `table`, which the provider parses before the socket is touched, so no span of it is SQL.
+The confirmation gate therefore answers from this engine's row of `NON_SQL_DESTRUCTIVE_VOCABULARY` in `src/lib/db/destructive-commands.ts` instead of a SQL reading.
+Its grammar is `DEFAULT_SQL_GRAMMAR`, the compatibility default, since no SQL grammar of its own applies to this text.
+Redaction is `none`: a redacted statement is stored as `?`, because a reader guessing where a literal ends in a language it does not read can store the literal.
+
 ## 2. Why v2c only, today
 
 This is a fact about the connection form, not a preference. The shared connection record carries

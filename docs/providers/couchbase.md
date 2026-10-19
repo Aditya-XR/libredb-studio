@@ -645,6 +645,13 @@ caller shape-checks for the method and this provider does not answer it.
 
 ---
 
+### 5.6 SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/document/couchbase/sql-grammar.ts`](../../src/lib/db/providers/document/couchbase/sql-grammar.ts), the `couchbase` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+Its grammar is `DEFAULT_SQL_GRAMMAR`, the compatibility default, because no rule was established for SQL++, not because SQL++ agrees with the default.
+`readsSqlText` is `true`: the editor text is SQL++, which the SQL readers read under that default.
+Redaction is `none`, since the engine has no grammar of its own: a redacted statement is stored as `?`, because a reader guessing where a literal ends can store the literal.
+
 ## 6. Schema introspection
 
 Every reading of this engine's objects goes through the object surface

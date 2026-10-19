@@ -803,8 +803,8 @@ const SEARCH_MODULE_CITATIONS = [
   { name: "httpOrigin", source: "src/lib/db/http/endpoint.ts" },
   { name: "quoteIdentifier", source: "src/lib/sql/identifier.ts" },
   { name: "LITERAL_ESCAPE", source: "src/lib/sql/values.ts" },
-  { name: "ELASTICSEARCH_GRAMMAR", source: "src/lib/sql/grammar.ts" },
-  { name: "OPENSEARCH_GRAMMAR", source: "src/lib/sql/grammar.ts" },
+  { name: "ELASTICSEARCH_GRAMMAR", source: "src/lib/db/providers/sql/search/elasticsearch-sql-grammar.ts" },
+  { name: "OPENSEARCH_GRAMMAR", source: "src/lib/db/providers/sql/search/opensearch-sql-grammar.ts" },
 ] as const;
 
 /** Members of the dialect table rather than top-level declarations, so matched as object keys. */

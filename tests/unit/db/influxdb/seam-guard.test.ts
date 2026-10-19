@@ -13,7 +13,8 @@
  *    `/ping` or `/health`; a sentence that mentions a path inside longer text is not a path literal.
  * 6. Each layer value-imports only what contract section 1 lets it (types are free): `connection-options.ts` may take
  *    the value `TUNNEL_FAR_END` from `@/lib/types` (the Qdrant shape, architect amendment from T09), and a file of
- *    no layer fails, so a new file is placed in one on purpose.
+ *    no layer fails, so a new file is placed in one on purpose. The two SQL grammar modules (engine contract spec 5.3)
+ *    are a layer of their own, which value-imports only the contract's building blocks under `src/lib/db/sql-grammar/`.
  *
  * Rules 1 to 3 count a type-only import too: they keep modules apart, not values. Module names are resolved as
  * TypeScript resolves them, so an alias counts; a planted module that does not exist yet resolves by its spelling.
@@ -34,8 +35,9 @@ const SQL_BASE = "@/lib/db/providers/sql/sql-base";
 const SHARED = ["connection-options", "routes", "client", "versions", "errors", "run-database", "monitoring", "labels"];
 const BROWSER = ["influxql-lexer", "influxql-policy", "influxql-quote", "influxql-generators"];
 const INFLUXQL_SERVER = ["influxql-results", "influxql-objects", "influxql-provider"];
+const GRAMMAR = ["influxdb-sql-grammar", "influxdb3-sql-grammar"];
 
-type Layer = "connection" | "browser" | "influxql-server" | "sql";
+type Layer = "connection" | "browser" | "influxql-server" | "sql" | "grammar";
 
 const canonical = (path: string): string => realpathSync.native(path).split("\\").join("/");
 const relative = (path: string): string => path.slice(canonical(ROOT).length + 1);
@@ -46,6 +48,7 @@ function layerOf(file: string): Layer | undefined {
   if (SHARED.includes(name) || name === "index") return "connection";
   if (BROWSER.includes(name)) return "browser";
   if (INFLUXQL_SERVER.includes(name)) return "influxql-server";
+  if (GRAMMAR.includes(name)) return "grammar";
   if (name.startsWith("sql-")) return "sql";
   return undefined;
 }
@@ -91,6 +94,7 @@ const OUTSIDE_VALUES: Readonly<Record<Layer, readonly string[]>> = {
     "src/lib/db/object-kinds.ts",
     "src/lib/db/providers/sql/sql-base.ts",
   ],
+  grammar: ["src/lib/db/sql-grammar/"],
 };
 
 /** Which of this directory's modules each layer may import a value from. */
@@ -106,6 +110,8 @@ function insideAllowed(file: string, layer: Layer, target: string): boolean {
       return shared || name.startsWith("influxql-");
     case "sql":
       return shared || name.startsWith("sql-");
+    case "grammar":
+      return false;
   }
 }
 

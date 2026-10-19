@@ -460,6 +460,16 @@ SEARCH probe_customers USING INDEX idx_customers_country (country=?)
 
 ---
 
+### SQL grammar
+
+How this engine's statement text is read is declared once, in [`src/lib/db/providers/sql/libsql/sql-grammar.ts`](../../src/lib/db/providers/sql/libsql/sql-grammar.ts), the `libsql` row of the SQL grammar registry in `src/lib/db/sql-grammar/`.
+Its grammar is `SQLITE_GRAMMAR`, the one reading the statement splitter, the row limiter, the confirmation gate and query-event redaction share, so they cannot disagree about where a literal or a comment ends.
+It is the same grammar object as `sqlite`'s, and every one of its facts was re-measured over Hrana on sqld 0.24.33 rather than inherited: `SELECT 1 # x` is refused ("bad variable name"), `SELECT [id] FROM probe_customers` parses, `/* outer /* inner */ SELECT 1` runs, and `q'[x]'` is a syntax error.
+The trigger-body fact was measured on the same sqld: a trigger cut at its inner `;` is "SQL string could not be parsed: unexpected end of input", and sent whole it is created.
+Sharing the object is deliberate: a divergence would have to be written down as its own grammar, which is the change a reader should see.
+`readsSqlText` is `true`: the editor text is SQL, and the provider extends `SQLBaseProvider`.
+Redaction is `sql` with no name quote: a redacted statement keeps its words, and every literal and quoted run becomes `?`.
+
 ## 6. Schema introspection
 
 | Surface | Statement |

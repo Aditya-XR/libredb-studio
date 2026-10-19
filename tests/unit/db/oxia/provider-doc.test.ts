@@ -192,6 +192,7 @@ const OUTLINE: readonly string[] = [
   "### 5.6 Bounds",
   "### 5.7 Cancellation and the confirmation gate",
   "### 5.8 Natural-order notice",
+  "### 5.9 SQL grammar",
   "## 6. Schema introspection",
   "### 6.1 The object surface",
   "### 6.2 Object source",
@@ -222,6 +223,7 @@ const BROWSER_SET: ReadonlySet<string> = new Set([
   "generators.ts",
   "order.ts",
   "cursor.ts",
+  "sql-grammar.ts",
 ]);
 
 /** The version note of contract section 23 (SB1-6.6), the one text three files hold identically. */

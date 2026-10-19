@@ -96,8 +96,8 @@ it writes `DEFAULT_SQL_GRAMMAR.<fact>`. Three such sites remain, all on the same
 `#` and block-comment nesting are now established for every dialect that has a grammar row.
 ClickHouse's three facts were established after this entry was first written.
 
-**A different state, not an undecided fact:** couchbase, druid and libredb have no row in
-`SQL_GRAMMARS` at all, so they fall to the whole default. Nobody has probed them.
+**A different state, not an undecided fact:** couchbase, druid and libredb declare `grammar: DEFAULT_SQL_GRAMMAR` in
+their modules (`src/lib/db/providers/document/couchbase/sql-grammar.ts`, `src/lib/db/providers/sql/druid/sql-grammar.ts`, `src/lib/db/providers/embedded/libredb-sql-grammar.ts`), so they read the whole default. Nobody has probed them.
 
 Leaving a bracket row undecided costs nothing while the dialect does not use the syntax — `[` carries
 no meaning in ordinary MySQL or Oracle SQL, and Elasticsearch refuses it outright. It costs something
@@ -134,7 +134,7 @@ MySQL's `BEGIN` alone is a transaction, as SQLite's is, so its rule is not Oracl
 ### S9. A CQL `BEGIN BATCH … APPLY BATCH` is cut at its inner `;`
 
 CQL's batch is one statement whose body holds a `;` after each inner write (`docs/providers/cassandra.md`, "`BEGIN BATCH … APPLY BATCH` is a single statement").
-The `cassandra` grammar row declares no body rule, `script: DEFAULT_SQL_GRAMMAR.script` (`src/lib/sql/grammar.ts:663`), so `splitExecutionUnits` in `src/lib/sql/statement-splitter.ts` ends a unit at every code `;`.
+The `cassandra` grammar row declares no body rule, `script: DEFAULT_SQL_GRAMMAR.script` (`src/lib/db/providers/sql/cassandra/sql-grammar.ts`), so `splitExecutionUnits` in `src/lib/sql/statement-splitter.ts` ends a unit at every code `;`.
 On this tree a two-insert batch comes back as three units: `BEGIN BATCH` with the first `INSERT`, the second `INSERT`, and `APPLY BATCH`.
 The multi-statement route runs those units one by one (`src/app/api/db/multi-query/route.ts:213`), so the first fails with "line 0:-1 mismatched input <EOF> expecting K_APPLY" and the editor reports "Executed 0/81 statements" for a batch the splitter cut into 81 units, where the batch should have run as one statement.
 Neither `blocks` value fits: `pl-sql` and `trigger-body` read `BEGIN … END`, and a CQL batch closes with `APPLY BATCH`.
@@ -3297,7 +3297,7 @@ Found 2026-10-12 while designing the Snowflake provider.
 
 ### D321. Snowflake's grammar row has no Scripting block member
 
-The Snowflake row in `src/lib/sql/grammar.ts` reads `script.blocks` as `"none"`, so a bare `BEGIN ... END` block splits at its first `;` and Snowflake refuses the fragment; the doc tells the user to wrap it in `EXECUTE IMMEDIATE $$ ... $$`.
+The Snowflake grammar in `src/lib/db/providers/sql/snowflake/sql-grammar.ts` reads `script.blocks` as `"none"`, so a bare `BEGIN ... END` block splits at its first `;` and Snowflake refuses the fragment; the doc tells the user to wrap it in `EXECUTE IMMEDIATE $$ ... $$`.
 The trial capture measured that the SQL API takes a bare block (M58).
 
 Found 2026-10-12 while designing the Snowflake provider.
@@ -6243,7 +6243,7 @@ Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 ### DOC31. A composed-sql.ts comment says every shipped grammar row declares backslashAlwaysEscapes false
 
 The docblock above `assertSelector` in `src/lib/agent/composed-sql-primitives.ts` says the per-dialect fact `backslashAlwaysEscapes` is one "that every shipped row declares false".
-In `src/lib/sql/grammar.ts`, `DATABEND_GRAMMAR`, `BIGQUERY_GRAMMAR` and `SNOWFLAKE_GRAMMAR` declare it `true`.
+`DATABEND_GRAMMAR`, `BIGQUERY_GRAMMAR` and `SNOWFLAKE_GRAMMAR`, in `src/lib/db/providers/sql/<type-id>/sql-grammar.ts`, declare it `true`.
 The function's rule, refusing any backslash in a selector, is unaffected: the docblock already says it is correct whichever way a row declares the fact, so only the sentence is stale.
 S2's heading and its "Every shipped row but Databend's" sentence in this file are stale the same way.
 
