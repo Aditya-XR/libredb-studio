@@ -41,7 +41,7 @@ None of it is a GitHub issue.
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4-K8 · 5
 - [Security scanner triage](#security-scanner-triage) — SCAN1-SCAN2 · 2
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A2–A8 · 5
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B123 · 56
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B126 · 59
 - [Passkey deferrals (#785)](#passkey-deferrals-785) — PK1-PK9 · 8
 - [MCP server deferrals (#246)](#mcp-server-deferrals-246) — MCP1-MCP3 · 3
 - [Governance follow-ups](#governance-follow-ups) — GOV1-GOV30 · 30
@@ -834,7 +834,7 @@ out of the population the guard compares.
 Measured 2026-09-13, both directions. Exploding an EXISTING entry past 120 columns is a LOUD red: two
 declared ids against the agent side's four, 1 fail, "Expected - 0 / Received + 2", with `table` and
 `trigger` unmatched. So that half is safe. But adding a FIFTH kind as a multi-line entry drops it from
-the guard's population AND it is absent from `COMPOSED_KIND_WORDS`, both sides shrink together, and
+the guard's population AND it is absent from `COMPOSED_KIND_WORDS` (now the SQLite engine overlay's `catalogCapture.kindWords` in `src/lib/agent/languages/sql/engines/sqlite.ts`), both sides shrink together, and
 the guard passes at 1 pass 0 fail, while the same kind written on one line fails.
 
 So the defect is a kind that is declared and unmapped, not a formatter. The provider keeps its entries
@@ -6242,7 +6242,7 @@ Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 
 ### DOC31. A composed-sql.ts comment says every shipped grammar row declares backslashAlwaysEscapes false
 
-The docblock above `assertSelector` in `src/lib/agent/composed-sql.ts` says the per-dialect fact `backslashAlwaysEscapes` is one "that every shipped row declares false".
+The docblock above `assertSelector` in `src/lib/agent/composed-sql-primitives.ts` says the per-dialect fact `backslashAlwaysEscapes` is one "that every shipped row declares false".
 In `src/lib/sql/grammar.ts`, `DATABEND_GRAMMAR`, `BIGQUERY_GRAMMAR` and `SNOWFLAKE_GRAMMAR` declare it `true`.
 The function's rule, refusing any backslash in a selector, is unaffected: the docblock already says it is correct whichever way a row declares the fact, so only the sentence is stale.
 S2's heading and its "Every shipped row but Databend's" sentence in this file are stale the same way.
@@ -6254,11 +6254,11 @@ Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 ### DOC32. docs/AGENT.md says composed-sql.ts composes for four engines
 
 The repository layout in `docs/AGENT.md` annotates `composed-sql.ts` as "the SQL the SERVER writes, per dialect: four of the thirty-seven".
-`CATALOG_COMPOSERS` in `src/lib/agent/composed-sql.ts` has five rows (PostgreSQL, SQLite, DuckDB, SQL Server and MySQL) since #1629 added MySQL's; the thirty-seven is the size of `DatabaseType`, which moves with every engine (#1759 made it thirty-seven).
+`CATALOG_COMPOSERS` in `src/lib/agent/composed-sql.ts` had five rows (PostgreSQL, SQLite, DuckDB, SQL Server and MySQL) since #1629 added MySQL's, and since #1821 they are the five SQL engine overlays that supply a `catalogRead` (`src/lib/agent/languages/sql/engines/`); the thirty-seven is the size of `DatabaseType`, which moves with every engine (#1759 made it thirty-seven).
 
 Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
 
-**Done when:** the annotation names the composed dialects, or counts `CATALOG_COMPOSERS` with no denominator that moves with each engine, and `tests/unit/agent-documentation.test.ts` holds it to the record.
+**Done when:** the annotation names the composed dialects, or counts the engines that supply a `catalogRead` with no denominator that moves with each engine, and `tests/unit/agent-documentation.test.ts` holds it to the record.
 
 ### DOC33. snowflake.md does not say that a database whose schemas fail to list is named as not read and the plan walk goes on
 
@@ -7669,6 +7669,7 @@ Found 2026-10-12 in a plan-mode pass of the RabbitMQ provider.
 ### B111. DuckDB is offered profile_table, which can only refuse
 
 `profile_table` is offered to the database-assessment and data-analysis workflows on DuckDB, and `composeTableProfile` (`src/lib/agent/table-profile.ts`) has no verified DuckDB composition, so every call answers `UNSUPPORTED_DIALECT`.
+Since #1821 that absence is DuckDB's engine overlay declaring its `profileComposition` `"unsupported"` (`src/lib/agent/languages/sql/engines/duckdb.ts`).
 Kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
 Found 2026-10-14 while building the statement-language layer.
 
@@ -7789,6 +7790,36 @@ A new language must therefore edit both components, and the language boundary gu
 Found 2026-10-19 while splitting the agent core into language packs (#1821).
 
 **Done when:** the hand-over chips are a member of each language's client pack and `ConsentCard.tsx` reads them through `languageClientPack`, the no-connection default in `AgentRail.tsx` is named in the client tier rather than written as a literal, and the existing ConsentCard and AgentRail tests pass unchanged; cited in `docs/AGENT.md`.
+
+### B124. MySQL's estimating plan doubles a FORMAT=JSON the model already wrote
+
+`composeEstimatingExplain("mysql", "EXPLAIN FORMAT=JSON SELECT 1")` in `src/lib/agent/composed-sql.ts` returns `EXPLAIN FORMAT=JSON FORMAT=JSON SELECT 1`.
+`withoutEstimatingPrefix` strips a leading `EXPLAIN`, `EXPLAIN QUERY PLAN` and `EXPLAIN (FORMAT JSON)`, the PostgreSQL, DuckDB and SQLite spellings, and not MySQL's `FORMAT=JSON` tail, so MySQL's prefix from its engine overlay (`src/lib/agent/languages/sql/engines/mysql.ts`) is put in front of a format clause that is still there.
+The engine-dialect golden (`tests/fixtures/agent/engine-dialect/`) pins this as current behaviour.
+
+Found 2026-10-19 while moving the estimating prefixes onto the engine overlays (#1821).
+
+**Done when:** a statement that already carries MySQL's estimating prefix is composed with it once, the golden entry is regenerated in that change with the reason, and a test covers `EXPLAIN FORMAT=JSON` in upper and lower case; cited in `docs/AGENT.md`.
+
+### B125. A catalog read's declared schema is folded on SQLite only
+
+`readCatalog` in `src/lib/agent/tools.ts` declares the selector's schema as its policy target through the engine's `catalogRead.declaredSchema`, and only SQLite's overlay supplies one (lower case).
+SQL Server under its default collation and DuckDB compare schema names case-insensitively as well, so on them `DBO` or `MAIN` is declared as written, and a scope allowlist of `["dbo"]` would deny a read the engine itself would serve, because `withinAllowlist` in `src/lib/db/operations/policy.ts` compares case-sensitively.
+Nothing builds a schema allowlist for an agent run today, so no run meets it.
+
+Found 2026-10-19 while moving the catalog reads onto the engine overlays (#1821).
+
+**Done when:** each engine whose catalog compares schema names case-insensitively declares the fold its catalog applies, or the policy compares by the engine's rule, with a test that a mixed-case schema passes a lower-case allowlist on SQL Server and DuckDB; cited in `docs/AGENT.md`.
+
+### B126. The SQL catalog advice calls a native catalog another engine's
+
+`sqlCatalogAdvice` in `src/lib/agent/languages/sql/server.ts` answers any database error that names `information_schema` or `pg_catalog` with the sentence that the catalog belongs to another engine.
+Both are native on PostgreSQL, and `information_schema` is native on MySQL, SQL Server and DuckDB.
+Measured 2026-10-19 on PostgreSQL 18: `SELECT * FROM information_schema.colums LIMIT 1` fails with `relation "information_schema.colums" does not exist`, and the advice for that message on a `postgres` connection tells the model the catalog belongs to another engine and that the connection is postgres.
+
+Found 2026-10-19 while splitting the agent core into engine overlays (#1821).
+
+**Done when:** the advice names a catalog as foreign only when it is not the connection engine's own, with a test of the PostgreSQL message above and of a `pg_catalog` error on SQLite; cited in `docs/AGENT.md`.
 
 ## Passkey deferrals (#785)
 

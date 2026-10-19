@@ -287,10 +287,10 @@ forty it invokes `db.schema.read`, which walks the connection's own OBJECT SURFA
 `listContainers`, `countObjects`, `listObjects` and `describeObjects` the sidebar walks when it lists
 your objects, and composes no statement at all.
 **Forty counts type-ids the factory can build, not engines a user would name**: `SHIPPED` holds
-forty-two, `CATALOG_PLANS` serves two of them, and the remainder is what this second reading covers.
+forty-two, two of them supply a `catalogCapture`, and the remainder is what this second reading covers.
 Every other count said about grounding in these docs counts the same thing. libSQL is one of the
 forty and not one of the two: it speaks SQLite's dialect, but the read-only catalog path
-`CATALOG_PLANS` serves needs a database-native read-only profile, and `PRAGMA query_only` is refused
+a `catalogCapture` takes needs a database-native read-only profile, and `PRAGMA query_only` is refused
 by a libSQL server (see [`providers/libsql.md`](./providers/libsql.md)). Two things it does
 NOT count. The wire-compatible engines of
 [`docs/providers/README.md`](./providers/README.md) are not extra members — TiDB is grounded because it

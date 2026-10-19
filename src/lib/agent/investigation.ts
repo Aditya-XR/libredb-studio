@@ -1256,8 +1256,8 @@ interface PlanningGrounding {
  *
  * FOUR sentences since #414, over the same two axes as `PLANNING_SNAPSHOT_PREFACE`.
  * This record was left one-dimensional when that one was made 2x2, which put the two
- * halves of one conversation in direct contradiction on every engine `CATALOG_PLANS`
- * does not serve: the rules said the inventory came "through the same read-only
+ * halves of one conversation in direct contradiction on every engine whose overlay
+ * supplies no `catalogCapture`: the rules said the inventory came "through the same read-only
  * catalog path the agent mode uses", and the message under them said it came from the
  * engine's own inspection. Both halves of the first were false there: no catalog
  * statement is composed on those engines, and at #414 agent mode took no read-only

@@ -2782,7 +2782,7 @@ describe("captureContextSnapshot — the kind, composed on the catalog path", ()
 
     `walkObjectInventory` attaches `derivedGroupings` to the relation kinds and this path
     omitted it. What made the omission safe was a precondition nothing pinned - that no
-    engine setting the flag has an entry in `COMPOSED_KIND_WORDS`, so no composed kind could
+    engine setting the flag supplies a `catalogCapture` with `kindWords`, so no composed kind could
     ever come from one - and a precondition nobody asserts is a precondition that expires
     the day someone adds an engine. Carrying the declaration deletes it. The capabilities
     below are PostgreSQL's with the flag set, which no real PostgreSQL sets: the flag is a

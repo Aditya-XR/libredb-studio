@@ -2990,7 +2990,7 @@ export class PostgresProvider extends SQLBaseProvider {
         // (`tests/isolated/agent-investigation-e2e.test.ts` asserts exactly that), and
         // a bare probe at connect would be the first statement to leave it - for an
         // answer that path cannot use: the agent composes its own EXPLAIN from
-        // `ESTIMATING_EXPLAIN_PREFIX`, keyed on the type id and not on this capability,
+        // its `planEstimate` (`src/lib/agent/languages/sql/engines/postgres.ts`), keyed on the type id and not on this capability,
         // and `summarisePlan` reads a plan only when that composed `EXPLAIN
         // (FORMAT JSON)` succeeded, which is the case where the probe would have
         // answered `postgres-json` anyway. So the profile keeps the static default and

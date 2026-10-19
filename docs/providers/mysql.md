@@ -2498,8 +2498,8 @@ So the `flags` parameter is stripped too, and the capability is removed by the `
 The profile's pool is separate from the pool every other path shares for that reason and one more: each call pins a transaction and several session modes on the connection it holds, and closes it afterwards, traffic an editor's own statements never see.
 
 The catalog compositions of `composeCatalogRead("mysql", …)` and the profile compositions of
-`composeTableProfile("mysql", …)` ([composed-sql.ts](../../src/lib/agent/composed-sql.ts),
-[table-profile.ts](../../src/lib/agent/table-profile.ts)) run through this path, and every spelling
+`composeTableProfile("mysql", …)` ([languages/sql/engines/mysql.ts](../../src/lib/agent/languages/sql/engines/mysql.ts),
+reached through [composed-sql.ts](../../src/lib/agent/composed-sql.ts) and [table-profile.ts](../../src/lib/agent/table-profile.ts)) run through this path, and every spelling
 in them was measured on both engines as `libredb_agent`. The one aggregate-order fact worth
 recording: MariaDB accepts `JSON_ARRAYAGG(… ORDER BY …)` and MySQL answers **1064** for the same
 text, so the column list is `GROUP_CONCAT(… ORDER BY … SEPARATOR ',')` bracketed by `CONCAT` — the

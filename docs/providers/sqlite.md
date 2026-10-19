@@ -1504,7 +1504,7 @@ column list here is `SELECT … FROM pragma_table_info('t')`, and the operations
 table-valued functions and some of them SET (`pragma_query_only(0)` was found while reviewing this
 very profile). So `inspect_schema` composes
 `SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') …`
-([composed-sql.ts](../../src/lib/agent/composed-sql.ts)), whose projection is therefore each object's
+([languages/sql/engines/sqlite.ts](../../src/lib/agent/languages/sql/engines/sqlite.ts)), whose projection is therefore each object's
 own DDL text — a column list is there to be read out of a `CREATE TABLE` statement, rather than
 arriving as rows. PostgreSQL gets a structured column inventory from `information_schema` instead.
 The DDL is parsed by [`sqlite-ddl.ts`](../../src/lib/agent/languages/sql/engines/sqlite-ddl.ts) (#329 T8), which reads four

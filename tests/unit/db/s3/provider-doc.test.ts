@@ -1921,9 +1921,9 @@ describe("docs/providers/s3.md: the servers it was verified on", () => {
 
 describe("the agent docs count the type-ids and name S3 where they list engines", () => {
   const ids = SHIPPED_DATABASE_TYPES.length;
-  /** Ids grounded through their own provider: every id but the two CATALOG_PLANS dialects, postgres and sqlite. */
+  /** Ids grounded through their own provider: every id but the two that supply a catalogCapture, postgres and sqlite. */
   const provided = ids - 2;
-  /** Ids with no statistics this run reads: every id but the three ESTIMATE_BUILDERS serves, postgres, sqlite and mssql. */
+  /** Ids with no statistics this run reads: every id but the three that supply statistics, postgres, sqlite and mssql. */
   const noStatistics = ids - 3;
 
   test("61. AGENT.md", () => {
@@ -1972,7 +1972,7 @@ describe("the agent docs count the type-ids and name S3 where they list engines"
     expect(flow).toContain(
       `**${Word(provided)} counts type-ids the factory can build, not engines a user would name**`,
     );
-    expect(flow).toContain(`\`SHIPPED\` holds ${word(ids)}, \`CATALOG_PLANS\` serves two of them`);
+    expect(flow).toContain(`\`SHIPPED\` holds ${word(ids)}, two of them supply a \`catalogCapture\``);
     expect(flow).toContain(`libSQL is one of the ${word(provided)} and not one of the two`);
     expect(flow).toContain(
       "- On S3-compatible object storage the grounding carries bucket names only, never an object key, a prefix, a size or any object content (objects are listed by the Keys panel, not by the object walk).",

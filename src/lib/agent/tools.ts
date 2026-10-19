@@ -2702,7 +2702,7 @@ export type AgentObjectInventoryRead =
  * Whether a run's object-inventory grounding is taken under the execution profile its statements are sent under: an
  * agent-mode run of a workflow that sends statements, on an engine whose statement language is its own (`kubectl`,
  * `mongo`). Such a run is refused at its grounding exactly where its first statement would be. A PostgreSQL or SQLite
- * run grounds through the composed catalog (`CATALOG_PLANS`), under the read-only profile already; the other SQL
+ * run grounds through the composed catalog (its overlay's `catalogCapture`), under the read-only profile already; the other SQL
  * engines ground through `readObjectInventoryForGrounding` under the operations profile, which refuses only what their
  * own read-only open refuses, such as SQL Server's privileged principal (#1744's D345). Plan mode and the operations
  * workflow send no statement of the model's and ground under the operations profile.
@@ -2727,7 +2727,7 @@ export function groundsUnderExecutionProfile(context: AgentToolContext): boolean
  * its catalog statement through `provider.query`: nothing routes them through `queryReadOnly`,
  * so no read-only transaction can contain them. That matches the path that grounds through
  * the flat provider inspection this replaced took exactly - that whole grounding was a curated
- * call under this same profile - and it does not match a dialect `CATALOG_PLANS` serves, where every
+ * call under this same profile - and it does not match a dialect that supplies a `catalogCapture`, where every
  * statement of the run arrives inside `BEGIN READ ONLY` and this read would have been the one
  * that left it.
  *

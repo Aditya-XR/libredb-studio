@@ -62,7 +62,7 @@ Three properties frame everything below, and each of them is load-bearing rather
   require `queryReadOnly` (`src/lib/db/factory.ts`, `PROFILE_ACQUISITION`). Since #411 an operations
   run does take one acquisition before its first turn and never during it, for its schema capture,
   exactly as every other workflow does — and since #414 **which profile that capture acquires depends
-  on which of its two readings it takes**: `agent-read-only` on the dialects `CATALOG_PLANS` serves,
+  on which of its two readings it takes**: `agent-read-only` on the dialects that supply a `catalogCapture`,
   because it composes catalog statements, and `agent-operations` everywhere else, because asking a
   provider to describe its own schema sends nothing an engine has to plan.
   That is what lets grounding reach every engine the read-only profile refuses, and it still cannot narrow any workflow's reach: the profile whose acquisition would be refused is never the profile that capture asks for.
@@ -456,7 +456,7 @@ audited, budgeted path an agent run's `inspect_schema` takes. The model is hande
 nothing further.
 
 **There are TWO readings, and which one runs is the dialect's decision** (#414). On the dialects
-`CATALOG_PLANS` serves — PostgreSQL and SQLite — the server composes catalog statements and executes
+that supply a `catalogCapture` (`src/lib/agent/languages/sql/engines/`) — PostgreSQL and SQLite — the server composes catalog statements and executes
 them under `agent-read-only`. On every other dialect it invokes `db.schema.read`, a sixth operation
 descriptor whose whole input is empty: it acquires `agent-operations`, walks the connection's own
 object surface — the same reading the sidebar performs when it lists your objects — and returns the
@@ -619,8 +619,8 @@ What a grounded plan run is given, and where each part comes from:
   including the two free ones. That is deliberate: what the model may conclude must not depend on
   which process happened to have read a catalog first. They are read from what the engine already
   holds — `pg_class.reltuples` and `pg_stats` on PostgreSQL, `sqlite_stat1` on SQLite — so no column
-  is scanned and no value is read out of any row. `ESTIMATE_BUILDERS` serves those two and SQL Server (`buildMssqlEstimates`, from `sys.partitions`) and
-  nothing else, and #414 added no engine to it: on the other thirty-nine `readSchemaStatistics` answers
+  is scanned and no value is read out of any row. A `statistics` reading is supplied by the engine overlays of those two and SQL Server (`buildMssqlEstimates`, from `sys.partitions`) and
+  nothing else, and #414 added no engine to them: on the other thirty-nine `readSchemaStatistics` answers
   `DIALECT_HAS_NO_STATISTICS` — *"this engine does not hold statistics this run knows how to read"* —
   so **a known schema with no statistics is now the ORDINARY combination rather than a rare one**, and
   the two sentences the run is handed agree: the inventory is a record of what exists, and every
@@ -743,7 +743,7 @@ Three consequences worth stating plainly, because each is easy to assume the oth
    statistics read (two on SQLite: the `sqlite_stat1` availability probe has to be its own statement,
    because SQLite resolves table names at prepare time). On the other forty it is **one**, the
    single `db.schema.read` call, except on SQL Server, which adds the one statistics read
-   `ESTIMATE_BUILDERS` serves outside `CATALOG_PLANS`; the other thirty-nine hold no statistics this run
+   its overlay's `statistics` supplies without a `catalogCapture`; the other thirty-nine hold no statistics this run
    knows how to read. Since #789 an engine that declares object kinds costs **one more**, the
    object-surface reading above; an engine that declares none is charged nothing extra, because a read
    that cannot exist is never admitted. They come out of the same per-run statement budget every other read does,
@@ -976,7 +976,7 @@ Two consequences worth stating:
 - **A schema read takes one of two descriptors, and which one is the DIALECT's decision.** This
   document said for two milestones that there is no descriptor for catalog access — the canonical set
   was three, then four, then five — and the truer statement is now about the split rather than about
-  a number. On the dialects `CATALOG_PLANS` serves, a catalog read still *is* a bounded read
+  a number. On the dialects that supply a `catalogCapture`, a catalog read still *is* a bounded read
   (`sql.query.read`) whose statement the server writes, and the asymmetry inside that is real and
   documented on the tool: PostgreSQL yields a structured column inventory, while SQLite's
   `pragma_table_info()` is refused by the statement guard, so SQLite yields each object's own DDL text
@@ -1358,7 +1358,7 @@ What differs is the **packing** (`packOperationsInventory`, `context-snapshot.ts
   relation this database does not have.
 
 Grounding reaches this workflow exactly as it reaches every other, and since #414 that means every
-engine: `CATALOG_PLANS` serves PostgreSQL and SQLite, and every other dialect asks its provider to
+engine: PostgreSQL and SQLite supply a `catalogCapture`, and every other dialect asks its provider to
 describe itself instead of being refused on the dialect. Where the reading fails the run continues
 ungrounded. What it is TOLD then is the capture's own DIAGNOSIS under a sentence of this file's own,
 because the capture's ADVICE would have sent it to `inspect_schema`: it is told why no inventory was
@@ -2307,7 +2307,7 @@ model passed the capability probe**; for anybody else the answer is that there i
 | **A free-form markdown report**, opening with a performance score out of 100 and closing with configuration advice. | A report is claims, each citing an artifact this run read or the snapshot it captured, verified against the run's own ledger before it is recorded. A number cited to nothing cannot be reported — the citation is what is checked, never the claim's text, so a fabricated score citing a real artifact would be accepted. | `src/lib/agent/tools.ts` (`composeReportTool`); `tests/evals/legacy-surface-coverage.test.ts` — an invented correlation id is refused and the run ends `unanswered (no-report)`. |
 | **Maintenance tasks** — `VACUUM`, `ANALYZE`, reindexing — in the same report. | Nothing proposes them: the `change` card has two members and neither is maintenance. It stays where it was before the panels — the monitoring surface, and the user's own editor. | `src/lib/agent/tools.ts` (`recommendationSchema`). |
 | **Multi-turn conversation.** NL2SQL replayed the whole exchange on every request, so "and how many in the second one?" was answerable. | **Largely restored, and differently.** A follow-up is still a NEW run — a run's objective is fixed when it starts, and no ledger event records a later question — but it now belongs to a CONVERSATION and is told about it: every earlier step's objective, and the most recent step's report, derived server-side from those runs' own ledgers and fenced before the model reads it. What is not restored is the replay: NL2SQL re-sent the whole exchange verbatim, while a conversation carries a bounded account of it, and only the newest step's findings. Two other differences are deliberate — the run still re-reads the catalog, because its inventory is its own evidence; and `LIBREDB_AGENT_THREAD_CONTEXT=false` turns the whole thing off, which no panel offered. See [the conversation a run belongs to](#the-conversation-a-run-belongs-to). | `src/lib/agent/thread-context.ts`; `src/app/api/agent/runs/route.ts`; `tests/evals/thread-context.test.ts` — a three-step conversation, and the fence the block arrives inside. |
-| **MongoDB, MySQL and every other engine.** Both panels ran against whatever the connection was, and NL2SQL emitted Mongo query documents when the connection's query language was JSON. | The agent composes catalog SQL for the dialects `CATALOG_COMPOSERS` carries, the engines whose statement language is SQL, and grounds a run through composed catalog statements on PostgreSQL and SQLite among them (`CATALOG_PLANS`); an unlisted dialect is never guessed at: since #414 it is read a different way instead of being refused. `run_read_query` takes each engine's own command language, as `AGENT_STATEMENT_LANGUAGE` (`src/lib/agent/agent-manifest.ts`) names it: SQL, a kubectl read on Kubernetes, and a JSON command on MongoDB. **A run whose workflow sends statements is refused on another engine before it opens**: `POST /api/agent/runs` answers 400 with the posture's own sentence when the mode is agent and `AGENT_WORKFLOW_SENDS_STATEMENTS` holds for the requested workflow, so no run id and no model turn are spent on a refusal the connection's type already decided. What an engine that IS admitted can then do differs by MODE. **Agent mode is still only the engines a provider can bound**: its read-class tools reach the database under the `agent-read-only` profile, which the factory grants only to a provider with `queryReadOnly`, the same fact the refusal reads. **Plan mode is now every engine**: its grounding acquires `agent-operations` and walks the provider's object surface (`db.schema.read`), so a plan run on MongoDB is ordinarily grounded and is asked for one statement or command **in that engine's own language**, in a block still tagged with the canonical type-id. What the engine decides is no longer whether a plan is grounded but HOW (a composed catalog statement or a provider inventory, and whether estimated statistics exist at all), and the four prefaces say which. Where the reading itself fails, the run is steered to the `NO STATEMENT:` refusal with the capture's own diagnosis. **The `operations` workflow reaches every engine in both modes**, because it composes no SQL at all, and since #411 it is grounded under the same rule as everything else. | `src/lib/agent/composed-sql.ts`, `src/lib/agent/context-snapshot.ts` (`captureContextSnapshot`, `captureFromProvider`, `packOperationsInventory`), `src/lib/db/operations/descriptors.ts` (`db.schema.read`); `tests/unit/lib/agent/context-snapshot.test.ts`: the provider path, its timeout and its refusals; `tests/unit/lib/agent/composed-sql.test.ts`: `UNSUPPORTED_DIALECT`; `tests/evals/plan-grounding.test.ts`: a plan run whose provider cannot describe itself runs no statement and says it is ungrounded; `tests/isolated/agent-investigation.test.ts`: a plan run grounded through the engine's own schema inspection. |
+| **MongoDB, MySQL and every other engine.** Both panels ran against whatever the connection was, and NL2SQL emitted Mongo query documents when the connection's query language was JSON. | The agent composes catalog SQL for the dialects whose engine overlay supplies a `catalogRead` (`src/lib/agent/languages/sql/engines/`), the engines whose statement language is SQL, and grounds a run through composed catalog statements on PostgreSQL and SQLite among them (their `catalogCapture`); an unlisted dialect is never guessed at: since #414 it is read a different way instead of being refused. `run_read_query` takes each engine's own command language, as `AGENT_STATEMENT_LANGUAGE` (`src/lib/agent/agent-manifest.ts`) names it: SQL, a kubectl read on Kubernetes, and a JSON command on MongoDB. **A run whose workflow sends statements is refused on another engine before it opens**: `POST /api/agent/runs` answers 400 with the posture's own sentence when the mode is agent and `AGENT_WORKFLOW_SENDS_STATEMENTS` holds for the requested workflow, so no run id and no model turn are spent on a refusal the connection's type already decided. What an engine that IS admitted can then do differs by MODE. **Agent mode is still only the engines a provider can bound**: its read-class tools reach the database under the `agent-read-only` profile, which the factory grants only to a provider with `queryReadOnly`, the same fact the refusal reads. **Plan mode is now every engine**: its grounding acquires `agent-operations` and walks the provider's object surface (`db.schema.read`), so a plan run on MongoDB is ordinarily grounded and is asked for one statement or command **in that engine's own language**, in a block still tagged with the canonical type-id. What the engine decides is no longer whether a plan is grounded but HOW (a composed catalog statement or a provider inventory, and whether estimated statistics exist at all), and the four prefaces say which. Where the reading itself fails, the run is steered to the `NO STATEMENT:` refusal with the capture's own diagnosis. **The `operations` workflow reaches every engine in both modes**, because it composes no SQL at all, and since #411 it is grounded under the same rule as everything else. | `src/lib/agent/composed-sql.ts`, `src/lib/agent/context-snapshot.ts` (`captureContextSnapshot`, `captureFromProvider`, `packOperationsInventory`), `src/lib/db/operations/descriptors.ts` (`db.schema.read`); `tests/unit/lib/agent/context-snapshot.test.ts`: the provider path, its timeout and its refusals; `tests/unit/lib/agent/composed-sql.test.ts`: `UNSUPPORTED_DIALECT`; `tests/evals/plan-grounding.test.ts`: a plan run whose provider cannot describe itself runs no statement and says it is ungrounded; `tests/isolated/agent-investigation.test.ts`: a plan run grounded through the engine's own schema inspection. |
 
 One of these has since been restored under its own workflow (the monitoring row, which closed both
 deferrals that tracked it), and the first row is Phase 1's own boundary rather than a defect, and its one
@@ -2430,7 +2430,7 @@ hazard, and the amber pre-start card below — which renders for an unsupported 
 unresolved connection (`engineUnsupported`, `AgentRail.tsx`) — is where that reading is alerted.
 
 **The qualifier is visible, and that is a claim rather than a layout choice.** A bare "executes
-nothing" overclaims: on the dialects `CATALOG_PLANS` serves (`src/lib/agent/context-snapshot.ts`)
+nothing" overclaims: on the dialects that supply a `catalogCapture` (`src/lib/agent/languages/sql/engines/`)
 plan mode's grounding capture IS a catalog read, and `engine-support.ts` says in its own header that
 copy compressing these facts overclaims. So both halves sit on the same line, the row wraps rather
 than truncating — a qualifier cut off mid-clause is the same overclaim with an ellipsis on it — and
@@ -2779,7 +2779,8 @@ src/lib/agent/
 ├── tools.ts              # the four tools + server-side selection; the only database reach,
                           #   the model's tools and the server's own grounding reads alike
 ├── composed-sql.ts # the SQL the SERVER writes, per dialect: four of the forty-two
-├── sqlite-ddl.ts         # reading SQLite's stored DDL back into an inventory
+├── languages/sql/engines/ # each SQL engine's own compositions, read through `engineServerDialect`
+├── languages/sql/engines/sqlite-ddl.ts # reading SQLite's stored DDL back into an inventory
 ├── execution-policy.ts   # the frozen policy and the run-level ceilings
 ├── deadline.ts           # the wall-clock deadline and the timeout clamp
 ├── repair-ledger.ts      # the bounded repair loop and its statement fingerprint
@@ -2919,7 +2920,7 @@ the role's own grants are the whole boundary (A3).
 - **B108**: RabbitMQ is served by plan mode and the MCP metadata tools only: its provider implements no `queryReadOnly`, so agent execution of a workflow that sends statements and MCP `run_read_query` refuse it; its plan-mode walk reads the virtual host `/` alone and counts the others it did not read (`docs/providers/rabbitmq.md` section 8).
 - **B109**: the schema docs route puts table, collection and stream names in the prompt without the untrusted-content fence, for every provider; the route has no tools, so the exposure is a spoofed document on the user's screen.
 - **B110**: the answer card's inventory chip counts every captured object under the engine's entity noun, so a RabbitMQ capture of 17 streams, 6 queues and 18 exchanges reads "41 streams read".
-- **B111**: DuckDB is offered `profile_table` by the database-assessment and data-analysis workflows, and `composeTableProfile` (`src/lib/agent/table-profile.ts`) has no verified DuckDB composition, so every call answers `UNSUPPORTED_DIALECT`; it was kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
+- **B111**: DuckDB is offered `profile_table` by the database-assessment and data-analysis workflows, and DuckDB's engine overlay (`src/lib/agent/languages/sql/engines/duckdb.ts`) declares its `profileComposition` `"unsupported"`, so every `composeTableProfile` call answers `UNSUPPORTED_DIALECT`; it was kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
 - **B112**: a run's persisted workflow type is not checked when its ledger is read, so a ledger naming a workflow Studio does not know reaches five workflow-keyed tables as `undefined`, and a budget read on it fails as a `TypeError` rather than a named refusal.
 - **B113**: [`AGENT_GUIDE.md`](./AGENT_GUIDE.md) and [`AGENT_DATA_FLOW.md`](./AGENT_DATA_FLOW.md) cite code by line number, and those numbers have drifted from the code they name; read the file and symbol a citation names rather than its line.
 - **B114**: a cluster health run drops the Warning events of a controller whose kind the workload profile does not list, such as a CloudNativePG `Cluster` or an Argo `Rollout`, when that controller has no pod in the namespace, because `readWorkloadProfile` gives it no row to count them under.
@@ -2933,6 +2934,9 @@ the role's own grants are the whole boundary (A3).
 - **B121**: the model evals have no MongoDB preset, so `bun run agent:eval` cannot measure a real model on the command envelope; the mongo workflows are proved with scripted model turns only.
 - **B122**: `src/lib/agent/tools.ts` and `src/lib/agent/context-snapshot.ts` import runtime values from each other; nothing reads across the cycle at module scope, so it works, and the language boundary guard passes it because it runs through no language pack.
 - **B123**: two per-language tables live in UI components rather than in the language client packs: the hand-over chips (`HANDOVER_CHIPS` in `src/components/agent/ConsentCard.tsx`) and the rail's `"sql"` default when it has no connection type (`handOverLanguage` in `src/components/agent/AgentRail.tsx`).
+- **B124**: on MySQL, an estimating plan request for `EXPLAIN FORMAT=JSON SELECT 1` is composed as `EXPLAIN FORMAT=JSON FORMAT=JSON SELECT 1`, because `withoutEstimatingPrefix` (`src/lib/agent/composed-sql.ts`) strips PostgreSQL's and SQLite's spellings of the prefix and not MySQL's.
+- **B125**: a catalog read's declared schema is folded to lower case on SQLite only, while SQL Server under its default collation and DuckDB compare schema names case-insensitively too, so a scope allowlist of `["dbo"]` would deny a read the model asked for as `DBO`; nothing builds a schema allowlist for an agent run today, so no run meets it.
+- **B126**: the SQL catalog advice tells a model that `information_schema` and `pg_catalog` belong to another engine on every SQL engine, including the ones where they are native: a mistyped `information_schema.colums` on PostgreSQL is told that the catalog belongs to another engine and that the connection is postgres.
 
 **What machine redaction leaves unmasked on Kubernetes.**
 Agent reads on a cluster are masked by structural rules and by request target (see [On a Kubernetes connection](#on-a-kubernetes-connection)), and what those rules do not reach is stated here, in the same six lines as [`docs/providers/kubernetes.md`](./providers/kubernetes.md) section 9:

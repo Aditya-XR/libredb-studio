@@ -238,7 +238,7 @@ the `information_schema` views only to a role that owns the table or holds a pri
 than* `SELECT`. The relations read went through those views, so under exactly the role prescribed
 above the graph was empty and case 1 answered *"There are no declared foreign key constraints between
 tables in the database"*, citing a snapshot that genuinely contained nothing. `composePostgresRelations`
-(`src/lib/agent/composed-sql.ts`) now reads `pg_constraint`, which asks only for `USAGE` on the schema,
+(`src/lib/agent/languages/sql/engines/postgres.ts`) now reads `pg_constraint`, which asks only for `USAGE` on the schema,
 and answers all 18 rows as this role. What is still true and cannot be fixed by any read: an EMPTY
 relations read cannot tell "this database declares none" from "this role cannot see the ones it
 declares". So the run is no longer allowed to choose — the relations block now states the limit of

@@ -1219,11 +1219,11 @@ range) is still checked on its numeral only, deliberately, so that no numeral go
       relatives, and their sum. `connectableProductCount()` is the arithmetic's one definition — derive
       from it, and re-read each sentence to see which of the four it counts. A mechanical replace is
       how a correct number becomes wrong: the agent docs' count of the ids grounded through their provider is type-ids minus
-      the two `CATALOG_PLANS` dialects and moved for a different reason than the driver count did.
+      the two dialects that supply a `catalogCapture` and moved for a different reason than the driver count did.
       DuckDB is the sharpest illustration: it moved the type-id count and the driver count, left
       "the fourteen the read-only profile refuses" exactly where it was — because it implements
       `queryReadOnly`, so numerator and denominator both grew by one — and moved the
-      `CATALOG_PLANS` remainder, because it is not one of those two dialects
+      `catalogCapture` remainder, because it is not one of those two dialects
 - [ ] the marketplace listings under `deploy/` — a claim that enumerates engines is bound to the file
       that proves it, and the `marketplace-copy` test fails when a plan-capable engine is missing from
       one

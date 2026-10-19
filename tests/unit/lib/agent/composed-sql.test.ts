@@ -1140,8 +1140,8 @@ describe("the composers are reachable, which is the defect that put this file he
    *
    * It walks the shipped engines whose statement language is SQL, read from
    * `AGENT_STATEMENT_LANGUAGE`, rather than a name, because the defect was never about
-   * DuckDB: `CATALOG_COMPOSERS`' own docblock asserts that every SQL engine agent mode
-   * reads statements on has an entry here, and until this loop existed NOTHING enforced
+   * DuckDB: the docblock of `CATALOG_COMPOSERS`, now each engine overlay's `catalogRead`, asserted that
+   * every SQL engine agent mode reads statements on has an entry there, and until this loop existed NOTHING enforced
    * it - a hardcoded `"duckdb"` passes for ever while another SQL variant joins with no
    * composer and `inspect_schema`, `profile_table` and `inspect_plan` can only refuse on
    * it. Every SQL variant requires the composers; an engine whose language is not SQL
