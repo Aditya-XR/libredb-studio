@@ -11,7 +11,7 @@ import { KUBECTL_PACK } from "@/lib/agent/languages/kubectl/index";
 import * as MONGO_CLIENT_OVERLAYS from "@/lib/agent/languages/mongo/engines/client";
 import * as MONGODB from "@/lib/agent/languages/mongo/engines/mongodb";
 import { MONGO_PACK } from "@/lib/agent/languages/mongo/index";
-import { defineOverlay } from "@/lib/agent/languages/overlay";
+import { defineOverlay, dialectOnly } from "@/lib/agent/languages/overlay";
 import type { AgentEngineClientDialect, AgentEngineServerDialect } from "@/lib/agent/languages/pack";
 import { languageServerPack } from "@/lib/agent/languages/server";
 import * as SQL_CLIENT_OVERLAYS from "@/lib/agent/languages/sql/engines/client";
@@ -149,6 +149,8 @@ describe("engineServerDialect", () => {
   test.each([...ALL_TYPES, "toString" as DatabaseType])("%s answers a frozen dialect with every member", (type) => {
     const dialect = engineServerDialect(type);
     expect(Object.isFrozen(dialect)).toBe(true);
+    // The overlay holding it is frozen too, so no caller can swap an engine's dialect for the whole process.
+    expect(Object.isFrozen(engineServerOverlay(type))).toBe(true);
     expect(Object.keys(dialect).sort()).toEqual([...SERVER_DIALECT_MEMBERS].sort());
     if (!SQL_ENGINES.includes(type)) {
       for (const member of SERVER_DIALECT_MEMBERS) expect(dialect[member]).toBe("unsupported");
@@ -418,6 +420,22 @@ describe("defineOverlay", () => {
     expect(defineOverlay(base)).toBe(base);
     expect(defineOverlay(base, undefined)).toBe(base);
     expect(defineOverlay(base, {})).toBe(base);
+  });
+});
+
+describe("dialectOnly", () => {
+  test("keeps an overlay's dialect by reference and drops every other key, frozen", () => {
+    const dialect = Object.freeze({ catalogRead: "supported" as const });
+    const kept = dialectOnly({ dialect, copy: "an engine copy the registries never read" });
+    expect(kept).toEqual({ dialect });
+    expect(kept.dialect).toBe(dialect);
+    expect(Object.isFrozen(kept)).toBe(true);
+  });
+
+  test("an overlay with no dialect gives an empty, frozen one", () => {
+    const empty = dialectOnly({});
+    expect(empty).toEqual({});
+    expect(Object.isFrozen(empty)).toBe(true);
   });
 });
 

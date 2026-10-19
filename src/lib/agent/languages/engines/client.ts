@@ -4,13 +4,14 @@
  * Client tier. It reads the family client facets (`languages/client.ts`) and the engine client overlays, never
  * `agent-manifest.ts` at run time, which reads this module: an engine's family is held beside its overlay instead, and
  * `AgentEngineClientOverlays` types it as the family `AGENT_STATEMENT_LANGUAGE` maps the engine onto. The registry is
- * total over `AgentEngineType` and declared in the order postgres, sqlite, duckdb, mssql, mysql, mongodb, kubernetes.
+ * total over `AgentEngineType` and declared in the order postgres, sqlite, duckdb, mssql, mysql, mongodb, kubernetes,
+ * and like the server registry it copies only `dialect` out of each engine module.
  */
 import type { DatabaseType } from "@/lib/types";
 import { languageClientPack } from "../client";
 import { KUBERNETES_CLIENT_OVERLAY } from "../kubectl/engines/client";
 import { MONGODB_CLIENT_OVERLAY } from "../mongo/engines/client";
-import { defineOverlay } from "../overlay";
+import { defineOverlay, dialectOnly } from "../overlay";
 import type { AgentEngineClientDialect, AgentEngineClientOverlays, AgentEnginePack, AgentEngineType } from "../pack";
 import {
   DUCKDB_CLIENT_OVERLAY,
@@ -21,13 +22,13 @@ import {
 } from "../sql/engines/client";
 
 const CLIENT_OVERLAYS: AgentEngineClientOverlays = Object.freeze({
-  postgres: { family: "sql", overlay: POSTGRES_CLIENT_OVERLAY },
-  sqlite: { family: "sql", overlay: SQLITE_CLIENT_OVERLAY },
-  duckdb: { family: "sql", overlay: DUCKDB_CLIENT_OVERLAY },
-  mssql: { family: "sql", overlay: MSSQL_CLIENT_OVERLAY },
-  mysql: { family: "sql", overlay: MYSQL_CLIENT_OVERLAY },
-  mongodb: { family: "mongo", overlay: MONGODB_CLIENT_OVERLAY },
-  kubernetes: { family: "kubectl", overlay: KUBERNETES_CLIENT_OVERLAY },
+  postgres: Object.freeze({ family: "sql", overlay: dialectOnly(POSTGRES_CLIENT_OVERLAY) }),
+  sqlite: Object.freeze({ family: "sql", overlay: dialectOnly(SQLITE_CLIENT_OVERLAY) }),
+  duckdb: Object.freeze({ family: "sql", overlay: dialectOnly(DUCKDB_CLIENT_OVERLAY) }),
+  mssql: Object.freeze({ family: "sql", overlay: dialectOnly(MSSQL_CLIENT_OVERLAY) }),
+  mysql: Object.freeze({ family: "sql", overlay: dialectOnly(MYSQL_CLIENT_OVERLAY) }),
+  mongodb: Object.freeze({ family: "mongo", overlay: dialectOnly(MONGODB_CLIENT_OVERLAY) }),
+  kubernetes: Object.freeze({ family: "kubectl", overlay: dialectOnly(KUBERNETES_CLIENT_OVERLAY) }),
 } satisfies AgentEngineClientOverlays);
 
 /**

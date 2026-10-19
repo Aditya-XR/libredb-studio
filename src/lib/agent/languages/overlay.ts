@@ -6,6 +6,9 @@
  * becomes the member; any other value replaces the member whole. Values are never merged, so an overlay that gives a
  * record gives all of it. Every member the overlay leaves alone keeps its reference, and an overlay with no own key is
  * no overlay: the base comes back itself.
+ *
+ * `dialectOnly` is what both engine registries (`engines/server.ts`, `engines/client.ts`) keep of an engine module's
+ * overlay: its `dialect` and nothing else.
  */
 import type { FacetOverrides } from "./pack";
 
@@ -24,3 +27,12 @@ export function defineOverlay<B extends object, A extends object = Record<never,
   }
   return Object.freeze({ ...base, ...resolved }) as Readonly<B & Omit<A, keyof B>>;
 }
+
+/** An overlay with its `dialect` alone, or with nothing for a family that has none. */
+type DialectOnly<Overlay> = Overlay extends { readonly dialect: infer Dialect }
+  ? { readonly dialect: Dialect }
+  : Record<never, never>;
+
+/** The `dialect` of an engine module's overlay, and nothing else it holds, frozen like the dialect inside it. */
+export const dialectOnly = <Overlay extends { readonly dialect?: object }>(overlay: Overlay): DialectOnly<Overlay> =>
+  Object.freeze(overlay.dialect === undefined ? {} : { dialect: overlay.dialect }) as DialectOnly<Overlay>;

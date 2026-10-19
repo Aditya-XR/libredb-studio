@@ -12,21 +12,13 @@
 import type { DatabaseType } from "@/lib/types";
 import { KUBERNETES_SERVER_OVERLAY } from "../kubectl/engines/kubernetes";
 import { MONGODB_SERVER_OVERLAY } from "../mongo/engines/mongodb";
+import { dialectOnly } from "../overlay";
 import type { AgentEngineServerDialect, AgentEngineServerOverlays, AgentEngineType } from "../pack";
 import { DUCKDB_SERVER_OVERLAY } from "../sql/engines/duckdb";
 import { MSSQL_SERVER_OVERLAY } from "../sql/engines/mssql";
 import { MYSQL_SERVER_OVERLAY } from "../sql/engines/mysql";
 import { POSTGRES_SERVER_OVERLAY } from "../sql/engines/postgres";
 import { SQLITE_SERVER_OVERLAY } from "../sql/engines/sqlite";
-
-/** An overlay with its `dialect` alone, or with nothing for a family that has none. */
-type DialectOnly<Overlay> = Overlay extends { readonly dialect: infer Dialect }
-  ? { readonly dialect: Dialect }
-  : Record<never, never>;
-
-/** The `dialect` of an engine module's overlay, and nothing else it holds. */
-const dialectOnly = <Overlay extends { readonly dialect?: object }>(overlay: Overlay): DialectOnly<Overlay> =>
-  (overlay.dialect === undefined ? {} : { dialect: overlay.dialect }) as DialectOnly<Overlay>;
 
 const SERVER_OVERLAYS: AgentEngineServerOverlays = Object.freeze({
   postgres: dialectOnly(POSTGRES_SERVER_OVERLAY),
