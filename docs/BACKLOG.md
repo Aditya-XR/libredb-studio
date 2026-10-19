@@ -28,10 +28,10 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
-- [Drivers and connections](#drivers-and-connections) — D1-D375, U17 · 272
+- [Drivers and connections](#drivers-and-connections) — D1-D379, U17 · 275
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U147 · 133
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U148 · 134
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC35 · 31
 - [Release pipeline](#release-pipeline) — REL1-REL9 · 9
@@ -2100,6 +2100,7 @@ Amended 2026-10-04: the same default bounds each test of `tests/unit/db/etcd/sea
 That file's `beforeAll` already parses the repository once under a 60-second budget, so what ran out was the rule's own walk over the parsed files.
 The file passed alone (59 tests in 6.3 s there, and 60 tests in 3.9 s on `main` at `d994ad72f`), in every full run after that one, and in three runs beside 40 busy loops on a 20-core machine (7 to 10 s each, on `main` at `6dcc67fd6`), so it needs more load than that to fail again.
 This entry is done only when that test also passes repeated runs at the CI job's concurrency, through a timeout of its own or a cheaper walk.
+Amended 2026-10-20: it failed that way again on the `Cross-platform Tests (macos-latest)` job of #1818 on 2026-10-19 (attempt 1 of run 39288327751, 6028 ms), beside D379's failure; attempt 2 passed.
 
 **Done when:** the hook carries a timeout sized for a busy runner (bun's `beforeAll` takes one as its second argument), or makes RSA keys only where a test needs RSA, and the file passes repeated runs at the CI job's concurrency.
 
@@ -3836,6 +3837,58 @@ Measured on 2026-10-17 with a probe test that held the old provider's disconnect
 Found 2026-10-17 while verifying an external review of #1785.
 
 **Done when:** concurrent requests for a stale entry share one retirement and one replacement, for example by taking the entry out of the cache before awaiting its disconnect, no provider is left connected outside the cache, and a test with a disconnect held open and two requests shows one replacement provider and the old one closed.
+
+### D377. Four test files do seconds of work inside bun's default five-second test timeout
+
+Each test below does its expensive work in the test body and passes no timeout of its own, so bun's default of 5000 ms bounds it.
+Each ran out of that default under load on a 20-core development machine during the engine contract series (#1845 to #1850), and each passes alone in under 2 s.
+
+- `tests/unit/db/snowflake/key-runtimes.test.ts`, `in this Bun process > the passphrase codes, the PBKDF2 PRFs and scrypt`, makes an RSA key and decrypts every passphrase form with PBKDF2 and scrypt in the body; the file's `beforeAll` hooks carry 60-second budgets and this test does not.
+  5114 ms in a `test:coverage` run on the SQL grammar branch of #1847 on 2026-10-19, while other worktrees ran tests too.
+- `tests/security/duckdb-posture-callsites.test.ts`, `the scan found the real call sites, so it is not vacuously green`, parses every file under `src/` with the TypeScript compiler a second time to count the factory calls, after the module scope parsed them once for `UNPOSTURED`.
+  6345 ms in a `test:coverage` run of the connection form branch of #1849 at `3dc61662d` on 2026-10-19.
+- `tests/unit/db/create-table-spec-census.test.ts`, `exactly the eight ids with a measured grammar declare one`, builds every provider through `createDatabaseProvider`, which imports every provider module.
+  7268 ms in the same run as the DuckDB test.
+- `tests/unit/db/mongodb/seam-guard.test.ts` ran a test out of the default under 20 parallel jobs on the SQL writing branch of #1850 on 2026-10-19; which test was not recorded.
+  Its slowest without a timeout of its own is `the real sources pass all three rules`, an import-graph walk from every file under `src/lib/db/operations` and `src/lib/agent`, read from disk in the body.
+
+Re-measured alone on 2026-10-20 on `main` at `6e611bf73`, three runs each through bun's JUnit reporter: 0.88 to 1.13 s, 0.52 to 0.53 s, 0.39 to 0.40 s and 0.38 to 0.39 s, in the order above.
+D153 is the same class in the etcd files.
+
+Found on #1847, #1849 and #1850, none of which touches these tests.
+
+**Done when:** each test above either carries a timeout of its own sized from a measured busy-runner time, or does its expensive work once in a `beforeAll` with a budget, and each file passes repeated runs at the CI job's concurrency.
+
+### D378. Two declarations answer how an engine quotes a name, and four engines get two different answers
+
+`SqlWritingSpec.quoteIdentifier`, declared beside each provider and read through `sqlWritingFor` (`src/lib/db/sql-writing/index.ts`), answers for all 42 type-ids; `quoteIdentifier` in `src/lib/sql/identifier.ts` reads it for inline editing, result export, the pivot table, table profiles, migration DDL and Databend's objects.
+`quoteIdentifier` in `src/lib/query-generators.ts` answers from the capabilities instead: `ProviderCapabilities.identifierQuoting` through `DECLARED_QUOTING` where an engine declares one (BigQuery and OpenSearch `backtick`, Db2, DuckDB, Elasticsearch and Trino `double`, InfluxDB 3 and Snowflake `double-always`, Databend and Spark `backtick-always`), the query language for the JSON, Cypher and InfluxQL engines, and the default port for the rest.
+Probed on 2026-10-20 on `main` at `6e611bf73` with eight names through both answers for every type-id, comparing the spec with the generators' `always` form, since the spec always quotes:
+
+- BigQuery: the spec writes a backtick inside a name as a backslash and a backtick, the generators double it, and the spec module says a doubled backtick ends the name in GoogleSQL.
+- Couchbase: double quotes in the spec, backticks in the generators.
+- Neo4j: double quotes in the spec, backticks in the generators.
+- InfluxDB (InfluxQL): a double quote inside a name is doubled in the spec and backslash-escaped in the generators.
+
+Every other engine outside the JSON languages gets the same answer from both, and the JSON-language engines' specs answer a double-quoted name where the generators answer it bare.
+Whether a caller of the spec reaches the Couchbase, Neo4j or InfluxDB row with a name was not traced.
+D329's upper-fold member belongs in whichever home this settles.
+
+Found on #1850, which moved the spec's quoting beside each provider and left the capability where it was; which of the two the query generators should read is a behaviour question, so that change did not merge them.
+
+**Done when:** one of the two is the only home of the identifier quoting fact and the other reads it, each of the four disagreements above is settled by a measurement on its engine, and a test holds the result for every type-id.
+
+### D379. The connect-timeout test's waited-seconds case assumes its own 400 ms sleep ends on time
+
+`the seconds are the wait this request made, never a limit it was not given` in `tests/unit/db/http/node-transport-connect-timeout.test.ts` makes a 700 ms deadline, sleeps 400 ms with `setTimeout`, then sends a request to a host whose connect never completes, and expects the failure to name a wait of 0.2 to 0.4 seconds.
+The transport counts that wait from the request's own start (`queuedAt` in `createNodeTransport`, `src/lib/db/http/node-transport.ts`), and `waitedSeconds` in `src/lib/db/errors.ts` names 0.2 only from 150 ms up, so the test holds only while the sleep ends no more than 150 ms late.
+On the `Cross-platform Tests (macos-latest)` job of #1818, attempt 1 of run 39288327751 on 2026-10-19, it failed at line 108 with `expect(received).toBeGreaterThanOrEqual(expected)`, "Expected: >= 0.2", "Received: 0.1", after 704 ms, so the request started with under 150 ms of the deadline left; attempt 2 passed.
+The same attempt also ran D153's etcd `descriptor readers` test out of the default timeout (6028 ms), so the runner was busy, and nothing points at the transport.
+The file passed alone on 2026-10-20 on `main` at `6e611bf73` (12 tests, 3.3 s).
+
+Found on #1818, whose change does not touch the HTTP transport.
+
+**Done when:** the test bounds the named wait by the time it measured itself between sending the request and the deadline, not by the sleep's nominal length, and the file passes repeated runs at the CI job's concurrency.
 
 ## Value interpolation
 
@@ -5718,6 +5771,19 @@ The schemes the parser reads for ClickHouse are `clickhouse://`, `http://` and `
 Found 2026-10-19 by the connection form golden capture of the engine contract refactor; pre-existing.
 
 **Done when:** the ClickHouse connection string placeholder names a URL the parser reads as ClickHouse, the golden file and the placement test are regenerated and updated with it, and the dialog's E2E or component assertions for ClickHouse still pass.
+
+### U148. The connection form golden holds the whole dialog for each engine, so a new engine rewrites all 42 files
+
+`tests/unit/db/connection-form/golden.test.tsx` renders `ConnectionModal` for each type-id (`renderFormGolden` in `tests/unit/db/connection-form/fixtures.tsx`) and holds every line of the dialog to `golden/<type-id>.txt`, the engine picker and the shared chrome included.
+Measured on 2026-10-20 on `main` at `6e611bf73`: the 42 files hold 3930 lines, and 2016 of them are the picker's 42 buttons, once per dialog state a file captures (36 files once, 6 twice).
+Another 23 lines are the same in all 42 files: the description, Paste URL, the name, query timeout and object-scan fields, the five environment buttons, Cancel, Test Connection, Establish Connection and the section markers.
+What is the engine's own runs from 6 lines (DuckDB, LibreDB) to 51 (SQL Server, Oracle), so a new engine's picker button changes every file for a line none of them is about.
+Engine counts are written as the literal 42 in nine tests: `connection-form/isolation.test.ts`, `connection-string/isolation.test.ts`, `connection-string/docs.test.ts`, `execution-ui/isolation.test.ts` and `execution-ui/docs.test.ts` (all five added by #1849), `object-edit-expectation.test.ts` and `maintenance-surface-census.test.ts` under `tests/unit/db/`, and `object-source-declarations.test.ts` and `object-column-declarations.test.ts` under `tests/isolated/`.
+The maintenance census test's own title reads "11 of 4041 type-ids".
+
+Found on #1849, whose golden capture this is.
+
+**Done when:** each golden holds only the engine's own fields, with the picker and the shared chrome pinned once elsewhere, and each count above derives from the type-id list (`EXTERNAL_DATABASE_TYPES` in `src/lib/db/compatibility.ts` with LibreDB) instead of a literal.
 
 ## Dependencies
 
