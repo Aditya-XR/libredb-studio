@@ -767,6 +767,7 @@ Deploy your own instance of LibreDB Studio with a single click on DigitalOcean, 
 | `LLM_API_KEY` | ❌ | API key for AI features |
 | `LLM_MODEL` | ❌ | Model name (e.g., `gemini-2.5-flash`) |
 | `LLM_API_URL` | ❌ | API URL for `ollama` and `custom`; required for `custom`, defaults to `http://localhost:11434/v1` for `ollama` |
+| `LLM_MODEL_EFFORT` | No | Reasoning effort, `openai` only: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; unset leaves the model's default, and any other provider refuses it |
 | `STORAGE_PROVIDER` | ❌ | Storage provider: `local` (default), `sqlite`, or `postgres` |
 | `STORAGE_SQLITE_PATH` | ❌ | SQLite file path (e.g. `/app/data/libredb-storage.db`) |
 | `STORAGE_POSTGRES_URL` | ❌ | PostgreSQL connection URL (required when `STORAGE_PROVIDER=postgres`) |

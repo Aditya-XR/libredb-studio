@@ -14,10 +14,9 @@ import {
   AGENT_REPORT_RESERVE_NOTICE,
   type AgentToolResources,
   guidanceDelivered,
-  PLAN_NO_REASONING_EFFORT,
   runInvestigation,
 } from "@/lib/agent/investigation";
-import type { AgentModel } from "@/lib/agent/model-adapter";
+import { type AgentModel, PLAN_NO_REASONING_EFFORT } from "@/lib/agent/model-adapter";
 import { resolveAgentProviderAdapter } from "@/lib/agent/provider-registry";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import { AgentRunService, AgentRunServiceError } from "@/lib/agent/run-service";
@@ -35,7 +34,7 @@ import { EtcdProvider } from "@/lib/db/providers/keyvalue/etcd/index";
 import { InfluxDB3Provider, InfluxDBProvider } from "@/lib/db/providers/timeseries/influxdb/index";
 import type { DatabaseProvider, ProviderCapabilities, ProviderLabels } from "@/lib/db/types";
 import { KEY_PATTERN_LABELS, SEARCH_INDEX_LABELS, TABLE_LABELS } from "../fixtures/provider-labels";
-import { LLMAuthError, LLMStreamError } from "@/lib/llm/types";
+import { LLMAuthError, LLMConfigError, LLMStreamError } from "@/lib/llm/types";
 import type {
   ColumnSchema,
   DatabaseConnection,
@@ -56,7 +55,14 @@ import {
   scriptedModel,
   unansweredCall,
 } from "./fixtures/agent-scripted-model";
-import { chatNeverAnswers, chatTextStream, chatToolCallStream, endpointError } from "./fixtures/agent-transport";
+import {
+  chatNeverAnswers,
+  chatTextStream,
+  chatToolCallStream,
+  endpointError,
+  responsesTextStream,
+  responsesToolCallStream,
+} from "./fixtures/agent-transport";
 
 /**
  * The investigation workflow (#329 T7b): the loop that turns one objective into a
@@ -6154,8 +6160,8 @@ describe("the handover an answer records comes from the run's own setting", () =
   part without consulting `part.invalid` (src/lib/agent/investigation.ts:1042), and it
   keeps only `role: "assistant"` response messages, discarding the SDK's error result
   (src/lib/agent/investigation.ts:1069). Hardening the first to
-  `part.invalid !== true` — the shape `capability-probe.ts:279` already uses, so it is
-  a natural edit rather than a hypothetical one — deletes #406's entire behaviour
+  `part.invalid !== true` (the shape `capability-probe.ts:296` already uses, so it is
+  a natural edit rather than a hypothetical one) deletes #406's entire behaviour
   gain: the call is dropped, the turn looks like "the model stopped", and the run is
   scored with no answer and nothing on the ledger saying why.
 
@@ -6861,13 +6867,15 @@ describe("a model that thinks instead of answering is told not to", () => {
     A REQUEST FIELD, not a word in the prompt: nothing is spliced into what Studio says to a
     model, and no cell's measured wording moves.
   */
-  test.each(["ollama", "openai"] as const)(
+  test.each(["ollama", "custom"] as const)(
     "the field reaches a model configured as %s, because the adapter is the same one",
     async (provider) => {
       /*
-        BOTH providers, and ollama first, because that is where this broke. The options were
-        keyed by the provider's own name; the scripted model is `openai` by default, so a
-        single-provider test passed while every real ollama run sent nothing and timed out.
+        BOTH chat-wire providers, and ollama first, because that is where this broke. The
+        options were keyed by the provider's own name; the scripted model was `openai` by
+        default then, so a single-provider test passed while every real ollama run sent
+        nothing and timed out. The `openai` kind speaks the Responses API now, and its own
+        tests are in the describe that follows this one's sibling.
       */
       const b = boot(freshDataDir());
       const run = await startRun(b, "planning");
@@ -6990,5 +6998,117 @@ describe("a model that thinks instead of CALLING is told not to, on its agent tu
     });
 
     expect(script.turns[0]?.body?.reasoning_effort).toBeUndefined();
+  });
+});
+
+describe("an openai run speaks the Responses API, statelessly", () => {
+  /*
+    The `openai` kind left Chat Completions because GPT-6 tool calling lives on the Responses
+    API. Two things only a run can show: every turn is sent `store: false` with the configured
+    effort, and the encrypted reasoning a stateless turn returns is replayed in the next one,
+    because the loop builds its transcript from the SDK's own assistant messages and
+    `neutraliseAssistantMessages` passes reasoning parts through untouched.
+  */
+  const LUNA = "gpt-6-luna";
+
+  test("a planning turn is sent store: false and LLM_MODEL_EFFORT, on /responses", async () => {
+    const b = boot(freshDataDir());
+    const run = await startRun(b, "planning");
+    const script = scriptedModel(
+      () => responsesTextStream("```sqlite\nSELECT 1\n```"),
+      () => responsesTextStream("```sqlite\nSELECT 1\n```"),
+    );
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch, "https://api.openai.com/v1", LUNA, "openai", "low"),
+      resources: b.resources,
+    });
+
+    expect(script.turns[0]?.body.store).toBe(false);
+    expect(script.turns[0]?.body.reasoning).toEqual({ effort: "low" });
+    expect(script.turns[0]?.body.include).toEqual(["reasoning.encrypted_content"]);
+  });
+
+  test("an agent turn's encrypted reasoning is replayed with the next turn, and the run completes", async () => {
+    const b = boot(freshDataDir());
+    const run = await startRun(b);
+    const script = scriptedModel(
+      () =>
+        responsesToolCallStream(
+          "run_read_query",
+          JSON.stringify({ sql: "SELECT id FROM orders", rationale: "size the table" }),
+          { reasoning: { id: "rs_turn_1", encryptedContent: "ENCRYPTED-TURN-1" } },
+        ),
+      (turn) =>
+        responsesToolCallStream(
+          "compose_report",
+          JSON.stringify({
+            claims: [
+              {
+                claim: "The orders report scans the whole table.",
+                // The Responses API carries the transcript as `input`, not `messages`.
+                evidence: [{ source: "artifact", correlationId: correlationIdIn(JSON.stringify(turn.body.input)) }],
+              },
+            ],
+          }),
+          { callId: "call_report", reasoning: { id: "rs_turn_2", encryptedContent: "ENCRYPTED-TURN-2" } },
+        ),
+    );
+
+    const result = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch, "https://api.openai.com/v1", LUNA, "openai"),
+      resources: b.resources,
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.stopReason).toBe("report-composed");
+    const second = script.turns[1]?.body;
+    expect(second?.store).toBe(false);
+    expect(second?.input).toContainEqual(
+      expect.objectContaining({ type: "reasoning", id: "rs_turn_1", encrypted_content: "ENCRYPTED-TURN-1" }),
+    );
+    // The call it reasoned towards, and the loop's own answer to it, follow it in order.
+    expect(second?.input).toContainEqual(expect.objectContaining({ type: "function_call", call_id: "call_1" }));
+    expect(second?.input).toContainEqual(expect.objectContaining({ type: "function_call_output", call_id: "call_1" }));
+  });
+
+  test("an effort the model does not take fails the turn with the SDK's own reason, not a run at another effort", async () => {
+    const b = boot(freshDataDir());
+    const run = await startRun(b, "planning");
+    const script = scriptedModel(() => responsesTextStream("```sqlite\nSELECT 1\n```"));
+
+    const drive = runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch, "https://api.openai.com/v1", "gpt-6.1-sol", "openai", "none"),
+      resources: b.resources,
+    });
+
+    // Raised as the configuration error it is, which the drive reports; the answer the SDK got
+    // at its own default effort is never read.
+    await expect(drive).rejects.toThrow(
+      'LLM_MODEL_EFFORT "none" was refused for the model "gpt-6.1-sol" (openai): gpt-6.1-sol only supports the following reasoning efforts: low, medium, high, xhigh, max.',
+    );
+    await expect(drive).rejects.toBeInstanceOf(LLMConfigError);
+    expect(script.turns).toHaveLength(1);
+  });
+
+  test("with no explicit effort a profile's quiet switch still reaches the openai kind, and a drop is raised", async () => {
+    // `gemma4:12b` is measured needing quiet on its agent turns. Served under the openai kind it
+    // is not a model the SDK knows to reason, so the SDK drops the field, and that is raised
+    // rather than the turn running with the thinking its profile was measured needing off.
+    const b = boot(freshDataDir());
+    const run = await startRun(b, "agent");
+    const script = scriptedModel(() => responsesTextStream("nothing to add"));
+
+    const drive = runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch, "https://api.openai.com/v1", "gemma4:12b", "openai"),
+      resources: b.resources,
+    });
+
+    await expect(drive).rejects.toThrow("The reasoning effort this model's profile asks for was refused");
+    expect(script.turns[0]?.body.store).toBe(false);
   });
 });
