@@ -712,7 +712,7 @@ describe("planted violations yield exactly their findings", () => {
     expect(layeringFindings(prepend(postgres, 'import "../index";'))).toEqual([
       `R3 cycle: ${server} -> ${postgres} -> ${index} -> ${TOOLS} -> ${server}`,
       `R3 server: ${composed} reaches ${index} through ${composed} -> ${toIndex}`,
-      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${toIndex}`,
+      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${toIndex}`,
       `R3 server: ${server} reaches ${index} through ${toIndex}`,
       `R3 server: ${postgres} reaches ${index} through ${postgres} -> ${index}`,
       `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${toIndex}`,
@@ -752,6 +752,15 @@ describe("planted violations yield exactly their findings", () => {
     expect(read(sqlite)).toContain(
       'import type { AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";',
     );
+  }, 60_000);
+
+  test("the grounding capture imported at run time by an engine overlay closes a cycle", () => {
+    const postgres = `${LANGUAGES}/sql/engines/postgres.ts`;
+    const server = `${LANGUAGES}/engines/server.ts`;
+    const snapshot = `${AGENT}/context-snapshot.ts`;
+    expect(layeringFindings(prepend(postgres, 'import "../../../context-snapshot";'))).toEqual([
+      `R3 cycle: ${snapshot} -> ${server} -> ${postgres} -> ${snapshot}`,
+    ]);
   }, 60_000);
 
   test("an engine server overlay imported by a language verifier fails the verifier closure", () => {

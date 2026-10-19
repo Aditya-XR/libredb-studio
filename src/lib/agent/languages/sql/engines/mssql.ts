@@ -271,5 +271,6 @@ export const MSSQL_SERVER_OVERLAY = {
     planEstimate: MSSQL_PLAN_ESTIMATE,
     profileComposition: MSSQL_PROFILE_COMPOSITION,
     statistics: MSSQL_STATISTICS,
+    catalogCapture: "unsupported",
   }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

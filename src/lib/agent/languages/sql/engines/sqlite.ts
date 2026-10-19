@@ -2,7 +2,15 @@
  * SQLite's server overlay (#1821): the dialect-bound members of the SQL server facet, as agent mode composes them on
  * SQLite. Server tier, read only through `engineServerDialect` in `languages/engines/server.ts`.
  */
-import { numeric, text } from "../../../catalog-rows";
+import {
+  type AgentCatalogCapture,
+  attach,
+  type CatalogRows,
+  type ComposedKindResolver,
+  numeric,
+  type TableIndex,
+  text,
+} from "../../../catalog-rows";
 import {
   type AgentCatalogRead,
   type AgentCatalogSelector,
@@ -14,6 +22,7 @@ import {
 import type { AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";
 import type { AgentProfileComposition } from "../../../table-profile";
 import type { AgentEngineServerOverlay } from "../../pack";
+import { parseSqliteIndexDdl, parseSqliteTableDdl } from "./sqlite-ddl";
 
 /** `LIKE` for the email shape and `GLOB` for the digit run (B26, `PROFILE_SHAPES`). */
 const SQLITE_PROFILE_COMPOSITION: AgentProfileComposition = Object.freeze({
@@ -193,11 +202,50 @@ const SQLITE_STATISTICS: AgentStatisticsReading = Object.freeze({
   limitNote: SQLITE_STATISTICS_LIMIT,
 });
 
+function buildSqliteTables(rows: CatalogRows, kindOf: ComposedKindResolver): TableIndex {
+  const tables: TableIndex = new Map();
+
+  for (const row of rows.get("columns") ?? []) {
+    const name = text(row.name);
+    const definition = parseSqliteTableDdl(text(row.sql));
+    tables.set(name, {
+      name,
+      kind: kindOf(row.type),
+      columns: [...definition.columns],
+      // The constraint-created indexes SQLite stores no DDL for: the composed index
+      // read below cannot see them, and they are what kept a UNIQUE-covered foreign
+      // key reading as unindexed (#502).
+      indexes: [...definition.indexes],
+      foreignKeys: [...definition.foreignKeys],
+    });
+  }
+
+  for (const row of rows.get("indexes") ?? []) {
+    const parsed = parseSqliteIndexDdl(text(row.sql));
+    if (parsed === null) continue;
+    attach(tables, text(row.tbl_name), (table) => {
+      table.indexes.push({ name: text(row.name), columns: [...parsed.columns], unique: parsed.unique });
+    });
+  }
+
+  return tables;
+}
+
+/** SQLite's grounding capture: `sqlite_schema.type` words, which are the provider's kind ids as they stand. */
+const SQLITE_CATALOG_CAPTURE: AgentCatalogCapture = Object.freeze({
+  // Two reads, not three: a SQLite table's foreign keys are declared inside its own
+  // `CREATE TABLE` text, which the object read already returns.
+  kinds: Object.freeze(["columns", "indexes"] as const),
+  build: buildSqliteTables,
+  kindWords: Object.freeze({ table: "table", view: "view", index: "index", trigger: "trigger" }),
+});
+
 export const SQLITE_SERVER_OVERLAY = {
   dialect: Object.freeze({
     catalogRead: SQLITE_CATALOG_READ,
     planEstimate: SQLITE_PLAN_ESTIMATE,
     profileComposition: SQLITE_PROFILE_COMPOSITION,
     statistics: SQLITE_STATISTICS,
+    catalogCapture: SQLITE_CATALOG_CAPTURE,
   }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

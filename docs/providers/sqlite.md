@@ -1507,7 +1507,7 @@ very profile). So `inspect_schema` composes
 ([composed-sql.ts](../../src/lib/agent/composed-sql.ts)), whose projection is therefore each object's
 own DDL text — a column list is there to be read out of a `CREATE TABLE` statement, rather than
 arriving as rows. PostgreSQL gets a structured column inventory from `information_schema` instead.
-The DDL is parsed by [`sqlite-ddl.ts`](../../src/lib/agent/sqlite-ddl.ts) (#329 T8), which reads four
+The DDL is parsed by [`sqlite-ddl.ts`](../../src/lib/agent/languages/sql/engines/sqlite-ddl.ts) (#329 T8), which reads four
 things out of it and steps over the rest: the columns, which are `NOT NULL`, which form the primary
 key, and where each `REFERENCES` points. Text it cannot read as a `CREATE TABLE` with a column list —
 a view, most obviously — yields an EMPTY definition rather than a partial one, and the table is

@@ -9,6 +9,7 @@ import type {
   AgentStatementLanguageId,
   AgentWorkflowVariant,
 } from "../agent-manifest";
+import type { AgentCatalogCapture } from "../catalog-rows";
 import type { AgentCatalogRead, AgentPlanEstimate } from "../composed-sql-primitives";
 import type { AgentGoalShortfall, VerifiableAgentRun } from "../goal-verifier";
 import type { AgentInventoryNoun } from "../inventory-noun";
@@ -371,6 +372,8 @@ export interface SqlServerDialect {
   readonly profileComposition: AgentProfileComposition | Unsupported;
   /** The statistics reading (`composeStatisticsAvailabilityProbe` in `composed-sql.ts`, `schema-stats.ts`). */
   readonly statistics: AgentStatisticsReading | Unsupported;
+  /** The grounding capture's composed catalog read (`readInventory` in `context-snapshot.ts`). */
+  readonly catalogCapture: AgentCatalogCapture | Unsupported;
 }
 
 /** The client view of a SQL engine's dialect: nothing yet. */

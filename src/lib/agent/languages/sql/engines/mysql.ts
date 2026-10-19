@@ -204,5 +204,6 @@ export const MYSQL_SERVER_OVERLAY = {
     planEstimate: MYSQL_PLAN_ESTIMATE,
     profileComposition: MYSQL_PROFILE_COMPOSITION,
     statistics: "unsupported",
+    catalogCapture: "unsupported",
   }),
 } as const satisfies AgentEngineServerOverlay<"sql">;

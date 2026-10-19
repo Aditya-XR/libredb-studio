@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { parseSqliteIndexDdl, parseSqliteTableDdl } from "@/lib/agent/sqlite-ddl";
+import { parseSqliteIndexDdl, parseSqliteTableDdl } from "@/lib/agent/languages/sql/engines/sqlite-ddl";
 
 /**
  * Reading SQLite's stored DDL back into an inventory (#329 T8).

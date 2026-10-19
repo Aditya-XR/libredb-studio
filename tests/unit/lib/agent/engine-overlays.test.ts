@@ -42,6 +42,7 @@ const SERVER_DIALECT_MEMBERS: readonly (keyof AgentEngineServerDialect)[] = [
   "planEstimate",
   "profileComposition",
   "statistics",
+  "catalogCapture",
 ];
 
 const ENGINE_MODULES: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
@@ -234,6 +235,45 @@ describe("engineServerDialect", () => {
     for (const type of [...ALL_TYPES, "toString" as DatabaseType]) {
       const dialect = engineServerDialect(type);
       if (dialect.statistics !== "unsupported") expect(dialect.catalogRead).not.toBe("unsupported");
+    }
+  });
+
+  test("catalogCapture is supplied on PostgreSQL and SQLite, each with its own kinds, builder and kind words", () => {
+    const supplied = SQL_ENGINES.filter((type) => engineServerDialect(type).catalogCapture !== "unsupported");
+    expect(supplied).toEqual(["postgres", "sqlite"]);
+    for (const type of ["duckdb", "mssql", "mysql"] as const) {
+      expect(engineServerDialect(type).catalogCapture).toBe("unsupported");
+    }
+    const capture = (type: DatabaseType) => {
+      const catalogCapture = engineServerDialect(type).catalogCapture;
+      if (catalogCapture === "unsupported") throw new Error(`${type} has no catalog capture`);
+      return catalogCapture;
+    };
+    expect(capture("postgres").kinds).toEqual(["columns", "relations", "indexes"]);
+    expect(capture("sqlite").kinds).toEqual(["columns", "indexes"]);
+    expect(capture("postgres").kindWords).toEqual({
+      r: "table",
+      p: "table",
+      v: "view",
+      m: "materialized_view",
+      S: "sequence",
+    });
+    expect(capture("sqlite").kindWords).toEqual({ table: "table", view: "view", index: "index", trigger: "trigger" });
+    for (const type of supplied) {
+      expect(Object.isFrozen(capture(type))).toBe(true);
+      expect(Object.isFrozen(capture(type).kinds)).toBe(true);
+      expect(Object.isFrozen(capture(type).kindWords)).toBe(true);
+      expect(typeof capture(type).build).toBe("function");
+    }
+    expect(capture("postgres").build).not.toBe(capture("sqlite").build);
+  });
+
+  test("an engine that captures its catalog also composes every kind it captures", () => {
+    for (const type of [...ALL_TYPES, "toString" as DatabaseType]) {
+      const dialect = engineServerDialect(type);
+      if (dialect.catalogCapture === "unsupported") continue;
+      if (dialect.catalogRead === "unsupported") throw new Error(`${type} captures a catalog it cannot read`);
+      for (const kind of dialect.catalogCapture.kinds) expect(Object.keys(dialect.catalogRead.compose)).toContain(kind);
     }
   });
 });

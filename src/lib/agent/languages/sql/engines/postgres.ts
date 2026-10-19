@@ -2,7 +2,19 @@
  * PostgreSQL's server overlay (#1821): the dialect-bound members of the SQL server facet, as agent mode composes them
  * on PostgreSQL. Server tier, read only through `engineServerDialect` in `languages/engines/server.ts`.
  */
-import { numeric, text } from "../../../catalog-rows";
+import {
+  type AgentCatalogCapture,
+  attach,
+  type CatalogRows,
+  type ComposedKindResolver,
+  emptyTable,
+  markPrimary,
+  numeric,
+  qualified,
+  type TableIndex,
+  text,
+  truthy,
+} from "../../../catalog-rows";
 import {
   type AgentCatalogRead,
   type AgentCatalogSelector,
@@ -483,11 +495,100 @@ function buildPostgresEstimates(rows: readonly Record<string, unknown>[]): Map<s
 /** PostgreSQL's statistics reading: no probe, since absence is per table and already NULL in the read itself. */
 const POSTGRES_STATISTICS: AgentStatisticsReading = Object.freeze({ probe: null, build: buildPostgresEstimates });
 
+/**
+ * The column list a PostgreSQL column row carries, aggregated by `json_agg` (B52).
+ *
+ * `pg` parses a `json` column into an array in memory, but the same rows may arrive
+ * as a JSON string from another transport or from a fixture, so both are read.
+ * Anything else is the empty inventory rather than an exception: a row this cannot
+ * read says nothing about its columns, and refusing it here would turn one malformed
+ * row into a lost snapshot.
+ *
+ * The ELEMENTS are filtered for the same reason the value is, and the filter is the
+ * load-bearing half: `Array.isArray` says nothing about what is IN the array, so a
+ * `null` element used to reach the fold and be read as `column.name` — a TypeError,
+ * raised where `buildPostgresTables` runs OUTSIDE `readInventory`'s catch, which ends
+ * the run `internal` rather than degrading the capture (the shape B48 exists to keep
+ * out of this path). A bad element is dropped rather than emptying the list: the rest
+ * of the array is still an inventory, and losing one entry says less than losing the
+ * table.
+ */
+function parsePostgresColumns(value: unknown): readonly Record<string, unknown>[] {
+  const entries = (candidate: unknown): readonly Record<string, unknown>[] =>
+    Array.isArray(candidate)
+      ? candidate.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+      : [];
+
+  if (Array.isArray(value)) return entries(value);
+  if (typeof value === "string" && value.trim() !== "") {
+    try {
+      return entries(JSON.parse(value) as unknown);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function buildPostgresTables(rows: CatalogRows, kindOf: ComposedKindResolver): TableIndex {
+  const tables: TableIndex = new Map();
+
+  for (const row of rows.get("columns") ?? []) {
+    const name = qualified(row.table_schema, row.table_name);
+    const table = tables.get(name) ?? { ...emptyTable(name), kind: kindOf(row.relkind) };
+    tables.set(name, table);
+    for (const column of parsePostgresColumns(row.columns)) {
+      table.columns.push({
+        name: text(column.name),
+        type: text(column.type),
+        nullable: text(column.nullable).toUpperCase() === "YES",
+        isPrimary: false,
+      });
+    }
+  }
+
+  for (const row of rows.get("relations") ?? []) {
+    attach(tables, qualified(row.table_schema, row.table_name), (table) => {
+      table.foreignKeys.push({
+        columnName: text(row.column_name),
+        referencedTable: qualified(row.referenced_schema, row.referenced_table),
+        referencedColumn: text(row.referenced_column),
+      });
+    });
+  }
+
+  // One row per indexed column, in the index's own column order, so an index is
+  // assembled across rows rather than declared by one.
+  for (const row of rows.get("indexes") ?? []) {
+    const indexName = text(row.index_name);
+    const columnName = text(row.column_name);
+    attach(tables, qualified(row.table_schema, row.table_name), (table) => {
+      let index = table.indexes.find((candidate) => candidate.name === indexName);
+      if (index === undefined) {
+        index = { name: indexName, columns: [], unique: truthy(row.is_unique) };
+        table.indexes.push(index);
+      }
+      index.columns.push(columnName);
+      if (truthy(row.is_primary)) markPrimary(table, columnName);
+    });
+  }
+
+  return tables;
+}
+
+/** PostgreSQL's grounding capture: columns, relations and indexes, each kind read as `pg_class.relkind` words. */
+const POSTGRES_CATALOG_CAPTURE: AgentCatalogCapture = Object.freeze({
+  kinds: Object.freeze(["columns", "relations", "indexes"] as const),
+  build: buildPostgresTables,
+  kindWords: Object.freeze({ r: "table", p: "table", v: "view", m: "materialized_view", S: "sequence" }),
+});
+
 export const POSTGRES_SERVER_OVERLAY = {
   dialect: Object.freeze({
     catalogRead: POSTGRES_CATALOG_READ,
     planEstimate: POSTGRES_PLAN_ESTIMATE,
     profileComposition: POSTGRES_PROFILE_COMPOSITION,
     statistics: POSTGRES_STATISTICS,
+    catalogCapture: POSTGRES_CATALOG_CAPTURE,
   }),
 } as const satisfies AgentEngineServerOverlay<"sql">;
