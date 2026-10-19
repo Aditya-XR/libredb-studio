@@ -90,7 +90,9 @@ function resolveSource(specifier: string, fromFile: string): string | null {
     path.join(base, "index.tsx"),
     base,
   ]) {
-    if (existsSync(candidate) && statSync(candidate).isFile()) return path.relative(ROOT, candidate);
+    // Forward slashes on every platform, so the SERVER patterns match on Windows too instead of matching nothing.
+    if (existsSync(candidate) && statSync(candidate).isFile())
+      return path.relative(ROOT, candidate).split(path.sep).join("/");
   }
   return null;
 }
