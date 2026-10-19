@@ -69,6 +69,13 @@ describe("agentPosture in plan mode", () => {
     );
   });
 
+  test("the engines named as capturing by a catalog read are PostgreSQL and SQLite, written out", () => {
+    // The literal beside the derived one above: the mirror and its source could move together.
+    const posture = agentPosture({ mode: "planning", engine: null, engineLabel: "", handover: false });
+
+    expect(posture.body).toContain("On PostgreSQL and SQLite that capture is itself a catalog read");
+  });
+
   test("an engine agent mode cannot execute on gets the identical plan posture", () => {
     const onMongo = agentPosture({
       mode: "planning",

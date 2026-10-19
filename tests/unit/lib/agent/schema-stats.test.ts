@@ -453,6 +453,18 @@ describe("readSchemaStatistics — what it will not do", () => {
     expect(h.statements()).toHaveLength(0);
   });
 
+  // DuckDB is composed for but has no reader; Oracle is not composed for at all. Both arrive
+  // at the same answer before a statement is sent.
+  test.each(["duckdb", "oracle"] as const)(
+    "%s has no statistics this run reads, and no statement is sent",
+    async (type) => {
+      const h = harness(type, async () => result([]));
+
+      expect(await readOf(h)).toEqual({ kind: "unavailable", reasonCode: "DIALECT_HAS_NO_STATISTICS" });
+      expect(h.statements()).toHaveLength(0);
+    },
+  );
+
   test("it is the SERVER's grounding read, so it works in planning mode — where the MODEL still has no tools", async () => {
     // The mode gate in `tools.ts` refuses a model-driven call outside agent mode.
     // This read is not one: it is the server establishing the run's context before
