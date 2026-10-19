@@ -14,13 +14,16 @@
  * - R1e: a string literal or literal type that starts with a pack id and a separator, or ends in `-<id>.<n>`: an
  *   operation id, a verifier id or a fingerprint prefix.
  * - R2: an import of a module under `languages/` other than the shared entries: `pack.ts`, `client.ts`, `server.ts`,
- *   `index.ts`, `verifiers.ts` and `refusals.ts`, matched by full path.
+ *   `index.ts`, `verifiers.ts`, `refusals.ts` and `engines/{client,server,index}.ts`, matched by full path.
  * - R3: the tiers, each finding the first forbidden module a chain meets, not every module past it. The server modules never reach the execution tier; the client packs never reach a server module, an
  *   execution module or a `node:`/`bun:` builtin; the language verifiers and `goal-claims.ts` never reach
  *   `goal-verifier.ts`; `goal-verifier.ts`, `goal-claims.ts` and every verifier module never reach `tools.ts` or a
  *   server, adapter or definitions module; and no runtime cycle among the agent modules passes through `languages/` or
  *   a shared module. A dynamic `import("x")` or `require("x")` with a literal specifier counts as an import, for R2
  *   and R3 alike.
+ * - R6: every `*_SERVER_OVERLAY` and `*_CLIENT_OVERLAY` an engine module under `languages/<family>/engines/` exports is
+ *   declared `satisfies` its overlay type, `AgentEngineServerOverlay<...>`, `AgentEngineClientOverlay<...>` or
+ *   `{ dialect: ClientDialectOf<...> }`, so the excess-property check holds every overlay to its family's dialect.
  * - R4: the allowlist is exact. A key found more often than it is listed fails, and so does a listed key found less
  *   often, so the list can only shrink.
  *
@@ -50,9 +53,17 @@ const COMPOUND_ID = [new RegExp(`^(${IDS})[.:-]`), new RegExp(`-(${IDS})\\.\\d+$
 
 /** The shared entries of `languages/` the core may import; every other module there belongs to one pack. */
 const SHARED_ENTRIES = new Set(
-  ["pack.ts", "client.ts", "server.ts", "index.ts", "verifiers.ts", "refusals.ts"].map(
-    (name) => `${LANGUAGES}/${name}`,
-  ),
+  [
+    "pack.ts",
+    "client.ts",
+    "server.ts",
+    "index.ts",
+    "verifiers.ts",
+    "refusals.ts",
+    "engines/client.ts",
+    "engines/server.ts",
+    "engines/index.ts",
+  ].map((name) => `${LANGUAGES}/${name}`),
 );
 
 /**
@@ -286,13 +297,21 @@ function reach(start: string, planted: Planted): Map<string, string[]> {
   return chains;
 }
 
+/** An engine's server overlay: every module under a family's `engines/` but its client overlays. */
+const isEngineServerModule = (file: string): boolean =>
+  new RegExp(`^${LANGUAGES}/[^/]+/engines/(?!client\\.ts$)[^/]+\\.ts$`).test(file);
 const SERVER_SIDE = [
   `${AGENT}/tools.ts`,
   `${AGENT}/goal-verifier.ts`,
   `${AGENT}/tool-contracts.ts`,
   `${AGENT}/goal-claims.ts`,
+  `${AGENT}/composed-sql.ts`,
+  `${AGENT}/table-profile.ts`,
+  `${AGENT}/schema-stats.ts`,
+  `${AGENT}/context-snapshot.ts`,
   `${LANGUAGES}/server.ts`,
   `${LANGUAGES}/verifiers.ts`,
+  `${LANGUAGES}/engines/server.ts`,
 ];
 const isExecution = (file: string): boolean =>
   file === `${LANGUAGES}/index.ts` || new RegExp(`^${LANGUAGES}/[^/]+/(index|tools)\\.ts$`).test(file);
@@ -300,16 +319,29 @@ const isExecution = (file: string): boolean =>
 const isServerFacet = (file: string): boolean =>
   file === `${AGENT}/tools.ts` ||
   file === `${LANGUAGES}/server.ts` ||
+  file === `${LANGUAGES}/engines/server.ts` ||
+  isEngineServerModule(file) ||
   new RegExp(`^${LANGUAGES}/[^/]+/(adapter|server|definitions)\\.ts$`).test(file);
 const CLIENT_FORBIDDEN = new Set([
   `${AGENT}/tools.ts`,
   `${AGENT}/investigation.ts`,
   `${AGENT}/goal-verifier.ts`,
+  `${AGENT}/composed-sql.ts`,
+  `${AGENT}/composed-sql-primitives.ts`,
+  `${AGENT}/table-profile.ts`,
+  `${AGENT}/schema-stats.ts`,
+  `${AGENT}/context-snapshot.ts`,
+  `${AGENT}/catalog-rows.ts`,
   `${LANGUAGES}/server.ts`,
   `${LANGUAGES}/index.ts`,
+  `${LANGUAGES}/engines/server.ts`,
+  `${LANGUAGES}/engines/index.ts`,
 ]);
 const isClientForbidden = (file: string): boolean =>
-  CLIENT_FORBIDDEN.has(file) || file.startsWith("package:node:") || file.startsWith("package:bun:");
+  CLIENT_FORBIDDEN.has(file) ||
+  isEngineServerModule(file) ||
+  file.startsWith("package:node:") ||
+  file.startsWith("package:bun:");
 const SHARED_MODULES = new Set(
   [
     "tool-contracts.ts",
@@ -361,9 +393,9 @@ function layeringFindings(planted: Planted = {}): string[] {
         findings.add(`R3 ${bullet}: ${from} reaches ${target} through ${chain.join(" -> ")}`);
     }
   };
-  for (const file of SERVER_SIDE) forbid(file, isExecution, "server");
   const files = sourcesUnder(AGENT);
-  for (const file of files.filter((path) => new RegExp(`^${LANGUAGES}/([^/]+/)?client\\.ts$`).test(path))) {
+  for (const file of [...SERVER_SIDE, ...files.filter(isEngineServerModule)]) forbid(file, isExecution, "server");
+  for (const file of files.filter((path) => new RegExp(`^${LANGUAGES}/(.+/)?client\\.ts$`).test(path))) {
     forbid(file, isClientForbidden, "client");
   }
   for (const file of [
@@ -415,6 +447,33 @@ function plantInTypeAlias(file: string, name: string, member: string): Planted {
 
 const prepend = (file: string, code: string): Planted => ({ [file]: `${code}\n${read(file)}` });
 
+/** The overlay types an engine overlay may be declared `satisfies`, as written. */
+const OVERLAY_TYPE = /^(AgentEngine(Server|Client)Overlay<[\s\S]+>|\{\s*dialect: ClientDialectOf<[\s\S]+>;?\s*\})$/;
+
+/** R6 over every engine module: each exported overlay that is not declared `satisfies` its overlay type. */
+function overlayShapeFindings(planted: Planted = {}): string[] {
+  const findings: string[] = [];
+  const modules = sourcesUnder(LANGUAGES).filter((file) => new RegExp(`^${LANGUAGES}/[^/]+/engines/`).test(file));
+  for (const file of modules) {
+    const source = parse(file, textOf(file, planted));
+    for (const statement of source.statements) {
+      if (!ts.isVariableStatement(statement)) continue;
+      if (!statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        const name = declaration.name.getText(source);
+        if (!/_(SERVER|CLIENT)_OVERLAY$/.test(name)) continue;
+        const initializer = declaration.initializer;
+        const shaped =
+          initializer !== undefined &&
+          ts.isSatisfiesExpression(initializer) &&
+          OVERLAY_TYPE.test(initializer.type.getText(source));
+        if (!shaped) findings.push(`${file}#${name}: R6`);
+      }
+    }
+  }
+  return findings.sort();
+}
+
 describe("the agent core names no language a pack owns", () => {
   test("the pack ids come from the manifest", () => {
     expect(PACK_IDS).toEqual(["kubectl", "mongo"]);
@@ -457,6 +516,31 @@ describe("the language modules load in tiers", () => {
       `${AGENT}/context-snapshot.ts -> ${AGENT}/tools.ts -> ${AGENT}/context-snapshot.ts`,
     );
   }, 60_000);
+});
+
+describe("every engine overlay is declared satisfies its overlay type", () => {
+  test("the real engine modules hold R6, and the scan reads every overlay they export", () => {
+    expect(overlayShapeFindings()).toEqual([]);
+    const exported = sourcesUnder(LANGUAGES)
+      .filter((file) => new RegExp(`^${LANGUAGES}/[^/]+/engines/`).test(file))
+      .flatMap((file) => Array.from(read(file).matchAll(/^export const (\w+_(SERVER|CLIENT)_OVERLAY)\b/gm)));
+    expect(exported).toHaveLength(14);
+  });
+
+  test("an overlay that drops its satisfies fails R6", () => {
+    const duckdb = `${LANGUAGES}/sql/engines/duckdb.ts`;
+    const text = read(duckdb);
+    const planted = { [duckdb]: text.replace(' as const satisfies AgentEngineServerOverlay<"sql">', "") };
+    expect(planted[duckdb]).not.toBe(text);
+    expect(overlayShapeFindings(planted)).toEqual([`${duckdb}#DUCKDB_SERVER_OVERLAY: R6`]);
+  });
+
+  test("an overlay declared satisfies another type fails R6", () => {
+    const client = `${LANGUAGES}/mongo/engines/client.ts`;
+    const text = read(client);
+    const planted = { [client]: text.replace('satisfies AgentEngineClientOverlay<"mongo">', "satisfies object") };
+    expect(overlayShapeFindings(planted)).toEqual([`${client}#MONGODB_CLIENT_OVERLAY: R6`]);
+  });
 });
 
 describe("planted violations yield exactly their findings", () => {
@@ -528,6 +612,8 @@ describe("planted violations yield exactly their findings", () => {
       `R3 cycle: ${index} -> ${LANGUAGES}/kubectl/index.ts -> ${LANGUAGES}/kubectl/tools.ts -> ${TOOLS} -> ${index}`,
       `R3 cycle: ${index} -> ${LANGUAGES}/mongo/index.ts -> ${LANGUAGES}/mongo/tools.ts -> ${TOOLS} -> ${index}`,
       `R3 cycle: ${index} -> ${LANGUAGES}/sql/index.ts -> ${TOOLS} -> ${index}`,
+      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${index}`,
+      `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${TOOLS} -> ${index}`,
       `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${index}`,
     ]);
   }, 60_000);
@@ -539,6 +625,8 @@ describe("planted violations yield exactly their findings", () => {
       `R3 cycle: ${index} -> ${LANGUAGES}/kubectl/index.ts -> ${LANGUAGES}/kubectl/tools.ts -> ${TOOLS} -> ${index}`,
       `R3 cycle: ${index} -> ${LANGUAGES}/mongo/index.ts -> ${LANGUAGES}/mongo/tools.ts -> ${TOOLS} -> ${index}`,
       `R3 cycle: ${index} -> ${LANGUAGES}/sql/index.ts -> ${TOOLS} -> ${index}`,
+      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${index}`,
+      `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${TOOLS} -> ${index}`,
       `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${index}`,
     ]);
   }, 60_000);
@@ -547,12 +635,14 @@ describe("planted violations yield exactly their findings", () => {
     const client = `${LANGUAGES}/kubectl/client.ts`;
     const planted = prepend(client, 'import { executeAgentOperation } from "../../tools";');
     const clients = `${LANGUAGES}/client.ts`;
+    const engines = `${LANGUAGES}/engines/client.ts`;
     const manifest = `${AGENT}/agent-manifest.ts`;
     const claims = `${AGENT}/goal-claims.ts`;
     const toTools = `${manifest} -> ${clients} -> ${client} -> ${TOOLS}`;
     // The manifest loads the client packs, and the verifiers load the manifest, so the verifier closure fails too.
     expect(layeringFindings(planted)).toEqual([
       `R3 client: ${clients} reaches ${TOOLS} through ${clients} -> ${client} -> ${TOOLS}`,
+      `R3 client: ${engines} reaches ${TOOLS} through ${engines} -> ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${client} reaches ${TOOLS} through ${client} -> ${TOOLS}`,
       `R3 cycle: ${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
       `R3 verifier: ${claims} reaches ${TOOLS} through ${claims} -> ${toTools}`,
@@ -566,8 +656,10 @@ describe("planted violations yield exactly their findings", () => {
   test("a builtin imported by a client pack fails the client tier", () => {
     const client = `${LANGUAGES}/sql/client.ts`;
     const clients = `${LANGUAGES}/client.ts`;
+    const engines = `${LANGUAGES}/engines/client.ts`;
     expect(layeringFindings(prepend(client, 'import "node:fs";'))).toEqual([
       `R3 client: ${clients} reaches package:node:fs through ${clients} -> ${client} -> package:node:fs`,
+      `R3 client: ${engines} reaches package:node:fs through ${engines} -> ${clients} -> ${client} -> package:node:fs`,
       `R3 client: ${client} reaches package:node:fs through ${client} -> package:node:fs`,
     ]);
   }, 60_000);
@@ -591,6 +683,61 @@ describe("planted violations yield exactly their findings", () => {
       `R3 verifier: ${GOAL_VERIFIER} reaches ${TOOLS} through ${GOAL_VERIFIER} -> ${all} -> ${verifiers} -> ${TOOLS}`,
       `R3 verifier: ${verifiers} reaches ${TOOLS} through ${verifiers} -> ${TOOLS}`,
       `R3 verifier: ${all} reaches ${TOOLS} through ${all} -> ${verifiers} -> ${TOOLS}`,
+    ]);
+  }, 60_000);
+
+  test("an engine module imported by the core fails R2", () => {
+    const posture = `${AGENT}/posture.ts`;
+    const planted = prepend(posture, 'import { POSTGRES_SERVER_OVERLAY } from "./languages/sql/engines/postgres";');
+    expect(boundaryFindings(planted)).toEqual([`${posture}#<module>: R2 ${LANGUAGES}/sql/engines/postgres.ts`]);
+  });
+
+  test("the engine server resolver imported by a client overlay fails the client tier", () => {
+    const client = `${LANGUAGES}/sql/engines/client.ts`;
+    const engines = `${LANGUAGES}/engines/client.ts`;
+    const server = `${LANGUAGES}/engines/server.ts`;
+    expect(layeringFindings(prepend(client, 'import "../../engines/server";'))).toEqual([
+      `R3 client: ${engines} reaches ${server} through ${engines} -> ${client} -> ${server}`,
+      `R3 client: ${client} reaches ${server} through ${client} -> ${server}`,
+    ]);
+  }, 60_000);
+
+  test("the execution tier imported by an engine server overlay fails the server tier and closes a cycle", () => {
+    const postgres = `${LANGUAGES}/sql/engines/postgres.ts`;
+    const server = `${LANGUAGES}/engines/server.ts`;
+    const index = `${LANGUAGES}/sql/index.ts`;
+    const profile = `${AGENT}/table-profile.ts`;
+    const toIndex = `${profile} -> ${server} -> ${postgres} -> ${index}`;
+    expect(layeringFindings(prepend(postgres, 'import "../index";'))).toEqual([
+      `R3 cycle: ${server} -> ${postgres} -> ${index} -> ${TOOLS} -> ${profile} -> ${server}`,
+      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${toIndex}`,
+      `R3 server: ${server} reaches ${index} through ${server} -> ${postgres} -> ${index}`,
+      `R3 server: ${postgres} reaches ${index} through ${postgres} -> ${index}`,
+      `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${TOOLS} -> ${toIndex}`,
+      `R3 server: ${profile} reaches ${index} through ${toIndex}`,
+      `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${toIndex}`,
+    ]);
+  }, 60_000);
+
+  test("a core reader of the resolver imported at run time by an engine overlay closes a cycle", () => {
+    const postgres = `${LANGUAGES}/sql/engines/postgres.ts`;
+    const server = `${LANGUAGES}/engines/server.ts`;
+    const profile = `${AGENT}/table-profile.ts`;
+    expect(layeringFindings(prepend(postgres, 'import "../../../table-profile";'))).toEqual([
+      `R3 cycle: ${server} -> ${postgres} -> ${profile} -> ${server}`,
+    ]);
+    // The overlays read the core through type-only imports, which load nothing.
+    expect(read(postgres)).toContain('import type { AgentProfileComposition } from "../../../table-profile";');
+  }, 60_000);
+
+  test("an engine server overlay imported by a language verifier fails the verifier closure", () => {
+    const verifiers = `${LANGUAGES}/mongo/verifiers.ts`;
+    const all = `${LANGUAGES}/verifiers.ts`;
+    const postgres = `${LANGUAGES}/sql/engines/postgres.ts`;
+    expect(layeringFindings(prepend(verifiers, 'import "../sql/engines/postgres";'))).toEqual([
+      `R3 verifier: ${GOAL_VERIFIER} reaches ${postgres} through ${GOAL_VERIFIER} -> ${all} -> ${verifiers} -> ${postgres}`,
+      `R3 verifier: ${verifiers} reaches ${postgres} through ${verifiers} -> ${postgres}`,
+      `R3 verifier: ${all} reaches ${postgres} through ${all} -> ${verifiers} -> ${postgres}`,
     ]);
   }, 60_000);
 });

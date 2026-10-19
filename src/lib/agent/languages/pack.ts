@@ -2,12 +2,18 @@
  * The shape of a statement language's pack (#1821). Types only: nothing here is evaluated, so every tier may read it.
  */
 import type { ClusterUsageInput } from "@/lib/db/types";
-import type { AgentLanguageCopy, AgentStatementLanguageId, AgentWorkflowVariant } from "../agent-manifest";
+import type { DatabaseType } from "@/lib/types";
+import type {
+  AGENT_STATEMENT_LANGUAGE,
+  AgentLanguageCopy,
+  AgentStatementLanguageId,
+  AgentWorkflowVariant,
+} from "../agent-manifest";
 import type { AgentGoalShortfall, VerifiableAgentRun } from "../goal-verifier";
 import type { AgentInventoryNoun } from "../inventory-noun";
 import type { PlanStatementIdentifiers } from "../plan-statement";
 import type { AgentPosture } from "../posture";
-import type { AgentProfileDepth } from "../table-profile";
+import type { AgentProfileComposition, AgentProfileDepth } from "../table-profile";
 import type { z } from "zod";
 import type {
   AgentOperationId,
@@ -325,4 +331,90 @@ export interface AgentLanguagePack {
   readonly client: AgentLanguageClientPack;
   readonly server: AgentLanguageServerPack;
   readonly execution: AgentLanguageExecutionPack;
+}
+
+/** What an engine overlay says of a dialect-bound member it has no verified composition for. */
+export type Unsupported = "unsupported";
+
+/**
+ * One member of a facet as an overlay may give it: the value itself, or a derivation from the base value. A function
+ * in an overlay is always a derivation, so a member whose value is a function is only ever derived.
+ */
+export type MemberOverride<V> =
+  | ((base: V) => Exclude<V, undefined>)
+  | (Exclude<V, undefined> extends (...args: never[]) => unknown ? never : Exclude<V, undefined>);
+
+/** What an overlay may give of a facet: any of its members, each as a `MemberOverride`. Read by `defineOverlay`. */
+export type FacetOverrides<Facet> = { readonly [K in keyof Facet]?: MemberOverride<Facet[K]> };
+
+/** The engines that speak a statement language, read from the literal-typed `AGENT_STATEMENT_LANGUAGE`. */
+export type AgentEngineType = {
+  [T in DatabaseType]: (typeof AGENT_STATEMENT_LANGUAGE)[T] extends null ? never : T;
+}[DatabaseType];
+
+/** The statement language an engine speaks, its family. */
+export type AgentEngineFamily<T extends AgentEngineType> = NonNullable<(typeof AGENT_STATEMENT_LANGUAGE)[T]>;
+
+/**
+ * The members of a SQL engine's server facet that are bound to its dialect: each one a verified composition, or
+ * `"unsupported"`, which the core refuses in its own words. Every SQL engine's overlay says one or the other for every
+ * member, so an engine that composes nothing has to say so.
+ */
+export interface SqlServerDialect {
+  /** The `profile_table` composition (`composeTableProfile` in `table-profile.ts`). */
+  readonly profileComposition: AgentProfileComposition | Unsupported;
+}
+
+/** The client view of a SQL engine's dialect: nothing yet. */
+export type SqlClientDialect = Record<never, never>;
+
+/** One explicit row per family, no default branch: a fourth `AgentStatementLanguageId` fails to compile until its row exists. */
+interface AgentFamilyDialectRows {
+  sql: { client: SqlClientDialect; server: SqlServerDialect };
+  mongo: { client: Record<never, never>; server: Record<never, never> };
+  kubectl: { client: Record<never, never>; server: Record<never, never> };
+}
+
+/** The dialect-bound members of each family, client and server. */
+export type AgentFamilyDialect = { readonly [F in AgentStatementLanguageId]: AgentFamilyDialectRows[F] };
+
+/** A family with no dialect-bound member gives its engines no `dialect` at all. */
+type DialectSlot<D> = keyof D extends never ? { readonly dialect?: never } : { readonly dialect: D };
+
+/**
+ * What an engine's server overlay holds: its family's dialect-bound members and nothing else. A Shared member is not
+ * overridable here (#1821 PR 2): every Shared consumer reads the family pack, so an override would compile and do
+ * nothing.
+ */
+export type AgentEngineServerOverlay<F extends AgentStatementLanguageId> = DialectSlot<AgentFamilyDialect[F]["server"]>;
+
+/** The client counterpart of `AgentEngineServerOverlay`. */
+export type AgentEngineClientOverlay<F extends AgentStatementLanguageId> = DialectSlot<AgentFamilyDialect[F]["client"]>;
+
+/** Every engine's server overlay, total over `AgentEngineType`: the registry in `engines/server.ts`. */
+export type AgentEngineServerOverlays = {
+  readonly [T in AgentEngineType]: AgentEngineServerOverlay<AgentEngineFamily<T>>;
+};
+
+/** Every engine's client overlay, with the family it overlays, total over `AgentEngineType`: the registry in `engines/client.ts`. */
+export type AgentEngineClientOverlays = {
+  readonly [T in AgentEngineType]: {
+    readonly family: AgentEngineFamily<T>;
+    readonly overlay: AgentEngineClientOverlay<AgentEngineFamily<T>>;
+  };
+};
+
+/** The core's merged view of the server dialect: every member of every family; an engine without one answers `"unsupported"`. */
+export type AgentEngineServerDialect = AgentFamilyDialectRows["sql"]["server"];
+
+/** The core's merged view of the client dialect. */
+export type AgentEngineClientDialect = AgentFamilyDialectRows["sql"]["client"];
+
+/**
+ * One engine's pack: its family's pack, with the engine's dialect on the client and server facets. An engine whose
+ * overlays are empty is its family's pack itself (`agentEnginePack` in `engines/index.ts`).
+ */
+export interface AgentEnginePack extends Omit<AgentLanguagePack, "server" | "client"> {
+  readonly server: AgentLanguageServerPack & { readonly dialect?: AgentEngineServerDialect };
+  readonly client: AgentLanguageClientPack & { readonly dialect?: AgentEngineClientDialect };
 }
