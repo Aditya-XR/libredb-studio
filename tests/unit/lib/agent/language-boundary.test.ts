@@ -522,10 +522,26 @@ function coreFileFindings(file: string, text: string, exemptEngineMap = true): s
 const coreFiles = (): string[] => sourcesUnder(AGENT).filter((file) => !file.startsWith(`${LANGUAGES}/`));
 
 /** R1 and R2 checked against the allowlist (R4): every finding it does not excuse, and every stale entry. */
+/**
+ * Each core file's findings on its text as committed, scanned once. A plant changes one file, so every other file is
+ * read from here instead of being parsed again; parsing the whole core per plant is what outran bun's five-second test
+ * timeout on CI.
+ */
+const COMMITTED_FINDINGS = new Map<string, readonly string[]>();
+
+function committedFindings(file: string): readonly string[] {
+  const cached = COMMITTED_FINDINGS.get(file);
+  if (cached !== undefined) return cached;
+  const found = coreFileFindings(file, read(file));
+  COMMITTED_FINDINGS.set(file, found);
+  return found;
+}
+
 function boundaryFindings(planted: Planted = {}): string[] {
   const counts = new Map<string, number>();
   for (const file of coreFiles()) {
-    for (const finding of coreFileFindings(file, textOf(file, planted))) {
+    const fileFindings = Object.hasOwn(planted, file) ? coreFileFindings(file, planted[file]) : committedFindings(file);
+    for (const finding of fileFindings) {
       counts.set(finding, (counts.get(finding) ?? 0) + 1);
     }
   }
