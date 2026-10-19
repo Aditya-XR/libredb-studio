@@ -138,7 +138,7 @@ export const SQL_SERVER_PACK = Object.freeze({
     rowCapAdvice: SQL_ROW_CAP_ADVICE,
     admit: null,
   }),
-  // SQL replaces nothing: its definitions are `AGENT_TOOL_DEFINITIONS`.
+  // SQL replaces nothing: its definitions (`./definitions.ts`) are the reference ones `AGENT_TOOL_DEFINITIONS` holds.
   toolOverrides: Object.freeze({}),
   baseDefinitions: Object.freeze({}),
   answerNotADataRead: UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ,

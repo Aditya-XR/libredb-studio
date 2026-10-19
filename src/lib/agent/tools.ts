@@ -154,6 +154,7 @@ import type { AgentFamilyOperationIds } from "./languages/pack";
 import {
   CURATED_CALL_LANGUAGE,
   LANGUAGE_BASE_DEFINITIONS,
+  REFERENCE_STATEMENT_DEFINITIONS,
   languageServer,
   languageServerPack,
 } from "./languages/server";
@@ -178,6 +179,7 @@ import {
   evidenceSchema,
   handoverText,
   presentAnswerSchema,
+  profileSelectorSchema,
   unavailable,
 } from "./tool-contracts";
 import type {
@@ -571,25 +573,6 @@ const groundingSelectorSchema = catalogSelectorSchema.extend({
   kind: z.enum(["columns", "relations", "indexes", "statistics"]).optional(),
 });
 
-const readStatementSchema = z.strictObject({
-  sql: z.string().min(1),
-  /**
-   * Why the model wrote this statement. Accepted here and NOT recorded at this
-   * commit: the `statement-drafted` event that carries it (`types.ts`) is emitted by
-   * the run service, which does not exist yet. It is in the declared contract so the
-   * model is asked for it from the first run rather than having the tool's shape
-   * change under it later. Deliberately no `min(1)`: refusing an otherwise valid read
-   * because its rationale came back blank would be a disproportionate refusal.
-   */
-  rationale: z.string().optional(),
-});
-
-/**
- * What `inspect_plan` takes on SQL. Exported for the SQL pack's arms (`languages/sql/index.ts`), which declare it as
- * the SQL arm's input, held equal to the offered schema by `tests/unit/lib/agent/tool-offer-census.test.ts`.
- */
-export const planStatementSchema = z.strictObject({ sql: z.string().min(1) });
-
 const reportSchema = z.strictObject({
   claims: z.array(z.strictObject({ claim: z.string().min(1), evidence: z.array(evidenceSchema).min(1) })).min(1),
 });
@@ -602,33 +585,6 @@ const reportSchema = z.strictObject({
  * label would let a comparison attribute a plan to a statement that never produced
  * it — the exact mislabelling a before/after claim rests on not doing.
  */
-/**
- * A profile names a TABLE, never columns and never SQL. The columns come from the
- * run's own captured inventory, so a profile cannot be aimed at something the run
- * never established exists — the same rule `compare_plans` follows about plans.
- * Exported for the SQL pack's arms (`languages/sql/index.ts`), which declare it as the SQL
- * arm's input, held equal to the offered schema by `tool-offer-census.test.ts`.
- */
-export const profileSelectorSchema = z.strictObject({
-  /*
-    Described, because an undescribed optional string next to a fingerprint-heavy set of
-    rules is an invitation. `qwen3:8b` filled it with the snapshot fingerprint
-    (`ctx_3b6b…`), which resolved to nothing and cost it the run. Omitting the field
-    entirely is the right answer whenever the inventory names a table bare, so the
-    description leads with that rather than with what a schema is.
-  */
-  schema: z
-    .string()
-    .describe(
-      "Omit this unless the inventory qualifies the table as schema.table. It is a database schema name — never an artifact id or a snapshot fingerprint.",
-    )
-    .optional(),
-  table: z.string().min(1),
-  depth: z.enum(["basic", "distribution", "pattern"]).optional(),
-  /** Where in the table's column list to start. The server bounds how many follow. */
-  fromColumn: z.number().int().min(0).optional(),
-});
-
 const planComparisonSchema = z.strictObject({
   before: z.string().min(1),
   after: z.string().min(1),
@@ -1069,34 +1025,7 @@ function readDisplacedRecommendation(input: unknown): unknown {
 }
 
 export const AGENT_TOOL_DEFINITIONS: Readonly<Record<AgentToolName, AgentToolDefinition>> = Object.freeze({
-  inspect_schema: {
-    name: "inspect_schema",
-    description:
-      "Read the database's own catalog, optionally narrowed to one schema or table. Pass kind to choose the inventory: columns (the default: tables and their columns), relations (foreign keys) or indexes. The statement is composed by the server; you supply only the selector. On a large database pass a schema or table selector: the result is subject to the same row budget as any read and is refused, not truncated, if it overflows.",
-    inputSchema: catalogSelectorSchema,
-    operationId: "sql.query.read",
-  },
-  run_read_query: {
-    name: "run_read_query",
-    description:
-      "Run one bounded read-only SQL statement. Writes, DDL and multi-statement text are refused before the database is reached.",
-    inputSchema: readStatementSchema,
-    operationId: "sql.query.read",
-  },
-  inspect_plan: {
-    name: "inspect_plan",
-    description:
-      "Ask the engine for the ESTIMATED plan of one read-only statement. The plan is described, never executed, so no timings are produced.",
-    inputSchema: planStatementSchema,
-    operationId: "sql.explain.estimate",
-  },
-  profile_table: {
-    name: "profile_table",
-    description:
-      "Profile one table the run has already inventoried. The server chooses the columns from the captured schema and composes the aggregates; you supply only the table and how deep to go. Depth basic counts rows and missing values, distribution adds distinct counts, pattern adds a shape test for personal data. Only COUNTS are returned — no value is ever read out of a column.",
-    inputSchema: profileSelectorSchema,
-    operationId: "sql.table.profile",
-  },
+  ...REFERENCE_STATEMENT_DEFINITIONS,
   compare_plans: {
     name: "compare_plans",
     description:
@@ -3696,7 +3625,7 @@ export async function inspectPlanTool(
   context: AgentToolContext,
   input: { readonly sql: string },
 ): Promise<AgentToolOutcome> {
-  const parsed = parseToolInput(planStatementSchema, input);
+  const parsed = parseToolInput(REFERENCE_STATEMENT_DEFINITIONS.inspect_plan.inputSchema, input);
   if (!parsed.ok) return unavailable("INVALID_TOOL_INPUT", parsed.problems);
   let plan: AgentEstimatingExplain;
   try {
