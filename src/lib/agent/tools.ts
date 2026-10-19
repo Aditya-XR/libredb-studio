@@ -3701,13 +3701,18 @@ export function recommendChangeTool(
     the reference statement card otherwise, which every SQL run's definition is. Only the hooks that card declares
     apply, because the statement card's readings and refusal copy are about a statement: the displaced-field repair
     moves SQL between fields, and the shape sentence describes a CREATE INDEX or a SELECT. Neither says anything true
-    about another card.
+    about another card. A schema neither card owns is a pack defect, and it fails by name.
   */
-  const familyCard = languageServerPack(statementFamilyOf(context.statementLanguage)).recommendationCard;
-  const card: AgentRecommendationCard =
-    familyCard !== undefined && definition.inputSchema === familyCard.inputSchema
-      ? familyCard
-      : REFERENCE_RECOMMENDATION_CARD;
+  const family = statementFamilyOf(context.statementLanguage);
+  const card: AgentRecommendationCard | undefined = [
+    languageServerPack(family).recommendationCard,
+    REFERENCE_RECOMMENDATION_CARD,
+  ].find((owner) => owner?.inputSchema === definition.inputSchema);
+  if (card === undefined) {
+    throw new Error(
+      `agent tool layer: no recommendation card owns the recommend_change schema ${family} offers for ${context.workflowType}`,
+    );
+  }
   const parsed = parseToolInput(card.inputSchema, card.prepare === undefined ? input : card.prepare(input));
   if (!parsed.ok) {
     const advice = card.refuseParse?.(input, parsed.problems, run.events, context.modelId);

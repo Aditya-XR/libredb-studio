@@ -164,8 +164,8 @@ describe.each(ENGINES)("%s", (type) => {
 
   test("its card is frozen, and every recommend_change it offers is read by the card that owns its schema", () => {
     // The schema itself is a zod object, which is not frozen; the card that holds it is. `recommendChangeTool` parses
-    // with the family's card when the offered schema is that card's, and with the reference card otherwise, so an
-    // offered schema that neither owns would be parsed by a card it was never written for.
+    // with the family's card when the offered schema is that card's, with the reference card when it is that one's,
+    // and throws for a schema neither owns, so this holds every shipped offer to one of the two before a run does.
     const card = pack.server.recommendationCard;
     if (card !== undefined) expect(Object.isFrozen(card)).toBe(true);
     const owners: readonly unknown[] = [card?.inputSchema, REFERENCE_RECOMMENDATION_CARD.inputSchema];
