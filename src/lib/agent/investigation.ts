@@ -2471,8 +2471,9 @@ async function takeTurn(
   /*
     The options every call to a model sends come from one place, `agentProviderOptions`, so
     the capability probe and the classifier send what a turn sends: `store: false` and the
-    configured effort on the `openai` kind, and on every kind the quiet switch below. Keyed
-    `openai` whatever the provider is called, for the reason that function records.
+    configured effort on the `openai` kind, and on the three OpenAI-compatible kinds the quiet
+    switch below, which yields to `LLM_MODEL_EFFORT` on `openai`. Keyed `openai` whatever the
+    provider is called, for the reason that function records.
   */
   // Two switches, one per mode, and neither implies the other: a model measured needing quiet on
   // its plan turn was not measured needing it while holding tools. See both fields in `profile.ts`.

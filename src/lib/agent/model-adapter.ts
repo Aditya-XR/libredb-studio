@@ -111,7 +111,9 @@ export type AgentProviderOptions = Record<string, Record<string, string | boolea
  *    quiet switch; otherwise the quiet switch's `none`; otherwise nothing, the model's default.
  *
  * For `ollama` and `custom` only the quiet switch, as before this options object existed, so the
- * bytes those endpoints receive do not move. `gemini` reads its own key, so the `openai` object a
+ * options those endpoints receive do not move. (Their tool schemas did move once, with the SDK:
+ * `@ai-sdk/openai` 4.0.96 strips `propertyNames` from every Chat Completions tool schema, which
+ * constrains nothing on JSON object keys.) `gemini` reads its own key, so the `openai` object a
  * quiet switch builds reaches nothing there.
  *
  * @param quiet - whether the model's profile asks this turn for no reasoning
