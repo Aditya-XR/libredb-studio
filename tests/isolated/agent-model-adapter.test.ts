@@ -9,6 +9,7 @@ import {
   refusedEffortError,
 } from "@/lib/agent/model-adapter";
 import type { AgentFetch } from "@/lib/agent/provider-registry";
+import * as providerRegistry from "@/lib/agent/provider-registry";
 import { classifyAgentWorkflow } from "@/lib/agent/workflow-classifier";
 import { logger } from "@/lib/logger";
 import {
@@ -445,6 +446,22 @@ describe("createAgentModel refuses a configuration the chat surface would also r
   test("a base URL the SDK itself rejects surfaces as a configuration error, not a raw SDK error", async () => {
     const config: Partial<LLMConfig> = { provider: "custom", model: "m", apiUrl: "   " };
     await expect(createAgentModel({ config })).rejects.toBeInstanceOf(LLMConfigError);
+  });
+
+  test("a failure while the SDK prepares the effort check is a configuration error, not a raw SDK error", async () => {
+    // Unreachable with the options built here today; stubbed so the @throws contract covers the
+    // effort check as it covers the provider's construction.
+    const prepare = spyOn(providerRegistry, "openAIResponsesRequestWarnings").mockRejectedValue(
+      new TypeError("prepareRequest broke"),
+    );
+    try {
+      const failure = createAgentModel({ config: { ...OPENAI_CONFIG, model: "gpt-6-luna", modelEffort: "low" } });
+
+      await expect(failure).rejects.toBeInstanceOf(LLMConfigError);
+      await expect(failure).rejects.toThrow("Cannot build the openai model: prepareRequest broke");
+    } finally {
+      prepare.mockRestore();
+    }
   });
 });
 

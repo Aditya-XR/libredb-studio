@@ -59,17 +59,18 @@ export interface AgentModelOptions {
  * Build a model instance from the repository's resolved LLM configuration.
  *
  * @throws LLMConfigError if the configuration is one the chat surface would also
- *         refuse, if the kind has no adapter, or if the SDK refuses the settings
- *         when the provider is constructed.
+ *         refuse, if the kind has no adapter, if the SDK refuses the settings
+ *         when the provider is constructed, or if the model does not take the
+ *         configured reasoning effort (`effort_refused`).
  */
 export async function createAgentModel(options: AgentModelOptions = {}): Promise<AgentModel> {
   const config = resolveConfig(options.config);
   validateConfig(config);
   const adapter = resolveAgentProviderAdapter(config.provider);
   const effort = validModelEffort(config);
-  if (effort !== undefined) await refuseUntakenEffort({ provider: config.provider, modelId: config.model, effort });
 
   try {
+    if (effort !== undefined) await refuseUntakenEffort({ provider: config.provider, modelId: config.model, effort });
     return {
       provider: config.provider,
       modelId: config.model,
