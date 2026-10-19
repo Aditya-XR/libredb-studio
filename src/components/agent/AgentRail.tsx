@@ -1667,7 +1667,7 @@ export const AgentRail = React.memo(function AgentRail({
     `LLM_MODEL_EFFORT` the model refuses answers 503 in either mode, which is a
     configuration error and not a verdict.) A capability refusal is therefore only ever
     true of the mode it was raised for, and showing it above another mode would be the
-    rail stating something the server did not — most visibly right after the user takes
+    rail stating something the server did not, most visibly right after the user takes
     the way out this state itself points at.
 
     Scoped here rather than cleared in the hook: the hook reports what the server said,
