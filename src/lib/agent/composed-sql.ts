@@ -49,7 +49,8 @@ import type { DatabaseType } from "@/lib/types";
  * `null` when the dialect needs no such question asked.
  *
  * Only SQLite needs one, for the prepare-time reason documented on
- * `composeSqliteStatistics`. PostgreSQL's `pg_class` and `pg_stats` are part of every
+ * `composeSqliteStatistics` in `languages/sql/engines/sqlite.ts`. PostgreSQL's
+ * `pg_class` and `pg_stats` are part of every
  * installation, so absence there is per-table and already expressed IN the statistics
  * read as NULL statistics columns — a probe would answer a question that read has
  * already answered more precisely, and returning a statement for it would invite a

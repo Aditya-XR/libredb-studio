@@ -2778,7 +2778,7 @@ src/lib/agent/
 ├── runtime.ts            # composition root: the only place that assembles a tool context
 ├── tools.ts              # the four tools + server-side selection; the only database reach,
                           #   the model's tools and the server's own grounding reads alike
-├── composed-sql.ts # the SQL the SERVER writes, per dialect: four of the forty-two
+├── composed-sql.ts # the type-keyed entry points to the SQL the SERVER writes, each dispatched to an engine's dialect: four of the forty-two
 ├── languages/sql/engines/ # each SQL engine's own compositions, read through `engineServerDialect`
 ├── languages/sql/engines/sqlite-ddl.ts # reading SQLite's stored DDL back into an inventory
 ├── execution-policy.ts   # the frozen policy and the run-level ceilings

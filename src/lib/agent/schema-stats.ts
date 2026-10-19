@@ -86,7 +86,8 @@ export interface AgentTableEstimate {
   /**
    * Empty where this run has no per-column distribution to report. That is all of SQLite,
    * which records none at all, and all of SQL Server, which records them behind a DBCC
-   * command this boundary refuses — see `buildMssqlEstimates` for that distinction.
+   * command this boundary refuses — see `buildMssqlEstimates` in
+   * `languages/sql/engines/mssql.ts` for that distinction.
    */
   readonly columns: readonly AgentColumnEstimate[];
 }
