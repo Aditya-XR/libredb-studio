@@ -129,11 +129,40 @@ describe("the engine overlay types", () => {
           statistics: "unsupported",
           catalogCapture: "unsupported",
         },
-        // @ts-expect-error: a Shared member is not overridable from an engine overlay (ruling 2).
-        grounding: {},
+        // @ts-expect-error: a member outside ENGINE_OVERRIDABLE_SERVER_MEMBERS is not overridable (ruling 2).
+        toolOverrides: {},
       } as const satisfies AgentEngineServerOverlay<"sql">,
+      {
+        // @ts-expect-error: the adapter is read by family, so an engine cannot derive its own.
+        adapter: (base) => base,
+      } as const satisfies AgentEngineServerOverlay<"mongo">,
+      {
+        // @ts-expect-error: base definitions are merged across families by name, so an engine cannot give its own.
+        baseDefinitions: {},
+      } as const satisfies AgentEngineServerOverlay<"kubectl">,
     ];
-    expect(fixtures).toHaveLength(12);
+    expect(fixtures).toHaveLength(14);
+  });
+
+  test("accept an override of a member ENGINE_OVERRIDABLE_SERVER_MEMBERS names, beside a dialect or without one", () => {
+    const fixtures: readonly unknown[] = [
+      {
+        dialect: {
+          catalogRead: "unsupported",
+          planEstimate: "unsupported",
+          profileComposition: "unsupported",
+          statistics: "unsupported",
+          catalogCapture: "unsupported",
+        },
+        grounding: (base) => base,
+      } as const satisfies AgentEngineServerOverlay<"sql">,
+      { grounding: (base) => base } as const satisfies AgentEngineServerOverlay<"mongo">,
+      {
+        workflowToolRules: (base) => base,
+        answerNotADataRead: "That is not a read of data.",
+      } as const satisfies AgentEngineServerOverlay<"kubectl">,
+    ];
+    expect(fixtures).toHaveLength(3);
   });
 
   test("hold a client overlay to what its engine's server overlay supplies", () => {

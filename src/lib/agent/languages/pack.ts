@@ -35,6 +35,7 @@ import type {
   AgentRunRecord,
   AgentRunWorkflowType,
 } from "../types";
+import type { ENGINE_OVERRIDABLE_SERVER_MEMBERS } from "./overlay";
 
 /** SQL's operations. `sql.explain.analyze` is a member for the reason `AgentOperationId` in `tools.ts` gives. */
 type SqlOperationId =
@@ -510,12 +511,20 @@ export type AgentFamilyDialect = { readonly [F in AgentStatementLanguageId]: Age
 /** A family with no dialect-bound member gives its engines no `dialect` at all. */
 type DialectSlot<D> = keyof D extends never ? { readonly dialect?: never } : { readonly dialect: D };
 
+/** The server members an engine overlay may override, as `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names them. */
+export type AgentEngineOverridableServer = Pick<
+  AgentLanguageServerPack,
+  (typeof ENGINE_OVERRIDABLE_SERVER_MEMBERS)[number]
+>;
+
 /**
- * What an engine's server overlay holds: its family's dialect-bound members and nothing else. A Shared member is not
- * overridable here (#1821 PR 2): every Shared consumer reads the family pack, so an override would compile and do
- * nothing.
+ * What an engine's server overlay holds: its family's dialect-bound members, and any of the members
+ * `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names, each a value or a derivation from the family's (`MemberOverride`). Only
+ * those are overridable, because only those are read through the run resolver everywhere they are read; an override
+ * of any other member would compile and reach no reader, so it does not compile.
  */
-export type AgentEngineServerOverlay<F extends AgentStatementLanguageId> = DialectSlot<AgentFamilyDialect[F]["server"]>;
+export type AgentEngineServerOverlay<F extends AgentStatementLanguageId> =
+  FacetOverrides<AgentEngineOverridableServer> & DialectSlot<AgentFamilyDialect[F]["server"]>;
 
 /** The client counterpart of `AgentEngineServerOverlay`. */
 export type AgentEngineClientOverlay<F extends AgentStatementLanguageId> = DialectSlot<AgentFamilyDialect[F]["client"]>;

@@ -30,9 +30,10 @@
  * - R8c: any other identifier with a whole segment (split at `_` and at case changes, then lowercased) that is an
  *   engine id: `postgresThing` is one, `redistribute` is not. An import or export specifier is no reference, as for
  *   R5c, so an imported name is read where the file uses it.
- * - R9: a read of a server member an engine overlay may override (`OVERRIDABLE_SERVER_MEMBERS`) through a family
- *   resolver, so an engine's override is never bypassed: the receiver chain starts at a call to `agentLanguagePack`,
- *   `languageServerPack` or `languageServer`, or at a name bound to such a chain, by a declarator or a binding pattern.
+ * - R9: a read of a server member an engine overlay may override (`ENGINE_OVERRIDABLE_SERVER_MEMBERS`) through a
+ *   family resolver, so an engine's override is never bypassed: the receiver chain starts at a call to
+ *   `agentLanguagePack`, `languageServerPack` or `languageServer`, or at a name bound to such a chain, by a declarator
+ *   or a binding pattern.
  *   An import of `WORKFLOW_TOOL_RULES`, a family projection of one, or a namespace member of that name, is R9 too.
  * - R3: the tiers, each finding the first forbidden module a chain meets, not every module past it. The server modules never reach the execution tier; the client packs never reach a server module, an
  *   execution module or a `node:`/`bun:` builtin; the language verifiers and `goal-claims.ts` never reach
@@ -65,6 +66,7 @@ import * as manifest from "@/lib/agent/agent-manifest";
 import { AGENT_LANGUAGE_COPY, AGENT_STATEMENT_LANGUAGE } from "@/lib/agent/agent-manifest";
 import * as languages from "@/lib/agent/languages";
 import * as languageClients from "@/lib/agent/languages/client";
+import { ENGINE_OVERRIDABLE_SERVER_MEMBERS } from "@/lib/agent/languages/overlay";
 import * as languageServers from "@/lib/agent/languages/server";
 
 const ROOT = join(import.meta.dir, "..", "..", "..", "..");
@@ -101,7 +103,7 @@ const LANGUAGE_TABLES: ReadonlySet<string> = new Set(
 );
 
 /** The server members an engine overlay may override; every other member is read by family. */
-const OVERRIDABLE_SERVER_MEMBERS = new Set(["grounding", "workflowToolRules", "answerNotADataRead"]);
+const OVERRIDABLE_SERVER_MEMBERS = new Set<string>(ENGINE_OVERRIDABLE_SERVER_MEMBERS);
 /** The resolvers that answer a family's pack, blind to the engine's overlay. */
 const FAMILY_RESOLVERS = new Set(["agentLanguagePack", "languageServerPack", "languageServer"]);
 const MANIFEST = `${AGENT}/agent-manifest.ts`;

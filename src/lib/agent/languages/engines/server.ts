@@ -2,8 +2,9 @@
  * The engines' server dialects (#1821): the one way the core reaches an engine's dialect-bound members.
  *
  * Server tier. The registry is total over `AgentEngineType`, so an engine that speaks a statement language does not
- * compile until it registers an overlay here, and it copies only `dialect` out of each engine module: a Shared member
- * an overlay held would compile and do nothing, because every Shared consumer reads the family pack.
+ * compile until it registers an overlay here, and it keeps each engine module's overlay whole: its `dialect`, and any
+ * member `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names, which `runServerPack` lays over the family pack. The type allows no
+ * other member, since every other consumer reads the family pack and an override of it would reach no reader.
  *
  * `engineServerDialect` is total over any type id: an engine with no statement language, an engine whose family has
  * no dialect, and a name that is no key at all (`toString`) each answer `NO_SERVER_DIALECT`, every member
@@ -14,12 +15,14 @@ import { KUBERNETES_SERVER_OVERLAY } from "../kubectl/engines/kubernetes";
 import { MONGODB_SERVER_OVERLAY } from "../mongo/engines/mongodb";
 import type { AgentStatementLanguageId } from "../../agent-manifest";
 import { statementFamilyOf } from "../client";
-import { defineOverlay, dialectOnly } from "../overlay";
+import { defineOverlay } from "../overlay";
 import type {
+  AgentEngineOverridableServer,
   AgentEngineServerDialect,
   AgentEngineServerOverlays,
   AgentEngineType,
   AgentLanguageServerPack,
+  FacetOverrides,
 } from "../pack";
 import { languageServerPack } from "../server";
 import { DUCKDB_SERVER_OVERLAY } from "../sql/engines/duckdb";
@@ -30,13 +33,13 @@ import { SQLITE_SERVER_OVERLAY } from "../sql/engines/sqlite";
 import { engineFamily } from "./client";
 
 const SERVER_OVERLAYS: AgentEngineServerOverlays = Object.freeze({
-  postgres: dialectOnly(POSTGRES_SERVER_OVERLAY),
-  sqlite: dialectOnly(SQLITE_SERVER_OVERLAY),
-  duckdb: dialectOnly(DUCKDB_SERVER_OVERLAY),
-  mssql: dialectOnly(MSSQL_SERVER_OVERLAY),
-  mysql: dialectOnly(MYSQL_SERVER_OVERLAY),
-  mongodb: dialectOnly(MONGODB_SERVER_OVERLAY),
-  kubernetes: dialectOnly(KUBERNETES_SERVER_OVERLAY),
+  postgres: Object.freeze({ ...POSTGRES_SERVER_OVERLAY }),
+  sqlite: Object.freeze({ ...SQLITE_SERVER_OVERLAY }),
+  duckdb: Object.freeze({ ...DUCKDB_SERVER_OVERLAY }),
+  mssql: Object.freeze({ ...MSSQL_SERVER_OVERLAY }),
+  mysql: Object.freeze({ ...MYSQL_SERVER_OVERLAY }),
+  mongodb: Object.freeze({ ...MONGODB_SERVER_OVERLAY }),
+  kubernetes: Object.freeze({ ...KUBERNETES_SERVER_OVERLAY }),
 } satisfies AgentEngineServerOverlays);
 
 /** What an engine with no dialect answers: every member unsupported. */
@@ -48,14 +51,19 @@ const NO_SERVER_DIALECT: AgentEngineServerDialect = Object.freeze({
   catalogCapture: "unsupported",
 });
 
+/** One engine's server overlay as the core reads it: any overridable member, and the dialect if its family has one. */
+type EngineServerOverlay = FacetOverrides<AgentEngineOverridableServer> & {
+  readonly dialect?: AgentEngineServerDialect;
+};
+
 /** What an engine with no overlay holds: nothing, so its server facet is its family's own. */
-const NO_SERVER_OVERLAY: { readonly dialect?: AgentEngineServerDialect } = Object.freeze({});
+const NO_SERVER_OVERLAY: EngineServerOverlay = Object.freeze({});
 
 /**
- * The server overlay of `type` as the registry holds it, its `dialect` alone, or an empty one for a type with no
- * overlay. Read by `agentEnginePack` in `engines/index.ts`.
+ * The server overlay of `type` as the registry holds it, whole, or an empty one for a type with no overlay. Read by
+ * `agentEnginePack` in `engines/index.ts` and by `runServerPack`.
  */
-export function engineServerOverlay(type: DatabaseType): { readonly dialect?: AgentEngineServerDialect } {
+export function engineServerOverlay(type: DatabaseType): EngineServerOverlay {
   return Object.hasOwn(SERVER_OVERLAYS, type) ? SERVER_OVERLAYS[type as AgentEngineType] : NO_SERVER_OVERLAY;
 }
 
