@@ -4,9 +4,9 @@ import {
   composeCatalogRead,
   composeEstimatingExplain,
   composeStatisticsAvailabilityProbe,
-  withoutExtensionOwnershipTest,
 } from "@/lib/agent/composed-sql";
 import { AgentComposedSqlError, MAX_CATALOG_SELECTOR_LENGTH } from "@/lib/agent/composed-sql-primitives";
+import { withoutExtensionOwnershipTest } from "@/lib/agent/languages/sql/engines/postgres";
 import { agentReadSqlInput, inspectAgentStatement } from "@/lib/db/operations/statement-guard";
 import { AGENT_STATEMENT_LANGUAGE } from "@/lib/agent/agent-manifest";
 import { SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
@@ -1224,7 +1224,9 @@ describe("composeCatalogRead — the agent's exclusion set cannot drift from the
       /const SYSTEM_SCHEMAS = \[([\s\S]*?)\] as const;/.exec(readSource("src/lib/db/providers/sql/postgres.ts"))?.[1],
     );
     const agentSchemas = quotedNames(
-      /const POSTGRES_SYSTEM_SCHEMAS = \[([\s\S]*?)\] as const;/.exec(readSource("src/lib/agent/composed-sql.ts"))?.[1],
+      /const POSTGRES_SYSTEM_SCHEMAS = \[([\s\S]*?)\] as const;/.exec(
+        readSource("src/lib/agent/languages/sql/engines/postgres.ts"),
+      )?.[1],
     );
 
     // Non-vacuity first: a regex that stops matching silently turns both lists
@@ -1238,7 +1240,7 @@ describe("composeCatalogRead — the agent's exclusion set cannot drift from the
       readSource("src/lib/db/providers/sql/postgres.ts"),
     )?.[1];
     const agentQuery = /const POSTGRES_EXTENSION_OWNED_SCHEMAS_SQL =([\s\S]*?);/.exec(
-      readSource("src/lib/agent/composed-sql.ts"),
+      readSource("src/lib/agent/languages/sql/engines/postgres.ts"),
     )?.[1];
 
     const normalize = (query: string | undefined): string => (query ?? "").replace(/\s+/g, " ").trim();

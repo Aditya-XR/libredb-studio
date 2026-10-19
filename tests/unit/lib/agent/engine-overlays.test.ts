@@ -37,7 +37,11 @@ const ENGINES = ALL_TYPES.filter((type) => AGENT_STATEMENT_LANGUAGE[type] !== nu
 const SQL_ENGINES = ENGINES.filter((type) => AGENT_STATEMENT_LANGUAGE[type] === "sql");
 
 /** The merged view's members: every dialect-bound member of every family. */
-const SERVER_DIALECT_MEMBERS: readonly (keyof AgentEngineServerDialect)[] = ["planEstimate", "profileComposition"];
+const SERVER_DIALECT_MEMBERS: readonly (keyof AgentEngineServerDialect)[] = [
+  "catalogRead",
+  "planEstimate",
+  "profileComposition",
+];
 
 const ENGINE_MODULES: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
   "sql/engines/postgres": POSTGRES,
@@ -78,10 +82,15 @@ describe("the engine registry", () => {
   });
 
   test("every engine module exports overlays that hold a dialect and nothing else (ruling 2)", () => {
-    const exported = Object.entries(ENGINE_MODULES).flatMap(([module, exports]) =>
+    const all = Object.entries(ENGINE_MODULES).flatMap(([module, exports]) =>
       Object.entries(exports).map(([name, overlay]) => [`${module}#${name}`, overlay] as const),
     );
+    const exported = all.filter(([name]) => /_(SERVER|CLIENT)_OVERLAY$/.test(name));
     expect(exported).toHaveLength(14);
+    // The one other export is the PostgreSQL retry's rewrite, which its tests call directly.
+    expect(all.filter(([name]) => !/_(SERVER|CLIENT)_OVERLAY$/.test(name)).map(([name]) => name)).toEqual([
+      "sql/engines/postgres#withoutExtensionOwnershipTest",
+    ]);
     for (const [, overlay] of exported) {
       expect(Object.keys(overlay as object).filter((key) => key !== "dialect")).toEqual([]);
     }
@@ -159,6 +168,43 @@ describe("engineServerDialect", () => {
       mssql: { kind: "session-mode", mode: "estimate-plan" },
     });
     for (const type of SQL_ENGINES) expect(Object.isFrozen(engineServerDialect(type).planEstimate)).toBe(true);
+  });
+
+  test("catalogRead is supplied on every SQL engine, with SQLite's relation read its object read", () => {
+    const composers = (type: DatabaseType) => {
+      const catalogRead = engineServerDialect(type).catalogRead;
+      if (catalogRead === "unsupported") throw new Error(`${type} has no catalog read`);
+      return catalogRead.compose;
+    };
+    for (const type of SQL_ENGINES) {
+      const compose = composers(type);
+      expect(Object.keys(compose).sort()).toEqual(["columns", "indexes", "relations", "statistics"]);
+      expect(Object.isFrozen(engineServerDialect(type).catalogRead)).toBe(true);
+      expect(Object.isFrozen(compose)).toBe(true);
+    }
+    expect(composers("sqlite").relations).toBe(composers("sqlite").columns);
+    for (const type of ["postgres", "duckdb", "mssql", "mysql"] as const) {
+      expect(composers(type).relations).not.toBe(composers(type).columns);
+    }
+  });
+
+  test("only SQLite folds the declared schema, and only PostgreSQL retries a failed catalog read", () => {
+    const supplied = (member: "declaredSchema" | "retry") =>
+      SQL_ENGINES.filter((type) => {
+        const catalogRead = engineServerDialect(type).catalogRead;
+        return catalogRead !== "unsupported" && catalogRead[member] !== undefined;
+      });
+    expect(supplied("declaredSchema")).toEqual(["sqlite"]);
+    expect(supplied("retry")).toEqual(["postgres"]);
+    const sqlite = engineServerDialect("sqlite").catalogRead;
+    const postgres = engineServerDialect("postgres").catalogRead;
+    if (sqlite === "unsupported" || postgres === "unsupported") throw new Error("catalog read missing");
+    expect(sqlite.declaredSchema?.("MAIN")).toBe("main");
+    expect(Object.isFrozen(postgres.retry)).toBe(true);
+    expect(postgres.retry?.matches('relation "pg_depend" does not exist')).toBe(true);
+    expect(postgres.retry?.matches('relation "PG_EXTENSION" does not exist')).toBe(true);
+    expect(postgres.retry?.matches("permission denied for table orders")).toBe(false);
+    expect(postgres.retry?.rewrite).toBe(POSTGRES.withoutExtensionOwnershipTest);
   });
 });
 

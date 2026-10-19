@@ -40,6 +40,7 @@ const SERVER_OVERLAYS: AgentEngineServerOverlays = Object.freeze({
 
 /** What an engine with no dialect answers: every member unsupported. */
 const NO_SERVER_DIALECT: AgentEngineServerDialect = Object.freeze({
+  catalogRead: "unsupported",
   planEstimate: "unsupported",
   profileComposition: "unsupported",
 });

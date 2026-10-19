@@ -710,14 +710,14 @@ describe("planted violations yield exactly their findings", () => {
     const composed = `${AGENT}/composed-sql.ts`;
     const toIndex = `${server} -> ${postgres} -> ${index}`;
     expect(layeringFindings(prepend(postgres, 'import "../index";'))).toEqual([
-      `R3 cycle: ${composed} -> ${server} -> ${postgres} -> ${index} -> ${TOOLS} -> ${composed}`,
+      `R3 cycle: ${server} -> ${postgres} -> ${index} -> ${TOOLS} -> ${server}`,
       `R3 server: ${composed} reaches ${index} through ${composed} -> ${toIndex}`,
-      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${composed} -> ${toIndex}`,
+      `R3 server: ${AGENT}/context-snapshot.ts reaches ${index} through ${AGENT}/context-snapshot.ts -> ${TOOLS} -> ${toIndex}`,
       `R3 server: ${server} reaches ${index} through ${toIndex}`,
       `R3 server: ${postgres} reaches ${index} through ${postgres} -> ${index}`,
       `R3 server: ${AGENT}/schema-stats.ts reaches ${index} through ${AGENT}/schema-stats.ts -> ${composed} -> ${toIndex}`,
       `R3 server: ${profile} reaches ${index} through ${profile} -> ${toIndex}`,
-      `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${composed} -> ${toIndex}`,
+      `R3 server: ${TOOLS} reaches ${index} through ${TOOLS} -> ${toIndex}`,
     ]);
   }, 60_000);
 

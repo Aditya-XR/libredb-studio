@@ -31,9 +31,9 @@ export type AgentPlanEstimate =
 
 export type AgentComposedSqlDenyCode =
   /**
-   * This dialect has no verified composition. `CATALOG_COMPOSERS` in `composed-sql.ts` is the list, and it
-   * is the engines whose `AGENT_STATEMENT_LANGUAGE` is SQL: PostgreSQL, SQLite, DuckDB,
-   * SQL Server and MySQL. Anything else is refused rather than served a statement nobody
+   * This dialect has no verified composition. The engines whose server overlay supplies `catalogRead`
+   * (`languages/sql/engines/<id>.ts`) are the list, and they are the engines whose `AGENT_STATEMENT_LANGUAGE`
+   * is SQL: PostgreSQL, SQLite, DuckDB, SQL Server and MySQL. Anything else is refused rather than served a statement nobody
    * ran against that engine's catalog.
    */
   | "UNSUPPORTED_DIALECT"
@@ -92,6 +92,22 @@ export interface AgentCatalogSelector {
   readonly kind?: AgentCatalogKind;
   readonly schema?: string;
   readonly table?: string;
+}
+
+/**
+ * How an engine reads its catalog (`composeCatalogRead` in `composed-sql.ts`, `readCatalog` in `tools.ts`): one
+ * composer per kind; the fold from a selector's schema to the name a policy target declares, absent when the name is
+ * declared as written; and the one retry a refused read may take, absent when there is none.
+ */
+export interface AgentCatalogRead {
+  readonly compose: Readonly<Record<AgentCatalogKind, (selector: AgentCatalogSelector) => string>>;
+  readonly declaredSchema?: (schema: string) => string;
+  readonly retry?: {
+    /** Whether a database error is the one this retry answers. */
+    readonly matches: (message: string) => boolean;
+    /** The statement to send instead. A rewrite that changes nothing is not sent. */
+    readonly rewrite: (sql: string) => string;
+  };
 }
 /**
  * Validates one selector value and returns it.

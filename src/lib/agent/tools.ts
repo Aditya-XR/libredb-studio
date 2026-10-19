@@ -132,8 +132,13 @@ import type { ColumnSchema, DatabaseConnection, QueryResult } from "@/lib/types"
 import { type ProfileTargetResolution, type ResolvedProfileTarget, resolveProfileTarget } from "./inventory-address";
 import { addressableObjects } from "./inventory-objects";
 import type { AgentInventory, AgentInventoryObject, AgentUnlistedParent, AgentUnlistedParentsNotNamed } from "./types";
-import { composeCatalogRead, composeEstimatingExplain, withoutExtensionOwnershipTest } from "./composed-sql";
-import { type AgentCatalogKind, AgentComposedSqlError, type AgentEstimatingExplain } from "./composed-sql-primitives";
+import { composeCatalogRead, composeEstimatingExplain } from "./composed-sql";
+import {
+  type AgentCatalogKind,
+  type AgentCatalogRead,
+  AgentComposedSqlError,
+  type AgentEstimatingExplain,
+} from "./composed-sql-primitives";
 import type { AgentDeadlineDenyCode, AgentRunDeadline } from "./deadline";
 import {
   AGENT_EXECUTION_PROFILE,
@@ -143,6 +148,7 @@ import {
 } from "./execution-policy";
 import type { AgentRepairDenyCode, AgentRepairLedger } from "./repair-ledger";
 import { fingerprintStatement } from "./repair-ledger";
+import { engineServerDialect } from "./languages/engines/server";
 import { LANGUAGE_BASE_DEFINITIONS, languageServer, languageServerPack } from "./languages/server";
 import { evaluateAutoExecute } from "./auto-execute";
 import { summarisePlan } from "./plan-summary";
@@ -2258,19 +2264,6 @@ const CATALOG_LABELS: Readonly<Record<AgentCatalogKind, string>> = Object.freeze
 });
 
 /**
- * The schema name to DECLARE as the policy target, given what the composer accepted.
- *
- * Only SQLite needs the fold: `main` is its whole schema set and the composer matches
- * it case-insensitively, so the canonical spelling is the one a scope allowlist can be
- * written against. PostgreSQL is left exactly as supplied — `information_schema`
- * compares `table_schema` case-sensitively, so folding it would declare a target that
- * is not the one the composed statement reads.
- */
-function normalizeDeclaredSchema(context: AgentToolContext, schema: string): string {
-  return context.connection.type === "sqlite" ? schema.toLowerCase() : schema;
-}
-
-/**
  * Parses a tool's arguments against the schema the tool DECLARES, so the declaration
  * is load-bearing rather than advisory.
  *
@@ -3174,18 +3167,6 @@ export async function readStatementForGrounding(
   });
 }
 
-/**
- * Whether a database error names the two catalogs the extension ownership tests
- * join against. A postgres-typed connection can reach an engine the driver
- * serves but nobody here has run, and one without those catalogs raises on
- * them; the catalog read then retries without the ownership tests — the same
- * decision the provider makes in `isMissingExtensionCatalogError`.
- */
-function isMissingExtensionCatalogError(message: string): boolean {
-  const lowered = message.toLowerCase();
-  return lowered.includes("pg_depend") || lowered.includes("pg_extension");
-}
-
 async function readCatalog(
   context: AgentToolContext,
   selectorSchema: z.ZodType<{ kind?: AgentCatalogKind; schema?: string; table?: string }>,
@@ -3201,6 +3182,8 @@ async function readCatalog(
   } catch (error) {
     return composedSqlOutcome(error);
   }
+  // Supplied: `composeCatalogRead` refuses an engine whose catalog read is unsupported.
+  const { declaredSchema, retry } = engineServerDialect(context.connection.type).catalogRead as AgentCatalogRead;
   const request: AgentOperationRequest = {
     operationId: "sql.query.read",
     sql,
@@ -3231,21 +3214,23 @@ async function readCatalog(
     // accepts SQLite's `main` case-insensitively while `withinAllowlist` compares
     // case-sensitively, so declaring a raw `MAIN` would compose fine and then be
     // denied against a `["main"]` allowlist.
-    ...(selector.schema === undefined ? {} : { target: { schema: normalizeDeclaredSchema(context, selector.schema) } }),
+    // The engine's `declaredSchema` is that fold, and an engine without one declares the
+    // name as written.
+    ...(selector.schema === undefined
+      ? {}
+      : { target: { schema: declaredSchema === undefined ? selector.schema : declaredSchema(selector.schema) } }),
   };
   let outcome = await executeAgentOperation(context, request);
 
-  // A postgres-typed connection can reach an engine the driver serves but nobody
-  // here has run, one without the two catalogs the ownership tests join against
-  // (it raises on pg_depend/pg_extension). The provider drops the tests on that
-  // error and retries with the fixed schema list alone; mirror it here.
+  // The engine's one retry, when it declares one: PostgreSQL's drops the ownership
+  // tests on an engine without the catalogs they join against (`languages/sql/engines/postgres.ts`).
   if (
-    context.connection.type === "postgres" &&
+    retry !== undefined &&
     outcome.kind === "refused" &&
     outcome.refusal.class === "database-error" &&
-    isMissingExtensionCatalogError(outcome.refusal.message)
+    retry.matches(outcome.refusal.message)
   ) {
-    const fallback = withoutExtensionOwnershipTest(sql);
+    const fallback = retry.rewrite(sql);
     if (fallback !== sql) {
       outcome = await executeAgentOperation(context, { ...request, sql: fallback });
     }

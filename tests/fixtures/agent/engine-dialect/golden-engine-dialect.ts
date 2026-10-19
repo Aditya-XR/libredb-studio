@@ -23,13 +23,13 @@ import {
   composeCatalogRead,
   composeEstimatingExplain,
   composeStatisticsAvailabilityProbe,
-  withoutExtensionOwnershipTest,
 } from "@/lib/agent/composed-sql";
 import {
   AgentComposedSqlError,
   type AgentCatalogKind,
   type AgentCatalogSelector,
 } from "@/lib/agent/composed-sql-primitives";
+import { withoutExtensionOwnershipTest } from "@/lib/agent/languages/sql/engines/postgres";
 import { agentPosture } from "@/lib/agent/posture";
 import { type AgentStatisticsDetail, type AgentTableEstimate, packSchemaStatistics } from "@/lib/agent/schema-stats";
 import { type AgentProfileDepth, composeTableProfile } from "@/lib/agent/table-profile";
