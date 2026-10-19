@@ -13,9 +13,10 @@
  * fallbacks stay unread, is the registry's concern and is documented there.
  */
 
-import { AISDKError, APICallError, LoadAPIKeyError } from "ai";
+import { AISDKError, APICallError, type CallWarning, LoadAPIKeyError } from "ai";
 import {
   type LLMConfig,
+  type LLMModelEffort,
   type LLMProviderType,
   LLMAuthError,
   LLMConfigError,
@@ -23,7 +24,7 @@ import {
   LLMRateLimitError,
   LLMStreamError,
 } from "@/lib/llm/types";
-import { resolveConfig, validateConfig } from "@/lib/llm/utils/config";
+import { resolveConfig, validateConfig, validModelEffort } from "@/lib/llm/utils/config";
 import { type AgentFetch, type AgentLanguageModel, resolveAgentProviderAdapter } from "./provider-registry";
 
 /** A model plus the resolved identity it was built from, for audit and logging. */
@@ -31,6 +32,11 @@ export interface AgentModel {
   readonly provider: LLMProviderType;
   readonly modelId: string;
   readonly model: AgentLanguageModel;
+  /**
+   * `LLM_MODEL_EFFORT`, validated, which `validateConfig` allows on the `openai` kind only.
+   * Carried here so every call can send it without reading the environment outside `src/lib/llm`.
+   */
+  readonly effort?: LLMModelEffort;
 }
 
 export interface AgentModelOptions {
@@ -55,12 +61,14 @@ export async function createAgentModel(options: AgentModelOptions = {}): Promise
   const config = resolveConfig(options.config);
   validateConfig(config);
   const adapter = resolveAgentProviderAdapter(config.provider);
+  const effort = validModelEffort(config);
 
   try {
     return {
       provider: config.provider,
       modelId: config.model,
       model: await adapter.createModel(config, options.fetch),
+      ...(effort === undefined ? {} : { effort }),
     };
   } catch (error) {
     if (error instanceof LLMError) throw error;
@@ -68,6 +76,97 @@ export async function createAgentModel(options: AgentModelOptions = {}): Promise
     throw new LLMConfigError(`Cannot build the ${config.provider} model: ${detail}`, config.provider);
   }
 }
+
+/**
+ * What a turn asks for when this model's thinking is the thing that loses the cell: a profile's
+ * quiet switch (`suppressPlanReasoning`, `suppressAgentReasoning` in `models/profile.ts`).
+ *
+ * A REQUEST FIELD and not a word in the prompt, which is the whole reason it is acceptable:
+ * every planning rule in `investigation.ts` is wording a measured cell depends on, and nothing
+ * here touches it. The in-prompt `/no_think` marker was tried first and abandoned - see the
+ * model's entry.
+ */
+export const PLAN_NO_REASONING_EFFORT = "none";
+
+/** Provider options in the shape the SDK takes them: one object per provider package's own key. */
+export type AgentProviderOptions = Record<string, Record<string, string | boolean | null>>;
+
+/**
+ * The provider options every agent call to a model sends, built in one place so the capability
+ * probe asks the model exactly what a run will ask it.
+ *
+ * Keyed `openai` whatever the kind is called, because the three OpenAI-compatible kinds are all
+ * `@ai-sdk/openai` models and that package reads its options under its OWN key. Keying them by
+ * the provider's name once passed every test and sent nothing at all on a real Ollama run.
+ *
+ * For the `openai` kind, which is OpenAI's Responses API:
+ *
+ *  - `store: false`, always: a run sends database schemas and rows, and OpenAI must not retain
+ *    them. Stateless mode is also why each turn's reasoning comes back encrypted and is replayed
+ *    with the next one; the SDK asks for that content itself once `store` is false.
+ *  - `reasoningSummary: null`, always: the SDK otherwise asks for a detailed summary whenever an
+ *    effort is set. Nothing in a run reads it, and OpenAI may require organization verification
+ *    before it serves one, which would turn a setting nobody asked for into a refused request.
+ *  - `reasoningEffort`: `LLM_MODEL_EFFORT` when the operator set it, which wins over a profile's
+ *    quiet switch; otherwise the quiet switch's `none`; otherwise nothing, the model's default.
+ *
+ * For `ollama` and `custom` only the quiet switch, as before this options object existed, so the
+ * bytes those endpoints receive do not move. `gemini` reads its own key, so the `openai` object a
+ * quiet switch builds reaches nothing there.
+ *
+ * @param quiet - whether the model's profile asks this turn for no reasoning
+ */
+export function agentProviderOptions(
+  agentModel: Pick<AgentModel, "provider" | "effort">,
+  quiet = false,
+): AgentProviderOptions | undefined {
+  const effort = agentModel.effort ?? (quiet ? PLAN_NO_REASONING_EFFORT : undefined);
+  if (agentModel.provider === "openai") {
+    return {
+      openai: { store: false, reasoningSummary: null, ...(effort === undefined ? {} : { reasoningEffort: effort }) },
+    };
+  }
+  return effort === undefined ? undefined : { openai: { reasoningEffort: effort } };
+}
+
+/**
+ * The SDK's refusal of a reasoning effort, as the error it has to be.
+ *
+ * `@ai-sdk/openai` keeps its own table of which efforts a model takes (GPT-6.1 Sol has no `none`)
+ * and treats a non-reasoning model as taking none. An effort outside it is not sent and not
+ * refused by the API either: the SDK drops it, warns, and sends the request at the model's
+ * default effort. A run on an effort the operator did not ask for is the silent fallback this
+ * repository refuses, so every caller reads the call's warnings and raises this instead.
+ *
+ * @returns the error to raise, or undefined when no effort was dropped
+ */
+export function refusedEffortError(
+  warnings: readonly CallWarning[] | undefined,
+  agentModel: Pick<AgentModel, "provider" | "modelId" | "effort">,
+): LLMConfigError | undefined {
+  const dropped = warnings?.find(
+    (warning): warning is UnsupportedWarning => warning.type === "unsupported" && warning.feature === "reasoningEffort",
+  );
+  if (dropped === undefined) return undefined;
+  return new LLMConfigError(effortRefusalMessage(agentModel, dropped.details), agentModel.provider);
+}
+
+type UnsupportedWarning = Extract<CallWarning, { type: "unsupported" }>;
+
+// The sentence is one template from parts built a statement each: bun's line coverage under-counts
+// the continuation lines of multi-line string concatenation.
+const effortRefusalMessage = (
+  agentModel: Pick<AgentModel, "provider" | "modelId" | "effort">,
+  details: string | undefined,
+): string => {
+  const subject =
+    agentModel.effort === undefined
+      ? "The reasoning effort this model's profile asks for"
+      : `LLM_MODEL_EFFORT "${agentModel.effort}"`;
+  const reason = details === undefined ? "." : `: ${details.replace(/\.$/, "")}.`;
+  const advice = agentModel.effort === undefined ? "" : " Change LLM_MODEL_EFFORT or unset it.";
+  return `${subject} was refused for the model "${agentModel.modelId}" (${agentModel.provider})${reason}${advice}`;
+};
 
 /**
  * An `APICallError`'s message, plus the transport's own words when only its `cause` carries them.

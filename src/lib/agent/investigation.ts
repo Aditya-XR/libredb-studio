@@ -109,7 +109,7 @@ import {
   AGENT_REPORT_RESERVE_TURNS,
   AGENT_WORKFLOW_BUDGETS,
 } from "./execution-policy";
-import { type AgentModel, mapAgentModelError } from "./model-adapter";
+import { type AgentModel, agentProviderOptions, mapAgentModelError, refusedEffortError } from "./model-adapter";
 import { modelToolSchema } from "./model-tool-schema";
 import {
   type AgentRunInvocation,
@@ -2406,15 +2406,6 @@ function toolSetOf(definitions: readonly AgentToolDefinition[]): ToolSet | undef
 }
 
 /**
- * What a plan turn asks for when this model's thinking is the thing that loses the cell.
- *
- * A REQUEST FIELD and not a word in the prompt, which is the whole reason it is acceptable:
- * every planning rule above is wording a measured cell depends on, and nothing here touches
- * it. The in-prompt `/no_think` marker was tried first and abandoned - see the model's entry.
- */
-export const PLAN_NO_REASONING_EFFORT = "none";
-
-/**
  * One turn. The stream is read part by part rather than awaited as a result, for
  * the reason `capability-probe.ts` records: after a failed request the result
  * promises reject with the SDK's own wrapper, which hides the error this
@@ -2478,12 +2469,10 @@ async function takeTurn(
   */
   const sampling = samplingFor(agentModel.modelId, workflow);
   /*
-    Keyed `openai`, whatever this provider is called.
-
-    `provider-registry.ts` builds ollama, openai and custom through one `@ai-sdk/openai`
-    adapter, and that adapter reads its options under its OWN key. Keying them by the
-    provider's name passed the unit test - the scripted model is configured as `openai` - and
-    sent nothing at all on the first real ollama run, which then timed out at 94 seconds.
+    The options every call to a model sends come from one place, `agentProviderOptions`, so
+    the capability probe and the classifier send what a turn sends: `store: false` and the
+    configured effort on the `openai` kind, and on every kind the quiet switch below. Keyed
+    `openai` whatever the provider is called, for the reason that function records.
   */
   // Two switches, one per mode, and neither implies the other: a model measured needing quiet on
   // its plan turn was not measured needing it while holding tools. See both fields in `profile.ts`.
@@ -2503,7 +2492,7 @@ async function takeTurn(
     instructions,
     messages: [...messages],
     ...(tools === undefined ? {} : { tools }),
-    ...(quiet ? { providerOptions: { openai: { reasoningEffort: PLAN_NO_REASONING_EFFORT } } } : {}),
+    providerOptions: agentProviderOptions(agentModel, quiet),
     maxRetries: 0,
     // Real-time backstop for ONE call, sized by what the run has left. The
     // deadline object remains the authority — it is what the loop reads between
@@ -2522,7 +2511,15 @@ async function takeTurn(
 
   try {
     for await (const part of stream.fullStream) {
-      if (part.type === "text-delta") text += part.text;
+      if (part.type === "start-step") {
+        // The SDK drops an effort this model does not take and sends the turn at another one.
+        // Stopped here, before a word of that answer is read, and raised.
+        const refused = refusedEffortError(part.warnings, agentModel);
+        if (refused !== undefined) {
+          failure = refused;
+          break;
+        }
+      } else if (part.type === "text-delta") text += part.text;
       else if (part.type === "tool-call") {
         toolCalls.push({ toolCallId: part.toolCallId, toolName: part.toolName, input: part.input });
       } else if (part.type === "error") failure ??= part.error;

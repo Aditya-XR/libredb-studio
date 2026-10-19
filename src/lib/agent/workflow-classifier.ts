@@ -56,7 +56,13 @@ import { DEFAULT_AGENT_WORKFLOW_TYPE } from "./types";
 import { AGENT_WORKFLOW_VARIANTS, type AgentStatementLanguageId, requiredVariant } from "./agent-manifest";
 import { DEFAULT_STATEMENT_LANGUAGE, statementFamilyOf } from "./languages/client";
 import type { AgentFetch } from "./provider-registry";
-import { type AgentModel, createAgentModel, mapAgentModelError } from "./model-adapter";
+import {
+  type AgentModel,
+  agentProviderOptions,
+  createAgentModel,
+  mapAgentModelError,
+  refusedEffortError,
+} from "./model-adapter";
 
 export type AgentWorkflowClassificationOutcome = "classified" | "unclassified";
 
@@ -195,9 +201,15 @@ export async function classifyAgentWorkflow(
       system,
       prompt: objective,
       maxOutputTokens: CLASSIFY_MAX_OUTPUT_TOKENS,
+      // A run's own options, `store: false` among them: the objective is the user's words about
+      // their database, and OpenAI keeps it no more than it keeps a run's turns.
+      providerOptions: agentProviderOptions(agentModel),
       maxRetries: 0,
       abortSignal: AbortSignal.any(signals),
     });
+    // Answered, but at an effort nobody configured; a failure like any other here, and logged.
+    const refused = refusedEffortError(result.warnings, agentModel);
+    if (refused !== undefined) throw refused;
     reply = result.text;
   } catch (error) {
     // Mapped into this repository's vocabulary for the log line only. Nothing is

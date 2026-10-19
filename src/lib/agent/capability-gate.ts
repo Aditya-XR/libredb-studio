@@ -33,8 +33,9 @@
  * case the probe's docblock already warns about), so a cached refusal would outlive the
  * problem. Re-probing costs a round trip to someone whose runs are already failing.
  *
- * **The cache key is the model's identity**, so a configuration change misses by
- * construction. There is no invalidation hook to forget to call, and no TTL to tune:
+ * **The cache key is the model's identity**, its reasoning effort included, so a
+ * configuration change misses by construction. There is no invalidation hook to
+ * forget to call, and no TTL to tune:
  * the thing that would change the answer also changes the key. The one case it cannot
  * see is a server swapped behind an unchanged id, which is exactly why refusals are not
  * cached.
@@ -79,7 +80,9 @@ function onlyLacksToolCalling(refusal: AgentCapabilityRefusal): boolean {
  */
 const established = new Set<string>();
 
-const identityOf = (model: AgentModel): string => `${model.provider}:${model.modelId}`;
+// The reasoning effort is part of the identity because the probe sends it and a model can refuse
+// one effort while taking another (GPT-6.1 Sol has no "none").
+const identityOf = (model: AgentModel): string => `${model.provider}:${model.modelId}:${model.effort ?? ""}`;
 
 /** Test seam. A process-wide cache is exactly the state a suite must be able to clear. */
 export function resetAgentCapabilityCache(): void {

@@ -212,6 +212,19 @@ describe("the model gate on the start path", () => {
     expect(probeAgentModel).toHaveBeenCalledTimes(2);
   });
 
+  test("a different reasoning effort on the same model is a different question", async () => {
+    // GPT-6.1 Sol takes "low" and refuses "none": a pass cached for one effort must not admit
+    // the other, which the probe would refuse.
+    const openai = (effort: "low" | "none"): AgentModel =>
+      ({ provider: "openai", modelId: "gpt-6.1-sol", model: {}, effort }) as unknown as AgentModel;
+    createAgentModel.mockImplementationOnce(async () => openai("low"));
+    await admitAgentModel("agent");
+    createAgentModel.mockImplementationOnce(async () => openai("none"));
+    await admitAgentModel("agent");
+
+    expect(probeAgentModel).toHaveBeenCalledTimes(2);
+  });
+
   test("a model that cannot even be built admits the run", async () => {
     // An unconfigured provider says nothing about a model's capabilities, and the start
     // path must not gain a way to fail that it did not have.
