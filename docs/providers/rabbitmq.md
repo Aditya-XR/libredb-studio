@@ -525,6 +525,16 @@ CI runs it in the Functional Smoke job against a fresh 4.3.6 broker; 4.2.9 is ru
 - On 4.2.x and 4.3.0 to 4.3.6 a message the broker cannot convert ends every read that reaches it ([§5.6](#56-messages-the-broker-cannot-convert-541)).
 - Managed services are not claimed: none was tested.
 
+## Migration DDL
+
+[`RABBITMQ_MIGRATION_DDL`](../../src/lib/db/providers/stream/rabbitmq/migration-ddl.ts) is what the schema-diff migration generator writes for `rabbitmq`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+A broker keeps no schema and no catalog, so there is no table DDL to decline or to wrap (#1656).
+
+The refusal reason it prints, verbatim:
+
+- "A stream holds messages, not rows with declared columns, so there is no column definition to change."
+
 ## 16. References
 
 - RabbitMQ is a trademark of Broadcom, Inc. in the U.S. and other countries; LibreDB Studio is not affiliated with or endorsed by Broadcom.

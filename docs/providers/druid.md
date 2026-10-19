@@ -1993,6 +1993,18 @@ cancellation as unsupported because the provider exposes no `cancelQuery`
 
 ---
 
+## Migration DDL
+
+[`DRUID_MIGRATION_DDL`](../../src/lib/db/providers/sql/druid/migration-ddl.ts) is what the schema-diff migration generator writes for `druid`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+Druid has no transaction concept to translate the wrapper into: a datasource is rewritten by an MSQ task, not by a bracketed statement list (#284).
+
+The refusal reason it prints, verbatim:
+
+- "Druid SQL has no ALTER TABLE; rewrite the datasource with REPLACE INTO through an MSQ task."
+
+---
+
 ## 14. References
 
 - Source: [`src/lib/db/providers/sql/druid/`](../../src/lib/db/providers/sql/druid/)

@@ -650,6 +650,16 @@ readOnly: true
 - No agent execution and no MCP `run_read_query` (B94).
 - The Charts tab defects of section 5.8 (U79, U80).
 
+## Migration DDL
+
+[`INFLUXDB_MIGRATION_DDL`](../../src/lib/db/providers/timeseries/influxdb/influxdb-migration-ddl.ts) is what the schema-diff migration generator writes for `influxdb`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`influxdb` text is an InfluxQL statement, not SQL, and the provider is read-only, so there is no table DDL to wrap (#284).
+
+The refusal reason it prints, verbatim:
+
+- "A measurement's tags and fields are created by the points written to it, not declared with columns, so there is no column definition to change."
+
 ## 14. References
 
 - The influxql scanner and parser at v1.4.1, the version InfluxDB 1.13.1 pins: [`scanner.go`](https://github.com/influxdata/influxql/blob/v1.4.1/scanner.go) and [`parser.go`](https://github.com/influxdata/influxql/blob/v1.4.1/parser.go); and at v1.3.0, the version 2.9.1 pins: [`scanner.go`](https://github.com/influxdata/influxql/blob/v1.3.0/scanner.go).

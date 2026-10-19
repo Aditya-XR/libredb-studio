@@ -273,6 +273,16 @@ reporting every mutation caught looks identical to a run that measured nothing.
   published at QoS 0 and not retained, so on a broker that does not store certificates a reader sees
   one only while an edge node connects or answers somebody else's rebirth.
 
+## Migration DDL
+
+[`SPARKPLUG_MIGRATION_DDL`](../../src/lib/db/providers/industrial/sparkplug/migration-ddl.ts) is what the schema-diff migration generator writes for `sparkplug`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+A metric's shape is the birth certificate its edge node publishes, and the encoder has no function that writes a PUBLISH, so there is no table DDL to wrap either (#1720).
+
+The refusal reason it prints, verbatim:
+
+- "A Sparkplug metric's shape is declared in the birth certificate its edge node publishes, not in columns a client can change, and this provider's encoder has no function that writes a PUBLISH, so there is no column definition to change."
+
 ## 13. References
 
 - Eclipse Sparkplug 3.0.0 specification, sections 4.1, 4.2.1, 5.3, 5.4, 5.10, 5.17, 6.4.x, 10.1.4

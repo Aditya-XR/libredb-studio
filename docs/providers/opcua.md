@@ -1207,6 +1207,16 @@ and the ones that disagreed with it were replaced ([3.3](#33-more-rows-than-node
     session is opened rather than when a provider is built, so nothing that merely constructs a
     connection loads it.
 
+## Migration DDL
+
+[`OPCUA_MIGRATION_DDL`](../../src/lib/db/providers/industrial/opcua/migration-ddl.ts) is what the schema-diff migration generator writes for `opcua`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+A node's attributes are defined by its type in the server's own model, and this provider has no code that writes to a server (#1677).
+
+The refusal reason it prints, verbatim:
+
+- "An OPC UA node has attributes defined by its type in the server's own model, not columns, and this provider has no code that can write to a server, so there is no column definition to change."
+
 ## 13. References
 
 - OPC 10000-3 (Part 3), Address Space Model — node classes, `AccessLevel` (8.57), `ValueRank`

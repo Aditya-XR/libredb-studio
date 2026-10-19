@@ -280,3 +280,19 @@ It covers connect, `datasets.list`, `tables.list` and `tables.get` (tables, view
 The emulator's `jobs.query` answers every row and no `pageToken` (it ignores `maxResults`, `server/handler.go` at v0.8.1), so for the paging check the script puts a pass-through proxy in front of it that cuts the first answer at `maxResults` as BigQuery does; every later page is the emulator's own `getQueryResults` answer.
 
 It does not cover, so these stay covered by the replayed captures only: dry runs and bytes processed (the emulator runs a `dryRun` query and reports no bytes), region-level `INFORMATION_SCHEMA` (refused, so the catalog comes from the REST fallback there), monitoring, job cancel, locations, and authentication (the emulator checks none, so none is sent).
+
+## Migration DDL
+
+[`BIGQUERY_MIGRATION_DDL`](../../src/lib/db/providers/sql/bigquery/migration-ddl.ts) is what the schema-diff migration generator writes for `bigquery`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+BigQuery runs each statement as its own job, and `BEGIN TRANSACTION` exists only inside a multi-statement script, so `transactionWrapper` is `null` (#284).
+It has no foreign-key constraint this generator could write, so an added or dropped foreign key is a comment.
+An added table declines its primary key in a comment after the `CREATE TABLE`, and a modified column is a comment naming the column.
+Index changes are a comment too, because BigQuery's only indexes are search and vector indexes.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddColumn`, `standardColumnDef`, `standardDropColumn` and `standardDropTable`.
+
+Every refusal reason it can print, verbatim:
+
+- "BigQuery widens a column with ALTER COLUMN ... SET DATA TYPE only along its coercion rules, and nothing else; write the change by hand."
+- "BigQuery: Cannot generate index DDL. BigQuery has search and vector indexes only; write the index change by hand."
+- "The engine has no foreign-key constraint."
+- "BigQuery accepts a primary key only as PRIMARY KEY (...) NOT ENFORCED."

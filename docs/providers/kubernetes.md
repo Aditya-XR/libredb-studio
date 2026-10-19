@@ -509,6 +509,16 @@ Not measured: an etcd-backed managed cluster, Rancher's proxy, OpenShift (its pr
 - `inspect_usage` needs metrics-server: without `metrics.k8s.io` the run records that usage is unavailable and names metrics-server.
 - Restart counts are cumulative since a container started, so `profile_workloads` shows a count with the last termination time and reason, never a rate.
 
+## Migration DDL
+
+[`KUBERNETES_MIGRATION_DDL`](../../src/lib/db/providers/platform/kubernetes/migration-ddl.ts) is what the schema-diff migration generator writes for `kubernetes`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`kubernetes` text is one kubectl statement, not SQL, so there is no table DDL to wrap (#284).
+
+The refusal reason it prints, verbatim:
+
+- "Kubernetes objects follow the schema their API version serves, and Studio writes none, so there is no column definition to change."
+
 ## 15. References
 
 - The Kubernetes API concepts and the [aggregated discovery](https://kubernetes.io/docs/concepts/overview/kubernetes-api/#aggregated-discovery) and [Table](https://kubernetes.io/docs/reference/using-api/api-concepts/#receiving-resources-as-tables) pages.

@@ -197,3 +197,13 @@ known defect; they are the places where the evidence stops.
 - **MIB descriptors.** Names are resolved numerically. A descriptor reaching the read path is a
   defect rather than a condition, and says so.
 - **IPv6 end to end.** Measured only against the library's own in-process agent.
+
+## Migration DDL
+
+[`SNMP_MIGRATION_DDL`](../../src/lib/db/providers/network/snmp/migration-ddl.ts) is what the schema-diff migration generator writes for `snmp`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+An object's type is the device's MIB module, and this provider's valve refuses any PDU that is not a Get, GetNext or GetBulk.
+
+The refusal reason it prints, verbatim:
+
+- "An SNMP object's type is declared in the MIB module the device was built with, not in columns a client can change, and this provider's valve refuses any PDU that is not a Get, GetNext or GetBulk, so there is no column definition to change."

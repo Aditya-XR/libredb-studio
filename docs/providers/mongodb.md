@@ -1620,6 +1620,18 @@ A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES`
 
 ---
 
+## Migration DDL
+
+[`MONGODB_MIGRATION_DDL`](../../src/lib/db/providers/document/mongodb/migration-ddl.ts) is what the schema-diff migration generator writes for `mongodb`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`mongodb` writes no SQL text at all (`readsSqlText: false`), so there is no table DDL to wrap, whatever the driver's own transaction API offers (#284).
+
+The refusal reason it prints, verbatim:
+
+- "Collections are schemaless, so there is no column definition to change."
+
+---
+
 ## 14. References
 
 - Driver: [`mongodb` (node-mongodb-native)](https://github.com/mongodb/node-mongodb-native)

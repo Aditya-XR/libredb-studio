@@ -535,6 +535,16 @@ The token goes in `password`, there is no `user`, and `allowInsecureAuth: true` 
 - InfluxDB 3 Enterprise is not tested, and Cloud Serverless and Dedicated cannot be reached by this type ([D201](../BACKLOG.md), [D202](../BACKLOG.md)).
 - No agent execution and no MCP `run_read_query` ([B94](../BACKLOG.md)).
 
+## Migration DDL
+
+[`INFLUXDB3_MIGRATION_DDL`](../../src/lib/db/providers/timeseries/influxdb/influxdb3-migration-ddl.ts) is what the schema-diff migration generator writes for `influxdb3`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`influxdb3` text is SQL, but the 3.x planner refuses DDL and DML, so there is no table DDL to wrap (#284).
+
+The refusal reason it prints, verbatim:
+
+- "A table's tags and fields are created by the line protocol written to it, and InfluxDB 3's SQL takes no DDL, so there is no column definition to change."
+
 ## 14. References
 
 - The InfluxDB 3 Core HTTP API reference: `/api/v3/query_sql`, `/api/v3/configure/database`, `/ping` and `/health`.

@@ -2893,6 +2893,17 @@ Over the API: `POST /api/db/query`, `POST /api/db/transaction`, `POST /api/db/ca
 
 ---
 
+## Migration DDL
+
+[`MYSQL_MIGRATION_DDL`](../../src/lib/db/providers/sql/mysql-migration-ddl.ts) is what the schema-diff migration generator writes for `mysql`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+MySQL drops an index with `ON <table>` and a foreign key with `DROP FOREIGN KEY`, and restates the whole column in `MODIFY COLUMN`.
+Everything else is the shared statement, wrapped in `BEGIN;` and `COMMIT;`.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `BEGIN_COMMIT`, `standardAddColumn`, `standardAddForeignKey`, `standardColumnDef`, `standardCreateIndex`, `standardCreateTableForeignKey`, `standardDropColumn`, `standardDropTable` and `standardPrimaryKey`.
+
+It prints no refusal reason.
+
+---
+
 ## 16. References
 
 - Driver: [`mysql2`](https://github.com/sidorares/node-mysql2)

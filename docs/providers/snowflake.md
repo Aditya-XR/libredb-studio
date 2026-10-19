@@ -713,3 +713,16 @@ What the capture could not ask, such as a 403 from an address a network policy r
 - Programmatic access tokens: https://docs.snowflake.com/en/user-guide/programmatic-access-tokens
 - Account identifiers: https://docs.snowflake.com/en/user-guide/admin-account-identifier
 - Warehouse billing: https://docs.snowflake.com/en/user-guide/cost-understanding-compute
+
+## Migration DDL
+
+[`SNOWFLAKE_MIGRATION_DDL`](../../src/lib/db/providers/sql/snowflake/migration-ddl.ts) is what the schema-diff migration generator writes for `snowflake`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+A Snowflake DDL statement commits the open transaction, and each SQL API statement runs in its own session, so `transactionWrapper` is `null` (#284).
+A type change is spelled `SET DATA TYPE`, and `ALTER COLUMN` sets a default only to a sequence's `NEXTVAL`, so any other default change is a comment while dropping one is plain.
+Index changes are a comment, because Snowflake has indexes only on hybrid tables.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddColumn`, `standardAddForeignKey`, `standardColumnDef`, `standardCreateTableForeignKey`, `standardDropColumn`, `standardDropForeignKey`, `standardDropTable` and `standardPrimaryKey`.
+
+Every refusal reason it can print, verbatim:
+
+- "Snowflake: Cannot generate index DDL. Snowflake has indexes only on hybrid tables; write the index change by hand."
+- "ALTER COLUMN sets a default only to a sequence's NEXTVAL; recreate the column with its default."

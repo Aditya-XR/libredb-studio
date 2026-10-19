@@ -321,7 +321,6 @@ These partial records deliberately have none:
 | `ENGINE_URI_SCHEMES` | `src/lib/connection-string-parser.ts` | No connection string ([§4.5](#45-no-connection-string)) |
 | `createTable` | `src/lib/db/types.ts` (`CreateTableSpec`) | Only engines that declare a `createTable` reach the Create Table form; Prometheus declares none |
 | `SQL_GRAMMAR` | `src/lib/db/sql-grammar/` | PromQL is not SQL, and the `prometheus` row declares `readsSqlText: false` ([§5.7](#57-sql-grammar)). Nothing on the run path reads PromQL under a SQL grammar: the confirmation gate answers from the `prometheus` row of `NON_SQL_DESTRUCTIVE_VOCABULARY` before any SQL reading ([§5.1](#51-the-call)), the multi-statement route is taken only where `queryLanguage` is `sql`, and the provider's own `prepareQuery` returns the text unchanged |
-| `NO_PORTABLE_INDEX_DDL`, `NO_FOREIGN_KEYS`, `FOREIGN_KEY_ONLY_IN_CREATE_TABLE` | `src/lib/schema-diff/migration-generator.ts` | They qualify index and foreign-key DDL for engines that have table DDL at all; how the generator treats `prometheus` as a whole is recorded in `MODIFIED_COLUMN_COVERAGE` and `TRANSACTION_WRAPPER_COVERAGE` in `tests/unit/schema-diff/migration-generator.test.ts` |
 | `AGENT_EXECUTION_ENGINES` | `src/lib/agent/engine-support.ts` | Agent execute mode is a non-goal; plan mode and the `operations` workflow still reach the server |
 
 `src/lib/sql/identifier.ts` is a `switch` with a `default` and needs no case.
@@ -727,6 +726,18 @@ See [`docs/API_DOCS.md`](../API_DOCS.md) for the full request and response contr
 - **The overview's metric count is unavailable only when a full list of `TSDB_LABEL_SCAN_LIMIT` label names omits the `__name__` entry** (M2), and a listed entry is the full count at any length of that list.
 - **The chart tab draws a missing sample, and a `NaN` or `Inf` among numbers, at 0**, so a raw range over targets scraped at their own offsets charts false zeros, while a stepped subquery charts correctly as long as every series has a sample at every step; a column 20% or more `NaN` or `Inf` is not drawn as a series, and becomes the default x axis only while it holds at most 50 distinct values ([§3.7](#37-nan-and-inf-stay-strings-and-what-the-chart-does-with-them), [§5.2](#52-result-shaping), `docs/BACKLOG.md` U44).
 - **Queries compete with the server's own rule evaluation** ([§3.4](#34-the-servers-query-slots-are-shared)).
+
+---
+
+## Migration DDL
+
+[`PROMETHEUS_MIGRATION_DDL`](../../src/lib/db/providers/timeseries/prometheus/migration-ddl.ts) is what the schema-diff migration generator writes for `prometheus`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`prometheus` text is PromQL, not SQL (`readsSqlText: false`, [§5.7](#57-sql-grammar)), so there is no table DDL to wrap (#284, #1085).
+
+The refusal reason it prints, verbatim:
+
+- "A metric is written by scrapes and recording rules, not declared with columns, so there is no column definition to change."
 
 ---
 

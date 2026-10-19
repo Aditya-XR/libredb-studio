@@ -1503,6 +1503,19 @@ Everything else:
 
 ---
 
+## Migration DDL
+
+[`COUCHBASE_MIGRATION_DDL`](../../src/lib/db/providers/document/couchbase/migration-ddl.ts) is what the schema-diff migration generator writes for `couchbase`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+Couchbase has index and collection DDL, but no `CREATE` or `ALTER TABLE` column grammar.
+Couchbase does have distributed ACID transactions, but spells one `BEGIN TRANSACTION` and answers with a `txid` every following statement has to carry as a request parameter, a shape a flat migration file cannot express (#284).
+
+The refusal reason it prints, verbatim:
+
+- "Collections hold schemaless JSON documents, so there is no column definition to change."
+
+---
+
 ## 14. References
 
 - Tracking issue: [#262 — Add Couchbase provider](https://github.com/libredb/libredb-studio/issues/262)

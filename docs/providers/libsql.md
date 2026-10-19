@@ -1085,6 +1085,24 @@ await provider.disconnect();
 
 ---
 
+## Migration DDL
+
+[`LIBSQL_MIGRATION_DDL`](../../src/lib/db/providers/sql/libsql/migration-ddl.ts) is what the schema-diff migration generator writes for `libsql`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+libSQL is SQLite, so `transactionWrapper` is `null` for SQLite's reason (#284), and this provider also closes its Hrana stream in the same request as each statement, so a `BEGIN` it emitted could not be continued.
+A foreign key is declared only as a `CREATE TABLE` table constraint, so an added table takes the key inside the statement, and an added or dropped foreign key on an existing table is a comment (#515).
+Measured over Hrana on sqld 0.24.33: `ALTER TABLE "users" ADD CONSTRAINT "fk_users_dept_id" FOREIGN KEY ("dept_id") REFERENCES "departments"("id")` and `ALTER TABLE t DROP CONSTRAINT fk_x` are both "near CONSTRAINT ... syntax error".
+A modified column is a comment: on sqld 0.24.33 `ALTER TABLE t ALTER COLUMN c TYPE integer` is "unexpected end of input" and `MODIFY COLUMN` is "syntax error around `MODIFY`", while `DROP COLUMN` and `RENAME COLUMN` are accepted.
+SQLite gained `ALTER COLUMN ... SET/DROP NOT NULL` in 3.53.0 (measured 2026-08-27), but sqld 0.24.33 ships 3.47.0, so declining every modification is still right here.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddColumn`, `standardColumnDef`, `standardCreateIndex`, `standardDropColumn`, `standardDropIndex`, `standardDropTable` and `standardPrimaryKey`.
+
+Every refusal reason it can print, verbatim:
+
+- "SQLite cannot retype a column; recreate the table and copy the rows."
+- "SQLite declares one only in CREATE TABLE; recreate the table and copy the rows."
+- "Requires table recreation."
+
+---
+
 ## 14. References
 
 - Turso documentation — <https://docs.turso.tech/introduction>

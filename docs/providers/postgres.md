@@ -2747,6 +2747,16 @@ await server.disconnect();                                 // closes every datab
 
 ---
 
+## Migration DDL
+
+[`POSTGRES_MIGRATION_DDL`](../../src/lib/db/providers/sql/postgres-migration-ddl.ts) is what the schema-diff migration generator writes for `postgres`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+PostgreSQL is the shape the shared building blocks were written from, so every statement is the shared one and the migration is wrapped in `BEGIN;` and `COMMIT;`.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `BEGIN_COMMIT`, `standardAddColumn`, `standardAddForeignKey`, `standardColumnDef`, `standardCreateIndex`, `standardCreateTableForeignKey`, `standardDropColumn`, `standardDropForeignKey`, `standardDropIndex`, `standardDropTable`, `standardModifyColumn` and `standardPrimaryKey`.
+
+It prints no refusal reason.
+
+---
+
 ## 16. References
 
 - Driver: [`pg` (node-postgres)](https://github.com/brianc/node-postgres)

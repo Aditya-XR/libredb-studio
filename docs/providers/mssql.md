@@ -1991,6 +1991,17 @@ Over the API: `POST /api/db/query`, `POST /api/db/transaction`, `POST /api/db/ca
 
 ---
 
+## Migration DDL
+
+[`MSSQL_MIGRATION_DDL`](../../src/lib/db/providers/sql/mssql-migration-ddl.ts) is what the schema-diff migration generator writes for `mssql`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+SQL Server wraps the migration in `BEGIN TRANSACTION;` and `COMMIT;`, adds a column with a bare `ADD`, and drops an index with `ON <table>`.
+A modified column restates its type and nullability in one `ALTER COLUMN`, falling back to `NVARCHAR(MAX)`, and a changed default is a separate `ADD DEFAULT ... FOR <column>`.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddForeignKey`, `standardColumnDef`, `standardCreateIndex`, `standardCreateTableForeignKey`, `standardDropColumn`, `standardDropForeignKey`, `standardDropTable` and `standardPrimaryKey`.
+
+It prints no refusal reason.
+
+---
+
 ## 16. References
 
 - Driver: [`node-mssql`](https://github.com/tediousjs/node-mssql) (Tedious / TDS)

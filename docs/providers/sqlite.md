@@ -1640,6 +1640,25 @@ not apply to SQLite ([§3.4](#34-no-transactions-api-no-cancellation-no-pool)).
 
 ---
 
+## Migration DDL
+
+[`SQLITE_MIGRATION_DDL`](../../src/lib/db/providers/sql/sqlite-migration-ddl.ts) is what the schema-diff migration generator writes for `sqlite`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+SQLite runs its own transaction, so `transactionWrapper` is `null` (#284).
+Its ALTER TABLE page enumerates rename table, rename column, add column, drop column, and SET/DROP NOT NULL since 3.53.0, and adding a constraint is not among them.
+Measured on sqlite3 3.53.3: `ALTER TABLE "users" ADD CONSTRAINT "fk_users_dept_id" FOREIGN KEY ("dept_id") REFERENCES "departments"("id")` is `near "FOREIGN": syntax error`.
+So an added table takes the key inside `CREATE TABLE`, after the columns and the `PRIMARY KEY` line, where 3.53.3 accepts it and `PRAGMA foreign_key_list` reports it, and an added foreign key on an existing table is a comment (#515).
+The key carries no `CONSTRAINT` name, because SQLite never reads a foreign key's name back.
+A dropped column and a dropped foreign key are comments naming the table recreation.
+A modified column is a comment too, though SQLite gained `ALTER COLUMN ... SET/DROP NOT NULL` in 3.53.0: the provider runs on whichever SQLite `bun:sqlite` or `node:sqlite` bundles, chosen at runtime with `LIBREDB_SQLITE_DRIVER` as an override, so the statement would write a migration that succeeds on one deployment and fails on another.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddColumn`, `standardColumnDef`, `standardCreateIndex`, `standardDropIndex`, `standardDropTable` and `standardPrimaryKey`.
+
+Every refusal reason it can print, verbatim:
+
+- "A foreign key is declarable only as a CREATE TABLE constraint; recreate the table and copy the rows."
+- "Requires table recreation."
+
+---
+
 ## 15. References
 
 - Drivers: [`bun:sqlite`](https://bun.sh/docs/api/sqlite) (Bun built-in) · [`node:sqlite`](https://nodejs.org/api/sqlite.html) (Node built-in)

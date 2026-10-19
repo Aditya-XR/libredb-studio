@@ -529,6 +529,16 @@ On 2026-10-12 a real project's `(default)` database answered as those built answ
 Not supported in this version, each a BACKLOG entry: writes of any kind, Pipelines, Datastore mode, the MongoDB-compatible API (use the `mongodb` type), Firebase Auth user sign-in under Security Rules, service-account impersonation, regional endpoints, real-time listeners, agent statement execution and MCP, collection export, point-in-time reads, `limitToLast`, bytes literals in the console, a read budget meter, an absent-cell marker in the grid, full support for the Enterprise BSON types, and a CI job running the emulator.
 An egress HTTPS proxy is not supported.
 
+## Migration DDL
+
+[`FIRESTORE_MIGRATION_DDL`](../../src/lib/db/providers/document/firestore/migration-ddl.ts) is what the schema-diff migration generator writes for `firestore`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+A document store keeps no schema and no catalog, so there is no table DDL to decline or to wrap.
+
+The refusal reason it prints, verbatim:
+
+- "A document store keeps no schema, so there is no column definition to change."
+
 ## 15. References
 
 - Firestore REST API v1: https://cloud.google.com/firestore/docs/reference/rest

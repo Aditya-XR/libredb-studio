@@ -1931,6 +1931,23 @@ See [`docs/API_DOCS.md`](../API_DOCS.md) for the full request/response contract.
 
 ---
 
+## Migration DDL
+
+[`TRINO_MIGRATION_DDL`](../../src/lib/db/providers/sql/trino/migration-ddl.ts) is what the schema-diff migration generator writes for `trino`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+Trino's transactional semantics are the connector's answer, so no portable `BEGIN;` or `COMMIT;` exists and `transactionWrapper` is `null` (#284).
+Trino has no index or foreign-key grammar, and its `CREATE TABLE` has no primary-key constraint, so an added table's key is declined in a comment after the statement; Trino was the first engine declined that way.
+A modified column is a comment, measured 2026-08-20 on Trino 476: `ALTER TABLE ... ALTER COLUMN id TYPE varchar` is "line 1:50: mismatched input 'TYPE'. Expecting: '.', 'DROP', 'SET'", and `ALTER COLUMN id SET DATA TYPE varchar` parses and then the catalog answers "This connector does not support setting column types".
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddColumn`, `standardColumnDef`, `standardDropColumn` and `standardDropTable`.
+
+Every refusal reason it can print, verbatim:
+
+- "Whether a column can be retyped is the connector's answer, not Trino's; run the change in the system the catalog points at."
+- "Trino: Cannot generate index DDL. Indexes belong to the connector's underlying system, not Trino SQL."
+- "The engine has no foreign-key constraint."
+- "Trino SQL has no primary-key constraint."
+
+---
+
 ## 14. References
 
 - Source: [`src/lib/db/providers/sql/trino/`](../../src/lib/db/providers/sql/trino/)

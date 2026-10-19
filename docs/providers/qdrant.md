@@ -464,6 +464,16 @@ Set `telemetry_disabled` if the server should not report to the vendor, and note
 - A vendor address pasted into the connection-string box instead of the Host box still selects ClickHouse.
 - A hostile or impersonated endpoint holds the key it receives and can return it in an encoding Studio does not list, so Studio withholds only the forms it sends.
 
+## Migration DDL
+
+[`QDRANT_MIGRATION_DDL`](../../src/lib/db/providers/vector/qdrant/migration-ddl.ts) is what the schema-diff migration generator writes for `qdrant`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`qdrant` text is a Qdrant console request, not SQL, so there is no table DDL to wrap (#284).
+
+The refusal reason it prints, verbatim:
+
+- "A collection's payloads are schemaless and its vectors are declared through Qdrant's own collection API, not SQL DDL, so there is no column definition to change."
+
 ## 14. References
 
 - The design: the vector-family design under issue #424, sections 3, 4 and 6.

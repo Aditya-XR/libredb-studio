@@ -518,6 +518,16 @@ Milvus's RBAC hides neither the topology nor other databases' row counts from an
 - A load the server continues after Load's 10-second poll is not covered by the one-load lock.
 - Clusters, Milvus Lite and 2.6 and older are not claimed.
 
+## Migration DDL
+
+[`MILVUS_MIGRATION_DDL`](../../src/lib/db/providers/vector/milvus/migration-ddl.ts) is what the schema-diff migration generator writes for `milvus`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`milvus` text is a Milvus console request, not SQL, so there is no table DDL to wrap (#284).
+
+The refusal reason it prints, verbatim:
+
+- "A collection's schema is declared through Milvus's own collection API, not SQL DDL, so there is no column definition to change."
+
 ## 14. References
 
 - The design: the vector-family design under issue #424, sections 3 to 5.

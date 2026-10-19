@@ -1669,6 +1669,22 @@ The reach described in this section is an admin editor's on an inline connection
 
 ---
 
+## Migration DDL
+
+[`DUCKDB_MIGRATION_DDL`](../../src/lib/db/providers/sql/duckdb/migration-ddl.ts) is what the schema-diff migration generator writes for `duckdb`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+DuckDB writes the shared statements wrapped in `BEGIN;` and `COMMIT;`, except for foreign keys, which it declares only as a `CREATE TABLE` table constraint.
+Measured on DuckDB v1.5.5: `CREATE TABLE "users" (..., PRIMARY KEY ("id"), FOREIGN KEY ("dept_id") REFERENCES "departments"("id"))` lands and `duckdb_constraints()` reports the key, so an added table takes the key inside the statement.
+`ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES u(id)` parses and then answers "Not implemented Error: No support for that ALTER TABLE option yet!" on v1.5.5, as does the `UNIQUE` form, so an added foreign key on an existing table is a comment.
+`ALTER TABLE t DROP CONSTRAINT IF EXISTS fk_x` answers the same "Not implemented" error, which is not an `IF EXISTS` no-op, so a dropped foreign key is a comment too.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `BEGIN_COMMIT`, `standardAddColumn`, `standardColumnDef`, `standardCreateIndex`, `standardDropColumn`, `standardDropIndex`, `standardDropTable`, `standardModifyColumn` and `standardPrimaryKey`.
+
+Every refusal reason it can print, verbatim:
+
+- "ALTER TABLE cannot add one yet; recreate the table and copy the rows."
+- "Requires table recreation."
+
+---
+
 ## 16. References
 
 - DuckDB — <https://duckdb.org>

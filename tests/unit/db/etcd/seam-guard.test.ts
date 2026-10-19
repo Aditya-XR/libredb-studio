@@ -1559,6 +1559,9 @@ const SPEC_3_1_MODULES: readonly string[] = [
   "errors.ts",
   "labels.ts",
   "index.ts",
+  // The engine's migration DDL contract module (engine contract, migration DDL), which the registry under
+  // src/lib/db/migration-ddl/ reads.
+  "migration-ddl.ts",
   // The SQL grammar contract's module (engine contract spec 5.3), which every provider directory holds.
   "sql-grammar.ts",
 ];

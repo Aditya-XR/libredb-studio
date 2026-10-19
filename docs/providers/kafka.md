@@ -745,6 +745,18 @@ See [`docs/API_DOCS.md`](../API_DOCS.md) for the full request and response contr
 
 ---
 
+## Migration DDL
+
+[`KAFKA_MIGRATION_DDL`](../../src/lib/db/providers/stream/kafka/migration-ddl.ts) is what the schema-diff migration generator writes for `kafka`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`kafka` text is a JSON read request, not SQL, so there is no table DDL to wrap (#284, #1088).
+
+The refusal reason it prints, verbatim:
+
+- "A topic holds messages, not rows with declared columns, so there is no column definition to change."
+
+---
+
 ## 14. References
 
 - Source: [`src/lib/db/providers/stream/kafka/`](../../src/lib/db/providers/stream/kafka/)

@@ -2096,6 +2096,18 @@ request/response contract.
 
 ---
 
+## Migration DDL
+
+[`REDIS_MIGRATION_DDL`](../../src/lib/db/providers/keyvalue/redis-migration-ddl.ts) is what the schema-diff migration generator writes for `redis`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`redis` writes no SQL text at all (`readsSqlText: false`), so there is no table DDL to wrap (#284).
+
+The refusal reason it prints, verbatim:
+
+- "Keys are not tables and have no column definitions to change."
+
+---
+
 ## 14. References
 
 - Tracking issue: [#7 — Implement Redis Provider](https://github.com/libredb/libredb-studio/issues/7)

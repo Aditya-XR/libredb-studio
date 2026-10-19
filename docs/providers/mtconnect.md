@@ -386,6 +386,16 @@ stand-in, and no local copy of a rule the shared modules own.
 - The Agent device's adapter addresses are visible to an MCP client (10.2).
 - A composition's own name is carried where the observation has one; MEASURED on 6 of 478.
 
+## Migration DDL
+
+[`MTCONNECT_MIGRATION_DDL`](../../src/lib/db/providers/industrial/mtconnect/migration-ddl.ts) is what the schema-diff migration generator writes for `mtconnect`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+An agent's device model is the agent's own and every route this provider sends is a GET, so there is no table DDL to wrap either (#1722).
+
+The refusal reason it prints, verbatim:
+
+- "An MTConnect data item's shape is declared in the agent's own device model, not in columns a client can change, and every request this provider sends is a GET, so there is no column definition to change."
+
 ## 13. References
 
 - MTConnect Standard Part 1 to Part 5, schema versions 1.3 to 2.8

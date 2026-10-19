@@ -526,6 +526,16 @@ Each replay asserts the topics by name and the type of each, so a decoder that r
 - `$SYS` is not subscribed to by default, for the reasons in 3.8.
 - The Keys panel cannot ask for a second page, by the choice in 3.7.
 
+## Migration DDL
+
+[`MQTT_MIGRATION_DDL`](../../src/lib/db/providers/keyvalue/mqtt/migration-ddl.ts) is what the schema-diff migration generator writes for `mqtt`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+A broker keeps no schema and no catalog, so there is no table DDL to decline or to wrap (#1635).
+
+The refusal reason it prints, verbatim:
+
+- "A broker keeps no schema and no catalog, so there is no column definition to change."
+
 ## 13. References
 
 - OASIS, *MQTT Version 5.0*, OASIS Standard, 7 March 2019. The clauses cited above:

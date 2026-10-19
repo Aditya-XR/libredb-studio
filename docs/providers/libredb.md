@@ -1350,6 +1350,18 @@ await provider.disconnect();
 
 ---
 
+## Migration DDL
+
+[`LIBREDB_MIGRATION_DDL`](../../src/lib/db/providers/embedded/libredb-migration-ddl.ts) is what the schema-diff migration generator writes for `libredb`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+The embedded engine speaks a JSON command grammar, so there is no table DDL to wrap (#284).
+
+The refusal reason it prints, verbatim:
+
+- "The embedded engine speaks a JSON command grammar, not SQL DDL."
+
+---
+
 ## 14. References
 
 - Driver: [`@libredb/libredb`](https://github.com/libredb/libredb-database)

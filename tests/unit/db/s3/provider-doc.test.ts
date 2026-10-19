@@ -199,6 +199,7 @@ const OUTLINE: readonly string[] = [
   "### 11.5 The acceptance matrix",
   "## 12. Running an S3-compatible server for Studio",
   "## 13. Known limitations",
+  "## Migration DDL",
   "## 14. References",
 ];
 
@@ -668,6 +669,7 @@ const BROWSER_SET: ReadonlySet<string> = new Set([
   "preview-csv.ts",
   "preview-json.ts",
   "parquet-schema.ts",
+  "migration-ddl.ts",
   "parquet-thrift-guard.ts",
   "preview-cells.ts",
   "preview-render.ts",

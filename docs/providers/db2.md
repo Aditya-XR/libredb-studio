@@ -472,6 +472,19 @@ Both scripts connect as the compose service's `db2inst1` / `Password123` unless 
 The K23 probe and the live check's password check need `DB2_K23_USER` and `DB2_K23_PASSWORD`, a user whose password holds all of `!`, `^`, `[`, `]` and `|`; without them the probe prints `PRESENT (not probed)` and the check prints `SKIP`.
 The 2026-10-04 runs on 1.0.25 made that user in the container with `useradd` and `chpasswd` from a file, so no shell read the password, granted it `CONNECT`, enabled TLS as section 3.3 shows, and loaded the fixture by hand after the image skipped it on a fresh volume (D160).
 
+## Migration DDL
+
+[`DB2_MIGRATION_DDL`](../../src/lib/db/providers/sql/db2/migration-ddl.ts) is what the schema-diff migration generator writes for `db2`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+Db2 (#786) has no standalone `BEGIN;`, and `BEGIN` opens a compound SQL block, so `transactionWrapper` is `null`.
+A dropped foreign key or index is written without `IF EXISTS`, measured on Db2 LUW 12.1.0.0: `ALTER TABLE "C" DROP CONSTRAINT IF EXISTS "fk_c"` and `DROP INDEX IF EXISTS "ix_c"` are both SQL0104N at `EXISTS`, while the bare statements run.
+`DROP TABLE` keeps `IF EXISTS`, and `ADD COLUMN` and `DROP COLUMN` take the standard spelling, both measured on 12.1.0.0.
+A modified column is a comment: Db2 retypes a column with `ALTER COLUMN ... SET DATA TYPE`, and several such changes leave the table REORG-pending until a REORG runs, which a flat migration file cannot schedule.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddColumn`, `standardAddForeignKey`, `standardColumnDef`, `standardCreateIndex`, `standardCreateTableForeignKey`, `standardDropColumn`, `standardDropTable` and `standardPrimaryKey`.
+
+The refusal reason it prints, verbatim:
+
+- "Db2 changes a column with ALTER COLUMN ... SET DATA TYPE and may leave the table REORG-pending; write the change by hand."
+
 ## 14. References
 
 - [IBM Db2 12.1 documentation](https://www.ibm.com/docs/en/db2/12.1.x)

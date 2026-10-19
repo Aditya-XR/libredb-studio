@@ -768,8 +768,8 @@ of the fact, which is why nothing is special-cased. Consequences elsewhere in th
   unimplemented features, so the EDIT toggle and the editable cell are not offered (#269).
 - The schema-diff migration generator emits, in place of a column change:
   *"Elasticsearch SQL reads only; change a field by reindexing into an index whose mapping declares
-  it."* (the `NO_COLUMN_MODIFICATION` table in
-  [`migration-generator.ts`](../../src/lib/schema-diff/migration-generator.ts)). It says *reindex* rather than
+  it."* (the `ELASTICSEARCH_MIGRATION_DDL` refusal in
+  [`elasticsearch-migration-ddl.ts`](../../src/lib/db/providers/sql/search/elasticsearch-migration-ddl.ts)). It says *reindex* rather than
   "use the mapping API" for a reason: an existing field's type cannot be changed in place at all, even
   outside SQL.
 - `schemaRefreshPattern` is `\b(DELETE)\b` (`SEARCH_SCHEMA_REFRESH_PATTERN`, [index.ts](../../src/lib/db/providers/sql/search/index.ts)),
@@ -1732,6 +1732,20 @@ because the provider exposes no `cancelQuery` ([§3.8](#38-the-deadline-is-the-c
   Generate Query omits it from the SELECT list so the starter statement runs (#1459).
 - **The whole result body is buffered** before it is parsed
   ([§3.1](#31-http-only--no-driver-and-what-that-costs)).
+
+---
+
+## Migration DDL
+
+[`ELASTICSEARCH_MIGRATION_DDL`](../../src/lib/db/providers/sql/search/elasticsearch-migration-ddl.ts) is what the schema-diff migration generator writes for `elasticsearch`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+Measured 2026-08-19 on Elasticsearch 9.1.4: `ALTER TABLE probe_orders ADD COLUMN x INT` and `... MODIFY COLUMN customer TEXT` are refused with `parsing_exception`, "mismatched input 'ALTER' expecting {'(', 'DEBUG', 'DESC', 'DESCRIBE', 'EXPLAIN', 'SELECT', 'SHOW', 'SYS', 'WITH'}".
+That list is every statement Elasticsearch SQL accepts, so it has no DDL and no `BEGIN` either (#284).
+An existing field's type cannot be changed in a mapping at all, which is why the reason says reindex rather than "use the mapping API".
+
+The refusal reason it prints, verbatim:
+
+- "Elasticsearch SQL reads only; change a field by reindexing into an index whose mapping declares it."
 
 ---
 

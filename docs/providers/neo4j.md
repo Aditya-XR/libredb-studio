@@ -487,6 +487,16 @@ Each line is one run.
 - No client certificate, no routing `neo4j://` URI, no cluster routing and no Aura in this version.
 - The UI shows the plain name "Neo4j" and a generic graph icon, never Neo4j's logo.
 
+## Migration DDL
+
+[`NEO4J_MIGRATION_DDL`](../../src/lib/db/providers/graph/neo4j/migration-ddl.ts) is what the schema-diff migration generator writes for `neo4j`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`neo4j` text is a Cypher statement, not SQL, and the provider is read-only, so there is no table DDL to wrap (#284).
+
+The refusal reason it prints, verbatim:
+
+- "A node label groups nodes whose properties are not declared columns, so there is no column definition to change."
+
 ## 14. References
 
 - The design, decided with the maintainer on 2026-10-03, and its research on the driver, Cypher, the editions and Memgraph.

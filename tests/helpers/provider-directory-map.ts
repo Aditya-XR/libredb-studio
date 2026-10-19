@@ -15,8 +15,8 @@ import type { DatabaseType } from "@/lib/types";
  * connection layer is both. `tests/unit/helpers/provider-directory-map.test.ts` holds the table equal to
  * the directory on disk, so a new file is claimed the day it lands.
  *
- * `sql/search/` also serves two type-ids, and is absent on purpose: every file there serves both, which is the
- * one-directory reading the censuses already give it.
+ * `sql/search/` also serves two type-ids, `elasticsearch` and `opensearch`: its connection layer is both, and a
+ * per-engine contract module named after its type-id (`elasticsearch-*`, `opensearch-*`) is that type-id's.
  */
 export interface ProviderDirectoryEntry {
   /** A file name prefix and the one type-id whose files it marks. */
@@ -47,6 +47,13 @@ export const PROVIDER_DIRECTORY_MAP: Readonly<Record<string, ProviderDirectoryEn
       "run-database.ts",
       "versions.ts",
     ]),
+  }),
+  "sql/search": Object.freeze({
+    byPrefix: Object.freeze({
+      "elasticsearch-": "elasticsearch",
+      "opensearch-": "opensearch",
+    }),
+    shared: Object.freeze(["http-transport.ts", "index.ts", "introspect.ts", "transport.ts"]),
   }),
 });
 

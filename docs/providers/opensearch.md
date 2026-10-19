@@ -709,8 +709,8 @@ Consequences elsewhere in the product:
   unimplemented features, so the EDIT toggle and the editable cell are not offered (#269).
 - The schema-diff migration generator emits, in place of a column change: *"OpenSearch SQL reads only;
   change a field by reindexing into an index whose mapping declares it."*
-  (the `NO_COLUMN_MODIFICATION` table in
-  [`migration-generator.ts`](../../src/lib/schema-diff/migration-generator.ts)). It says *reindex*
+  (the `OPENSEARCH_MIGRATION_DDL` refusal in
+  [`opensearch-migration-ddl.ts`](../../src/lib/db/providers/sql/search/opensearch-migration-ddl.ts)). It says *reindex*
   rather than "use the mapping API" because an existing field's type cannot be changed in place at
   all, even outside SQL.
 - `schemaRefreshPattern` is `\b(DELETE)\b`
@@ -1702,6 +1702,20 @@ because the provider exposes no `cancelQuery`
   Generate Query omits them from the SELECT list so the starter statement runs (#1459).
 - **The whole result body is buffered** before it is parsed
   ([§3.1](#31-http-only--no-driver-and-what-that-costs)).
+
+---
+
+## Migration DDL
+
+[`OPENSEARCH_MIGRATION_DDL`](../../src/lib/db/providers/sql/search/opensearch-migration-ddl.ts) is what the schema-diff migration generator writes for `opensearch`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+Measured 2026-08-19 on OpenSearch 3.8.0: `ALTER TABLE probe_orders ADD COLUMN x INT` and `... MODIFY COLUMN customer TEXT` are refused with `SQLFeatureNotSupportedException`, "Query must start with SELECT, DELETE, SHOW or DESCRIBE".
+OpenSearch SQL has no `BEGIN` either, measured on 3.8.0, so there is no wrapper (#284).
+An existing field's type cannot be changed in a mapping at all, which is why the reason says reindex rather than "use the mapping API".
+
+The refusal reason it prints, verbatim:
+
+- "OpenSearch SQL reads only; change a field by reindexing into an index whose mapping declares it."
 
 ---
 

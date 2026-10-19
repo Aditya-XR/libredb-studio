@@ -523,6 +523,16 @@ kube-apiserver compacts etcd every 5 minutes, so Compact history is for a NOSPAC
 - A watch whose member goes silent after etcd answered its create, with the connection left open, reports a quiet window, since nothing on the client tells a silent member from a quiet key range; a window that runs on for about 16 seconds after the member went silent lets the keepalive drop the connection (a ping every 10 seconds, unanswered for 6) and ends the watch as an error.
 - The connection dialog sends a client certificate the current SSL mode no longer draws, filed as U60.
 
+## Migration DDL
+
+[`ETCD_MIGRATION_DDL`](../../src/lib/db/providers/keyvalue/etcd/migration-ddl.ts) is what the schema-diff migration generator writes for `etcd`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+`etcd` text is an etcdctl command line, not SQL, so there is no table DDL to wrap (#284, #1089).
+
+The refusal reason it prints, verbatim:
+
+- "A key-prefix group holds keys whose values are bytes, not rows with declared columns, so there is no column definition to change."
+
 ## 14. References
 
 - The design: issue [#1089](https://github.com/libredb/libredb-studio/issues/1089), "Cloud-native control plane".

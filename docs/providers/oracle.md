@@ -2584,6 +2584,20 @@ the object tree's own routes under `POST /api/db/objects/*`
 
 ---
 
+## Migration DDL
+
+[`ORACLE_MIGRATION_DDL`](../../src/lib/db/providers/sql/oracle-migration-ddl.ts) is what the schema-diff migration generator writes for `oracle`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+Oracle DDL commits implicitly and `BEGIN` opens a PL/SQL block, not a transaction, so `transactionWrapper` is `null`.
+Oracle has no `IF EXISTS` on `DROP CONSTRAINT` or `DROP INDEX`, so a dropped foreign key, index or table is written bare.
+A column definition puts `DEFAULT` before `NOT NULL`, falls back to `VARCHAR2(255)`, and is added with `ADD (...)`.
+A modified column writes its nullability only when it changes, because restating ` NULL` on a nullable column is ORA-01451 and the column keeps its old type (#1240).
+The live regression probe is `tests/live/schema-diff-dialects.ts`.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddForeignKey`, `standardCreateIndex`, `standardCreateTableForeignKey`, `standardDropColumn` and `standardPrimaryKey`.
+
+It prints no refusal reason.
+
+---
+
 ## 15. References
 
 - Driver: [`node-oracledb`](https://github.com/oracle/node-oracledb) (Thin mode)

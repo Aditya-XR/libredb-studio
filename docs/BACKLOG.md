@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
-- [Drivers and connections](#drivers-and-connections) — D1-D376, U17 · 273
+- [Drivers and connections](#drivers-and-connections) — D1-D375, U17 · 272
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R4 · 4
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U146 · 133
@@ -2038,12 +2038,12 @@ Found 2026-10-03 while scoping the Db2 provider's first version (#786).
 
 ### D147. The Db2 schema diff writes a column modification as a comment
 
-`NO_COLUMN_MODIFICATION` in `src/lib/schema-diff/migration-generator.ts` holds `db2`, because Db2 changes a column with `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE` and may leave the table REORG-pending, after which most statements on it fail with SQL0668N until a REORG.
+`DB2_MIGRATION_DDL` in `src/lib/db/providers/sql/db2/migration-ddl.ts` writes a modified column as its `NO_COLUMN_MODIFICATION` comment, because Db2 changes a column with `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE` and may leave the table REORG-pending, after which most statements on it fail with SQL0668N until a REORG.
 The #787 branch drafted a branch that emits `SET DATA TYPE`, `SET`/`DROP NOT NULL` and `SET`/`DROP DEFAULT` with a REORG advisory comment, never measured live.
 
 Found 2026-10-03 while scoping the Db2 provider's first version (#786).
 
-**Done when:** the column modification is expressed through a declared capability rather than a `dialect === "db2"` branch, each statement it emits runs on Db2 12.1 against the fixture, the REORG-pending advisory names the table, and `tests/unit/schema-diff/migration-generator.test.ts` moves `db2` out of the comment-only coverage.
+**Done when:** `DB2_MIGRATION_DDL`'s `modifyColumn` emits `SET DATA TYPE`, `SET`/`DROP NOT NULL` and `SET`/`DROP DEFAULT` with the REORG advisory, each statement it emits runs on Db2 12.1 against the fixture, the REORG-pending advisory names the table, and `tests/unit/schema-diff/migration-generator.test.ts` moves `db2` out of the comment-only coverage.
 
 ### D148. Db2 has no transactions, SANDBOX or query cancel
 
@@ -3552,8 +3552,8 @@ Found 2026-10-13 while reviewing the Apache Spark provider (#1759); pre-existing
 
 ### D350. The schema-diff migration says BigQuery has no foreign-key constraint
 
-`NO_FOREIGN_KEYS` in `src/lib/schema-diff/migration-generator.ts` names BigQuery, so an added or dropped foreign key is declined with `-- BigQuery: Cannot add a foreign key. The engine has no foreign-key constraint.` (and the `Cannot drop` twin).
-BigQuery does have foreign keys, declared `NOT ENFORCED`, as it has primary keys, and the same file's `NO_PRIMARY_KEY_CONSTRAINT` row for BigQuery already says so for the primary key: "BigQuery accepts a primary key only as PRIMARY KEY (...) NOT ENFORCED."
+`BIGQUERY_MIGRATION_DDL` in `src/lib/db/providers/sql/bigquery/migration-ddl.ts` declines a foreign key with the shared `NO_FOREIGN_KEY_CONSTRAINT`, so an added or dropped foreign key is declined with `-- BigQuery: Cannot add a foreign key. The engine has no foreign-key constraint.` (and the `Cannot drop` twin).
+BigQuery does have foreign keys, declared `NOT ENFORCED`, as it has primary keys, and the same module's `NO_PRIMARY_KEY_CONSTRAINT` already says so for the primary key: "BigQuery accepts a primary key only as PRIMARY KEY (...) NOT ENFORCED."
 The decline itself may stay; its reason is false.
 
 Found 2026-10-13 while reviewing the Apache Spark provider (#1759); pre-existing.
@@ -3835,16 +3835,6 @@ Measured on 2026-10-17 with a probe test that held the old provider's disconnect
 Found 2026-10-17 while verifying an external review of #1785.
 
 **Done when:** concurrent requests for a stale entry share one retirement and one replacement, for example by taking the entry out of the cache before awaiting its disconnect, no provider is left connected outside the cache, and a test with a disconnect held open and two requests shows one replacement provider and the old one closed.
-
-### D376. The schema-diff migration generator keeps its per-engine rules in tables keyed by type id
-
-`src/lib/schema-diff/migration-generator.ts` decides what it can write per engine from tables keyed by `DatabaseType`: `NO_COLUMN_MODIFICATION`, `NO_DROP_IF_EXISTS`, `NO_TRANSACTION_WRAPPER`, `NO_TABLE_DDL`, `NO_PORTABLE_INDEX_DDL`, `NO_FOREIGN_KEYS`, `NO_PRIMARY_KEY_CONSTRAINT` and `FOREIGN_KEY_ONLY_IN_CREATE_TABLE`, plus `dialect === "<id>"` branches in the column and `ALTER TABLE` writers.
-A new provider gets the generator's default (PostgreSQL-shaped) DDL until someone adds it to the right tables, which is the defect class #648 was for the Create Table form, and the engine's facts live in the generator rather than beside its provider.
-#1822 moved the Create Table form's grammar onto the provider as `createTable` and left these tables alone, because they are a separate surface with their own scope; D147 and D350 are single-engine entries inside it.
-
-Found 2026-10-18 while designing #1822.
-
-**Done when:** each rule the generator reads is a declaration on the provider's capabilities, the generator holds no table or branch keyed by a type id, and `tests/unit/schema-diff/migration-dialects.test.ts` still pins every engine's emitted text unchanged.
 
 ## Value interpolation
 

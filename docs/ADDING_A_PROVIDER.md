@@ -1114,7 +1114,10 @@ Those three reach code and tests only; the four prose greps of the published blo
 
 - [ ] `src/lib/db/destructive-commands.ts`: `NON_SQL_DESTRUCTIVE_VOCABULARY`, a row for every id whose grammar module declares `readsSqlText: false`, which `tests/unit/db/destructive-commands.test.ts` holds to exactly those ids.
       A text that cannot write takes the row that names no operation and decides alone, the Prometheus and Kafka shape.
-- [ ] `src/lib/schema-diff/migration-generator.ts`: `NO_TABLE_DDL`, beside `NO_COLUMN_MODIFICATION` and `NO_TRANSACTION_WRAPPER`, for an engine whose diff gets no table DDL at all; every id in it is in `NO_TRANSACTION_WRAPPER` too.
+- [ ] `src/lib/db/migration-ddl/index.ts`: the new id's row in `MIGRATION_DDL`, which the compiler holds complete.
+      Write the row's module beside the provider at the placement rule, `<family>/<id>-migration-ddl.ts` for a flat provider or `<family>/<id>/migration-ddl.ts` for a directory one, as a `MigrationDdlSpec`: `tableDdl: "refused"` with its one `refusal` line for an engine whose diff gets no table DDL at all, or `"written"` with every statement kind and a `transactionWrapper` decision (#284), sharing PostgreSQL's spelling only by importing a named building block from `shared.ts` (#269).
+      Give the provider doc its `Migration DDL` section, which `tests/unit/db/migration-ddl/docs.test.ts` holds to the module, then run `UPDATE_GOLDEN=1 bun tests/run-tests.ts tests/unit/db/migration-ddl/golden.test.ts` and read the new golden file before committing it.
+      Add the new id to `PLACEMENT` in `tests/unit/db/migration-ddl/census.test.ts`, which the compiler holds complete, and, when the module refuses table DDL, to its `REFUSED` list, a plain list the compiler does not hold.
 - [ ] `tests/unit/lib/db-ui-config.test.ts`: `FIELD_CHECKLIST`, when the new id's connection fields include one the checklist does not hold.
 - [ ] The pinned lists and per-dialect pins: `tests/components/ConnectionModal.test.tsx` (its mocks and its `SHIPPED` census), `tests/components/rich-text.test.tsx` and `tests/unit/lib/sql/fence-tags.test.ts` (the hand lists of canonical tags), `tests/unit/aws-listing-fields.test.ts` (`productNames`), `tests/unit/db/object-edit-expectation.test.ts` (the census counts), `tests/unit/lib/export/result-export.test.ts` and `tests/unit/sql/values.test.ts` (the literal and placeholder pins).
 - [ ] `docs/API_DOCS.md`: the `type DatabaseType` line names every type-id.
@@ -1163,13 +1166,6 @@ Those three reach code and tests only; the four prose greps of the published blo
 - [ ] `src/lib/connection-string-parser.ts` — the scheme(s), if `supportsConnectionString`
 - [ ] `src/lib/query-generators.ts` — only if the dialect needs its own branch; the default is
       PostgreSQL-shaped, so check before assuming it fits
-- [ ] `src/lib/schema-diff/migration-generator.ts` — same shape, same hazard: the modified-column
-      chain's trailing `else` is PostgreSQL DDL, so an unlisted id silently inherits it (#269). Give the
-      dialect a branch, or list it in `NO_COLUMN_MODIFICATION` to emit an honest comment instead. A new
-      id also needs a decision in `NO_TRANSACTION_WRAPPER` (#284): does `BEGIN;`/`COMMIT;` wrap this
-      engine's DDL at all, or does it belong in the set that gets no wrapper? An id absent from that
-      set inherits the PostgreSQL-shaped wrapper by default, which is silently wrong for a non-SQL or
-      non-transactional engine the same way the modified-column `else` used to be
 - [ ] `src/lib/db/sql-grammar/`: write your engine's grammar module, `<family>/<id>/sql-grammar.ts`
       under `src/lib/db/providers/` (or `<family>/<id>-sql-grammar.ts` beside a provider that is one
       flat file), exporting `<ID>_SQL_GRAMMAR` with every fact of `SqlGrammarSpec`, and add its row to
@@ -1264,8 +1260,8 @@ connection-form test), so the compiler and those tests refuse to pass until each
 `tests/hooks/use-connection-form.test.ts`,
 `tests/unit/schema-diff/migration-generator.test.ts` (`MODIFIED_COLUMN_COVERAGE` — classify the new id
 as having its own dialect branch or as unable to express a column modification; and
-`TRANSACTION_WRAPPER_COVERAGE` — classify it as `"wrapped"` or `"unwrapped"`, matching whatever you
-chose in `NO_TRANSACTION_WRAPPER`),
+`TRANSACTION_WRAPPER_COVERAGE` — classify it as `"wrapped"` or `"unwrapped"`, matching the module's
+`transactionWrapper`),
 `tests/unit/sql/grammar.test.ts` (`GRAMMAR_COVERAGE` and `SQL_TEXT_COVERAGE` — record whether the id
 has an established grammar or reads at the default, and whether its query text is SQL).
 

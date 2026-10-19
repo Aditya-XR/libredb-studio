@@ -242,3 +242,13 @@ The requirements are in `docs/SECURITY.md` under MB-S1 to MB-S13. The short form
 - The identification walk is bounded (MB-S6).
 - A value is data, never markup (MB-S13).
 - `mbaps` checks the chain and the host name, and not revocation, and says so.
+
+## Migration DDL
+
+[`MODBUS_MIGRATION_DDL`](../../src/lib/db/providers/industrial/modbus/migration-ddl.ts) is what the schema-diff migration generator writes for `modbus`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+What a register means is the device vendor's, written down in the user's register map, so there is no table DDL to wrap either (#1723).
+
+The refusal reason it prints, verbatim:
+
+- "A Modbus register has no column definition anywhere: the device holds 16-bit words and single bits with no name, no type and no unit, and what gives them meaning is the register map the user wrote, so there is nothing a client could change here."

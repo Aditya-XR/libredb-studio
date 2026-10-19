@@ -453,6 +453,16 @@ instead of silence.
 
 **Phase 2, `gnmi`, is not started.**
 
+## Migration DDL
+
+[`NETCONF_MIGRATION_DDL`](../../src/lib/db/providers/network/netconf/migration-ddl.ts) is what the schema-diff migration generator writes for `netconf`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+It declines the whole diff: `refusal` is the one line the migration prints after its header, in place of any DDL, and `transactionWrapper` is `null`.
+A node's shape is the device's YANG module, and this provider builds four read operations and a close, so there is no table DDL to wrap either (#1724).
+
+The refusal reason it prints, verbatim:
+
+- "A NETCONF node's shape is declared in the device's YANG module, which the device serves and a client reads, and this provider builds four read operations and a close, and nothing else, so there is no column definition here for anything to change."
+
 ## 13. References
 
 - RFC 6241, NETCONF

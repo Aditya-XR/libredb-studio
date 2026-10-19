@@ -991,6 +991,23 @@ A seed takes the same fields, as [SEED_CONNECTIONS.md](../SEED_CONNECTIONS.md) s
 - The sign-in latch is one Studio process's: several replicas each send a refused password once per 15 minutes, so five or more can still lock a user under a password policy ([D252](../BACKLOG.md)).
 - Driver-based SQL providers hold a whole result with no cell or byte budget, which Databend's provider has ([D247](../BACKLOG.md)), and the pulse of other engines resends a refused password, which the latch prevents here within one Studio process ([D248](../BACKLOG.md)).
 
+## Migration DDL
+
+[`DATABEND_MIGRATION_DDL`](../../src/lib/db/providers/sql/databend/migration-ddl.ts) is what the schema-diff migration generator writes for `databend`, read through `migrationDdlFor` in `src/lib/db/migration-ddl/`.
+Databend has `BEGIN`, `COMMIT` and `ROLLBACK`, but a DDL statement commits the open transaction, so `transactionWrapper` is `null`.
+Its constraints are `CHECK` only, so a foreign key is a comment.
+An added table declines its primary key in a comment after the statement: probe L11 found every `PRIMARY KEY` form refused with 1005.
+A modified column is a comment (probe L8): Databend has `ALTER TABLE ... MODIFY COLUMN`, measured changing type, nullability and comment with the data kept, but the MySQL spelling's `NOT NULL` form is refused on an empty table (1058, "Cannot find statistics for column"), a change that does not restate the default drops it, and the PostgreSQL `ALTER COLUMN` is a parse error (1005).
+Its `CREATE INDEX` always names an inverted, ngram, vector or spatial kind, with no plain or `UNIQUE` index to carry the diff's columns, so index changes are a comment.
+The fields it takes unchanged from `src/lib/db/migration-ddl/shared.ts` are `standardAddColumn`, `standardColumnDef`, `standardDropColumn` and `standardDropTable`.
+
+Every refusal reason it can print, verbatim:
+
+- "Databend has ALTER TABLE ... MODIFY COLUMN, but the MySQL spelling this generator writes fails NOT NULL on an empty table and silently drops an existing default it does not restate; write the change by hand."
+- "Databend: Cannot generate index DDL. Its indexes are inverted, ngram, vector and spatial search indexes, which the diff does not record; write the index change by hand."
+- "The engine has no foreign-key constraint."
+- "Databend's CREATE TABLE has no primary-key constraint."
+
 ## 14. References
 
 - Source: [`src/lib/db/providers/sql/databend/`](../../src/lib/db/providers/sql/databend/)
