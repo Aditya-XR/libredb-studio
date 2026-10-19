@@ -24,6 +24,8 @@
  * - R6: every `*_SERVER_OVERLAY` and `*_CLIENT_OVERLAY` an engine module under `languages/<family>/engines/` exports is
  *   declared `satisfies` its overlay type, `AgentEngineServerOverlay<...>`, `AgentEngineClientOverlay<...>` or
  *   `{ dialect: ClientDialectOf<...> }`, so the excess-property check holds every overlay to its family's dialect.
+ * - R7: no core file declares a name of a dialect table the engine overlays absorbed (`CATALOG_PLANS` and the rest of
+ *   `ABSORBED`), at any depth and with no allowlist, so a table cannot come back beside the overlay that replaced it.
  * - R4: the allowlist is exact. A key found more often than it is listed fails, and so does a listed key found less
  *   often, so the list can only shrink.
  *
@@ -474,6 +476,49 @@ function overlayShapeFindings(planted: Planted = {}): string[] {
   return findings.sort();
 }
 
+/**
+ * The module-private dialect tables PR 2 moved onto the engine overlays. `CATALOG_CAPTURE_ENGINES` is not here: posture
+ * still declares it under that name, derived from the client dialects.
+ */
+const ABSORBED = new Set([
+  "CATALOG_COMPOSERS",
+  "ESTIMATING_EXPLAIN_PREFIX",
+  "ESTIMATING_EXPLAIN_SESSION_MODE",
+  "ProfileDialect",
+  "INCOMPARABLE_TYPE",
+  "UNCOUNTABLE_TYPE",
+  "ESTIMATE_BUILDERS",
+  "CATALOG_PLANS",
+  "COMPOSED_KIND_WORDS",
+  "normalizeDeclaredSchema",
+  "isMissingExtensionCatalogError",
+]);
+
+/** R7 over `files`: every variable, function, class, type alias, interface or enum declared under an absorbed name. */
+function absorbedFindings(files: readonly string[], planted: Planted = {}): string[] {
+  const findings: string[] = [];
+  for (const file of files) {
+    const visit = (node: ts.Node): void => {
+      if (
+        (ts.isVariableDeclaration(node) ||
+          ts.isFunctionDeclaration(node) ||
+          ts.isClassDeclaration(node) ||
+          ts.isTypeAliasDeclaration(node) ||
+          ts.isInterfaceDeclaration(node) ||
+          ts.isEnumDeclaration(node)) &&
+        node.name !== undefined &&
+        ts.isIdentifier(node.name) &&
+        ABSORBED.has(node.name.text)
+      ) {
+        findings.push(`${file}#${node.name.text}: R7`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(parse(file, textOf(file, planted)));
+  }
+  return findings.sort();
+}
+
 describe("the agent core names no language a pack owns", () => {
   test("the pack ids come from the manifest", () => {
     expect(PACK_IDS).toEqual(["kubectl", "mongo"]);
@@ -540,6 +585,30 @@ describe("every engine overlay is declared satisfies its overlay type", () => {
     const text = read(client);
     const planted = { [client]: text.replace('satisfies AgentEngineClientOverlay<"mongo">', "satisfies object") };
     expect(overlayShapeFindings(planted)).toEqual([`${client}#MONGODB_CLIENT_OVERLAY: R6`]);
+  });
+});
+
+describe("no core file declares a dialect table the engine overlays absorbed", () => {
+  test("the real core sources hold R7, and the scan reads real declarations: the overlays hold one", () => {
+    expect(absorbedFindings(coreFiles())).toEqual([]);
+    expect(absorbedFindings(sourcesUnder(LANGUAGES))).toEqual([
+      `${LANGUAGES}/sql/engines/postgres.ts#isMissingExtensionCatalogError: R7`,
+    ]);
+  });
+
+  test("an absorbed table declared again in the core fails R7", () => {
+    const posture = `${AGENT}/posture.ts`;
+    expect(absorbedFindings(coreFiles(), prepend(posture, "const CATALOG_PLANS = {};"))).toEqual([
+      `${posture}#CATALOG_PLANS: R7`,
+    ]);
+  });
+
+  test("an absorbed name declared inside a function or as a type fails R7 too", () => {
+    const tools = `${AGENT}/tools.ts`;
+    const nested = plantInFunction(tools, "agentToolDefinition", "function normalizeDeclaredSchema() {}");
+    expect(absorbedFindings(coreFiles(), nested)).toEqual([`${tools}#normalizeDeclaredSchema: R7`]);
+    const alias = prepend(tools, 'type ProfileDialect = "x";');
+    expect(absorbedFindings(coreFiles(), alias)).toEqual([`${tools}#ProfileDialect: R7`]);
   });
 });
 

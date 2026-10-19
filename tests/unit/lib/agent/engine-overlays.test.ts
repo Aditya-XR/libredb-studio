@@ -427,7 +427,10 @@ describe("the resolvers and their readers load alone", () => {
     "src/lib/agent/languages/engines/client.ts",
     "src/lib/agent/languages/engines/server.ts",
     "src/lib/agent/languages/engines/index.ts",
+    "src/lib/agent/composed-sql.ts",
     "src/lib/agent/table-profile.ts",
+    "src/lib/agent/context-snapshot.ts",
+    "src/lib/agent/tools.ts",
     "src/lib/agent/agent-manifest.ts",
     "src/lib/agent/posture.ts",
   ])("%s loads alone in a fresh process", (module) => {
