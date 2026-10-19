@@ -2602,6 +2602,23 @@ measured on MySQL is not proven on any of them — Vitess, for one, refuses `KIL
 A server whose `VERSION()` answer could not be read is refused fail-closed the same way: an
 unidentified engine is an unproven boundary.
 
+### 12.6 Agent language pack
+
+Statement-language family: `sql`.
+Overlay: [`src/lib/agent/languages/sql/engines/mysql.ts`](../../src/lib/agent/languages/sql/engines/mysql.ts), with its client row in [`src/lib/agent/languages/sql/engines/client.ts`](../../src/lib/agent/languages/sql/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`, and the dialect through `engineServerDialect`.
+
+| Member | Kind | Value |
+| --- | --- | --- |
+| `catalogRead` | Dialect-bound | Supplied |
+| `planEstimate` | Dialect-bound | Supplied |
+| `profileComposition` | Dialect-bound | Supplied |
+| `statistics` | Dialect-bound | `"unsupported"` |
+| `catalogCapture` | Dialect-bound | `"unsupported"` |
+
+This overlay overrides no Shared member, so every Shared member is the `sql` statement-language family's own.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
+
 ## 13. Testing
 
 ### 13.1 How the tests work

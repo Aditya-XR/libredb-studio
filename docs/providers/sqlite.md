@@ -1541,6 +1541,23 @@ on a read-only handle, which the known-limitations record states in full.
 is REPORTED, not what runs — the limitation above is unchanged, and anything that displays a budget
 has to say so rather than imply preemption.
 
+### 12.5 Agent language pack
+
+Statement-language family: `sql`.
+Overlay: [`src/lib/agent/languages/sql/engines/sqlite.ts`](../../src/lib/agent/languages/sql/engines/sqlite.ts), with its client row in [`src/lib/agent/languages/sql/engines/client.ts`](../../src/lib/agent/languages/sql/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`, and the dialect through `engineServerDialect`.
+
+| Member | Kind | Value |
+| --- | --- | --- |
+| `catalogRead` | Dialect-bound | Supplied |
+| `planEstimate` | Dialect-bound | Supplied |
+| `profileComposition` | Dialect-bound | Supplied |
+| `statistics` | Dialect-bound | Supplied |
+| `catalogCapture` | Dialect-bound | Supplied |
+
+This overlay overrides no Shared member, so every Shared member is the `sql` statement-language family's own.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
+
 ---
 
 ## 13. Usage examples
