@@ -13,6 +13,7 @@ import { classifyAgentWorkflow } from "@/lib/agent/workflow-classifier";
 import { logger } from "@/lib/logger";
 import {
   type LLMConfig,
+  type LLMModelEffort,
   LLMAuthError,
   LLMConfigError,
   LLMError,
@@ -772,7 +773,7 @@ describe("the workflow classifier sends a run's options too", () => {
     expect(recording.requests[0]?.body.reasoning).toEqual({ effort: "low" });
   });
 
-  test("an effort the model refuses leaves the run unclassified rather than classified at another effort", async () => {
+  test("an effort the model refuses leaves the run unclassified, and no request goes out", async () => {
     process.env.LLM_PROVIDER = "openai";
     process.env.LLM_API_KEY = "sk-configured";
     process.env.LLM_MODEL = "gpt-6.1-sol";
@@ -784,13 +785,11 @@ describe("the workflow classifier sends a run's options too", () => {
       const classification = await classifyAgentWorkflow("vacuum the orders table", { fetch: recording.fetch });
 
       expect(classification).toEqual({ workflowType: "investigation", outcome: "unclassified" });
-      // Why it fell back: the SDK dropped the effort (no `reasoning` went out), the reply was a
-      // valid workflow type, and the classifier refused it as a configuration error.
-      expect(recording.requests).toHaveLength(1);
-      expect(recording.requests[0]?.url).toBe("https://api.openai.com/v1/responses");
-      expect(recording.requests[0]?.body).not.toHaveProperty("reasoning");
+      // Why it fell back: the model was refused when it was built, so there was nothing to ask.
+      // The start that follows answers the same configuration error with its sentence.
+      expect(recording.requests).toHaveLength(0);
       expect(warn).toHaveBeenCalledWith(
-        "Workflow classification failed; the run opens as an unclassified investigation",
+        "No model to classify the objective with; the run opens as an unclassified investigation",
         { route: "agent/workflow-classifier", error: "LLMConfigError" },
       );
     } finally {
@@ -827,11 +826,24 @@ describe("ollama and custom stay on Chat Completions, with the options they had"
 });
 
 describe("a reasoning effort the SDK drops is raised, not sent at another effort", () => {
-  const SOL: Partial<LLMConfig> = { provider: "openai", apiKey: "sk", model: "gpt-6.1-sol", modelEffort: "none" };
+  const SOL: Partial<LLMConfig> = { provider: "openai", apiKey: "sk", model: "gpt-6.1-sol" };
+
+  /**
+   * The model as a turn holds it once the build check is behind it. `createAgentModel` refuses
+   * these configurations itself (below), so the defence a turn keeps for anything that slips
+   * past it is exercised on a model built without the effort and handed it afterwards.
+   */
+  async function builtPastTheCheck(
+    config: Partial<LLMConfig>,
+    effort: LLMModelEffort,
+    fetchImpl: AgentFetch,
+  ): Promise<AgentModel> {
+    return { ...(await createAgentModel({ config, fetch: fetchImpl })), effort };
+  }
 
   test("the SDK's own refusal names the effort, the model and the efforts it takes", async () => {
     const recording = recordingFetch(responsesCompletion("pong"));
-    const agentModel = await createAgentModel({ config: SOL, fetch: recording.fetch });
+    const agentModel = await builtPastTheCheck(SOL, "none", recording.fetch);
     const result = await generateText({
       model: agentModel.model,
       prompt: "ping",
@@ -851,10 +863,7 @@ describe("a reasoning effort the SDK drops is raised, not sent at another effort
 
   test("a non-reasoning model refuses any effort the same way", async () => {
     const recording = recordingFetch(responsesCompletion("pong"));
-    const agentModel = await createAgentModel({
-      config: { ...OPENAI_CONFIG, modelEffort: "low" },
-      fetch: recording.fetch,
-    });
+    const agentModel = await builtPastTheCheck(OPENAI_CONFIG, "low", recording.fetch);
     const result = await generateText({
       model: agentModel.model,
       prompt: "ping",
@@ -882,5 +891,78 @@ describe("a reasoning effort the SDK drops is raised, not sent at another effort
     expect(refusedEffortError(undefined, agentModel)).toBeUndefined();
     expect(refusedEffortError([{ type: "unsupported", feature: "temperature" }], agentModel)).toBeUndefined();
     expect(refusedEffortError([{ type: "other", message: "reasoningEffort" }], agentModel)).toBeUndefined();
+  });
+});
+
+describe("an effort the model refuses is refused when the model is built, before any request", () => {
+  const SOL_MODEL: Partial<LLMConfig> = { provider: "openai", apiKey: "sk", model: "gpt-6.1-sol" };
+  const SOL: Partial<LLMConfig> = { ...SOL_MODEL, modelEffort: "none" };
+
+  /** Builds `config` over a transport that records and answers nothing. */
+  async function buildFailure(config: Partial<LLMConfig>): Promise<{ error: unknown; requests: CapturedRequest[] }> {
+    const recording = recordingFetch();
+    try {
+      await createAgentModel({ config, fetch: recording.fetch });
+    } catch (error) {
+      return { error, requests: recording.requests };
+    }
+    throw new Error("expected the build to refuse the configured effort");
+  }
+
+  test("GPT-6.1 Sol with LLM_MODEL_EFFORT=none is a configuration error, and nothing is sent", async () => {
+    const { error, requests } = await buildFailure(SOL);
+
+    expect(error).toBeInstanceOf(LLMConfigError);
+    expect((error as LLMConfigError).provider).toBe("openai");
+    expect((error as LLMConfigError).reason).toBe("effort_refused");
+    expect((error as LLMConfigError).message).toBe(
+      'LLM_MODEL_EFFORT "none" was refused for the model "gpt-6.1-sol" (openai): gpt-6.1-sol only supports the following reasoning efforts: low, medium, high, xhigh, max. Change LLM_MODEL_EFFORT or unset it.',
+    );
+    // The point of refusing here: no paid request at an effort nobody configured.
+    expect(requests).toHaveLength(0);
+  });
+
+  test("the build check and a real request read the SDK's one table, so they say the same sentence", async () => {
+    // The check prepares the request the SDK would send and reads its warnings; a turn reads the
+    // warnings of the request it did send. Two readings of one table, pinned to agree.
+    const recording = recordingFetch(responsesCompletion("pong"));
+    const built = await createAgentModel({ config: SOL_MODEL, fetch: recording.fetch });
+    const agentModel: AgentModel = { ...built, effort: "none" };
+    const result = await generateText({
+      model: agentModel.model,
+      prompt: "ping",
+      maxRetries: 0,
+      providerOptions: agentProviderOptions(agentModel),
+    });
+
+    expect(refusedEffortError(result.warnings, agentModel)?.message).toBe(
+      ((await buildFailure(SOL)).error as Error).message,
+    );
+  });
+
+  test("a non-reasoning model is refused any effort at build time too", async () => {
+    const { error, requests } = await buildFailure({ ...OPENAI_CONFIG, modelEffort: "low" });
+
+    expect((error as LLMConfigError).reason).toBe("effort_refused");
+    expect((error as Error).message).toContain("reasoningEffort is not supported for non-reasoning models");
+    expect(requests).toHaveLength(0);
+  });
+
+  test.each([
+    ["gpt-6-luna", "none"],
+    ["gpt-6.1-sol", "low"],
+    // The SDK has no effort table for GPT-5.x and passes any effort through; measured on
+    // 2026-10-19, gpt-5.4-mini takes "none" on the Responses API.
+    ["gpt-5.4-mini", "none"],
+  ] as const)("%s takes %s, and building it sends nothing", async (model, modelEffort) => {
+    const recording = recordingFetch();
+
+    const agentModel = await createAgentModel({
+      config: { provider: "openai", apiKey: "sk", model, modelEffort },
+      fetch: recording.fetch,
+    });
+
+    expect(agentModel.effort).toBe(modelEffort);
+    expect(recording.requests).toHaveLength(0);
   });
 });

@@ -85,6 +85,8 @@ describe("the model gate on the start path", () => {
 
     expect(verdict.kind).toBe("allowed");
     expect(probeAgentModel).not.toHaveBeenCalled();
+    // Built, which sends nothing, so a configuration the model refuses is caught here too.
+    expect(createAgentModel).toHaveBeenCalledTimes(1);
   });
 
   test("an agent run is probed, and admitted when the model can drive one", async () => {
@@ -261,4 +263,32 @@ describe("the model gate on the start path", () => {
     expect(verdict.kind).toBe("allowed");
     expect(probeAgentModel).not.toHaveBeenCalled();
   });
+
+  test("a planning run whose model cannot be built is admitted the same way", async () => {
+    createAgentModel.mockImplementationOnce(async () => {
+      throw new LLMConfigError("Gemini API key is required", "gemini");
+    });
+
+    expect(await admitAgentModel("planning")).toEqual({ kind: "allowed", protocol: "native" });
+  });
+
+  test.each(["planning", "agent"] as const)(
+    "a start in %s mode on an effort the model refuses is refused at the build, before any model call",
+    async (mode) => {
+      // `createAgentModel` asks the SDK's request preparation, offline, whether the model takes the
+      // configured effort. Every mode sends that effort, so every mode's start answers the
+      // configuration error; a plan run used to open, spend a turn and fail as model-unavailable.
+      const refused = new LLMConfigError(
+        'LLM_MODEL_EFFORT "none" was refused for the model "gpt-6.1-sol" (openai).',
+        "openai",
+        "effort_refused",
+      );
+      createAgentModel.mockImplementationOnce(async () => {
+        throw refused;
+      });
+
+      await expect(admitAgentModel(mode)).rejects.toBe(refused);
+      expect(probeAgentModel).not.toHaveBeenCalled();
+    },
+  );
 });

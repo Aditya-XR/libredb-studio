@@ -94,7 +94,7 @@ Two properties of that seam are enforced rather than assumed:
 - **OpenAI keeps nothing a run sends.**
   Every call of the `openai` kind, the run's turns, the capability probe and the workflow classification alike, is a Responses API request with `store: false`, so OpenAI does not store the response or the schemas and rows the request carried.
   Stateless mode is also why each turn's reasoning comes back as an encrypted item that the next turn sends back unread; Studio cannot read it and holds it only in the drive's in-memory transcript.
-  `LLM_MODEL_EFFORT`, when set, is sent as `reasoning.effort`, and a value the SDK will not send for the configured model is raised as a configuration error rather than sent at another effort (`agentProviderOptions` and `refusedEffortError` in `src/lib/agent/model-adapter.ts`, asserted on the wire in `tests/isolated/agent-model-adapter.test.ts`).
+  `LLM_MODEL_EFFORT`, when set, is sent as `reasoning.effort`, and a value the SDK will not send for the configured model is raised as a configuration error when the model is built, before any request leaves, rather than sent at another effort (`agentProviderOptions`, `refusedEffortError` and `createAgentModel` in `src/lib/agent/model-adapter.ts`, asserted on the wire in `tests/isolated/agent-model-adapter.test.ts`).
 
 `LLM_API_URL` reaches the `gemini` kind on the agent path exactly as on the chat surface, so a Gemini
 deployment behind an egress proxy or on a regional endpoint is configurable from the one variable. The

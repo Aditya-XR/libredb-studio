@@ -121,13 +121,17 @@ export class LLMError extends Error {
 }
 
 /**
- * Configuration error - missing or invalid config
+ * Configuration error - missing or invalid config.
+ *
+ * `reason` marks the two cases a caller treats apart: `missing_credentials`, an AI setup that may be
+ * absent on purpose, and `effort_refused`, an `LLM_MODEL_EFFORT` the configured model does not take,
+ * which the agent's start path refuses in every mode rather than letting a run reach it.
  */
 export class LLMConfigError extends LLMError {
   constructor(
     message: string,
     provider?: LLMProviderType,
-    public readonly reason?: "missing_credentials",
+    public readonly reason?: "missing_credentials" | "effort_refused",
   ) {
     super(message, provider);
     this.name = "LLMConfigError";

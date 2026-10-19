@@ -216,8 +216,9 @@ Every call is sent `store: false`, so OpenAI keeps nothing a run sends, and the 
 `ollama` and `custom` stay on `{LLM_API_URL}/chat/completions`, which a self-hosted endpoint serves and the Responses API is not.
 `LLM_MODEL_EFFORT` (openai only: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`) sets the reasoning effort and wins over a model profile's quiet switch.
 An effort the configured model does not take is never sent at another effort.
-The capability probe raises it as a configuration error, so an agent run is refused at start with HTTP 503 and the sentence naming the efforts the model takes, not with a capability refusal that would blame the model and offer Plan mode.
-Plan mode is not probed, and fails on its first turn as `model-unavailable`.
+Building the model raises it as a configuration error, before any request: `createAgentModel` asks the AI SDK's own request preparation, offline, whether the model takes the effort, so the SDK's per-model table decides and no copy of it lives here.
+The start gate builds the model in every mode, so an Agent or Plan run is refused at start with HTTP 503 and the sentence naming the efforts the model takes, not with a capability refusal that would blame the model and offer Plan mode.
+A turn still reads its own call's warnings and raises the same error, for an effort that reaches a call some other way, a profile's quiet switch.
 `agentProviderOptions` in `src/lib/agent/model-adapter.ts` is the one place these options are built.
 
 **"Configured" is a network-free check, and it has one blind spot worth naming.** `validateConfig`
@@ -2069,8 +2070,8 @@ shape what that costs:
   a drive now reports `model-rate-limited`, `model-unauthorized` or `model-unavailable`, those runs
   say what happened rather than sitting at `queued`.
   The one exception is a configuration the model refused, an `LLM_MODEL_EFFORT` it does not take:
-  the probe raises it as a configuration error and the start answers `503` with its sentence, since
-  the run's first turn would raise the same one.
+  building the model raises it as a configuration error without a model call, in every mode, and
+  the start answers `503` with its sentence, since the run's first turn would raise the same one.
 - **Positive verdicts are cached for the life of the process; refusals are not.** A model that called
   a tool keeps calling tools, so that round trip is paid once. A refusal is re-probed because an
   operator can fix the server without changing the model id — an `ollama` endpoint serving something

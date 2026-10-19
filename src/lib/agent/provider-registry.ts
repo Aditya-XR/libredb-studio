@@ -56,7 +56,7 @@
  * half-built; the reasoning and what closing it takes are in `docs/BACKLOG.md` B2.
  */
 
-import type { LanguageModel } from "ai";
+import type { CallWarning, LanguageModel } from "ai";
 import { type LLMConfig, type LLMProviderType, LLMConfigError } from "@/lib/llm/types";
 import { resolveGeminiSdkBaseUrl } from "@/lib/llm/utils/gemini-endpoint";
 
@@ -195,3 +195,28 @@ export function resolveAgentProviderAdapter(kind: LLMProviderType): AgentProvide
 // multi-line string concatenation.
 const noAdapterMessage = (kind: string): string =>
   `No agent provider adapter for "${kind}". Configured kinds: ${Object.keys(AGENT_PROVIDER_ADAPTERS).join(", ")}.`;
+
+/**
+ * The warnings the SDK raises while it PREPARES a Responses request for `modelId` with these
+ * provider options, without sending it.
+ *
+ * `prepareRequest` is the step every Responses call runs before its first byte leaves: it reads the
+ * SDK's per-model capability table and drops, with a warning, a reasoning effort the model does not
+ * take. Calling it on its own asks that table the question with no network call and no copy of the
+ * table here. It is a public static on the Responses model in the package's `internal` entry point,
+ * and the package is pinned to an exact version (`tests/unit/agent-dependency-boundary.test.ts`), so
+ * an upgrade that moved it fails the typecheck and the tests that pin its sentence to a real call's.
+ */
+export async function openAIResponsesRequestWarnings(
+  modelId: string,
+  providerOptions: Record<string, Record<string, string | boolean | null>> | undefined,
+): Promise<CallWarning[]> {
+  const { OpenAIResponsesLanguageModel } = await import("@ai-sdk/openai/internal");
+  const prepared = await OpenAIResponsesLanguageModel.prepareRequest({
+    modelId,
+    // No `fetch` and no real URL: preparation reads neither, and nothing here sends what it builds.
+    config: { provider: "openai.responses", url: () => "" },
+    options: { prompt: [], providerOptions },
+  });
+  return prepared.warnings;
+}

@@ -25,7 +25,12 @@ import {
   LLMStreamError,
 } from "@/lib/llm/types";
 import { resolveConfig, validateConfig, validModelEffort } from "@/lib/llm/utils/config";
-import { type AgentFetch, type AgentLanguageModel, resolveAgentProviderAdapter } from "./provider-registry";
+import {
+  type AgentFetch,
+  type AgentLanguageModel,
+  openAIResponsesRequestWarnings,
+  resolveAgentProviderAdapter,
+} from "./provider-registry";
 
 /** A model plus the resolved identity it was built from, for audit and logging. */
 export interface AgentModel {
@@ -62,6 +67,7 @@ export async function createAgentModel(options: AgentModelOptions = {}): Promise
   validateConfig(config);
   const adapter = resolveAgentProviderAdapter(config.provider);
   const effort = validModelEffort(config);
+  if (effort !== undefined) await refuseUntakenEffort({ provider: config.provider, modelId: config.model, effort });
 
   try {
     return {
@@ -150,10 +156,29 @@ export function refusedEffortError(
     (warning): warning is UnsupportedWarning => warning.type === "unsupported" && warning.feature === "reasoningEffort",
   );
   if (dropped === undefined) return undefined;
-  return new LLMConfigError(effortRefusalMessage(agentModel, dropped.details), agentModel.provider);
+  return new LLMConfigError(effortRefusalMessage(agentModel, dropped.details), agentModel.provider, "effort_refused");
 }
 
 type UnsupportedWarning = Extract<CallWarning, { type: "unsupported" }>;
+
+/**
+ * Refuses a configured `LLM_MODEL_EFFORT` the model does not take, before anything is sent.
+ *
+ * Without this, the first thing to learn of the refusal is a paid request that went out at the
+ * model's default effort, read back from its warnings: a plan run spent a turn and then failed as
+ * `model-unavailable`. The SDK's own request preparation answers the same question offline
+ * (`openAIResponsesRequestWarnings`), so every caller of `createAgentModel` (the start gate in every
+ * mode, the classifier, a drive) is refused here with the sentence a turn would raise. The checks
+ * on a turn's own warnings stay, for an effort that reaches a call some other way: a profile's quiet
+ * switch, which is per turn.
+ *
+ * Only the `openai` kind carries `LLM_MODEL_EFFORT` (`validateConfig`), so only its wire is asked.
+ */
+async function refuseUntakenEffort(agentModel: Pick<AgentModel, "provider" | "modelId" | "effort">): Promise<void> {
+  const warnings = await openAIResponsesRequestWarnings(agentModel.modelId, agentProviderOptions(agentModel));
+  const refused = refusedEffortError(warnings, agentModel);
+  if (refused !== undefined) throw refused;
+}
 
 // The sentence is one template from parts built a statement each: bun's line coverage under-counts
 // the continuation lines of multi-line string concatenation.

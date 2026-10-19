@@ -13,7 +13,8 @@
  * **Planning mode is not probed.** It is toolless by contract (`types.ts`), so tool
  * calling is not among the capabilities it needs, and probing would spend a model round
  * trip answering a question the mode does not ask. The probe's own docblock leaves this
- * choice to the caller; this is the caller making it.
+ * choice to the caller; this is the caller making it. Its model is still built, which
+ * costs no round trip, because building is where a refused reasoning effort is caught.
  *
  * **Only an ESTABLISHED incapability refuses.** The probe throws — in this
  * repository's `LLMError` vocabulary — for a bad key, a quota, an unpaid account, a
@@ -25,8 +26,9 @@
  * a drive reports `model-rate-limited`, `model-unauthorized` or `model-unavailable`
  * rather than sitting at `queued`. The one throw that is passed on is an
  * `LLMConfigError`, a configuration the model refused (a reasoning effort it does not
- * take): the run's first turn would raise the same error, so the start answers it as
- * the configuration error it is.
+ * take), raised when the model is built or, failing that, by the probe: the run's first
+ * turn would raise the same error, so the start answers it as the configuration error
+ * it is.
  *
  * **Positive verdicts are cached, and nothing else is.** A model that called a tool
  * will keep calling tools, so that round trip is worth paying once — the alternative is
@@ -98,20 +100,29 @@ export function resetAgentCapabilityCache(): void {
  * is swallowed for the same reason a probe failure is: an unconfigured provider is not
  * a statement about a model's capabilities, and the start path must not gain a new way
  * to fail. The drive builds its own model moments later and reports that honestly.
+ *
+ * The one construction failure passed on is an `LLM_MODEL_EFFORT` the model does not take
+ * (`effort_refused`), and it is checked in every mode, planning included. Building sends
+ * nothing: `createAgentModel` asks the SDK's own request preparation, offline. Every mode
+ * sends that effort, so a plan run would otherwise open, pay for a first turn the SDK sent at
+ * another effort, and fail as `model-unavailable`; the route answers this error with its
+ * sentence instead (503 `LLM_CONFIG`).
  */
 export async function admitAgentModel(mode: AgentRunMode): Promise<AgentCapabilityGateVerdict> {
-  if (mode === "planning") return { kind: "allowed", protocol: "native" };
-
   let model: AgentModel;
   try {
     model = await createAgentModel();
   } catch (error) {
+    if (error instanceof LLMConfigError && error.reason === "effort_refused") throw error;
     logger.warn("Model could not be built for the capability gate; starting the run anyway", {
       route: "agent/capability-gate",
       error: error instanceof Error ? error.name : "unknown",
     });
     return { kind: "allowed", protocol: "native" };
   }
+
+  // Planning is offered no tools, so there is nothing to probe for.
+  if (mode === "planning") return { kind: "allowed", protocol: "native" };
 
   const identity = identityOf(model);
   if (established.has(identity)) return { kind: "allowed", protocol: "native" };
