@@ -12,17 +12,37 @@ import type { POSTGRES_SERVER_OVERLAY } from "./postgres";
 import type { SQLITE_SERVER_OVERLAY } from "./sqlite";
 
 export const POSTGRES_CLIENT_OVERLAY = {
-  dialect: Object.freeze({ catalogRead: "supported", planEstimate: "supported", catalogCapture: "supported" }),
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "supported",
+    catalogCapture: "supported",
+  } satisfies ClientDialectOf<(typeof POSTGRES_SERVER_OVERLAY)["dialect"]>),
 } as const satisfies { dialect: ClientDialectOf<(typeof POSTGRES_SERVER_OVERLAY)["dialect"]> };
 export const SQLITE_CLIENT_OVERLAY = {
-  dialect: Object.freeze({ catalogRead: "supported", planEstimate: "supported", catalogCapture: "supported" }),
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "supported",
+    catalogCapture: "supported",
+  } satisfies ClientDialectOf<(typeof SQLITE_SERVER_OVERLAY)["dialect"]>),
 } as const satisfies { dialect: ClientDialectOf<(typeof SQLITE_SERVER_OVERLAY)["dialect"]> };
 export const DUCKDB_CLIENT_OVERLAY = {
-  dialect: Object.freeze({ catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" }),
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "supported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof DUCKDB_SERVER_OVERLAY)["dialect"]>),
 } as const satisfies { dialect: ClientDialectOf<(typeof DUCKDB_SERVER_OVERLAY)["dialect"]> };
 export const MSSQL_CLIENT_OVERLAY = {
-  dialect: Object.freeze({ catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" }),
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "supported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof MSSQL_SERVER_OVERLAY)["dialect"]>),
 } as const satisfies { dialect: ClientDialectOf<(typeof MSSQL_SERVER_OVERLAY)["dialect"]> };
 export const MYSQL_CLIENT_OVERLAY = {
-  dialect: Object.freeze({ catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" }),
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "supported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof MYSQL_SERVER_OVERLAY)["dialect"]>),
 } as const satisfies { dialect: ClientDialectOf<(typeof MYSQL_SERVER_OVERLAY)["dialect"]> };

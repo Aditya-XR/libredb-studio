@@ -23,7 +23,7 @@ import {
 } from "../../../composed-sql-primitives";
 import type { AgentColumnEstimate, AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";
 import type { AgentProfileComposition } from "../../../table-profile";
-import type { AgentEngineServerOverlay } from "../../pack";
+import type { AgentEngineServerOverlay, SqlServerDialect } from "../../pack";
 
 /** `LIKE` for the email shape and a POSIX regular expression for the digit run (B26, `PROFILE_SHAPES`). */
 const POSTGRES_PROFILE_COMPOSITION: AgentProfileComposition = Object.freeze({
@@ -590,5 +590,5 @@ export const POSTGRES_SERVER_OVERLAY = {
     profileComposition: POSTGRES_PROFILE_COMPOSITION,
     statistics: POSTGRES_STATISTICS,
     catalogCapture: POSTGRES_CATALOG_CAPTURE,
-  }),
+  } satisfies SqlServerDialect),
 } as const satisfies AgentEngineServerOverlay<"sql">;

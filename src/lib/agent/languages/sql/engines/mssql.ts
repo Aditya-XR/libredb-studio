@@ -11,7 +11,7 @@ import {
 } from "../../../composed-sql-primitives";
 import type { AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";
 import type { AgentProfileComposition } from "../../../table-profile";
-import type { AgentEngineServerOverlay } from "../../pack";
+import type { AgentEngineServerOverlay, SqlServerDialect } from "../../pack";
 
 /** `LIKE` for both shapes, the digit run as a character class repeated (B26, `PROFILE_SHAPES`). */
 const MSSQL_PROFILE_COMPOSITION: AgentProfileComposition = Object.freeze({
@@ -272,5 +272,5 @@ export const MSSQL_SERVER_OVERLAY = {
     profileComposition: MSSQL_PROFILE_COMPOSITION,
     statistics: MSSQL_STATISTICS,
     catalogCapture: "unsupported",
-  }),
+  } satisfies SqlServerDialect),
 } as const satisfies AgentEngineServerOverlay<"sql">;

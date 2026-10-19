@@ -9,7 +9,7 @@ import {
   equalsClause,
 } from "../../../composed-sql-primitives";
 import type { AgentProfileComposition } from "../../../table-profile";
-import type { AgentEngineServerOverlay } from "../../pack";
+import type { AgentEngineServerOverlay, SqlServerDialect } from "../../pack";
 
 /** `LIKE` for the email shape and `REGEXP` for the digit run (B26, `PROFILE_SHAPES`). */
 const MYSQL_PROFILE_COMPOSITION: AgentProfileComposition = Object.freeze({
@@ -205,5 +205,5 @@ export const MYSQL_SERVER_OVERLAY = {
     profileComposition: MYSQL_PROFILE_COMPOSITION,
     statistics: "unsupported",
     catalogCapture: "unsupported",
-  }),
+  } satisfies SqlServerDialect),
 } as const satisfies AgentEngineServerOverlay<"sql">;

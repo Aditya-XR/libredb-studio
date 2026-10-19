@@ -8,7 +8,7 @@ import {
   type AgentPlanEstimate,
   equalsClause,
 } from "../../../composed-sql-primitives";
-import type { AgentEngineServerOverlay } from "../../pack";
+import type { AgentEngineServerOverlay, SqlServerDialect } from "../../pack";
 
 /**
  * `EXPLAIN (FORMAT JSON)` answers the physical plan without touching a row.
@@ -168,5 +168,5 @@ export const DUCKDB_SERVER_OVERLAY = {
     profileComposition: "unsupported",
     statistics: "unsupported",
     catalogCapture: "unsupported",
-  }),
+  } satisfies SqlServerDialect),
 } as const satisfies AgentEngineServerOverlay<"sql">;

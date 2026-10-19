@@ -21,7 +21,7 @@ import {
 } from "../../../composed-sql-primitives";
 import type { AgentStatisticsReading, AgentTableEstimate } from "../../../schema-stats";
 import type { AgentProfileComposition } from "../../../table-profile";
-import type { AgentEngineServerOverlay } from "../../pack";
+import type { AgentEngineServerOverlay, SqlServerDialect } from "../../pack";
 import { parseSqliteIndexDdl, parseSqliteTableDdl } from "./sqlite-ddl";
 
 /** `LIKE` for the email shape and `GLOB` for the digit run (B26, `PROFILE_SHAPES`). */
@@ -247,5 +247,5 @@ export const SQLITE_SERVER_OVERLAY = {
     profileComposition: SQLITE_PROFILE_COMPOSITION,
     statistics: SQLITE_STATISTICS,
     catalogCapture: SQLITE_CATALOG_CAPTURE,
-  }),
+  } satisfies SqlServerDialect),
 } as const satisfies AgentEngineServerOverlay<"sql">;
