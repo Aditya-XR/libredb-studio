@@ -41,7 +41,7 @@ None of it is a GitHub issue.
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4-K8 · 5
 - [Security scanner triage](#security-scanner-triage) — SCAN1-SCAN2 · 2
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A2–A8 · 5
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B126 · 59
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B128 · 61
 - [Passkey deferrals (#785)](#passkey-deferrals-785) — PK1-PK9 · 8
 - [MCP server deferrals (#246)](#mcp-server-deferrals-246) — MCP1-MCP3 · 3
 - [Governance follow-ups](#governance-follow-ups) — GOV1-GOV30 · 30
@@ -7820,6 +7820,26 @@ Measured 2026-10-19 on PostgreSQL 18: `SELECT * FROM information_schema.colums L
 Found 2026-10-19 while splitting the agent core into engine overlays (#1821).
 
 **Done when:** the advice names a catalog as foreign only when it is not the connection engine's own, with a test of the PostgreSQL message above and of a `pg_catalog` error on SQLite; cited in `docs/AGENT.md`.
+
+### B127. A resumed MongoDB run is told its collection profile under the SQL profile's operation id
+
+`describePriorProgress` in `src/lib/agent/investigation.ts` narrates every `table-profiled` event of a resumed run with the fence label `operationId: "sql.table.profile"`, whatever the run's statement language.
+A MongoDB run that profiled a collection through `mongo.table.profile` and is then resumed is told that profile under the SQL id, so the narration names an operation the run never drove.
+`tests/unit/lib/agent/resume-narration-pins.test.ts` pins this as current behaviour, and the language boundary guard (`tests/unit/lib/agent/language-boundary.test.ts`) allowlists the literal with this entry as its reason.
+
+Found 2026-10-19 while moving the agent core onto the run resolver (#1821).
+
+**Done when:** the narration names the operation id the profile was taken under, read from the event or the run's language pack rather than written in core, the pin changes on purpose with the reason, the guard's allowlist entry is gone, and a test resumes a MongoDB run and a SQL run that each profiled a table; cited in `docs/AGENT.md`.
+
+### B128. An engine overlay cannot override a pack's adapter or its catalog advice
+
+An engine overlay may override only `grounding`, `workflowToolRules` and `answerNotADataRead` (`ENGINE_OVERRIDABLE_SERVER_MEMBERS` in `src/lib/agent/languages/overlay.ts`).
+The `adapter` (with its `inventoryProblem` and `planDraftIdentifiers`) and `catalogAdvice` stay the statement-language family's, because their readers carry no engine: `AuditedAgentCall.fingerprintLanguage` in `src/lib/agent/tools.ts` and `draftedStatement(input, language)` in `src/lib/agent/investigation.ts` name a language only, and step ids and repair identity depend on the adapter's fingerprint.
+An engine whose statement text needs its own canonical form or its own advice cannot have it today without changing every engine of its family.
+
+Found 2026-10-19 while widening the engine overlays (#1821).
+
+**Done when:** the audited call and the drafted statement carry the connection's engine, every reader of the adapter and of the catalog advice resolves them through the run resolver, `adapter` and `catalogAdvice` join `ENGINE_OVERRIDABLE_SERVER_MEMBERS`, and a test proves an engine override of each reaches the fingerprint, the draft and the refusal while a ledger written before it keeps its step ids; cited in `docs/AGENT.md`.
 
 ## Passkey deferrals (#785)
 

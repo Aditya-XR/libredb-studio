@@ -13,6 +13,7 @@ import {
   LANGUAGE_BASE_DEFINITIONS,
   LANGUAGE_SHORTFALL_NOTICES,
   LANGUAGE_USAGE_BAR_NOTICE,
+  REFERENCE_RECOMMENDATION_CARD,
   WORKFLOW_TOOL_RULES,
   languageServer,
   languageServerPack,
@@ -185,7 +186,12 @@ describe("the definitions the packs register", () => {
   });
 
   test("a language's recommendation card is the schema its recommend_change offer parses with", () => {
-    expect(languageServerPack("sql").recommendationCard).toBeUndefined();
+    const statement = languageServerPack("sql").recommendationCard;
+    expect(Object.isFrozen(statement)).toBe(true);
+    expect(statement?.inputSchema as unknown).toBe(
+      agentToolDefinition("sql", "query-optimization", "recommend_change").inputSchema,
+    );
+    expect(REFERENCE_RECOMMENDATION_CARD as unknown).toBe(statement);
     const resources = languageServerPack("kubectl").recommendationCard;
     expect(Object.isFrozen(resources)).toBe(true);
     expect(resources?.inputSchema as unknown).toBe(
@@ -196,9 +202,12 @@ describe("the definitions the packs register", () => {
     expect(documentIndex?.inputSchema as unknown).toBe(
       agentToolDefinition("mongo", "query-optimization", "recommend_change").inputSchema,
     );
-    // A kubectl workflow that proposes no resources change is offered the statement card, which no pack holds.
+    // A kubectl workflow that proposes no resources change is offered the statement card, the reference one SQL holds.
     expect(agentToolDefinition("kubectl", "investigation", "recommend_change").inputSchema).not.toBe(
       resources?.inputSchema,
+    );
+    expect(agentToolDefinition("kubectl", "investigation", "recommend_change").inputSchema as unknown).toBe(
+      statement?.inputSchema,
     );
   });
 });

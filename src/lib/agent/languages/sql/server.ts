@@ -6,6 +6,7 @@ import { AGENT_ANSWER_CONTRACT, UNAVAILABLE_TEXT } from "../../tool-contracts";
 import type { AgentRunWorkflowType } from "../../types";
 import type { AgentLanguageGrounding, AgentLanguageServerPack } from "../pack";
 import { canonicalText, OPERATIONS_TOOL_RULE } from "../shared";
+import { SQL_STATEMENT_CARD } from "./recommendation";
 
 const SQL_ROW_CAP_ADVICE = (_statement: string, allowed: string) =>
   `Ask for fewer rows: add LIMIT ${allowed} (or an aggregate that returns one row) and run it again.`;
@@ -138,11 +139,12 @@ export const SQL_SERVER_PACK = Object.freeze({
     rowCapAdvice: SQL_ROW_CAP_ADVICE,
     admit: null,
   }),
-  // SQL replaces nothing: its definitions are `AGENT_TOOL_DEFINITIONS`.
+  // SQL replaces nothing: its definitions (`./definitions.ts`) are the reference ones `AGENT_TOOL_DEFINITIONS` holds.
   toolOverrides: Object.freeze({}),
   baseDefinitions: Object.freeze({}),
   answerNotADataRead: UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ,
   catalogAdvice: sqlCatalogAdvice,
+  recommendationCard: SQL_STATEMENT_CARD,
   grounding: SQL_GROUNDING,
   workflowToolRules: SQL_WORKFLOW_TOOL_RULES,
   shortfallNotices: Object.freeze({}),

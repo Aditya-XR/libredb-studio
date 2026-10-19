@@ -1150,6 +1150,10 @@ Those three reach code and tests only; the four prose greps of the published blo
 - [ ] `docs/API_DOCS.md`: the `DatabaseConnection` block, which `tests/unit/api-docs-types.test.ts` compares with the interface as an ordered list of field names, so the field goes in at the same position in both.
 - [ ] `src/lib/db-ui-config.ts`: `fieldOptions`, when the field is a choice the dialog renders as a select, and `showSshTunnel: false`, when the engine cannot run through a tunnel; the dialog and `buildConnection` both read the latter through `offersSshTunnel`, one rule for both readers.
 
+**For agent mode (#1821):**
+
+- [ ] `src/lib/agent/agent-manifest.ts`: the `AGENT_STATEMENT_LANGUAGE` row, null unless the provider joins agent mode; a non-null row requires the agent leg of the triad in `CLAUDE.md` and the steps in [`docs/AGENT.md`](AGENT.md#language-packs), "How to add an engine to a statement-language family".
+
 **Conditionally, and each one is easy to miss because the code still compiles without it:**
 
 - [ ] `src/lib/db/types.ts` — add to the **`ExplainFormat`** union whenever `supportsExplain` is true.

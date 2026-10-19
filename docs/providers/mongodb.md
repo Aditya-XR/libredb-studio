@@ -1532,6 +1532,16 @@ Three residuals of reading the text as JSON stay in both: JavaScript puts intege
 **What this profile does not overclaim.** MongoDB has no read-only transaction, which is the whole reason the boundary is the user and not a session.
 `distribution`-depth profiling is refused rather than composed: a distinct count here has no one-statement shape that does not materialise the set, and trading the profile's one-statement-per-table contract silently is worse than saying so.
 
+#### Agent language pack
+
+Statement-language family: `mongo`.
+Overlay: [`src/lib/agent/languages/mongo/engines/mongodb.ts`](../../src/lib/agent/languages/mongo/engines/mongodb.ts), with its client row in [`src/lib/agent/languages/mongo/engines/client.ts`](../../src/lib/agent/languages/mongo/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`.
+Both overlays are empty, so the engine resolves to the `mongo` family pack itself.
+The `mongo` statement-language family has no dialect-bound member.
+This overlay overrides no Shared member, so every Shared member is the `mongo` statement-language family's own.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
+
 ## 13. Known limitations & future work
 
 - **Schema is inferred from a 100-document sample.** Fields outside the sample don't appear;

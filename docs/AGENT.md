@@ -130,6 +130,7 @@ Two companion pages carry what this one deliberately does not:
   - [The surface in the app](#the-surface-in-the-app)
   - [Deployment](#deployment)
   - [Package boundary](#package-boundary)
+  - [Language packs](#language-packs)
   - [Module map](#module-map)
   - [Known limitations](#known-limitations)
   - [Related documentation](#related-documentation)
@@ -2763,6 +2764,86 @@ One residual: the shared `BottomPanel` component ships in the package with its a
 branch present but inert — an optional prop the embedded shell never passes, on a component no entry
 point exports.
 
+## Language packs
+
+Agent mode reads statements in three statement languages, `sql`, `kubectl` and `mongo`, and what it does differently in each lives in that language's pack under `src/lib/agent/languages/<statement-language>/`, never in `src/lib/db`.
+The agent imports the database layer, and the database layer never imports the agent.
+The core (`investigation.ts`, `tools.ts` and the modules beside them) names no statement language a pack owns and no engine, which the guard at the end of this section holds.
+
+**The interface.** `AgentLanguagePack` in `languages/pack.ts` has three facets, one per tier:
+
+| Facet | Tier rule | What it holds | Read through |
+| --- | --- | --- | --- |
+| `client` | Browser-safe: it reaches no server module and no `node:` builtin | the copy, the workflow variants, the plan-estimate operation and the posture sentences | `languageClientPack` |
+| `server` | Below `tools.ts`: it never reaches the execution tier | the adapter, the tool overrides and base definitions, the recommendation card, grounding, the tool rules and the shortfall notices | `languageServerPack` |
+| `execution` | Above `tools.ts`: only the run loop reads it | the tool arms and the evidence tools | `agentLanguagePack` |
+
+**The three member kinds.**
+
+- **Shared:** the statement-language family's pack supplies it, and every engine of that family reads it as it is, unless the engine's overlay overrides it (below).
+- **Dialect-bound:** the five SQL members `catalogRead`, `planEstimate`, `profileComposition`, `statistics` and `catalogCapture`.
+  Each SQL engine's overlay supplies each one or says `"unsupported"`, and the compiler refuses an overlay that leaves one out.
+- **Optional:** the adapter's `inventoryProblem` and `planDraftIdentifiers`, which a pack with no such check leaves out.
+
+Some members are global by name, because a reader dispatches on the name before it reads a run's language: every pack's `baseDefinitions`, `shortfallNotices` and `evidenceTools` are merged into `LANGUAGE_BASE_DEFINITIONS`, `LANGUAGE_SHORTFALL_NOTICES` and `AGENT_EVIDENCE_TOOLS`, and a name two packs both hold fails at load.
+`LANGUAGE_USAGE_BAR_NOTICE` is the one pack's `usageBarNotice` that supplies one.
+`REFERENCE_STATEMENT_DEFINITIONS` are the default statement-language family's definitions of `inspect_schema`, `run_read_query`, `inspect_plan` and `profile_table`: `AGENT_TOOL_DEFINITIONS` spreads them first, and every family's `toolOverrides` replace them by name.
+
+**Engine overlays.** An engine that speaks a statement language has an overlay module at `languages/<statement-language>/engines/<type-id>.ts` and a client row in that directory's `client.ts`.
+`defineOverlay` applies an overlay to one facet of the family pack: a value replaces the member, a function derives it from the base member, nothing is merged deeper than one member, the result is frozen, and an empty overlay returns the base itself.
+A client overlay holds its `dialect` and nothing else.
+A server overlay holds its `dialect` and may override exactly the members `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names, `grounding`, `workflowToolRules` and `answerNotADataRead`, because every consumer reads those through the run resolver, so an override reaches every reader.
+Every other server member stays the family's:
+
+- `adapter` and `catalogAdvice` are read through `AuditedAgentCall.fingerprintLanguage` and `draftedStatement`, which carry no engine, and step ids and repair identity depend on them (B128);
+- `toolOverrides`, `recommendationCard` and the statement definitions make the tool offer, which is computed from the run record with no connection, and a card's schema must equal the offered one;
+- the global members above are merged by name across every family.
+
+Client overlays stay dialect-only because the copy, the variants and the plan-estimate operation are projected per family into browser tables, and the hand-over terms are read by language (B123).
+No shipped overlay overrides a Shared member.
+
+**Resolvers.**
+
+| Scope | Resolver | Answers |
+| --- | --- | --- |
+| Statement-language family | `languageClientPack`, `languageServerPack`, `agentLanguagePack` | one family's client facet, server facet or whole pack; an id the server does not know is a named error |
+| Engine | `engineFamily` | the statement-language family a type speaks, or null |
+| Engine | `engineClientPack` | the family's client facet with the engine's client overlay applied |
+| Engine | `engineServerOverlay` | the engine's server overlay as the registry holds it, or an empty one |
+| Engine | `engineServerDialect` | the engine's server dialect, every member `"unsupported"` for a type with none |
+| Engine | `agentEnginePack` | the engine's whole pack, which is the family pack itself while both overlays are empty |
+| Engine | `enginesSupporting` | the engines whose client dialect supports every member asked |
+| Run | `statementFamilyOf` | the family a run reads: its persisted `statementLanguage`, or `DEFAULT_STATEMENT_LANGUAGE` when the record holds none |
+| Run | `runServerPack` | the server facet a run reads: its family's, with the connection type's overlay applied only when that type speaks the family |
+
+A run's statement language is persisted, and the connection type only selects the overlay.
+`persistedRunFacts` leaves `statementLanguage` off the record for a SQL engine, for a ledger older than statement languages and for an engine with no statement language, and `statementFamilyOf` reads each of them as `DEFAULT_STATEMENT_LANGUAGE`, which is `sql`.
+An engine with no statement language, and a connection re-typed after its run opened, read the family pack itself.
+Every member an overlay cannot override stays keyed by the persisted family, so the tool offer and the dispatch agree.
+`CURATED_CALL_LANGUAGE` is the language a curated call is fingerprinted and refused in, because its `operations:` or `objects:` key is no statement in any language.
+
+**A pack never opens execution.** Whether agent mode executes on an engine is decided by `AGENT_EXECUTION_ENGINES` and the execution-profile check; a pack only says how a statement in its language is read, refused and narrated.
+
+**How to add an engine to a statement-language family.**
+
+1. Map the type-id onto its statement language in `AGENT_STATEMENT_LANGUAGE` in `agent-manifest.ts`.
+2. Write `languages/<statement-language>/engines/<type-id>.ts`, its server overlay declared `satisfies AgentEngineServerOverlay<...>`, with every dialect-bound member supplied or `"unsupported"`.
+3. Add its client row to `languages/<statement-language>/engines/client.ts`, and register both overlays in `languages/engines/server.ts` and `languages/engines/client.ts`; both registries are total, so the build fails until they hold the engine.
+4. Add the `Agent language pack` subsection to `docs/providers/<type-id>.md`, which `tests/unit/lib/agent/engine-docs.test.ts` holds to the overlay row for row.
+5. Run `engine-overlays.test.ts` and `engine-pack-contract.test.ts` under `tests/unit/lib/agent/`, which read the engine list from the manifest, so the new engine joins every case.
+
+**The guard.** `tests/unit/lib/agent/language-boundary.test.ts` reads every core file under `src/lib/agent/` outside `languages/`, and its allowlist holds each finding the core keeps on purpose with an exact count:
+
+- R1: no pack id other than `sql` as a literal, a property or part of an identifier, and no operation, verifier or fingerprint id that starts with one.
+- R2: no import of a module that belongs to one pack, only of the shared entries of `languages/`.
+- R3: the tiers hold: no server module reaches the execution tier, no client pack reaches a server module or a builtin, and no runtime cycle passes through `languages/`.
+- R4: the allowlist is exact, so it can only shrink.
+- R5: no `sql` literal, no `sql` read off a language-keyed table, no id that starts with `sql`, and an exact count of the references to `DEFAULT_STATEMENT_LANGUAGE` and `CURATED_CALL_LANGUAGE`.
+- R6: every engine overlay is declared `satisfies` its overlay type, so the excess-property check holds it to its family's dialect.
+- R7: no dialect table the overlays absorbed is declared in the core again.
+- R8: no engine id as a literal, a property or a segment of an identifier.
+- R9: no read of an overridable server member through a family resolver, which would bypass an engine's override.
+
 ## Module map
 
 ```
@@ -2778,7 +2859,8 @@ src/lib/agent/
 ├── runtime.ts            # composition root: the only place that assembles a tool context
 ├── tools.ts              # the four tools + server-side selection; the only database reach,
                           #   the model's tools and the server's own grounding reads alike
-├── composed-sql.ts # the type-keyed entry points to the SQL the SERVER writes, each dispatched to an engine's dialect: four of the forty-two
+├── composed-sql.ts # the type-keyed entry points to the SQL the SERVER writes, each dispatched to an engine's dialect: the engines `enginesSupporting("catalogRead", "planEstimate")` answers
+├── languages/            # the statement language packs and their resolvers (see Language packs)
 ├── languages/sql/engines/ # each SQL engine's own compositions, read through `engineServerDialect`
 ├── languages/sql/engines/sqlite-ddl.ts # reading SQLite's stored DDL back into an inventory
 ├── execution-policy.ts   # the frozen policy and the run-level ceilings
@@ -2937,6 +3019,8 @@ the role's own grants are the whole boundary (A3).
 - **B124**: on MySQL, an estimating plan request for `EXPLAIN FORMAT=JSON SELECT 1` is composed as `EXPLAIN FORMAT=JSON FORMAT=JSON SELECT 1`, because `withoutEstimatingPrefix` (`src/lib/agent/composed-sql.ts`) strips PostgreSQL's and SQLite's spellings of the prefix and not MySQL's.
 - **B125**: a catalog read's declared schema is folded to lower case on SQLite only, while SQL Server under its default collation and DuckDB compare schema names case-insensitively too, so a scope allowlist of `["dbo"]` would deny a read the model asked for as `DBO`; nothing builds a schema allowlist for an agent run today, so no run meets it.
 - **B126**: the SQL catalog advice tells a model that `information_schema` and `pg_catalog` belong to another engine on every SQL engine, including the ones where they are native: a mistyped `information_schema.colums` on PostgreSQL is told that the catalog belongs to another engine and that the connection is postgres.
+- **B127**: a resumed MongoDB run that already profiled a collection is told that profile under the SQL profile's operation id, `sql.table.profile`, because `describePriorProgress` (`src/lib/agent/investigation.ts`) writes that id for every `table-profiled` event.
+- **B128**: an engine overlay can override only `grounding`, `workflowToolRules` and `answerNotADataRead`; the adapter and the catalog advice stay the statement-language family's, because `AuditedAgentCall.fingerprintLanguage` and `draftedStatement` carry no engine and step ids and repair identity depend on them.
 
 **What machine redaction leaves unmasked on Kubernetes.**
 Agent reads on a cluster are masked by structural rules and by request target (see [On a Kubernetes connection](#on-a-kubernetes-connection)), and what those rules do not reach is stated here, in the same six lines as [`docs/providers/kubernetes.md`](./providers/kubernetes.md) section 9:

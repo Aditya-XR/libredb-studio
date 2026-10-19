@@ -1328,6 +1328,24 @@ The first two replace generic empty-state copy with the engine-specific absence 
 in §3.7. The maintenance label does not add another operation; it only describes the global
 `vacuum` control declared above.
 
+### 9.3 Agent language pack
+
+Statement-language family: `sql`.
+Overlay: [`src/lib/agent/languages/sql/engines/duckdb.ts`](../../src/lib/agent/languages/sql/engines/duckdb.ts), with its client row in [`src/lib/agent/languages/sql/engines/client.ts`](../../src/lib/agent/languages/sql/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`, and the dialect through `engineServerDialect`.
+
+| Member | Kind | Value |
+| --- | --- | --- |
+| `catalogRead` | Dialect-bound | Supplied |
+| `planEstimate` | Dialect-bound | Supplied |
+| `profileComposition` | Dialect-bound | `"unsupported"` |
+| `statistics` | Dialect-bound | `"unsupported"` |
+| `catalogCapture` | Dialect-bound | `"unsupported"` |
+
+This overlay overrides no Shared member, so every Shared member is the `sql` statement-language family's own.
+`profile_table` is still offered here and answers `UNSUPPORTED_DIALECT` (B111).
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
+
 
 
 ---

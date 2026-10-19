@@ -62,6 +62,8 @@ in lockstep with the code (see the tri-sync rule in [`../../CLAUDE.md`](../../CL
 - **Each doc mirrors the code.** Every `file:line` citation is verified, and the per-provider triad
   — code, this doc, and `tests/integration/db/<type-id>-provider.test.ts` — must stay in sync in the
   same PR (the *provider tri-sync invariant*).
+  **Agent leg:** a type-id whose `AGENT_STATEMENT_LANGUAGE` row is non-null also keeps, in the same PR: Code: `src/lib/agent/languages/<statement-language>/engines/<type-id>.ts` plus its client row in `languages/<statement-language>/engines/client.ts` · Docs: the `Agent language pack` subsection of its doc here · Tests: `tests/unit/lib/agent/engine-docs.test.ts`, plus the engine's cases in `engine-overlays.test.ts` and `engine-pack-contract.test.ts`.
+- An agent-capable engine's doc carries an `Agent language pack` subsection in its agent or capabilities section, numbered in the doc's own scheme, naming its statement-language family and every member of its overlay.
 - Each doc follows the same ~15-section shape: Overview → Architecture → Design decisions →
   Connection → Query interface → Schema → Monitoring → Maintenance → Capabilities & labels → Error
   handling → Testing → Usage → Known limitations → References.

@@ -38,6 +38,33 @@ export const catalogSelectorSchema = z.strictObject({
   table: z.string().optional(),
 });
 
+/**
+ * A profile names a TABLE, never columns and never SQL. The columns come from the
+ * run's own captured inventory, so a profile cannot be aimed at something the run
+ * never established exists — the same rule `compare_plans` follows about plans.
+ * Exported for the SQL pack's arms (`languages/sql/index.ts`), which declare it as the SQL
+ * arm's input, held equal to the offered schema by `tool-offer-census.test.ts`.
+ */
+export const profileSelectorSchema = z.strictObject({
+  /*
+    Described, because an undescribed optional string next to a fingerprint-heavy set of
+    rules is an invitation. `qwen3:8b` filled it with the snapshot fingerprint
+    (`ctx_3b6b…`), which resolved to nothing and cost it the run. Omitting the field
+    entirely is the right answer whenever the inventory names a table bare, so the
+    description leads with that rather than with what a schema is.
+  */
+  schema: z
+    .string()
+    .describe(
+      "Omit this unless the inventory qualifies the table as schema.table. It is a database schema name — never an artifact id or a snapshot fingerprint.",
+    )
+    .optional(),
+  table: z.string().min(1),
+  depth: z.enum(["basic", "distribution", "pattern"]).optional(),
+  /** Where in the table's column list to start. The server bounds how many follow. */
+  fromColumn: z.number().int().min(0).optional(),
+});
+
 export const evidenceSchema = z.discriminatedUnion("source", [
   z.strictObject({
     source: z.literal("artifact"),

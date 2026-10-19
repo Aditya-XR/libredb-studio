@@ -35,10 +35,91 @@ import type {
   AgentRunRecord,
   AgentRunWorkflowType,
 } from "../types";
+import type { ENGINE_OVERRIDABLE_SERVER_MEMBERS } from "./overlay";
+
+/** SQL's operations. `sql.explain.analyze` is a member for the reason `AgentOperationId` in `tools.ts` gives. */
+type SqlOperationId =
+  | "sql.query.read"
+  | "sql.explain.estimate"
+  | "sql.explain.analyze"
+  /** Bounded per-table profiling; #330 T3 reopened the three-descriptor decision. */
+  | "sql.table.profile";
+
+/** kubectl's operations: its reads and its two curated cluster readings. */
+type KubectlOperationId =
+  /** One kubectl read the model wrote, on a `kubernetes` connection; see `kubectlQueryReadDescriptor` for its id. */
+  | "kubectl.query.read"
+  /** Container usage in one namespace, a curated cluster reading; see `clusterUsageReadDescriptor` for its id. */
+  | "cluster.usage.read"
+  /** One namespace's workload profile, a curated cluster reading; see `clusterWorkloadsReadDescriptor` for its id. */
+  | "cluster.workloads.read";
+
+/** MongoDB's operations. */
+type MongoOperationId =
+  /** One MongoDB command the model wrote, on a `mongodb` connection; see `mongoQueryReadDescriptor` for its id. */
+  | "mongo.query.read"
+  /** A scoped MongoDB catalog read from the provider's own inventory; see `mongoSchemaReadDescriptor` for its id. */
+  | "mongo.schema.read"
+  /** The estimating plan of one MongoDB command; see `mongoPlanEstimateDescriptor` for its id. */
+  | "mongo.plan.estimate"
+  /** A MongoDB collection profile composed as an aggregation; see `mongoTableProfileDescriptor` for its id. */
+  | "mongo.table.profile";
+
+/**
+ * The canonical operations each family's tools drive, by family. `AgentOperationId` in `tools.ts` is the core's two
+ * curated ids and every row here, so a family's ids are written once, beside the family's other types.
+ */
+export interface AgentFamilyOperationIds {
+  readonly sql: SqlOperationId;
+  readonly kubectl: KubectlOperationId;
+  readonly mongo: MongoOperationId;
+}
+
+/** kubectl's goal verifiers. */
+type KubectlVerifierId =
+  /**
+   * Resource efficiency on a cluster, the kubectl query optimization: a usage reading of this run, cited by a
+   * resources recommendation or by a report that recommends nothing.
+   *
+   * Its own id rather than a new version of the SQL one, because it is a different bar and not a revision of it:
+   * a statement and a container are different subjects, and both rules stay live side by side.
+   */
+  | "agent-query-optimization-kubectl.1"
+  /**
+   * Cluster health, the kubectl database assessment: the investigation baseline, with a workload profile counted as
+   * meaningful even when it holds no row, then at least one workload profile of this run. The report need not cite it.
+   *
+   * Its own id for the reason the kubectl optimization has one: a workload is not a table, and both rules stay live.
+   */
+  | "agent-database-assessment-kubectl.1";
+
+/**
+ * The goal verifiers each family's rules judge under, by family. `AgentGoalVerifierId` in `goal-verifier.ts` is the
+ * core's ids and every row here. SQL has none of its own: its runs are judged by the core's rules.
+ */
+export interface AgentFamilyVerifierIds {
+  readonly sql: never;
+  readonly kubectl: KubectlVerifierId;
+  /**
+   * The MongoDB query optimization, which has no `compare_plans`: an index recommendation citing a plan of this run,
+   * as `.3`'s index arm, or a report citing a plan of this run and recommending nothing, because a command whose plan
+   * already reaches its documents through an index needs no change. Under `.3` such a run was held until it
+   * recommended something, and a live run on 2026-10-17 recommended the index its plan was already using.
+   *
+   * Its own id, as the kubectl rule has one: `.3` judged MongoDB runs before this existed, and a ledger opened under
+   * it keeps that rule, while this one judges the runs opened since.
+   */
+  readonly mongo: "agent-query-optimization-mongo.1";
+}
+
+/** The operation a family's model-written reads are evaluated under: its row's `<family>.query.read`. */
+type AgentFamilyReadOperation = {
+  [F in keyof AgentFamilyOperationIds]: Extract<AgentFamilyOperationIds[F], `${F}.query.read`>;
+}[keyof AgentFamilyOperationIds];
 
 export interface AgentLanguageServerAdapter {
   /** The descriptor this language's model-written reads are evaluated under. */
-  readonly readOperation: "sql.query.read" | "kubectl.query.read" | "mongo.query.read";
+  readonly readOperation: AgentFamilyReadOperation;
   /**
    * The model's argument as the one statement text every server layer reads: the fence, the provider, the ledger
    * and the repair identity. Null for any value that carries no statement, which the caller refuses rather than
@@ -69,10 +150,11 @@ export interface AgentLanguageServerAdapter {
 }
 
 /**
- * A `recommend_change` card a language offers in place of the statement card: a change stated as data, for a
- * language whose change is no statement an editor runs. `recommendChangeTool` in `tools.ts` parses the call with the
- * offered definition's schema, and where that schema is this card's, it checks every evidence reference against the
- * run's ledger and refuses an unverifiable one before the card is read, so `record` only ever sees verified evidence.
+ * A `recommend_change` card: the schema a call is parsed with, and how a parsed call is recorded. SQL's statement card
+ * (`sql/recommendation.ts`) is the reference one, a change stated as a statement an editor runs; a language whose change
+ * is no such statement offers its own card, a change stated as data. `recommendChangeTool` in `tools.ts` reads a call
+ * with the card that owns the offered definition's schema, and checks every evidence reference against the run's
+ * ledger and refuses an unverifiable one before `record` is called, so `record` only ever sees verified evidence.
  */
 export interface AgentRecommendationCard<
   Card extends { readonly evidence: readonly AgentEvidenceReference[] } = {
@@ -80,6 +162,24 @@ export interface AgentRecommendationCard<
   },
 > {
   readonly inputSchema: z.ZodType<Card>;
+  /** The call as models send it, read back into the call the schema accepts before it is parsed. Absent: as sent. */
+  readonly prepare?: (input: unknown) => unknown;
+  /**
+   * What a call that did not parse is told on top of the failing paths: a worked call and the card's own shape
+   * sentence, each where the card has one. `input` is the call as sent, before `prepare`. Absent: the paths alone.
+   */
+  refuseParse?(
+    input: unknown,
+    problems: string,
+    events: readonly AgentRunEvent[],
+    modelId: string,
+  ): { readonly example: string | undefined; readonly shape: string | undefined };
+  /** A refusal of a parsed card, made before the core checks its evidence, or undefined when there is none. */
+  refuseBeforeEvidence?(
+    card: Card,
+    events: readonly AgentRunEvent[],
+    modelId: string,
+  ): AgentRecommendationOutcome | undefined;
   /** Called after the core verified the card's evidence; returns the outcome verbatim. */
   record(events: readonly AgentRunEvent[], card: Card): AgentRecommendationOutcome;
 }
@@ -168,7 +268,7 @@ export interface AgentLanguageServerPack {
    * connection is, or undefined when the message names no foreign catalog. Absent for a language with no such mistake.
    */
   readonly catalogAdvice?: (message: string, engine: string) => string | undefined;
-  /** The card this language's `recommend_change` offers instead of the statement card. Absent for SQL. */
+  /** The card this language's `recommend_change` offers. Absent for a language that offers only the reference card. */
   readonly recommendationCard?: AgentRecommendationCard;
   /** How an agent-mode run of this language is grounded in words its own tools can act on. */
   readonly grounding: AgentLanguageGrounding;
@@ -411,12 +511,20 @@ export type AgentFamilyDialect = { readonly [F in AgentStatementLanguageId]: Age
 /** A family with no dialect-bound member gives its engines no `dialect` at all. */
 type DialectSlot<D> = keyof D extends never ? { readonly dialect?: never } : { readonly dialect: D };
 
+/** The server members an engine overlay may override, as `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names them. */
+export type AgentEngineOverridableServer = Pick<
+  AgentLanguageServerPack,
+  (typeof ENGINE_OVERRIDABLE_SERVER_MEMBERS)[number]
+>;
+
 /**
- * What an engine's server overlay holds: its family's dialect-bound members and nothing else. A Shared member is not
- * overridable here (#1821 PR 2): every Shared consumer reads the family pack, so an override would compile and do
- * nothing.
+ * What an engine's server overlay holds: its family's dialect-bound members, and any of the members
+ * `ENGINE_OVERRIDABLE_SERVER_MEMBERS` names, each a value or a derivation from the family's (`MemberOverride`). Only
+ * those are overridable, because only those are read through the run resolver everywhere they are read; an override
+ * of any other member would compile and reach no reader, so it does not compile.
  */
-export type AgentEngineServerOverlay<F extends AgentStatementLanguageId> = DialectSlot<AgentFamilyDialect[F]["server"]>;
+export type AgentEngineServerOverlay<F extends AgentStatementLanguageId> =
+  FacetOverrides<AgentEngineOverridableServer> & DialectSlot<AgentFamilyDialect[F]["server"]>;
 
 /** The client counterpart of `AgentEngineServerOverlay`. */
 export type AgentEngineClientOverlay<F extends AgentStatementLanguageId> = DialectSlot<AgentFamilyDialect[F]["client"]>;

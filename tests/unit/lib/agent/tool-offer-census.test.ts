@@ -14,9 +14,10 @@ import {
 } from "@/lib/agent/agent-manifest";
 import { LANGUAGE_TOOL_ARMS } from "@/lib/agent/languages/index";
 import { languageServer, WORKFLOW_TOOL_RULES } from "@/lib/agent/languages/server";
-import { AGENT_TOOL_DEFINITIONS, type AgentToolName, agentToolDefinition } from "@/lib/agent/tools";
+import { type AgentToolName, agentToolDefinition } from "@/lib/agent/tools";
 import type { AgentRunWorkflowType } from "@/lib/agent/types";
 import { createCanonicalOperationRegistry, isStatementReadOperation } from "@/lib/db/operations/descriptors";
+import { toolsNamedIn } from "../../../helpers/agent-tool-rules";
 
 const LANGUAGES = Object.keys(AGENT_LANGUAGE_COPY) as AgentStatementLanguageId[];
 
@@ -62,15 +63,6 @@ describe("the tools a run is offered", () => {
 });
 
 describe("the tool rules a run is told", () => {
-  /**
-   * The tools a rule text tells the model to use: every tool name it contains, except one written as an absence
-   * ("there is no inspect_schema"), which is the operations rules saying what the run does not hold.
-   */
-  const toolsNamedIn = (rules: string): AgentToolName[] =>
-    (Object.keys(AGENT_TOOL_DEFINITIONS) as AgentToolName[]).filter((tool) =>
-      new RegExp(`(?<!\\bno )\\b${tool}\\b`).test(rules),
-    );
-
   test("name only tools the run's own variant offers, on every language and workflow", () => {
     // A rule naming a tool the run does not hold is answered "there is no tool called ..." and costs the run a turn
     // (#350): measured on a MongoDB optimization run told to compare_plans, which its variant does not offer.

@@ -33,6 +33,9 @@ import { operatorCopyViolations } from "../../scripts/sync-chart-version.mjs";
 import { AGENT_STATEMENT_LANGUAGE, AGENT_WORKFLOW_VARIANTS } from "@/lib/agent/agent-manifest";
 import { AGENT_EXECUTION_ENGINES, namedList } from "@/lib/agent/engine-support";
 import { AGENT_HISTORY_MAX_CONVERSATIONS, AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
+import * as engineClientResolvers from "@/lib/agent/languages/engines/client";
+import * as enginePackResolvers from "@/lib/agent/languages/engines/index";
+import * as engineServerResolvers from "@/lib/agent/languages/engines/server";
 import { agentPosture } from "@/lib/agent/posture";
 import { getDBConfig } from "@/lib/db-ui-config";
 import { EXTERNAL_DATABASE_TYPES } from "@/lib/db/compatibility";
@@ -827,5 +830,35 @@ describe("the SQL engines' boundaries are stated in the order their provider doc
     expect(bullet).toContain("On MySQL and MariaDB");
     expect(mysql).toContain("principal verified before the first statement");
     expect(mysql).not.toMatch(/^On MySQL and MariaDB[^.]*verified at open/);
+  });
+});
+
+describe("docs/AGENT.md names every language-pack resolver in its Language packs section (#1821)", () => {
+  const section = AGENT_DOC.split("\n## Language packs\n")[1]?.split(/^## /m)[0] ?? "";
+  const RESOLVERS = [
+    ...Object.keys(engineClientResolvers),
+    ...Object.keys(engineServerResolvers),
+    ...Object.keys(enginePackResolvers),
+    "languageClientPack",
+    "languageServerPack",
+    "agentLanguagePack",
+    "statementFamilyOf",
+    "DEFAULT_STATEMENT_LANGUAGE",
+    "CURATED_CALL_LANGUAGE",
+  ];
+
+  test("the section exists and is in the table of contents", () => {
+    expect(section.length).toBeGreaterThan(0);
+    expect(AGENT_DOC).toContain("[Language packs](#language-packs)");
+  });
+
+  test("the engine resolvers were read from their modules (an empty read would pass everything below)", () => {
+    expect(RESOLVERS).toContain("runServerPack");
+    expect(RESOLVERS).toContain("agentEnginePack");
+    expect(RESOLVERS).toContain("engineFamily");
+  });
+
+  test("each resolver is named in backticks", () => {
+    expect(RESOLVERS.filter((name) => !section.includes(`\`${name}\``))).toEqual([]);
   });
 });
