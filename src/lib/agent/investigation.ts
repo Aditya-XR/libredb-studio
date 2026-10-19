@@ -135,6 +135,8 @@ import {
   presentableArtifact,
 } from "./tools";
 import { AGENT_EVIDENCE_CONTRACT, capturedSnapshot, citeSnapshot, handoverText } from "./tool-contracts";
+import { statementFamilyOf } from "./languages/client";
+import { runServerPack } from "./languages/engines/server";
 import { AGENT_EVIDENCE_TOOLS, agentLanguagePack } from "./languages/index";
 import type { EvidenceToolName, ShortfallAdvice, ShortfallContext, ShortfallNotice } from "./languages/pack";
 import { LANGUAGE_SHORTFALL_NOTICES, LANGUAGE_USAGE_BAR_NOTICE, languageServer } from "./languages/server";
@@ -372,23 +374,27 @@ interface PlanningEngine {
    */
   readonly statementLanguage?: string;
   /**
-   * The run's own statement language, where it has one, whose pack's `grounding` may carry planning rules. A
+   * The planning rules of the run's own server pack (`runServerPack`), empty where its `grounding` carries none. A
    * MongoDB plan draft names a collection the way a command does, so plan mode is told the collection rule agent mode
    * is told (`MONGO_COLLECTION_RULE` in `languages/mongo/server.ts`): without it, three of ten live plan drafts on 2026-10-17 named
    * `"collection": "shop.orders"`, which the editor reads as a collection that does not exist and answers with no rows.
    */
-  readonly agentLanguage?: AgentStatementLanguageId;
+  readonly planningRules: readonly string[];
+  /** The tool rules of the run's own server pack, per workflow; `workflowToolRules` reads the record's workflow. */
+  readonly toolRules: Readonly<Partial<Record<AgentRunWorkflowType, string>>>;
 }
 
 /** The engine facts a run's prose needs, taken from what its provider declared. */
 function planningEngine(context: AgentToolContext): PlanningEngine {
+  const server = runServerPack(context.statementLanguage, context.connection.type);
   return {
     type: context.connection.type,
     language: context.capabilities.queryLanguage,
     noun: inventoryNoun(context.labels),
     derivedGroupings: context.capabilities.tablesAreDerivedGroupings === true,
     ...(context.labels.statementLanguage === undefined ? {} : { statementLanguage: context.labels.statementLanguage }),
-    ...(context.statementLanguage === undefined ? {} : { agentLanguage: context.statementLanguage }),
+    planningRules: server.grounding.planningRules ?? [],
+    toolRules: server.workflowToolRules,
   };
 }
 
@@ -1183,9 +1189,7 @@ const planningStatementContract = (deliverable: { readonly noun: string }, engin
     // message is the #350 failure — and it names what the language is NOT, because
     // naming only what it is did not survive contact with the model's prior.
     ...(engine.statementLanguage === undefined ? [] : [`Write it in ${engine.statementLanguage}.`]),
-    ...(engine.agentLanguage === undefined
-      ? []
-      : (agentLanguagePack(engine.agentLanguage).server.grounding.planningRules ?? [])),
+    ...engine.planningRules,
     `Put it in a single fenced block tagged \`${engine.type}\` — three backticks, that tag, the statement, three backticks — and put nothing else inside that block.`,
     `Put the rationale AFTER the statement, and keep it brief: which ${engine.noun.plural} it reads, which joins it makes, and why that answers the objective.`,
     engine.language === "sql"
@@ -1576,9 +1580,9 @@ const planningProseRulesUngrounded = (engine: PlanningEngine): string =>
   ].join(" ");
 
 /** The tool rules an agent-mode run is given. A language with no rules for the workflow is an error, never silence. */
-function workflowToolRules(record: AgentRunRecord): string {
-  const language = record.statementLanguage ?? "sql";
-  const rules: Partial<Record<AgentRunWorkflowType, string>> = agentLanguagePack(language).server.workflowToolRules;
+function workflowToolRules(record: AgentRunRecord, engine: PlanningEngine): string {
+  const language = statementFamilyOf(record.statementLanguage);
+  const rules: Partial<Record<AgentRunWorkflowType, string>> = engine.toolRules;
   const own = Object.hasOwn(rules, record.workflowType) ? rules[record.workflowType] : undefined;
   if (own === undefined) throw new Error(`no tool rules for ${record.workflowType} on ${language}`);
   return own;
@@ -1646,7 +1650,7 @@ function systemPrompt(record: AgentRunRecord, grounding: PlanningGrounding, engi
     engine.statementLanguage === undefined ? "" : ` Write every statement in ${engine.statementLanguage}.`;
   const rules =
     record.mode === "agent"
-      ? `${agentRules(AGENT_LANGUAGE_COPY[record.statementLanguage ?? "sql"])}${languageSentence} ${workflowToolRules(record)}`
+      ? `${agentRules(AGENT_LANGUAGE_COPY[statementFamilyOf(record.statementLanguage)])}${languageSentence} ${workflowToolRules(record, engine)}`
       : planningRules;
   // Said only where it can happen, on all THREE counts. A planning run has no tools;
   // a run opened without the setting hands nothing anywhere; and a workflow that is
@@ -2161,7 +2165,7 @@ export function draftedStatement(
 
 /** A tool a run was offered and has no arm for in its language: the server's own fault, said by name. */
 function missingArm(context: AgentToolContext, tool: AgentToolName): never {
-  throw new Error(`agent run loop: the ${context.statementLanguage ?? "sql"} language has no ${tool} arm`);
+  throw new Error(`agent run loop: the ${statementFamilyOf(context.statementLanguage)} language has no ${tool} arm`);
 }
 
 /**
@@ -2189,13 +2193,13 @@ export const DATABASE_TOOL_HANDLERS: Readonly<
 > = Object.freeze({
   inspect_schema: (context, input, snapshot) =>
     (
-      agentLanguagePack(context.statementLanguage ?? "sql").execution.arms.inspect_schema ??
+      agentLanguagePack(statementFamilyOf(context.statementLanguage)).execution.arms.inspect_schema ??
       missingArm(context, "inspect_schema")
     ).run(context, input, snapshot),
   run_read_query: (context, input, snapshot) => runReadQueryTool(context, input, snapshot),
   inspect_plan: (context, input, snapshot) =>
     (
-      agentLanguagePack(context.statementLanguage ?? "sql").execution.arms.inspect_plan ??
+      agentLanguagePack(statementFamilyOf(context.statementLanguage)).execution.arms.inspect_plan ??
       missingArm(context, "inspect_plan")
     ).run(context, input, snapshot),
   inspect_operations: (context, input) => inspectOperationsTool(context, input),
@@ -2753,9 +2757,6 @@ export async function runInvestigation(
       ...(record.statementLanguage === undefined ? {} : { statementLanguage: record.statementLanguage }),
       actor: record.actor,
     };
-    // Read once, from the provider's own declarations, and spent by every sentence that
-    // has to name what this engine holds. See `PlanningEngine`.
-    const engine = planningEngine(context);
     /*
       How this model is asked for a call, decided by the capability gate when the run opened
       and read here rather than re-derived: a resumed drive must ask the way the drive that
@@ -2782,6 +2783,14 @@ export async function runInvestigation(
     const heldToolNames = new Set(selectAgentTools(record).map((definition) => definition.name));
     const holdsTool = (name: string): boolean =>
       prompted ? heldToolNames.has(name as AgentToolName) : tools?.[name] !== undefined;
+    // Read once, from the provider's own declarations, and spent by every sentence that
+    // has to name what this engine holds. See `PlanningEngine`. Read after the tool
+    // selection, so a run whose persisted language this server does not know fails
+    // first where `selectAgentTools` names it, as it did before the engine read a pack.
+    const engine = planningEngine(context);
+    // The server pack this run reads its grounding from: its family's, with its engine's
+    // overlay where the engine speaks that family.
+    const runServer = runServerPack(record.statementLanguage, context.connection.type);
     /**
      * A server notice, in the register this run can act on.
      *
@@ -3095,7 +3104,7 @@ export async function runInvestigation(
             record.objective,
             readBy,
             engine.noun,
-            agentLanguagePack(record.statementLanguage ?? "sql").server.grounding.sampledFields === true,
+            runServer.grounding.sampledFields === true,
           ),
         });
         messages.push({
@@ -3176,7 +3185,7 @@ export async function runInvestigation(
         return;
       }
       // The words this run is grounded in are its language's: a kubectl run holds no `inspect_schema` to name.
-      const languageGrounding = agentLanguagePack(record.statementLanguage ?? "sql").server.grounding;
+      const languageGrounding = runServer.grounding;
 
       /**
        * The inventory, as THIS workflow is shown it.
@@ -4065,7 +4074,7 @@ export async function runInvestigation(
               // drift between the notice and the tool it points at.
               holdsPresentable: presentableArtifact(sofar.events) !== undefined,
               holdsCompare: holdsTool("compare_plans"),
-              noun: AGENT_LANGUAGE_COPY[record.statementLanguage ?? "sql"].noun,
+              noun: AGENT_LANGUAGE_COPY[statementFamilyOf(record.statementLanguage)].noun,
             });
             return advice === null ? [] : [{ shortfall, advice }];
           })[0];
@@ -4311,7 +4320,7 @@ async function handleCall(input: {
   }
 
   const name = call.toolName as DatabaseToolName;
-  const language = context.statementLanguage ?? "sql";
+  const language = statementFamilyOf(context.statementLanguage);
   const stepId = deriveStepId(name, identifyingInput(call.input, language));
   const draft = draftedStatement(call.input, language);
   // The run as its ledger stands NOW. `record` was read before this drive captured its
@@ -4382,7 +4391,7 @@ export async function profileTable(
 ): Promise<CallResult> {
   const { record } = await service.resume(context.runId);
   const arm =
-    agentLanguagePack(context.statementLanguage ?? "sql").execution.arms.profile_table ??
+    agentLanguagePack(statementFamilyOf(context.statementLanguage)).execution.arms.profile_table ??
     missingArm(context, "profile_table");
   // Resolution and composition first, and they reach nothing: the step's identity
   // has to come from what the profile RESOLVED to, so that two requests naming the

@@ -763,12 +763,13 @@ describe("planted violations yield exactly their findings", () => {
     const toTools = `${manifest} -> ${clients} -> ${client} -> ${TOOLS}`;
     // The manifest loads the client packs, and the verifiers load the manifest, so the verifier closure fails too.
     // `tools.ts` reads the engine server dialects, whose run resolver reads `statementFamilyOf`: a cycle closes there.
+    // `tools.ts` reads `statementFamilyOf` itself too, so the shortest cycle through the client packs closes on it.
     expect(layeringFindings(planted)).toEqual([
       `R3 client: ${clients} reaches ${TOOLS} through ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${engines} reaches ${TOOLS} through ${engines} -> ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${client} reaches ${TOOLS} through ${client} -> ${TOOLS}`,
-      `R3 cycle: ${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
       `R3 cycle: ${manifest} -> ${engines} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
+      `R3 cycle: ${clients} -> ${client} -> ${TOOLS} -> ${clients}`,
       `R3 cycle: ${clients} -> ${client} -> ${TOOLS} -> ${LANGUAGES}/engines/server.ts -> ${clients}`,
       `R3 verifier: ${claims} reaches ${TOOLS} through ${claims} -> ${toTools}`,
       `R3 verifier: ${GOAL_VERIFIER} reaches ${TOOLS} through ${GOAL_VERIFIER} -> ${toTools}`,

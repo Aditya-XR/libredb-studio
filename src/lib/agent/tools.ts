@@ -148,8 +148,14 @@ import {
 } from "./execution-policy";
 import type { AgentRepairDenyCode, AgentRepairLedger } from "./repair-ledger";
 import { fingerprintStatement } from "./repair-ledger";
-import { engineServerDialect } from "./languages/engines/server";
-import { LANGUAGE_BASE_DEFINITIONS, languageServer, languageServerPack } from "./languages/server";
+import { statementFamilyOf } from "./languages/client";
+import { engineServerDialect, runServerPack } from "./languages/engines/server";
+import {
+  CURATED_CALL_LANGUAGE,
+  LANGUAGE_BASE_DEFINITIONS,
+  languageServer,
+  languageServerPack,
+} from "./languages/server";
 import { evaluateAutoExecute } from "./auto-execute";
 import { summarisePlan } from "./plan-summary";
 import {
@@ -1150,7 +1156,9 @@ export function agentToolDefinition(
   workflow: AgentRunWorkflowType,
   name: AgentToolName,
 ): AgentToolDefinition {
-  return languageServerPack(language ?? "sql").toolOverrides[workflow]?.[name] ?? AGENT_TOOL_DEFINITIONS[name];
+  return (
+    languageServerPack(statementFamilyOf(language)).toolOverrides[workflow]?.[name] ?? AGENT_TOOL_DEFINITIONS[name]
+  );
 }
 
 /** Planning is toolless. Not "filtered to nothing" — there is nothing to filter. */
@@ -1764,7 +1772,7 @@ export async function executeAgentOperation(
     // The statement IS the identity of a SQL call: two calls sending the same text
     // are the same call however the model worded its way to them.
     fingerprintSource: request.sql,
-    fingerprintLanguage: context.statementLanguage ?? "sql",
+    fingerprintLanguage: statementFamilyOf(context.statementLanguage),
     input: { [argument]: request.sql },
     ...(request.label === undefined ? {} : { label: request.label }),
     ...(request.target === undefined ? {} : { target: request.target }),
@@ -1959,7 +1967,9 @@ export async function runAuditedAgentCall(
   // set, so no dispatch of a model's tool call ever arrives here with it.
   if (context.mode !== "agent" && call.grounding !== true) return unavailable("MODE_HAS_NO_TOOLS");
 
-  const fingerprint = languageServer(call.fingerprintLanguage ?? "sql").fingerprint(call.fingerprintSource);
+  const fingerprint = languageServer(call.fingerprintLanguage ?? CURATED_CALL_LANGUAGE).fingerprint(
+    call.fingerprintSource,
+  );
   const repairAdmission = context.repairs.admit(fingerprint);
   if (!repairAdmission.admitted) return unavailable(repairAdmission.reasonCode);
 
@@ -2122,7 +2132,7 @@ export async function runAuditedAgentCall(
         error.message,
         context.connection.type,
         call.fingerprintSource,
-        call.fingerprintLanguage ?? "sql",
+        call.fingerprintLanguage ?? CURATED_CALL_LANGUAGE,
       );
     const answered = columns !== undefined;
     context.repairs.recordFailure(fingerprint, answered ? "database-error-answered" : "database-error");
@@ -2177,7 +2187,7 @@ export async function runAuditedAgentCall(
       return {
         kind: "refused",
         refusal: { class: "policy-denied", reasonCode: decision.reasonCode },
-        modelText: denialText(decision.reasonCode, policy.version, call.fingerprintLanguage ?? "sql"),
+        modelText: denialText(decision.reasonCode, policy.version, call.fingerprintLanguage ?? CURATED_CALL_LANGUAGE),
       };
     }
     context.repairs.recordFailure(fingerprint, "approval-required");
@@ -3300,7 +3310,7 @@ export async function runReadQueryTool(
   input: unknown,
   snapshot: AgentContextSnapshot | null = null,
 ): Promise<AgentToolOutcome> {
-  const language = context.statementLanguage ?? "sql";
+  const language = statementFamilyOf(context.statementLanguage);
   const definition = agentToolDefinition(language, context.workflowType, "run_read_query");
   const parsed = parseToolInput(definition.inputSchema, input);
   if (!parsed.ok) return unavailable("INVALID_TOOL_INPUT", parsed.problems);
@@ -4078,7 +4088,7 @@ export function recommendChangeTool(
           : undefined,
     );
   }
-  const card = languageServerPack(context.statementLanguage ?? "sql").recommendationCard;
+  const card = languageServerPack(statementFamilyOf(context.statementLanguage)).recommendationCard;
   if (card !== undefined && definition.inputSchema === card.inputSchema) {
     // A language's own card: its evidence is checked here, exactly as the statement card's is below, before the card
     // reads anything else, so every card refuses an unverifiable citation first and in the same words.
@@ -4708,7 +4718,7 @@ export function presentAnswerTool(
     // existed, or the named alternative was ignored - call for opposite fixes. The cited operation
     // and whether an alternative was offered are what tell them apart.
     const detail = instead === undefined ? undefined : `this run already read ${instead}, present that`;
-    const reason = languageServerPack(context.statementLanguage ?? "sql").answerNotADataRead;
+    const reason = runServerPack(context.statementLanguage, context.connection.type).answerNotADataRead;
     return {
       ...unavailable("ANSWER_NOT_A_DATA_READ", detail),
       modelText: detail === undefined ? reason : `${reason} (${detail})`,
