@@ -21,11 +21,13 @@
  *   server, adapter or definitions module; and no runtime cycle among the agent modules passes through `languages/` or
  *   a shared module. A dynamic `import("x")` or `require("x")` with a literal specifier counts as an import, for R2
  *   and R3 alike.
- * - R6: every `*_SERVER_OVERLAY` and `*_CLIENT_OVERLAY` an engine module under `languages/<family>/engines/` exports is
- *   declared `satisfies` its overlay type, `AgentEngineServerOverlay<...>`, `AgentEngineClientOverlay<...>` or
- *   `{ dialect: ClientDialectOf<...> }`, so the excess-property check holds every overlay to its family's dialect.
+ * - R6: every `*_SERVER_OVERLAY` and `*_CLIENT_OVERLAY` an engine module under `languages/<family>/engines/` declares,
+ *   exported or not, is declared `satisfies` its overlay type, `AgentEngineServerOverlay<...>`,
+ *   `AgentEngineClientOverlay<...>` or `{ dialect: ClientDialectOf<...> }`, so the excess-property check holds every
+ *   overlay to its family's dialect; and an export list gives an overlay's name to no other value.
  * - R7: no core file declares a name of a dialect table the engine overlays absorbed (`CATALOG_PLANS` and the rest of
- *   `ABSORBED`), at any depth and with no allowlist, so a table cannot come back beside the overlay that replaced it.
+ *   `ABSORBED`), at any depth, in a destructuring pattern too, and with no allowlist, so a table cannot come back
+ *   beside the overlay that replaced it.
  * - R4: the allowlist is exact. A key found more often than it is listed fails, and so does a listed key found less
  *   often, so the list can only shrink.
  *
@@ -452,24 +454,41 @@ const prepend = (file: string, code: string): Planted => ({ [file]: `${code}\n${
 /** The overlay types an engine overlay may be declared `satisfies`, as written. */
 const OVERLAY_TYPE = /^(AgentEngine(Server|Client)Overlay<[\s\S]+>|\{\s*dialect: ClientDialectOf<[\s\S]+>;?\s*\})$/;
 
-/** R6 over every engine module: each exported overlay that is not declared `satisfies` its overlay type. */
+const OVERLAY_NAME = /_(SERVER|CLIENT)_OVERLAY$/;
+
+/**
+ * R6 over every engine module: each overlay declaration, exported or not, that is not declared `satisfies` its overlay
+ * type, and each name an export list gives an overlay's name that is not such a declaration.
+ */
 function overlayShapeFindings(planted: Planted = {}): string[] {
   const findings: string[] = [];
   const modules = sourcesUnder(LANGUAGES).filter((file) => new RegExp(`^${LANGUAGES}/[^/]+/engines/`).test(file));
   for (const file of modules) {
     const source = parse(file, textOf(file, planted));
+    const shapedNames = new Set<string>();
     for (const statement of source.statements) {
       if (!ts.isVariableStatement(statement)) continue;
-      if (!statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
       for (const declaration of statement.declarationList.declarations) {
         const name = declaration.name.getText(source);
-        if (!/_(SERVER|CLIENT)_OVERLAY$/.test(name)) continue;
+        if (!OVERLAY_NAME.test(name)) continue;
         const initializer = declaration.initializer;
         const shaped =
           initializer !== undefined &&
           ts.isSatisfiesExpression(initializer) &&
           OVERLAY_TYPE.test(initializer.type.getText(source));
-        if (!shaped) findings.push(`${file}#${name}: R6`);
+        if (shaped) shapedNames.add(name);
+        else findings.push(`${file}#${name}: R6`);
+      }
+    }
+    for (const statement of source.statements) {
+      if (!ts.isExportDeclaration(statement) || statement.exportClause === undefined) continue;
+      if (!ts.isNamedExports(statement.exportClause)) continue;
+      for (const specifier of statement.exportClause.elements) {
+        const local = (specifier.propertyName ?? specifier.name).getText(source);
+        const exported = specifier.name.getText(source);
+        if (OVERLAY_NAME.test(exported) && !shapedNames.has(local) && !OVERLAY_NAME.test(local)) {
+          findings.push(`${file}#${exported}: R6`);
+        }
       }
     }
   }
@@ -494,7 +513,11 @@ const ABSORBED = new Set([
   "isMissingExtensionCatalogError",
 ]);
 
-/** R7 over `files`: every variable, function, class, type alias, interface or enum declared under an absorbed name. */
+/**
+ * R7 over `files`: every variable, function, class, type alias, interface or enum declared under an absorbed name, and
+ * every name a destructuring pattern binds. It is a name check: a table renamed past `ABSORBED` is PR 3's
+ * `DatabaseType`-literal rule to catch.
+ */
 function absorbedFindings(files: readonly string[], planted: Planted = {}): string[] {
   const findings: string[] = [];
   for (const file of files) {
@@ -505,7 +528,8 @@ function absorbedFindings(files: readonly string[], planted: Planted = {}): stri
           ts.isClassDeclaration(node) ||
           ts.isTypeAliasDeclaration(node) ||
           ts.isInterfaceDeclaration(node) ||
-          ts.isEnumDeclaration(node)) &&
+          ts.isEnumDeclaration(node) ||
+          ts.isBindingElement(node)) &&
         node.name !== undefined &&
         ts.isIdentifier(node.name) &&
         ABSORBED.has(node.name.text)
@@ -586,6 +610,23 @@ describe("every engine overlay is declared satisfies its overlay type", () => {
     const planted = { [client]: text.replace('satisfies AgentEngineClientOverlay<"mongo">', "satisfies object") };
     expect(overlayShapeFindings(planted)).toEqual([`${client}#MONGODB_CLIENT_OVERLAY: R6`]);
   });
+
+  test("an overlay declared without export and exported by name still fails R6", () => {
+    const duckdb = `${LANGUAGES}/sql/engines/duckdb.ts`;
+    const text = read(duckdb);
+    const planted = {
+      [duckdb]: `${text
+        .replace("export const DUCKDB_SERVER_OVERLAY", "const DUCKDB_SERVER_OVERLAY")
+        .replace(' as const satisfies AgentEngineServerOverlay<"sql">', "")}\nexport { DUCKDB_SERVER_OVERLAY };\n`,
+    };
+    expect(overlayShapeFindings(planted)).toEqual([`${duckdb}#DUCKDB_SERVER_OVERLAY: R6`]);
+  });
+
+  test("a name exported as an overlay that is no shaped overlay declaration fails R6", () => {
+    const client = `${LANGUAGES}/mongo/engines/client.ts`;
+    const planted = { [client]: `${read(client)}\nconst loose = {};\nexport { loose as LOOSE_CLIENT_OVERLAY };\n` };
+    expect(overlayShapeFindings(planted)).toEqual([`${client}#LOOSE_CLIENT_OVERLAY: R6`]);
+  });
 });
 
 describe("no core file declares a dialect table the engine overlays absorbed", () => {
@@ -609,6 +650,18 @@ describe("no core file declares a dialect table the engine overlays absorbed", (
     expect(absorbedFindings(coreFiles(), nested)).toEqual([`${tools}#normalizeDeclaredSchema: R7`]);
     const alias = prepend(tools, 'type ProfileDialect = "x";');
     expect(absorbedFindings(coreFiles(), alias)).toEqual([`${tools}#ProfileDialect: R7`]);
+  });
+
+  test("an absorbed name bound by a destructuring pattern fails R7 too", () => {
+    const posture = `${AGENT}/posture.ts`;
+    const planted = prepend(
+      posture,
+      "const { CATALOG_PLANS, x: [ESTIMATE_BUILDERS] } = { CATALOG_PLANS: {}, x: [{}] };",
+    );
+    expect(absorbedFindings(coreFiles(), planted)).toEqual([
+      `${posture}#CATALOG_PLANS: R7`,
+      `${posture}#ESTIMATE_BUILDERS: R7`,
+    ]);
   });
 });
 
