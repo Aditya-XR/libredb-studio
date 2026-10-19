@@ -12,13 +12,22 @@
 import type { DatabaseType } from "@/lib/types";
 import { KUBERNETES_SERVER_OVERLAY } from "../kubectl/engines/kubernetes";
 import { MONGODB_SERVER_OVERLAY } from "../mongo/engines/mongodb";
-import { dialectOnly } from "../overlay";
-import type { AgentEngineServerDialect, AgentEngineServerOverlays, AgentEngineType } from "../pack";
+import type { AgentStatementLanguageId } from "../../agent-manifest";
+import { statementFamilyOf } from "../client";
+import { defineOverlay, dialectOnly } from "../overlay";
+import type {
+  AgentEngineServerDialect,
+  AgentEngineServerOverlays,
+  AgentEngineType,
+  AgentLanguageServerPack,
+} from "../pack";
+import { languageServerPack } from "../server";
 import { DUCKDB_SERVER_OVERLAY } from "../sql/engines/duckdb";
 import { MSSQL_SERVER_OVERLAY } from "../sql/engines/mssql";
 import { MYSQL_SERVER_OVERLAY } from "../sql/engines/mysql";
 import { POSTGRES_SERVER_OVERLAY } from "../sql/engines/postgres";
 import { SQLITE_SERVER_OVERLAY } from "../sql/engines/sqlite";
+import { engineFamily } from "./client";
 
 const SERVER_OVERLAYS: AgentEngineServerOverlays = Object.freeze({
   postgres: dialectOnly(POSTGRES_SERVER_OVERLAY),
@@ -53,4 +62,19 @@ export function engineServerOverlay(type: DatabaseType): { readonly dialect?: Ag
 /** The server dialect of `type`: its overlay's own frozen `dialect`, or `NO_SERVER_DIALECT`. */
 export function engineServerDialect(type: DatabaseType): AgentEngineServerDialect {
   return engineServerOverlay(type).dialect ?? NO_SERVER_DIALECT;
+}
+
+/**
+ * The server facet one run reads: the family its persisted `language` names (`statementFamilyOf`), with the overlay of
+ * `type` applied only when `type` speaks that family. An engine with no family, or a connection re-typed after the
+ * run opened, reads the family pack itself. A language this server does not know is the named error of
+ * `languageServerPack`.
+ */
+export function runServerPack(
+  language: AgentStatementLanguageId | undefined,
+  type: DatabaseType,
+): Readonly<AgentLanguageServerPack & { readonly dialect?: AgentEngineServerDialect }> {
+  const family = statementFamilyOf(language);
+  const base = languageServerPack(family);
+  return engineFamily(type) === family ? defineOverlay(base, engineServerOverlay(type)) : base;
 }

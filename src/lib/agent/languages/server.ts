@@ -20,6 +20,12 @@ import { MONGO_SERVER_PACK } from "./mongo/server";
 import type { AgentLanguageServerAdapter, AgentLanguageServerPack } from "./pack";
 import { SQL_SERVER_PACK } from "./sql/server";
 
+/**
+ * The language a curated call is fingerprinted and refused in. Its `operations:` or `objects:` key is no statement in
+ * any language, so it reads the default family's adapter and advice whatever the run's language.
+ */
+export const CURATED_CALL_LANGUAGE = "sql" as const satisfies AgentStatementLanguageId;
+
 const SERVER_PACKS: Readonly<Record<AgentStatementLanguageId, AgentLanguageServerPack>> = Object.freeze({
   sql: SQL_SERVER_PACK,
   kubectl: KUBECTL_SERVER_PACK,

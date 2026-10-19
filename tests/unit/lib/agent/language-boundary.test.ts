@@ -762,12 +762,14 @@ describe("planted violations yield exactly their findings", () => {
     const claims = `${AGENT}/goal-claims.ts`;
     const toTools = `${manifest} -> ${clients} -> ${client} -> ${TOOLS}`;
     // The manifest loads the client packs, and the verifiers load the manifest, so the verifier closure fails too.
+    // `tools.ts` reads the engine server dialects, whose run resolver reads `statementFamilyOf`: a cycle closes there.
     expect(layeringFindings(planted)).toEqual([
       `R3 client: ${clients} reaches ${TOOLS} through ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${engines} reaches ${TOOLS} through ${engines} -> ${clients} -> ${client} -> ${TOOLS}`,
       `R3 client: ${client} reaches ${TOOLS} through ${client} -> ${TOOLS}`,
       `R3 cycle: ${manifest} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
       `R3 cycle: ${manifest} -> ${engines} -> ${clients} -> ${client} -> ${TOOLS} -> ${manifest}`,
+      `R3 cycle: ${clients} -> ${client} -> ${TOOLS} -> ${LANGUAGES}/engines/server.ts -> ${clients}`,
       `R3 verifier: ${claims} reaches ${TOOLS} through ${claims} -> ${toTools}`,
       `R3 verifier: ${GOAL_VERIFIER} reaches ${TOOLS} through ${GOAL_VERIFIER} -> ${toTools}`,
       `R3 verifier: ${LANGUAGES}/kubectl/verifiers.ts reaches ${TOOLS} through ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toTools}`,
@@ -822,9 +824,11 @@ describe("planted violations yield exactly their findings", () => {
     const claims = `${AGENT}/goal-claims.ts`;
     const toServer = `${AGENT}/agent-manifest.ts -> ${engines} -> ${client} -> ${server}`;
     // The manifest reads the engines' client dialects, and the verifiers load the manifest, so their closure fails too.
+    // The run resolver reads each engine's family from `engines/client.ts`, so a cycle closes there.
     expect(layeringFindings(prepend(client, 'import "../../engines/server";'))).toEqual([
       `R3 client: ${engines} reaches ${server} through ${engines} -> ${client} -> ${server}`,
       `R3 client: ${client} reaches ${server} through ${client} -> ${server}`,
+      `R3 cycle: ${engines} -> ${client} -> ${server} -> ${engines}`,
       `R3 verifier: ${claims} reaches ${server} through ${claims} -> ${toServer}`,
       `R3 verifier: ${GOAL_VERIFIER} reaches ${server} through ${GOAL_VERIFIER} -> ${toServer}`,
       `R3 verifier: ${LANGUAGES}/kubectl/verifiers.ts reaches ${server} through ${LANGUAGES}/kubectl/verifiers.ts -> ${claims} -> ${toServer}`,

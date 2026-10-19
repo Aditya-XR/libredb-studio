@@ -8,6 +8,7 @@
  * and like the server registry it copies only `dialect` out of each engine module.
  */
 import type { DatabaseType } from "@/lib/types";
+import type { AgentStatementLanguageId } from "../../agent-manifest";
 import { languageClientPack } from "../client";
 import { KUBERNETES_CLIENT_OVERLAY } from "../kubectl/engines/client";
 import { MONGODB_CLIENT_OVERLAY } from "../mongo/engines/client";
@@ -30,6 +31,14 @@ const CLIENT_OVERLAYS: AgentEngineClientOverlays = Object.freeze({
   mongodb: Object.freeze({ family: "mongo", overlay: dialectOnly(MONGODB_CLIENT_OVERLAY) }),
   kubernetes: Object.freeze({ family: "kubectl", overlay: dialectOnly(KUBERNETES_CLIENT_OVERLAY) }),
 } satisfies AgentEngineClientOverlays);
+
+/**
+ * The family `type` speaks, read from the registry beside its overlay, or null for a type with no statement language
+ * and for a name that is no own key (`toString`).
+ */
+export function engineFamily(type: DatabaseType): AgentStatementLanguageId | null {
+  return Object.hasOwn(CLIENT_OVERLAYS, type) ? CLIENT_OVERLAYS[type as AgentEngineType].family : null;
+}
 
 /**
  * The client facet of `type`: its family's, with the engine's overlay applied, which is the family's own object while
