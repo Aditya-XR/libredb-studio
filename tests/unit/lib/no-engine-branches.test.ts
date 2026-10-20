@@ -66,13 +66,12 @@ export const REGISTRIES: readonly Listed[] = [
     count: 1,
     reason: DISPLAY_ORDER,
   },
-  { path: "src/hooks/use-connection-form.ts", declaration: "selectableTypes", count: 1, reason: DISPLAY_ORDER },
   { path: "src/lib/db-showcase.ts", declaration: "SHOWCASE_RANK", count: 1, reason: DISPLAY_ORDER },
   {
     path: "src/lib/db-ui-config.ts",
     declaration: "DB_UI_CONFIG",
     count: 1,
-    reason: "the total data registry, and the connection form's contract home",
+    reason: "each engine's icon and identity colour, joined to the UI-free form data of src/lib/db/connection-form.ts",
   },
   {
     path: "src/lib/seed/types.ts",
