@@ -234,6 +234,10 @@ export async function POST(req: NextRequest) {
     if (!sql) {
       return NextResponse.json({ error: "Connection and query are required" }, { status: 400 });
     }
+    // A truthy non-string reached the provider and answered 500 with its own TypeError ("sql.slice is not a function").
+    if (typeof sql !== "string") {
+      return NextResponse.json({ error: "sql must be a string" }, { status: 400 });
+    }
     if (queryId !== undefined && typeof queryId !== "string") {
       return NextResponse.json({ error: "queryId must be a string" }, { status: 400 });
     }

@@ -254,6 +254,11 @@ export async function POST(req: NextRequest) {
     if (!action) {
       return NextResponse.json({ error: "Connection and action are required" }, { status: 400 });
     }
+    // A query action's text is read before its provider resolves: a truthy non-string reached the splitter and
+    // answered 500 with its own TypeError ("input.slice is not a function"). A missing one keeps its answer below.
+    if (action === "query" && sql && typeof sql !== "string") {
+      return NextResponse.json({ error: "sql must be a string" }, { status: 400 });
+    }
 
     // Each database of a server-level connection holds its own transaction (#1530), so ownership is per database.
     const catalog = requestCatalog(body);

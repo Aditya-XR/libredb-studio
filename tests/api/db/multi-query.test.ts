@@ -411,6 +411,43 @@ describe("POST /api/db/multi-query", () => {
     expect(data.error).toContain("required");
   });
 
+  // A truthy `sql` that is not a string reached the provider and answered 500 with the TypeError's own text
+  // ("sql.slice is not a function"). It is refused in words before any provider resolves.
+  for (const [label, sql] of [
+    ["a number", 123],
+    ["an object", { text: "SELECT 1" }],
+    ["an array", ["SELECT 1"]],
+    ["true", true],
+  ] as const) {
+    test(`answers 400 when sql is ${label}, before any provider resolves`, async () => {
+      mockGetOrCreateProvider.mockClear();
+      const req = createMockRequest("/api/db/multi-query", {
+        method: "POST",
+        body: { connection: validConnection, sql },
+      });
+
+      const res = await POST(req as never);
+      const data = await parseResponseJSON<{ error: string }>(res);
+
+      expect(res.status).toBe(400);
+      expect(data.error).toBe("sql must be a string");
+      expect(mockGetOrCreateProvider).not.toHaveBeenCalled();
+    });
+  }
+
+  test("an empty sql keeps the answer of a missing one", async () => {
+    const req = createMockRequest("/api/db/multi-query", {
+      method: "POST",
+      body: { connection: validConnection, sql: "" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{ error: string }>(res);
+
+    expect(res.status).toBe(400);
+    expect(data.error).toBe("Connection and query are required");
+  });
+
   test("missing sql returns 400", async () => {
     const req = createMockRequest("/api/db/multi-query", {
       method: "POST",

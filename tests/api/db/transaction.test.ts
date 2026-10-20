@@ -698,6 +698,43 @@ describe("POST /api/db/transaction", () => {
     expect(mockTxProvider.queryInTransaction).not.toHaveBeenCalled();
   });
 
+  // A truthy `sql` that is not a string reached the provider and answered 500 with the TypeError's own text
+  // ("sql.slice is not a function"). It is refused in words before any provider resolves.
+  for (const [label, sql] of [
+    ["a number", 123],
+    ["an object", { text: "SELECT 1" }],
+    ["an array", ["SELECT 1"]],
+    ["true", true],
+  ] as const) {
+    test(`answers 400 when sql is ${label}, before any provider resolves`, async () => {
+      mockGetOrCreateProvider.mockClear();
+      const req = createMockRequest("/api/db/transaction", {
+        method: "POST",
+        body: { connection: validConnection, action: "query", sql },
+      });
+
+      const res = await POST(req as never);
+      const data = await parseResponseJSON<{ error: string }>(res);
+
+      expect(res.status).toBe(400);
+      expect(data.error).toBe("sql must be a string");
+      expect(mockGetOrCreateProvider).not.toHaveBeenCalled();
+    });
+  }
+
+  test("an empty sql keeps the answer of a missing one", async () => {
+    const req = createMockRequest("/api/db/transaction", {
+      method: "POST",
+      body: { connection: validConnection, action: "query", sql: "" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{ error: string }>(res);
+
+    expect(res.status).toBe(400);
+    expect(data.error).toBe("SQL query is required for transaction query");
+  });
+
   test("query action without sql returns 400", async () => {
     const req = createMockRequest("/api/db/transaction", {
       method: "POST",
