@@ -5,6 +5,7 @@ import { resolveSqlGrammar } from "@/lib/sql/grammar";
 import { isSelectQuery, noteAppendedBound } from "@/lib/db/utils/query-limiter";
 import { createErrorResponse } from "@/lib/api/errors";
 import { bridgeAbortToCancel } from "@/lib/api/abort-cancel";
+import { pageOptionError } from "@/lib/api/page-probe";
 import { supportsQueryCancel } from "@/lib/db/query-cancel";
 import { QueryCancelledError } from "@/lib/db/errors";
 import { resolveConnection, SeedConnectionError } from "@/lib/seed/resolve-connection";
@@ -242,6 +243,11 @@ export async function POST(req: NextRequest) {
     }
     if (queryId !== undefined && typeof queryId !== "string") {
       return NextResponse.json({ error: "queryId must be a string" }, { status: 400 });
+    }
+    // The page bounds, held to the rule `POST /api/db/query` holds them to, before anything is split or acquired.
+    const optionError = pageOptionError(options);
+    if (optionError !== null) {
+      return NextResponse.json({ error: optionError }, { status: 400 });
     }
 
     // A type that declares a console text bound runs one statement per request. The SQL splitter below would turn

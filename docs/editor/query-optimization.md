@@ -87,6 +87,7 @@ const info = analyzeQuery('SELECT * FROM users WHERE active = true');
 const result = applyQueryLimit('SELECT * FROM users', 500, 0);
 // Returns: { sql: 'SELECT * FROM users LIMIT 500', wasLimited: true, ... }
 // (OFFSET is only appended when offset > 0, e.g. applyQueryLimit(sql, 500, 500) -> '... LIMIT 500 OFFSET 500')
+// A limit or offset that is not a non-negative safe integer (isRowBound) throws a QueryError
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 ### Supported Query Types

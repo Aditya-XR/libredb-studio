@@ -489,6 +489,88 @@ describe("POST /api/db/multi-query", () => {
     expect(data.error).toContain("No valid SQL statements found");
   });
 
+  // ─── The page options, held to the rule POST /api/db/query holds them to ───
+  describe("page options", () => {
+    const send = (options: unknown, sql = "SELECT * FROM users") =>
+      POST(
+        createMockRequest("/api/db/multi-query", {
+          method: "POST",
+          body: { connection: validConnection, sql, options },
+        }) as never,
+      );
+
+    const refused: Array<[string, unknown, string]> = [
+      ["a numeric string limit", { limit: "10" }, "options.limit must be a non-negative integer"],
+      ["a fractional limit", { limit: 1.5 }, "options.limit must be a non-negative integer"],
+      ["a negative limit", { limit: -1 }, "options.limit must be a non-negative integer"],
+      ["an array limit", { limit: [10] }, "options.limit must be a non-negative integer"],
+      [
+        "a limit of Number.MAX_SAFE_INTEGER",
+        { limit: Number.MAX_SAFE_INTEGER },
+        "options.limit must be a non-negative integer",
+      ],
+      ["a limit of 1e21", { limit: 1e21 }, "options.limit must be a non-negative integer"],
+      ["a numeric string offset", { offset: "10" }, "options.offset must be a non-negative integer"],
+      ["a fractional offset", { offset: 1.5 }, "options.offset must be a non-negative integer"],
+      ["a negative offset", { offset: -1 }, "options.offset must be a non-negative integer"],
+      ["an array offset", { offset: [10] }, "options.offset must be a non-negative integer"],
+      [
+        "an offset of Number.MAX_SAFE_INTEGER",
+        { offset: Number.MAX_SAFE_INTEGER },
+        "options.offset must be a non-negative integer",
+      ],
+      ["an offset of 1e21", { offset: 1e21 }, "options.offset must be a non-negative integer"],
+      ["null options", null, "options must be an object"],
+      ["string options", "500", "options must be an object"],
+    ];
+
+    test.each(refused)("refuses %s with 400 before any provider resolves", async (_name, options, error) => {
+      const res = await send(options);
+
+      expect(res.status).toBe(400);
+      expect((await parseResponseJSON<{ error: string }>(res)).error).toBe(error);
+      expect(mockGetOrCreateProvider).not.toHaveBeenCalled();
+      expect(mockProvider.prepareQuery).not.toHaveBeenCalled();
+      expect(mockProvider.query).not.toHaveBeenCalled();
+    });
+
+    // `;;;` splits into nothing to run, which the route refuses with its own sentence when the split runs first.
+    test("refuses the options before the text is split", async () => {
+      const res = await send({ limit: "10" }, ";;;");
+
+      expect(res.status).toBe(400);
+      expect((await parseResponseJSON<{ error: string }>(res)).error).toBe(
+        "options.limit must be a non-negative integer",
+      );
+    });
+
+    const accepted: Array<[string, unknown, Record<string, unknown>]> = [
+      ["no options", undefined, {}],
+      ["empty options", {}, {}],
+      ["an integer limit and offset", { limit: 50, offset: 100 }, { limit: 50, offset: 100 }],
+      ["a zero limit", { limit: 0 }, { limit: 0 }],
+      [
+        "one below Number.MAX_SAFE_INTEGER as limit and offset",
+        { limit: Number.MAX_SAFE_INTEGER - 1, offset: Number.MAX_SAFE_INTEGER - 1 },
+        { limit: Number.MAX_SAFE_INTEGER - 1, offset: Number.MAX_SAFE_INTEGER - 1 },
+      ],
+      ["an unlimited run", { unlimited: true }, { unlimited: true }],
+    ];
+
+    test.each(accepted)("runs %s as before", async (_name, options, prepared) => {
+      const res = await send(options);
+
+      expect(res.status).toBe(200);
+      expect(mockProvider.prepareQuery).toHaveBeenCalledWith("SELECT * FROM users", prepared);
+      expect(mockProvider.query).toHaveBeenCalledWith(
+        "SELECT * FROM users LIMIT 50",
+        undefined,
+        undefined,
+        expect.any(String),
+      );
+    });
+  });
+
   test("last SELECT gets prepareQuery applied", async () => {
     const req = createMockRequest("/api/db/multi-query", {
       method: "POST",
