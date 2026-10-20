@@ -6,9 +6,11 @@ import {
   applyQueryLimit,
   hasQueryLimit,
   noteAppendedBound,
+  isRowBound,
   isSelectQuery,
   type ParsedQueryInfo,
 } from "@/lib/db/utils/query-limiter";
+import { QueryError } from "@/lib/db/errors";
 
 // ─── analyzeQuery ───────────────────────────────────────────────────────────
 
@@ -661,6 +663,49 @@ describe("applyQueryLimit", () => {
       const result = applyQueryLimit("SELECT * FROM t", 100, 50);
       expect(result.sql).toBe("SELECT * FROM t LIMIT 100 OFFSET 50");
       expect(result.appliedOffset).toBe(50);
+    });
+  });
+
+  // ── A limit and an offset are non-negative integers, the rule the routes hold options to ──
+
+  describe("limit and offset values", () => {
+    const outOfRule: Array<[string, unknown]> = [
+      ["a numeric string", "10"],
+      ["a fraction", 1.5],
+      ["a negative number", -1],
+      ["NaN", Number.NaN],
+      ["an infinity", Number.POSITIVE_INFINITY],
+      ["null", null],
+      ["an array", [10]],
+    ];
+
+    test.each(outOfRule)("refuses %s as the limit with a QueryError", (_name, limit) => {
+      const run = () => applyQueryLimit("SELECT * FROM t", limit as number, 0, {}, "postgres");
+      expect(run).toThrow(QueryError);
+      expect(run).toThrow("The row limit must be a non-negative integer");
+    });
+
+    test.each(outOfRule)("refuses %s as the offset with a QueryError", (_name, offset) => {
+      const run = () => applyQueryLimit("SELECT * FROM t", 100, offset as number, {}, "postgres");
+      expect(run).toThrow(QueryError);
+      expect(run).toThrow("The row offset must be a non-negative integer");
+    });
+
+    test("refuses a value out of the rule whatever the query is", () => {
+      expect(() => applyQueryLimit("UPDATE t SET a = 1", "10" as unknown as number)).toThrow(QueryError);
+      expect(() => applyQueryLimit("SELECT * FROM t LIMIT 5", 100, "10" as unknown as number)).toThrow(QueryError);
+    });
+
+    test("keeps zero and every larger integer as it was given", () => {
+      expect(applyQueryLimit("SELECT * FROM t", 0).sql).toBe("SELECT * FROM t LIMIT 0");
+      expect(applyQueryLimit("SELECT * FROM t", 2 ** 53, 2 ** 53).sql).toBe(
+        "SELECT * FROM t LIMIT 9007199254740992 OFFSET 9007199254740992",
+      );
+    });
+
+    test("holds the same rule as a request's page options", () => {
+      for (const [, value] of outOfRule) expect(isRowBound(value)).toBe(false);
+      for (const value of [0, 1, 500, 2 ** 53]) expect(isRowBound(value)).toBe(true);
     });
   });
 });
