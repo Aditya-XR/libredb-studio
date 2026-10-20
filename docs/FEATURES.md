@@ -41,6 +41,7 @@
     A cell's full value is its tooltip, so a value the column cuts short can be read in place.
 *   **Cell Selection and Copy:** Cells select the way a spreadsheet's do: click a cell, drag across a range, Shift+Click to extend, Ctrl+Click (Cmd+Click on macOS) to add another range, click a column name or a row number to select the column or the row, and the corner to select everything.
     Ctrl+C copies the selection as tab-separated rows, so it pastes into Excel or Google Sheets cell for cell; a single cell copies its whole value as it is.
+    A range carries the CSV export's formula guard: a value a spreadsheet would run as a formula, such as `=HYPERLINK(...)`, is prefixed with an apostrophe, while a single cell stays raw for pasting into an editor.
     The copy goes through the browser's own copy event, so it also works over plain HTTP, where `navigator.clipboard` is unavailable.
     The context menu adds Copy Selection and Copy Selection with Headers.
     A copy reads each cell the way Copy Cell does: a masked cell copies its mask, a pending edit its new value, a binary or vector value its whole value.

