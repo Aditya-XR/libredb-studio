@@ -460,10 +460,20 @@ export function isRowBound(value: unknown): value is number {
 }
 
 /**
+ * Throws the `QueryError` a `limit` or an `offset` that is not a row bound (`isRowBound`) gets. `applyQueryLimit`
+ * calls it before anything else, and so does every `prepareQuery` that pages without `applyQueryLimit`.
+ */
+export function assertRowBounds(limit: unknown, offset: unknown, type?: DatabaseType): void {
+  if (!isRowBound(limit)) throw new QueryError("The row limit must be a non-negative integer", type);
+  if (!isRowBound(offset)) throw new QueryError("The row offset must be a non-negative integer", type);
+}
+
+/**
  * Adds a LIMIT to a SELECT statement, or updates the LIMIT it already has.
  *
- * `limit` and `offset` must each be a row bound (`isRowBound`): any other value throws a `QueryError` before anything
- * else is done. A caller holding a request's page options checks them first, as the routes do with `pageOptionError`.
+ * `limit` and `offset` must each be a row bound (`isRowBound`): any other value throws a `QueryError`
+ * (`assertRowBounds`) before anything else is done. A caller holding a request's page options checks them first, as
+ * the routes do with `pageOptionError`.
  */
 export function applyQueryLimit(
   sql: string,
@@ -472,8 +482,7 @@ export function applyQueryLimit(
   options: Partial<QueryLimitOptions> = {},
   type?: DatabaseType,
 ): LimitedQueryResult {
-  if (!isRowBound(limit)) throw new QueryError("The row limit must be a non-negative integer", type);
-  if (!isRowBound(offset)) throw new QueryError("The row offset must be a non-negative integer", type);
+  assertRowBounds(limit, offset, type);
   const { forceLimit = false } = options;
   // Resolved once and passed down, so the type it came from stops here: no reader
   // below this line ever sees a database type id.

@@ -6,6 +6,7 @@ import {
   applyQueryLimit,
   hasQueryLimit,
   noteAppendedBound,
+  assertRowBounds,
   isRowBound,
   isSelectQuery,
   type ParsedQueryInfo,
@@ -703,6 +704,13 @@ describe("applyQueryLimit", () => {
       expect(applyQueryLimit("SELECT * FROM t", Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER).sql).toBe(
         "SELECT * FROM t LIMIT 9007199254740991 OFFSET 9007199254740991",
       );
+    });
+
+    test("assertRowBounds throws the same QueryError for either bound and passes two row bounds", () => {
+      expect(() => assertRowBounds("10", 0)).toThrow("The row limit must be a non-negative integer");
+      expect(() => assertRowBounds(10, 1.5)).toThrow("The row offset must be a non-negative integer");
+      expect(() => assertRowBounds(null, 0)).toThrow(QueryError);
+      expect(() => assertRowBounds(0, Number.MAX_SAFE_INTEGER)).not.toThrow();
     });
 
     test("holds the same rule as a request's page options", () => {

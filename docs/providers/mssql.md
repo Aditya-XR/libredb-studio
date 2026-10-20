@@ -96,6 +96,8 @@ limit-less `SELECT`: with no offset it injects `TOP n` right after `SELECT [DIST
 offset it appends `OFFSET m ROWS FETCH NEXT n ROWS ONLY` — and because T-SQL requires an `ORDER BY`
 for `OFFSET … FETCH`, it injects `ORDER BY (SELECT NULL)` when the query has none.
 
+A `limit` or an `offset` that is not a non-negative safe integer is refused with a `QueryError` before either branch runs, by the check the shared limiter runs first (`assertRowBounds` in [`query-limiter.ts`](../../src/lib/db/utils/query-limiter.ts)).
+
 The two branches differ in where a **trailing** comment can reach them. `TOP` is spliced into the
 head, so `SELECT * FROM t -- note` has always come back as `SELECT TOP n * FROM t -- note` and is
 unchanged. The `OFFSET … FETCH` branch appends at the tail, so a trailing `-- note` used to swallow
