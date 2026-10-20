@@ -439,6 +439,8 @@ Detailed health check for a specific database connection.
 > a document other people build clients against: the route's failure path is
 > `createErrorResponse` (`src/lib/api/errors.ts`) and it never composes a reading.
 
+A body that is not a JSON object answers `400 { "error": "Invalid request body" }`, as on [`POST /api/db/query`](#post-apidbquery).
+
 ---
 
 #### POST /api/db/query
@@ -561,6 +563,14 @@ answers `503 POOL_EXHAUSTED`.
 A `sql` that is present but not a string (a number, `0` included, an object, an array, `true` or `false`) answers `400 { "error": "sql must be a string" }` on every connection type, before any provider resolves or any connection opens.
 `POST /api/db/multi-query` and the `query` action of `POST /api/db/transaction` answer it the same way.
 A missing, `null` or empty `sql` keeps its own answer: `400 { "error": "Connection and query are required" }` here and on `POST /api/db/multi-query`, and `400 { "error": "SQL query is required for transaction query" }` on the transaction route.
+
+**A body that is not a JSON object:**
+
+A body that is not JSON, or JSON that is not an object (`null`, an array, a number, a string, a boolean), answers `400 { "error": "Invalid request body" }` before any connection resolves.
+The same answer comes from `POST /api/db/multi-query`, `/api/db/transaction`, `/api/db/cancel`, `/api/db/profile`, `/api/db/health`, `/api/db/pool-stats` and both maintenance routes.
+`POST /api/db/disconnect` and `POST /api/db/test-connection` answer it in their own envelope, `400 { "success": false, "error": "Invalid request body" }`.
+`POST /api/db/monitoring` answers JSON that is not an object the same way, and keeps `400 { "error": "Invalid JSON in request body" }` for text that is not JSON.
+Its `options`, when sent, must be an object as well: anything else (`null`, a number, an array) answers `400 { "error": "options must be an object" }` before any connection resolves.
 
 **A connection type's console text bound:**
 
@@ -1147,6 +1157,9 @@ Without this the value reached the provider's identifier escaper, where it faile
 `identifier.replace is not a function` and the caller read a `500` for a malformed request. An
 empty string is not malformed: it reads as a request that named no container, the same way an empty
 `target` reads as the whole-database form.
+
+`target` gets the same check, before any provider is opened and before any audit row is written: a value that is neither absent nor a string answers `{ "error": "\"target\" must be a string naming the object to run against" }` with `400`.
+Without it a number failed in the provider as `identifier.replace is not a function`, answered `500`, and the audit row recorded the serialized value.
 
 A fifth `400` gates what the operation may be *pointed at*. Each provider declares that separately
 (`maintenanceOperationSpecs`, documented per engine under `docs/providers/`), and `target` selects
