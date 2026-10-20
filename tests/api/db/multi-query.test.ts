@@ -452,10 +452,14 @@ describe("POST /api/db/multi-query", () => {
       ["a fractional limit", { limit: 1.5 }, "options.limit must be a non-negative integer"],
       ["a negative limit", { limit: -1 }, "options.limit must be a non-negative integer"],
       ["an array limit", { limit: [10] }, "options.limit must be a non-negative integer"],
+      ["a limit past Number.MAX_SAFE_INTEGER", { limit: 2 ** 53 }, "options.limit must be a non-negative integer"],
+      ["a limit of 1e21", { limit: 1e21 }, "options.limit must be a non-negative integer"],
       ["a numeric string offset", { offset: "10" }, "options.offset must be a non-negative integer"],
       ["a fractional offset", { offset: 1.5 }, "options.offset must be a non-negative integer"],
       ["a negative offset", { offset: -1 }, "options.offset must be a non-negative integer"],
       ["an array offset", { offset: [10] }, "options.offset must be a non-negative integer"],
+      ["an offset past Number.MAX_SAFE_INTEGER", { offset: 2 ** 53 }, "options.offset must be a non-negative integer"],
+      ["an offset of 1e21", { offset: 1e21 }, "options.offset must be a non-negative integer"],
       ["null options", null, "options must be an object"],
       ["string options", "500", "options must be an object"],
     ];
@@ -485,6 +489,11 @@ describe("POST /api/db/multi-query", () => {
       ["empty options", {}, {}],
       ["an integer limit and offset", { limit: 50, offset: 100 }, { limit: 50, offset: 100 }],
       ["a zero limit", { limit: 0 }, { limit: 0 }],
+      [
+        "Number.MAX_SAFE_INTEGER as limit and offset",
+        { limit: Number.MAX_SAFE_INTEGER, offset: Number.MAX_SAFE_INTEGER },
+        { limit: Number.MAX_SAFE_INTEGER, offset: Number.MAX_SAFE_INTEGER },
+      ],
       ["an unlimited run", { unlimited: true }, { unlimited: true }],
     ];
 

@@ -677,6 +677,8 @@ describe("applyQueryLimit", () => {
       ["an infinity", Number.POSITIVE_INFINITY],
       ["null", null],
       ["an array", [10]],
+      ["the first integer past Number.MAX_SAFE_INTEGER", 2 ** 53],
+      ["a number JavaScript prints in exponent form", 1e21],
     ];
 
     test.each(outOfRule)("refuses %s as the limit with a QueryError", (_name, limit) => {
@@ -696,16 +698,16 @@ describe("applyQueryLimit", () => {
       expect(() => applyQueryLimit("SELECT * FROM t LIMIT 5", 100, "10" as unknown as number)).toThrow(QueryError);
     });
 
-    test("keeps zero and every larger integer as it was given", () => {
+    test("keeps zero and every larger safe integer as it was given", () => {
       expect(applyQueryLimit("SELECT * FROM t", 0).sql).toBe("SELECT * FROM t LIMIT 0");
-      expect(applyQueryLimit("SELECT * FROM t", 2 ** 53, 2 ** 53).sql).toBe(
-        "SELECT * FROM t LIMIT 9007199254740992 OFFSET 9007199254740992",
+      expect(applyQueryLimit("SELECT * FROM t", Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER).sql).toBe(
+        "SELECT * FROM t LIMIT 9007199254740991 OFFSET 9007199254740991",
       );
     });
 
     test("holds the same rule as a request's page options", () => {
       for (const [, value] of outOfRule) expect(isRowBound(value)).toBe(false);
-      for (const value of [0, 1, 500, 2 ** 53]) expect(isRowBound(value)).toBe(true);
+      for (const value of [0, 1, 500, Number.MAX_SAFE_INTEGER]) expect(isRowBound(value)).toBe(true);
     });
   });
 });

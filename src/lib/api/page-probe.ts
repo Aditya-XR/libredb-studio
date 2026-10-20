@@ -39,7 +39,7 @@ export function pageOfProbe<Row>(prepared: PreparedQuery, rows: Row[]): { hasMor
  *
  * Read from the request body, so a value can be any JSON: the probe adds one to the limit, and
  * `"500" + 1` is the string `"5001"`, which would run a page ten times the size asked for.
- * Each is therefore required to be a non-negative integer when present (`isRowBound`), the same rule
+ * Each is therefore required to be a non-negative safe integer when present (`isRowBound`), the same rule
  * `applyQueryLimit` holds its own `limit` and `offset` to.
  */
 export function pageOptionError(options: unknown): string | null {

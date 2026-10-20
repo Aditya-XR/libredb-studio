@@ -70,12 +70,14 @@ describe("checkEditorQuery", () => {
     expect(checkEditorQuery({ statement: 42, type: "postgres", options: {} })).toBeNull();
   });
 
-  test("page bounds that are not non-negative integers are refused with the route's sentences", () => {
+  test("page bounds that are not non-negative safe integers are refused with the route's sentences", () => {
     const check = (options: unknown) => checkEditorQuery({ statement: "SELECT 1", type: "postgres", options });
     expect(check("500")).toEqual({ status: 400, error: "options must be an object" });
     expect(check({ limit: -1 })).toEqual({ status: 400, error: "options.limit must be a non-negative integer" });
     expect(check({ offset: 1.5 })).toEqual({ status: 400, error: "options.offset must be a non-negative integer" });
     expect(check({ limit: "500" })).toEqual({ status: 400, error: "options.limit must be a non-negative integer" });
+    expect(check({ limit: 2 ** 53 })).toEqual({ status: 400, error: "options.limit must be a non-negative integer" });
+    expect(check({ offset: 1e21 })).toEqual({ status: 400, error: "options.offset must be a non-negative integer" });
   });
 
   test("a declared text bound refuses an oversize text in words and passes one at the bound", () => {
