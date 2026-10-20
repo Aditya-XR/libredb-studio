@@ -54,7 +54,7 @@ import {
   requiredVariant,
 } from "./agent-manifest";
 import { logger } from "@/lib/logger";
-import { isRetryableError, isToolCallParseError, LLMConfigError, LLMError } from "@/lib/llm/types";
+import { isRetryableError, isToolCallParseError, LLMConfigError } from "@/lib/llm/types";
 import { type AssistantModelMessage, type ModelMessage, Output, type ToolSet, streamText, tool } from "ai";
 import { z } from "zod";
 import {
@@ -2492,7 +2492,6 @@ async function takeTurn(
   const turnSampling = await agentSamplingFor(agentModel, providerOptions, sampling).catch((error: unknown) => {
     // The build-time path raises an LLMConfigError for the same preparation failure, so a turn does
     // too: a preparation that broke is a configuration refusal, not a transport retry.
-    if (error instanceof LLMError) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     throw new LLMConfigError(`Cannot decide the ${agentModel.provider} sampling: ${detail}`, agentModel.provider);
   });

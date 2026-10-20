@@ -1119,9 +1119,13 @@ describe("agentSamplingFor keeps only the sampling the openai kind's SDK would s
   });
 
   test("an empty sampling is returned without asking the SDK", async () => {
+    // A model id no other test resolves, so this test owns the cache entry: the early return for
+    // empty sampling is what keeps `prepareRequest` uncalled, not a memoized answer from an
+    // earlier test.
+    const model = { provider: "openai", modelId: "gpt-6-luna-empty-sampling" } as const;
     const prepare = spyOn(providerRegistry, "openAIResponsesRequestWarnings");
     try {
-      await expect(agentSamplingFor(LUNA, agentProviderOptions(LUNA), {})).resolves.toEqual({});
+      await expect(agentSamplingFor(model, agentProviderOptions(model), {})).resolves.toEqual({});
       expect(prepare).not.toHaveBeenCalled();
     } finally {
       prepare.mockRestore();

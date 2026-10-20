@@ -198,22 +198,9 @@ async function computeOpenAISamplingDrops(
  * SDK's per-model table applied on the wire, not this decision; the openai-only gate is what this
  * repository owns.
  *
- * Mutation table — reverting each piece fails a specific test, so the decision is load-bearing
- * rather than decorative:
- *
- *  - the `provider !== "openai"` gate → the ollama/custom/gemini arms of the `agentSamplingFor`
- *    matrix and the byte-for-byte turn tests in `tests/isolated/agent-investigation.test.ts`;
- *  - dropping a feature the SDK would drop → the `gpt-6-luna` / `gpt-6.1-sol` / `o3` / `gpt-5`
- *    arms of the same matrix;
- *  - the `(modelId, effort)` memoization → the "asked once, then reused" and "rejected preparation
- *    is not cached" arms of that matrix;
- *  - the turn-time `LLMConfigError` wrap in `investigation.ts` → the "sampling preparation breaks"
- *    drive test in `tests/isolated/agent-investigation.test.ts`.
- *
  * Deliberately not done here, and why: no capability table is copied (an SDK upgrade is caught by
  * `tests/unit/agent-dependency-boundary.test.ts`, not by a stale copy), and no global log switch is
- * touched. The full-repository `coverage:check` gate is environment-blocked (Windows symlink
- * privileges, Bun/Windows error-code naming, Turkish locale number formatting), not by this code.
+ * touched.
  */
 export async function agentSamplingFor(
   agentModel: Pick<AgentModel, "provider" | "modelId">,
