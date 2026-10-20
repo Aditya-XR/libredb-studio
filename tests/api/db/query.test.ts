@@ -431,13 +431,15 @@ describe("POST /api/db/query", () => {
     expect(data.error).toContain("required");
   });
 
-  // A truthy `sql` that is not a string reached the provider and answered 500 with the TypeError's own text
-  // ("sql.slice is not a function"). It is refused in words before any provider resolves.
+  // A `sql` that is present but not a string reached the provider and answered 500 with the TypeError's own text.
+  // It is refused in words before any provider resolves, a falsy one (0, false) included.
   for (const [label, sql] of [
     ["a number", 123],
     ["an object", { text: "SELECT 1" }],
     ["an array", ["SELECT 1"]],
     ["true", true],
+    ["zero", 0],
+    ["false", false],
   ] as const) {
     test(`answers 400 when sql is ${label}, before any provider resolves`, async () => {
       mockGetOrCreateProvider.mockClear();
@@ -459,6 +461,19 @@ describe("POST /api/db/query", () => {
     const req = createMockRequest("/api/db/query", {
       method: "POST",
       body: { connection: validConnection, sql: "" },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{ error: string }>(res);
+
+    expect(res.status).toBe(400);
+    expect(data.error).toBe("Connection and query are required");
+  });
+
+  test("a null sql keeps the answer of a missing one", async () => {
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: { connection: validConnection, sql: null },
     });
 
     const res = await POST(req as never);

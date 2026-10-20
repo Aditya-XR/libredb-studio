@@ -557,9 +557,9 @@ answers `503 POOL_EXHAUSTED`.
 
 **A `sql` that is not a string:**
 
-A `sql` that is present but not a string (a number, an object, an array, `true`) answers `400 { "error": "sql must be a string" }` on every connection type, before any provider resolves or any connection opens.
+A `sql` that is present but not a string (a number, `0` included, an object, an array, `true` or `false`) answers `400 { "error": "sql must be a string" }` on every connection type, before any provider resolves or any connection opens.
 `POST /api/db/multi-query` and the `query` action of `POST /api/db/transaction` answer it the same way.
-A missing or empty `sql` keeps its own answer: `400 { "error": "Connection and query are required" }` here and on `POST /api/db/multi-query`, and `400 { "error": "SQL query is required for transaction query" }` on the transaction route.
+A missing, `null` or empty `sql` keeps its own answer: `400 { "error": "Connection and query are required" }` here and on `POST /api/db/multi-query`, and `400 { "error": "SQL query is required for transaction query" }` on the transaction route.
 
 **A connection type's console text bound:**
 

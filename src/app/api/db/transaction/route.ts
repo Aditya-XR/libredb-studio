@@ -254,9 +254,11 @@ export async function POST(req: NextRequest) {
     if (!action) {
       return NextResponse.json({ error: "Connection and action are required" }, { status: 400 });
     }
-    // A query action's text is read before its provider resolves: a truthy non-string reached the splitter and
-    // answered 500 with its own TypeError ("input.slice is not a function"). A missing one keeps its answer below.
-    if (action === "query" && sql && typeof sql !== "string") {
+    // A query action's text is read before its provider resolves. A `sql` that is present but not a string, a falsy
+    // one (0, false) included, is refused in words: without `params` a truthy one reached the splitter and answered
+    // 500 with its own TypeError ("input.slice is not a function"), and with `params` it reached the provider's
+    // prepareQuery and queryInTransaction. A missing (null) or empty one keeps its answer below.
+    if (action === "query" && sql != null && typeof sql !== "string") {
       return NextResponse.json({ error: "sql must be a string" }, { status: 400 });
     }
 
