@@ -725,6 +725,28 @@ describe("POST /api/db/transaction", () => {
     });
   }
 
+  // Only the query action reads `sql`: another action that carries one that is not a string answers as it does
+  // without one.
+  for (const [action, sql, answer, providerCall] of [
+    ["begin", 123, { status: "active", message: "Transaction started" }, mockTxProvider.beginTransaction],
+    ["commit", ["COMMIT"], { status: "committed", message: "Transaction committed" }, mockTxProvider.commitTransaction],
+    ["rollback", 0, { status: "rolled_back", message: "Transaction rolled back" }, mockTxProvider.rollbackTransaction],
+    ["status", { text: "SELECT 1" }, { inTransaction: true }, mockTxProvider.isInTransaction],
+  ] as const) {
+    test(`the ${action} action ignores a sql that is not a string`, async () => {
+      const req = createMockRequest("/api/db/transaction", {
+        method: "POST",
+        body: { connection: validConnection, action, sql },
+      });
+
+      const res = await POST(req as never);
+
+      expect(res.status).toBe(200);
+      expect(await parseResponseJSON<Record<string, unknown>>(res)).toMatchObject(answer);
+      expect(providerCall).toHaveBeenCalledTimes(1);
+    });
+  }
+
   test("an empty sql keeps the answer of a missing one", async () => {
     const req = createMockRequest("/api/db/transaction", {
       method: "POST",
