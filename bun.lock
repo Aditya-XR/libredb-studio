@@ -7,11 +7,11 @@
       "dependencies": {
         "@duckdb/node-api": "1.5.5-r.5",
         "@google/generative-ai": "^0.24.1",
-        "@grpc/grpc-js": "1.14.5",
+        "@grpc/grpc-js": "1.14.6",
         "@grpc/proto-loader": "0.8.1",
         "@libredb/libredb": "^0.2.2",
         "@monaco-editor/react": "^4.7.0",
-        "@platformatic/kafka": "2.13.0",
+        "@platformatic/kafka": "2.14.0",
         "@radix-ui/react-accordion": "^1.2.20",
         "@radix-ui/react-alert-dialog": "^1.1.23",
         "@radix-ui/react-aspect-ratio": "^1.1.15",
@@ -51,15 +51,15 @@
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "cmdk": "^1.1.1",
-        "cytoscape": "3.34.3",
+        "cytoscape": "3.34.4",
         "cytoscape-fcose": "2.2.0",
         "date-fns": "^4.4.0",
-        "db2-node": "1.0.25",
+        "db2-node": "1.0.27",
         "elkjs": "^0.12.0",
         "embla-carousel-react": "^8.6.0",
         "framer-motion": "^14.0.0",
         "geist": "^1.7.2",
-        "hyparquet": "1.31.1",
+        "hyparquet": "1.31.4",
         "hyparquet-compressors": "1.1.2",
         "input-otp": "^1.5.0",
         "ioredis": "^5.11.1",
@@ -73,8 +73,8 @@
         "neo4j-driver-lite": "6.2.0",
         "next": "^16.3.6",
         "next-themes": "^0.4.6",
-        "node-opcua-certificate-manager": "2.187.0",
-        "node-opcua-client": "2.187.3",
+        "node-opcua-certificate-manager": "2.187.9",
+        "node-opcua-client": "2.187.9",
         "openid-client": "^6.8.8",
         "oracledb": "^6.10.0",
         "pg": "^8.23.0",
@@ -395,7 +395,7 @@
 
     "@graphile/logger": ["@graphile/logger@0.2.0", "", {}, "sha512-jjcWBokl9eb1gVJ85QmoaQ73CQ52xAaOCF29ukRbYNl6lY+ts0ErTaDYOBlejcbUs2OpaiqYLO5uDhyLFzWw4w=="],
 
-    "@grpc/grpc-js": ["@grpc/grpc-js@1.14.5", "", { "dependencies": { "@grpc/proto-loader": "^0.8.0", "@js-sdsl/ordered-map": "^4.4.2" } }, "sha512-7VZM+SVdEcUUqSQeNI3zM8Qs/BhQKZndPo2h5VkYkAM8Iz0wJIa8mKV5ekQGqG8UUsnkQ0NMxIxwkIHYvj0qOw=="],
+    "@grpc/grpc-js": ["@grpc/grpc-js@1.14.6", "", { "dependencies": { "@grpc/proto-loader": "^0.8.0", "@js-sdsl/ordered-map": "^4.4.2" } }, "sha512-SgC/B3/VZ8lTyOZ4Cwk6f1skWhmkNAaVfiX90qd5u1rRXGKk1//8FTUEN9GvOUq7rfWIqAYkA3CoyumYVpOS6g=="],
 
     "@grpc/proto-loader": ["@grpc/proto-loader@0.8.1", "", { "dependencies": { "lodash.camelcase": "^4.3.0", "long": "^5.0.0", "protobufjs": "^7.5.5", "yargs": "^17.7.2" }, "bin": { "proto-loader-gen-types": "build/bin/proto-loader-gen-types.js" } }, "sha512-wtF6h+DY6M3YaDBPAmvuuA6jV8Sif9MjtOI5euKFWRgCDl5PeDpPsHR9u2l6St5ceY8AZgoNDww5+HvEsXFsGg=="],
 
@@ -763,11 +763,11 @@
 
     "@peculiar/x509": ["@peculiar/x509@2.2.0", "", { "dependencies": { "@peculiar/asn1-cms": "^2.11.0", "@peculiar/asn1-csr": "^2.11.0", "@peculiar/asn1-ecc": "^2.11.0", "@peculiar/asn1-pkcs9": "^2.11.0", "@peculiar/asn1-rsa": "^2.11.0", "@peculiar/asn1-schema": "^2.11.0", "@peculiar/asn1-x509": "^2.11.0", "@peculiar/asn1-x509-post-quantum": "^2.11.0", "pvtsutils": "^1.3.6", "tslib": "^2.8.1", "tsyringe": "^4.10.0" } }, "sha512-adpW58ySPQMOUPv8pTKT3RIyCFqfUFt8X05ukPdtkQToXDVr8dMtxuenik1yx8tNFTbpApWsM/Hi5SzlIx48+Q=="],
 
-    "@platformatic/dynamic-buffer": ["@platformatic/dynamic-buffer@0.3.1", "", {}, "sha512-xQD5JSkQc4D15suOk7FezGDmh6Vb5e4phDoFZ/ASpa3Ft+3fOVwFOENmHtC1561zm/xHnKwI91NbMF8inpbk0Q=="],
+    "@platformatic/dynamic-buffer": ["@platformatic/dynamic-buffer@0.4.0", "", {}, "sha512-eCL++LyBjSsqalm4I67dl+gVqLSKd6gPYCieD72S5KqqAkmSAgAYNHt+lL+iVXssWPSfbuIJ5PEwpn5JVD73Xw=="],
 
-    "@platformatic/kafka": ["@platformatic/kafka@2.13.0", "", { "dependencies": { "@platformatic/dynamic-buffer": "^0.3.1", "@platformatic/wasm-utils": "^0.2.1", "ajv": "^8.17.1", "ajv-draft-04": "^1.0.0", "avsc": "^5.7.9", "debug": "^4.4.3", "fastq": "^1.19.1", "mnemonist": "^0.40.3", "scule": "^1.3.0" }, "optionalDependencies": { "@node-rs/crc32": "^1.10.6", "protobufjs": "^8.0.0" } }, "sha512-60zeFX9vXPsnv6ikCyNNRucgTwvgirjrrkI4e9GFAY8TFHF/4j8C1pMZlHka0Uz7SClUPHm3qsgXqtXTxZFvng=="],
+    "@platformatic/kafka": ["@platformatic/kafka@2.14.0", "", { "dependencies": { "@platformatic/dynamic-buffer": "^0.4.0", "@platformatic/wasm-utils": "^0.3.0", "ajv": "^8.20.0", "ajv-draft-04": "^1.0.0", "avsc": "^5.7.9", "debug": "^4.4.3", "fastq": "^1.20.3", "mnemonist": "^0.40.5", "scule": "^1.3.0" }, "optionalDependencies": { "@node-rs/crc32": "^1.10.8", "protobufjs": "^8.8.0" } }, "sha512-FvPnGuvxk3otCKQL515X1C2yMPAAjlmGEe9JQ2YiKCz0F90K+6zrWhExZ7DCBYIyPfo1O555hsI2D/R2MnmRUQ=="],
 
-    "@platformatic/wasm-utils": ["@platformatic/wasm-utils@0.2.1", "", { "dependencies": { "@platformatic/dynamic-buffer": "^0.3.1" } }, "sha512-5rNl4h5n+hZG4LjiItQ7bVfHBqTypjldP46NXrOYW64cZr87ahngK1s9nEtCpByWg7WWjRLSxyCytgJK5gNdwQ=="],
+    "@platformatic/wasm-utils": ["@platformatic/wasm-utils@0.3.0", "", { "dependencies": { "@platformatic/dynamic-buffer": "^0.4.0" } }, "sha512-tK7M2HMtVQrHBuQ/TSaDIk3YCEV6+EUQcConDrIH1kbQ7ZQiCWGrp7Jn+vd0FxoAsq2O8ZXGhANxwNpkPR8Maw=="],
 
     "@playwright/test": ["@playwright/test@1.64.1", "", { "dependencies": { "playwright": "1.64.1" }, "bin": { "playwright": "cli.js" } }, "sha512-IaYGml/nSOiZWROfPtuIL7neuu9qDOZ3TNvNljUIrhDMxiGTgPjzj/g9p9RxpS2tSepPDRY+UwAaEeiKtUvIAg=="],
 
@@ -1039,13 +1039,13 @@
 
     "@tanstack/react-table": ["@tanstack/react-table@9.3.1", "", { "dependencies": { "@tanstack/react-store": "^0.11.2", "@tanstack/table-core": "9.3.1" }, "peerDependencies": { "react": ">=18" } }, "sha512-E6Ya5TnY6EaGyZYIUqig/29Lr/gJSAubQkLJFqiWkUl5nRCr0Xr9hvJot+NiRTtG+TzGxHTiqUW3bnLtQxlHug=="],
 
-    "@tanstack/react-virtual": ["@tanstack/react-virtual@3.14.20", "", { "dependencies": { "@tanstack/virtual-core": "3.19.5" }, "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0", "react-dom": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-9hbhFlc0lznjXmWYDB/KEl7PJxEPz0Qnj2FzJFse98miGvXtx7jzjE5jlasmtczmZ6TxXsyI4v7PuyGQm2q1nQ=="],
+    "@tanstack/react-virtual": ["@tanstack/react-virtual@3.14.21", "", { "dependencies": { "@tanstack/virtual-core": "3.19.6" }, "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0", "react-dom": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-wWE/ZJDNNDp18JHWy7n5PQooqerHePVkEEu6Op0twKQ2InF9DPhYMQptQY0syDEviMd3/r8D0OUvKJibDGm9HQ=="],
 
     "@tanstack/store": ["@tanstack/store@0.11.2", "", {}, "sha512-sJ4mjol8uQsHV0gOJzzjwXfh2Fwm+Sz0+8deqiTm4jGbMdjzNSW+xZCFm0kUa870uhd8yi+DpKnZb5Kc4apa0Q=="],
 
     "@tanstack/table-core": ["@tanstack/table-core@9.3.1", "", { "dependencies": { "@tanstack/store": "^0.11.2" } }, "sha512-zQvlxSNi2qGM3L4jh85Z6hqMfdIR5qOfD9KHOU32nuKFJGN0RlJ7UvV1lsPb1fPVhpFYI0VP3jJGxLdLDpTKjQ=="],
 
-    "@tanstack/virtual-core": ["@tanstack/virtual-core@3.19.5", "", {}, "sha512-X/wq6DtSK/XClznMM+I4JE63yyIwmyPk4Ts83bD0VKaIbwHNdRsO5QipCPX+3OovqYyr0puQNpbmp8+SPhspNg=="],
+    "@tanstack/virtual-core": ["@tanstack/virtual-core@3.19.6", "", {}, "sha512-CsTW892z23gy7IyxYTTorVu1uZWB+0N349rSMgKz4rFLPpLza7F7TpcCKeI5iUAwYQCt8QUlOU67J+KXCxtpGw=="],
 
     "@tediousjs/connection-string": ["@tediousjs/connection-string@1.1.0", "", {}, "sha512-z9ZBWEG+8pIB5V1zYzlRPXx0oRJ5H7coPnMQK8EZOw03UTPI9Umn6viL36f5w+CuqkKsnCM50RVStpjZmR0Bng=="],
 
@@ -1533,7 +1533,7 @@
 
     "csstype": ["csstype@3.2.3", "", {}, "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ=="],
 
-    "cytoscape": ["cytoscape@3.34.3", "", {}, "sha512-yfYGhRcGAntq6YBD583j4n0Eg3jIxvWmZtz/5uz9UYkeIStSlMxuUja+ec5j3iBD8nv1rwaOAYMW09tBdkSeaQ=="],
+    "cytoscape": ["cytoscape@3.34.4", "", {}, "sha512-msY99tMY8iWTg+sIPGfSqDcPNOt4xcj+v/K/7qUFaCUxxlqnMkUYLBjRUzn9W5CU/R2hrmtJa5+UtovrEM2ctg=="],
 
     "cytoscape-fcose": ["cytoscape-fcose@2.2.0", "", { "dependencies": { "cose-base": "^2.2.0" }, "peerDependencies": { "cytoscape": "^3.2.0" } }, "sha512-ki1/VuRIHFCzxWNrsshHYPs6L7TvLu3DL+TyIGEsRcvVERmxokbf5Gdk7mFxZnTdiGtnA4cfSmjZJMviqSuZrQ=="],
 
@@ -1581,7 +1581,7 @@
 
     "date-fns": ["date-fns@4.4.0", "", {}, "sha512-+1UMbeh68lH1SegH83CGWwpb6OHHbpSgr3+s5Eww5M4CAgswBpoWS0AjTOfEJ33HiYKz1hdj/KTFprzXHmq/6w=="],
 
-    "db2-node": ["db2-node@1.0.25", "", {}, "sha512-ZvVRQ1vjhfUK6/ixdepSz3ZxIOVdOSoCANFoz3zTjGIA5UBtQtYk+/x3p2+1urAVxyp7TQliEga91/2yZwJzrg=="],
+    "db2-node": ["db2-node@1.0.27", "", {}, "sha512-+Z89WSAas53eX31o+sL036hI5gfW/yp0qPaEBnVu+JYWx+L7hrEQIugNuBxxZ9pBqkFVvS9vR8Sfttz1+YcYLQ=="],
 
     "debug": ["debug@4.4.3", "", { "dependencies": { "ms": "^2.1.3" } }, "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA=="],
 
@@ -1841,7 +1841,7 @@
 
     "fzstd": ["fzstd@0.1.1", "", {}, "sha512-dkuVSOKKwh3eas5VkJy1AW1vFpet8TA/fGmVA5krThl8YcOVE/8ZIoEA1+U1vEn5ckxxhLirSdY837azmbaNHA=="],
 
-    "geist": ["geist@1.7.2", "", { "peerDependencies": { "next": ">=13.2.0" } }, "sha512-Gu5lDFa3pLRyoBlBPf0QIFHVdWAnpco7fS1bJm41jyLPFoguBgiubseUN2oLXMgqZ7uxAxDoXcHMhCY/fOTTgg=="],
+    "geist": ["geist@1.8.1", "", { "peerDependencies": { "next": ">=13.2.0" } }, "sha512-oSBhuzTvwZqGAZVC4swTRo61G/JHojtEVNR3DCToU+4nUBkG48ndKNvj4Ma7zZ+OlJkYDLT66HS+hrFszkovTg=="],
 
     "generate-function": ["generate-function@2.3.1", "", { "dependencies": { "is-property": "^1.0.2" } }, "sha512-eeB5GfMNeevm/GRYq20ShmsaGcmI81kIX2K9XQx5miC8KdHaC6Jm0qQ8ZNeGOi7wYB8OsdxKs+Y2oVuTFuVwKQ=="],
 
@@ -1929,7 +1929,7 @@
 
     "human-signals": ["human-signals@2.1.0", "", {}, "sha512-B4FFZ6q/T2jhhksgkbEW3HBvWIfDW85snkQgawt07S7J5QXTk6BkNV+0yAeZrM5QpMAdYlocGoljn0sJ/WQkFw=="],
 
-    "hyparquet": ["hyparquet@1.31.1", "", {}, "sha512-tF9580Xb+41+Eb+mH0av1k7m1PWl+PSKrX66Yd7UOZ760cwEXP9/enwHRMSCeVncaubRI8XPb3v580/ujYKK5w=="],
+    "hyparquet": ["hyparquet@1.31.4", "", {}, "sha512-Qe37Nhu1lLvmnSL9bQuY/CN8suLDoNMPNhrTb6+ZXJDfiy1mHHRjkoVYIYPhf0krYpRdAxMMnuEWEHeSUCe40g=="],
 
     "hyparquet-compressors": ["hyparquet-compressors@1.1.2", "", { "dependencies": { "fzstd": "0.1.1", "hysnappy": "1.1.1" } }, "sha512-0Hx6w0ZpVpNCefKy5xBYLTp6rKeZn/tsUzuliNzfKqSCdLcTQSfwATEoeedS703Y17k1qNS61HwRME5aOeNkPg=="],
 
@@ -2175,7 +2175,7 @@
 
     "lru.min": ["lru.min@1.1.5", "", {}, "sha512-5J9ysMYUpYIg9RF2vJpy9SinEmSviFSe0GyPpCQ4L5QSkLAgeLXlTAOu2ZwWUU5m+0SBl6gUU1R1ZQB3aKypfA=="],
 
-    "lucide-react": ["lucide-react@1.58.0", "", { "peerDependencies": { "@types/react": "*", "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" }, "optionalPeers": ["@types/react"] }, "sha512-hXaFNm6mk6QVtBnDGBn1YAs8j2tGUk0A4s/CpclIcczfxeXiW1rdOLVo6zCsoIih9XXsGvDODQerl749a2n7bA=="],
+    "lucide-react": ["lucide-react@1.59.0", "", { "peerDependencies": { "@types/react": "*", "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" }, "optionalPeers": ["@types/react"] }, "sha512-5qgMyyCPU6OvnKpLS2t693+ZtiqA8oaSweWoUows0BLFKFf6V75m4+CptpmohZHpD5IuOVIBXHBBiv2vpLJmtw=="],
 
     "lz-string": ["lz-string@1.5.0", "", { "bin": { "lz-string": "bin/bin.js" } }, "sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ=="],
 
@@ -2285,7 +2285,7 @@
 
     "node-opcua-address-space-store": ["node-opcua-address-space-store@2.187.1", "", { "dependencies": { "node-opcua-address-space-base": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-yQIL5v3YbrV3frL26ipqwVQ8o0g4Ai+GIFC3FhQHByMgok8L+frFkx5jPu3aBIWpAQAi844abkcWE1Cxu15zyg=="],
 
-    "node-opcua-alarm-condition": ["node-opcua-alarm-condition@2.187.0", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-pseudo-session": "2.187.0", "node-opcua-service-filter": "2.187.0", "node-opcua-service-read": "2.187.0", "node-opcua-service-subscription": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-1LEHK+9re/iVeKLf2zq7bwaSMdW25eD2EXcIkK2HgbaptJVwDtf16hAG4/O3HXjIy3J5ERaEeHUzqo0AFz8fiw=="],
+    "node-opcua-alarm-condition": ["node-opcua-alarm-condition@2.187.9", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-pseudo-session": "2.187.9", "node-opcua-service-filter": "2.187.9", "node-opcua-service-read": "2.187.9", "node-opcua-service-subscription": "2.187.9", "node-opcua-service-translate-browse-path": "2.187.9", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-qkrFhFs/JCSi5D5lCwDQLYQZQZDtcalmlm/7zBa2I7FWb7b2M54tj/XERxPyi/7xmYlOqiPipslqf1WwvHeQFQ=="],
 
     "node-opcua-assert": ["node-opcua-assert@2.186.7", "", { "dependencies": { "chalk": "6.0.1" } }, "sha512-rBihYif7mYsC0xZ3dyQRswjEU5kuCd4RESFb1MKFo0LFFSUCZXp6Ob5bvwdEnBD41zdYA7ew3fCByqZsyz4wmg=="],
 
@@ -2295,13 +2295,13 @@
 
     "node-opcua-buffer-utils": ["node-opcua-buffer-utils@2.187.0", "", {}, "sha512-1KKtaVnqzoP27/DL5WyrzYwq//mU0maflTL01q/QGVjSaM0wqe+KcU8DkmNpAQc7Od5gOiR4peIe5S2X1q4V3w=="],
 
-    "node-opcua-certificate-manager": ["node-opcua-certificate-manager@2.187.0", "", { "dependencies": { "env-paths": "4.0.0", "node-opcua-assert": "2.186.7", "node-opcua-common": "2.187.0", "node-opcua-crypto": "6.2.0", "node-opcua-debug": "2.186.7", "node-opcua-object-registry": "2.186.7", "node-opcua-pki": "7.1.0", "node-opcua-status-code": "2.187.0", "thenify-ex": "4.4.0" } }, "sha512-cmlczhZSklg8BMEEiI1Gj9S6xbxAnR+fIRK9tGvVOrrC17lYfWwHiT8lTUyC9PaTrxmGsJp99KFolQA9xoC+4Q=="],
+    "node-opcua-certificate-manager": ["node-opcua-certificate-manager@2.187.9", "", { "dependencies": { "env-paths": "4.0.0", "node-opcua-assert": "2.186.7", "node-opcua-common": "2.187.9", "node-opcua-crypto": "6.2.3", "node-opcua-debug": "2.186.7", "node-opcua-object-registry": "2.186.7", "node-opcua-pki": "7.1.2", "node-opcua-status-code": "2.187.0", "thenify-ex": "4.4.0" } }, "sha512-5XXjFhSzpYD8tlkHrC758LoCGEALiOTLq89z3TMIBIEuz6eCCbN1gJmm6PYmclWziJvQ42673N2sD5WHLqsxkA=="],
 
     "node-opcua-chunkmanager": ["node-opcua-chunkmanager@2.187.0", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-buffer-utils": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-packet-assembler": "2.187.0" } }, "sha512-6F3iK7uUxz0w8Y4SAFAs+OoLHyWFZcOoEAyep/hO8b074O8D8aE+iW3Wl0/byVkfXUaUcfPamKvEb1mLI0zb/w=="],
 
-    "node-opcua-client": ["node-opcua-client@2.187.3", "", { "dependencies": { "@ster5/global-mutex": "^3.3.0", "chalk": "6.0.1", "node-opcua-alarm-condition": "2.187.0", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-buffer-utils": "2.187.0", "node-opcua-certificate-manager": "2.187.0", "node-opcua-client-dynamic-extension-object": "2.187.0", "node-opcua-common": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-hostname": "2.184.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-object-registry": "2.186.7", "node-opcua-pki": "7.1.0", "node-opcua-pseudo-session": "2.187.0", "node-opcua-schemas": "2.187.0", "node-opcua-secure-channel": "2.187.0", "node-opcua-service-browse": "2.187.0", "node-opcua-service-call": "2.187.0", "node-opcua-service-discovery": "2.187.0", "node-opcua-service-endpoints": "2.187.0", "node-opcua-service-filter": "2.187.0", "node-opcua-service-history": "2.187.0", "node-opcua-service-query": "2.187.0", "node-opcua-service-read": "2.187.0", "node-opcua-service-register-node": "2.187.0", "node-opcua-service-secure-channel": "2.187.0", "node-opcua-service-session": "2.187.0", "node-opcua-service-subscription": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-service-write": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-transport": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0", "thenify-ex": "4.4.0" } }, "sha512-jvyGemhFZgvfPUuIJgXnpglxeEBq5WUOByLGEQTagInEzW+EpewHoJF2Aea/1YBPPYLP490lb4Ds2Yxc0YRQ1Q=="],
+    "node-opcua-client": ["node-opcua-client@2.187.9", "", { "dependencies": { "@ster5/global-mutex": "^3.3.0", "chalk": "6.0.1", "node-opcua-alarm-condition": "2.187.9", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-buffer-utils": "2.187.0", "node-opcua-certificate-manager": "2.187.9", "node-opcua-client-dynamic-extension-object": "2.187.9", "node-opcua-common": "2.187.9", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.3", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-hostname": "2.187.6", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-object-registry": "2.186.7", "node-opcua-pki": "7.1.2", "node-opcua-pseudo-session": "2.187.9", "node-opcua-schemas": "2.187.0", "node-opcua-secure-channel": "2.187.9", "node-opcua-service-browse": "2.187.9", "node-opcua-service-call": "2.187.9", "node-opcua-service-discovery": "2.187.9", "node-opcua-service-endpoints": "2.187.9", "node-opcua-service-filter": "2.187.9", "node-opcua-service-history": "2.187.9", "node-opcua-service-query": "2.187.9", "node-opcua-service-read": "2.187.9", "node-opcua-service-register-node": "2.187.9", "node-opcua-service-secure-channel": "2.187.9", "node-opcua-service-session": "2.187.9", "node-opcua-service-subscription": "2.187.9", "node-opcua-service-translate-browse-path": "2.187.9", "node-opcua-service-write": "2.187.9", "node-opcua-status-code": "2.187.0", "node-opcua-transport": "2.187.8", "node-opcua-types": "2.187.9", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0", "thenify-ex": "4.4.0" } }, "sha512-sKxglTeGai9lfd4EpyU8XjvoCV00nqlZMuKdzFDF5LEKrqufgV5h4whj1yODjgsjFwkZ5O+7wrbVBZWdDgTytw=="],
 
-    "node-opcua-client-dynamic-extension-object": ["node-opcua-client-dynamic-extension-object@2.187.0", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-binary-stream": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-pseudo-session": "2.187.0", "node-opcua-schemas": "2.187.0", "node-opcua-service-browse": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-4k408jDpARtCVCBRS0BLOPPhxY7iKh5l3/a7+Ev6JDq10QWHJeSir834yJGJknGF86gsZNvySOJj8CMs56JGwA=="],
+    "node-opcua-client-dynamic-extension-object": ["node-opcua-client-dynamic-extension-object@2.187.9", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-binary-stream": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-pseudo-session": "2.187.9", "node-opcua-schemas": "2.187.0", "node-opcua-service-browse": "2.187.9", "node-opcua-service-translate-browse-path": "2.187.9", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-mI1/uPDqxgL0N3Z1sGBN882QSCJic2REWGJO4RR1IxcXBohTqTwcwxuy4Gp+8zeQe4JnwN9/nmJmBuSih9JMcw=="],
 
     "node-opcua-common": ["node-opcua-common@2.187.0", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-crypto": "6.2.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0" } }, "sha512-MjRdrO2IMhU2clvHhNamX3FDPjK/QYl9Ksb4b3Y3ykayEEHIJmvbVEjIdvGjSygRYkdO3haWBuqHetb/eLR5Mg=="],
 
@@ -2347,7 +2347,7 @@
 
     "node-opcua-pki": ["node-opcua-pki@7.1.0", "", { "dependencies": { "@ster5/global-mutex": "^3.3.0", "byline": "^5.0.0", "chalk": "6.0.1", "chokidar": "4.0.3", "command-line-args": "^6.0.2", "command-line-usage": "^7.0.4", "node-opcua-crypto": "6.2.0", "yauzl": "^3.4.0" }, "bin": { "pki": "dist/bin/pki.js", "node-opcua-pki": "dist/bin/pki.js" } }, "sha512-VD3Fbq+29hqQu2vRH6/p/+MnVX4JRjtEB/Z2g3uylmHLQmZraF0sU/DQCUGDWth3KhP46h7fSnyaYuikTmTTOA=="],
 
-    "node-opcua-pseudo-session": ["node-opcua-pseudo-session@2.187.0", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-service-browse": "2.187.0", "node-opcua-service-call": "2.187.0", "node-opcua-service-read": "2.187.0", "node-opcua-service-subscription": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-service-write": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-/RFxiYJhIohgrv5TbPzfHZ1vFtHDruScGekwx92phOrjfmnazmyT2a6uYothCqwlv5uPx1pgMZiQJSz3uBiNvw=="],
+    "node-opcua-pseudo-session": ["node-opcua-pseudo-session@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.3", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-debug": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-service-browse": "2.187.9", "node-opcua-service-call": "2.187.9", "node-opcua-service-read": "2.187.9", "node-opcua-service-subscription": "2.187.9", "node-opcua-service-translate-browse-path": "2.187.9", "node-opcua-service-write": "2.187.9", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-6pBDRLIKCydkBm1B6htIBs91Dl0d12Mdw8jEyNQdkkIKtFF1RnA44MwuszW97H1ZrsxDTq5ZZ0HlZisqj+D2ew=="],
 
     "node-opcua-schemas": ["node-opcua-schemas@2.187.0", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-binary-stream": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-variant": "2.187.0", "node-opcua-xml2json": "2.187.0" } }, "sha512-DvFFXTLC7sAPaNMr8p9c4IyQSLSd7n+kHEWqxdDWtOUtct/JYsmCPIw2/BJxF/OMuatfh8IfRoO4/6Gx5HVuOw=="],
 
@@ -3251,13 +3251,85 @@
 
     "node-opcua-address-space/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
 
+    "node-opcua-address-space/node-opcua-client-dynamic-extension-object": ["node-opcua-client-dynamic-extension-object@2.187.0", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-binary-stream": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-pseudo-session": "2.187.0", "node-opcua-schemas": "2.187.0", "node-opcua-service-browse": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-4k408jDpARtCVCBRS0BLOPPhxY7iKh5l3/a7+Ev6JDq10QWHJeSir834yJGJknGF86gsZNvySOJj8CMs56JGwA=="],
+
+    "node-opcua-address-space/node-opcua-pseudo-session": ["node-opcua-pseudo-session@2.187.0", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-service-browse": "2.187.0", "node-opcua-service-call": "2.187.0", "node-opcua-service-read": "2.187.0", "node-opcua-service-subscription": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-service-write": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-/RFxiYJhIohgrv5TbPzfHZ1vFtHDruScGekwx92phOrjfmnazmyT2a6uYothCqwlv5uPx1pgMZiQJSz3uBiNvw=="],
+
     "node-opcua-alarm-condition/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
+
+    "node-opcua-alarm-condition/node-opcua-service-filter": ["node-opcua-service-filter@2.187.9", "", { "dependencies": { "node-opcua-address-space-base": "2.187.9", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.9", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-Q6y2NgiTRK3SyYgScSX8fj9H5T0gDCIkMuGUsUb5xChhEimrS8kDzHmyX5Acl+80iquBdO4pZ8pvzFa2DkhU6w=="],
+
+    "node-opcua-alarm-condition/node-opcua-service-read": ["node-opcua-service-read@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-service-secure-channel": "2.187.9", "node-opcua-types": "2.187.9" } }, "sha512-oLoJboCH/XoeO21Mgv1Km0raq/OBXnywx1BXuvBS2cDj4yKprVWWxILlKCuQqJixD6k9LcdMBdJ5go9hN1dNVQ=="],
+
+    "node-opcua-alarm-condition/node-opcua-service-subscription": ["node-opcua-service-subscription@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-AJ/Oqbt3oVwb9cmbMUtjqj2KlQV7pUHWgRIZppsJqQrDOf3TiZJLmNHqlSLSD0k5uylBzbym8w+fYzuHnEJa1w=="],
+
+    "node-opcua-alarm-condition/node-opcua-service-translate-browse-path": ["node-opcua-service-translate-browse-path@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-sr5PxVtW3jUs4GtekhbCq1ONfLk+EPgkT6XswgTy2DWXQ921N4FQZXRN4z7rd0hswYcWuisPW6zPJ/Y1v7DdjQ=="],
+
+    "node-opcua-alarm-condition/node-opcua-types": ["node-opcua-types@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-enum": "2.187.0", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Kf8uEa+9lkraLfgh3WznCKuPEGXcvdZa1GTlT+DHUmkSi72aWPpmg+X2CFjfsNHDXHkQZz7fCeeNz4ojEezUPg=="],
 
     "node-opcua-assert/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
 
+    "node-opcua-certificate-manager/node-opcua-common": ["node-opcua-common@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-crypto": "6.2.3", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-6iuqL1gDjkDc6198r79eO32cWRMXEebXTiBNGgEKSgyPLss5hgGh4+3i0bBw1WzCXFt7wgqoGVf+o+7lihsP7g=="],
+
+    "node-opcua-certificate-manager/node-opcua-crypto": ["node-opcua-crypto@6.2.3", "", { "dependencies": { "@peculiar/asn1-cms": "^2.11.0", "@peculiar/asn1-pfx": "^2.11.0", "@peculiar/asn1-pkcs8": "^2.11.0", "@peculiar/asn1-pkcs9": "^2.11.0", "@peculiar/asn1-rsa": "^2.11.0", "@peculiar/asn1-schema": "^2.11.0", "@peculiar/asn1-x509": "^2.11.0", "@peculiar/webcrypto": "^1.7.1", "@peculiar/x509": "^2.1.0", "reflect-metadata": "^0.2.2", "sshpk": "^1.18.0" }, "peerDependencies": { "node-opcua-crypto-web": "^6.0.0" }, "optionalPeers": ["node-opcua-crypto-web"] }, "sha512-hQzZWpBr3fisPOboTZkg+OfFoR4pTih/oJoHQPHRdE6uOlDNKsKtZBfIQVU/pJPNWZdzOBMYlo1KxkZ6jMrOVQ=="],
+
+    "node-opcua-certificate-manager/node-opcua-pki": ["node-opcua-pki@7.1.2", "", { "dependencies": { "@ster5/global-mutex": "^3.3.0", "byline": "^5.0.0", "chalk": "6.0.1", "chokidar": "4.0.3", "command-line-args": "^6.0.2", "command-line-usage": "^7.0.4", "node-opcua-crypto": "6.2.3", "yauzl": "^3.4.0" }, "bin": { "pki": "dist/bin/pki.js", "node-opcua-pki": "dist/bin/pki.js" } }, "sha512-4Wheaba8znVTHoPz1ZCXDvvZHO2XbxCT5E+vrW5mG6zt3zMztRYs//Y2huLK151JbQ0mkDPTaybTPv7npZ+AUw=="],
+
     "node-opcua-client/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
 
+    "node-opcua-client/node-opcua-common": ["node-opcua-common@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-crypto": "6.2.3", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-6iuqL1gDjkDc6198r79eO32cWRMXEebXTiBNGgEKSgyPLss5hgGh4+3i0bBw1WzCXFt7wgqoGVf+o+7lihsP7g=="],
+
+    "node-opcua-client/node-opcua-crypto": ["node-opcua-crypto@6.2.3", "", { "dependencies": { "@peculiar/asn1-cms": "^2.11.0", "@peculiar/asn1-pfx": "^2.11.0", "@peculiar/asn1-pkcs8": "^2.11.0", "@peculiar/asn1-pkcs9": "^2.11.0", "@peculiar/asn1-rsa": "^2.11.0", "@peculiar/asn1-schema": "^2.11.0", "@peculiar/asn1-x509": "^2.11.0", "@peculiar/webcrypto": "^1.7.1", "@peculiar/x509": "^2.1.0", "reflect-metadata": "^0.2.2", "sshpk": "^1.18.0" }, "peerDependencies": { "node-opcua-crypto-web": "^6.0.0" }, "optionalPeers": ["node-opcua-crypto-web"] }, "sha512-hQzZWpBr3fisPOboTZkg+OfFoR4pTih/oJoHQPHRdE6uOlDNKsKtZBfIQVU/pJPNWZdzOBMYlo1KxkZ6jMrOVQ=="],
+
+    "node-opcua-client/node-opcua-data-value": ["node-opcua-data-value@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-enum": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Dj5uiIeqCwTP9EOjNrLtBfyHQA2sQlkxvUll9HrlL3iFNL+Qoo+M/Q9eCmzpMvbUj4vafKSGPGjU6rgq3mQWrw=="],
+
+    "node-opcua-client/node-opcua-hostname": ["node-opcua-hostname@2.187.6", "", {}, "sha512-zTLtwnmFTduEeIjaTc9xRNWEPODvDm8CGajQMMyFmpCABIrd8i8cps9YcIU5ZJLite5aS7WsW1K8y1VeQDg0kg=="],
+
+    "node-opcua-client/node-opcua-pki": ["node-opcua-pki@7.1.2", "", { "dependencies": { "@ster5/global-mutex": "^3.3.0", "byline": "^5.0.0", "chalk": "6.0.1", "chokidar": "4.0.3", "command-line-args": "^6.0.2", "command-line-usage": "^7.0.4", "node-opcua-crypto": "6.2.3", "yauzl": "^3.4.0" }, "bin": { "pki": "dist/bin/pki.js", "node-opcua-pki": "dist/bin/pki.js" } }, "sha512-4Wheaba8znVTHoPz1ZCXDvvZHO2XbxCT5E+vrW5mG6zt3zMztRYs//Y2huLK151JbQ0mkDPTaybTPv7npZ+AUw=="],
+
+    "node-opcua-client/node-opcua-secure-channel": ["node-opcua-secure-channel@2.187.9", "", { "dependencies": { "backoff": "^2.5.0", "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-chunkmanager": "2.187.8", "node-opcua-common": "2.187.9", "node-opcua-crypto": "6.2.3", "node-opcua-debug": "2.186.7", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-object-registry": "2.186.7", "node-opcua-packet-analyzer": "2.187.0", "node-opcua-packet-assembler": "2.187.0", "node-opcua-service-endpoints": "2.187.9", "node-opcua-service-secure-channel": "2.187.9", "node-opcua-status-code": "2.187.0", "node-opcua-transport": "2.187.8", "node-opcua-types": "2.187.9", "node-opcua-utils": "2.187.0" } }, "sha512-98j+ep1nF5l3K+v8K4r7ZpngVp768nelOTClFOlvg1OjNHiG/b3sDpCV6VeyQeff5vR3lAS53XgI5aEqQT2VBg=="],
+
+    "node-opcua-client/node-opcua-service-browse": ["node-opcua-service-browse@2.187.9", "", { "dependencies": { "node-opcua-data-model": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-NBGD6AroOGqfvGQJYR8SJyeYjKuoP/Bfm7sk3ElUol10jCPD/s2sWY2VrapKvqi2iAUc5PcjUoGFlWu2tsVrpA=="],
+
+    "node-opcua-client/node-opcua-service-call": ["node-opcua-service-call@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-RXWRvX/YeOIy+9aK6rbJo1e9FsWWPWf5UrV7nVRvIURk+8BomIUt5LRcxVaEfFDoDgWNB5QEMgpc6J95JfnGDg=="],
+
+    "node-opcua-client/node-opcua-service-discovery": ["node-opcua-service-discovery@2.187.9", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-debug": "2.186.7", "node-opcua-object-registry": "2.186.7", "node-opcua-types": "2.187.9", "sterfive-bonjour-service": "1.1.4" } }, "sha512-ywJsf9lnIDDCGMQz1/QCoPV/GtCA4GVL24Kvxd5sd++a1gOL4lN6P7kVGM/15P+z6MhDRKTNkP+MJnBusNnpLA=="],
+
+    "node-opcua-client/node-opcua-service-endpoints": ["node-opcua-service-endpoints@2.187.9", "", { "dependencies": { "node-opcua-types": "2.187.9" } }, "sha512-GzEG1wu86bv0tm8CBC7FcmKkgrPoOusMepqu9dfLtvIG5IUIRnggwAGD2vnpoZAy4LmXkFxFPLxsx0snGZIMYg=="],
+
+    "node-opcua-client/node-opcua-service-filter": ["node-opcua-service-filter@2.187.9", "", { "dependencies": { "node-opcua-address-space-base": "2.187.9", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.9", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-Q6y2NgiTRK3SyYgScSX8fj9H5T0gDCIkMuGUsUb5xChhEimrS8kDzHmyX5Acl+80iquBdO4pZ8pvzFa2DkhU6w=="],
+
+    "node-opcua-client/node-opcua-service-history": ["node-opcua-service-history@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-data-value": "2.187.9", "node-opcua-types": "2.187.9" } }, "sha512-NtppwKbRwH/T6q2X4EWwkKvsi/b8sDBK0JXhRRhP980tShvvjsPZZwuyk3QlUXWdkHf3cXK3dgFGe/nY09WIAQ=="],
+
+    "node-opcua-client/node-opcua-service-query": ["node-opcua-service-query@2.187.9", "", { "dependencies": { "node-opcua-types": "2.187.9" } }, "sha512-LdQtzfw5X7GzQ1srNNB4NUd7/C5VvqCHiHv4unis4H7thyrQVfplXLyYUulZd1Jpe1Qf6ykd5sYNFVdbAmRUXg=="],
+
+    "node-opcua-client/node-opcua-service-read": ["node-opcua-service-read@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-service-secure-channel": "2.187.9", "node-opcua-types": "2.187.9" } }, "sha512-oLoJboCH/XoeO21Mgv1Km0raq/OBXnywx1BXuvBS2cDj4yKprVWWxILlKCuQqJixD6k9LcdMBdJ5go9hN1dNVQ=="],
+
+    "node-opcua-client/node-opcua-service-register-node": ["node-opcua-service-register-node@2.187.9", "", { "dependencies": { "node-opcua-types": "2.187.9" } }, "sha512-UXPN6Ypqctiw5Qf6k4WpfaV26mnjvGO0MZU3TMyVVzmlnvrR7LxniiJRsJjL/jSHxCTOKig5OuXJyvohiQEM5A=="],
+
+    "node-opcua-client/node-opcua-service-secure-channel": ["node-opcua-service-secure-channel@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-llgn19pPf/HNahf5DWh152FYud1PJJvMqeUAuEGzC6TXf/2QiXdBjR6j2e57Nrj5fCCApCAPmtPRe28Q3DQRkQ=="],
+
+    "node-opcua-client/node-opcua-service-session": ["node-opcua-service-session@2.187.9", "", { "dependencies": { "node-opcua-factory": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-sSI7U8PSEUvsBBEH7J0DvBi5muji7Y/GYxhWSUVN9hrI14cHNmOF90Sc0wvNPPdcBQQ2GnsmFRBWHdMdSyPgBw=="],
+
+    "node-opcua-client/node-opcua-service-subscription": ["node-opcua-service-subscription@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-AJ/Oqbt3oVwb9cmbMUtjqj2KlQV7pUHWgRIZppsJqQrDOf3TiZJLmNHqlSLSD0k5uylBzbym8w+fYzuHnEJa1w=="],
+
+    "node-opcua-client/node-opcua-service-translate-browse-path": ["node-opcua-service-translate-browse-path@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-sr5PxVtW3jUs4GtekhbCq1ONfLk+EPgkT6XswgTy2DWXQ921N4FQZXRN4z7rd0hswYcWuisPW6zPJ/Y1v7DdjQ=="],
+
+    "node-opcua-client/node-opcua-service-write": ["node-opcua-service-write@2.187.9", "", { "dependencies": { "node-opcua-types": "2.187.9" } }, "sha512-pPJbVXPVpjTdns3+DBapi0La3ApNgWyBzIyH4gcMDSk68oe+k0+W5V+RZ8VOxDtocKtQeacHLlXBGVguXQfbWA=="],
+
+    "node-opcua-client/node-opcua-transport": ["node-opcua-transport@2.187.8", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-buffer-utils": "2.187.0", "node-opcua-chunkmanager": "2.187.8", "node-opcua-debug": "2.186.7", "node-opcua-factory": "2.187.0", "node-opcua-object-registry": "2.186.7", "node-opcua-packet-assembler": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-utils": "2.187.0" } }, "sha512-fnrBQHENd/hnB4HinBwpeHHJQuQks4jRaSA23JFXlCdKIhguCFO2M3m91maPk64ldXQKa949ZdyHdg6tFpELfQ=="],
+
+    "node-opcua-client/node-opcua-types": ["node-opcua-types@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-enum": "2.187.0", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Kf8uEa+9lkraLfgh3WznCKuPEGXcvdZa1GTlT+DHUmkSi72aWPpmg+X2CFjfsNHDXHkQZz7fCeeNz4ojEezUPg=="],
+
     "node-opcua-client-dynamic-extension-object/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
+
+    "node-opcua-client-dynamic-extension-object/node-opcua-data-value": ["node-opcua-data-value@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-enum": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Dj5uiIeqCwTP9EOjNrLtBfyHQA2sQlkxvUll9HrlL3iFNL+Qoo+M/Q9eCmzpMvbUj4vafKSGPGjU6rgq3mQWrw=="],
+
+    "node-opcua-client-dynamic-extension-object/node-opcua-service-browse": ["node-opcua-service-browse@2.187.9", "", { "dependencies": { "node-opcua-data-model": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-NBGD6AroOGqfvGQJYR8SJyeYjKuoP/Bfm7sk3ElUol10jCPD/s2sWY2VrapKvqi2iAUc5PcjUoGFlWu2tsVrpA=="],
+
+    "node-opcua-client-dynamic-extension-object/node-opcua-service-translate-browse-path": ["node-opcua-service-translate-browse-path@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-sr5PxVtW3jUs4GtekhbCq1ONfLk+EPgkT6XswgTy2DWXQ921N4FQZXRN4z7rd0hswYcWuisPW6zPJ/Y1v7DdjQ=="],
+
+    "node-opcua-client-dynamic-extension-object/node-opcua-types": ["node-opcua-types@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-enum": "2.187.0", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Kf8uEa+9lkraLfgh3WznCKuPEGXcvdZa1GTlT+DHUmkSi72aWPpmg+X2CFjfsNHDXHkQZz7fCeeNz4ojEezUPg=="],
 
     "node-opcua-crypto/@peculiar/asn1-cms": ["@peculiar/asn1-cms@2.10.0", "", { "dependencies": { "@peculiar/asn1-schema": "^2.10.0", "@peculiar/asn1-x509": "^2.10.0", "@peculiar/asn1-x509-attr": "^2.10.0", "asn1js": "^3.0.10", "tslib": "^2.8.1" } }, "sha512-CkX0H4NCIOMHOU3rh2xXZywinYZ/EnJlaOlJiGI0e5L4XjFqHf4iH30LMbXWChVppdA9ljbanjtzQFOhDNfTWg=="],
 
@@ -3285,11 +3357,33 @@
 
     "node-opcua-pki/chokidar": ["chokidar@4.0.3", "", { "dependencies": { "readdirp": "^4.0.1" } }, "sha512-Qgzu8kfBvo+cA4962jnP1KkS6Dop5NS6g7R5LFYJr4b8Ub94PPQXUksCw9PvXoeXPRRddRNC5C1JQUR2SMGtnA=="],
 
+    "node-opcua-pseudo-session/node-opcua-crypto": ["node-opcua-crypto@6.2.3", "", { "dependencies": { "@peculiar/asn1-cms": "^2.11.0", "@peculiar/asn1-pfx": "^2.11.0", "@peculiar/asn1-pkcs8": "^2.11.0", "@peculiar/asn1-pkcs9": "^2.11.0", "@peculiar/asn1-rsa": "^2.11.0", "@peculiar/asn1-schema": "^2.11.0", "@peculiar/asn1-x509": "^2.11.0", "@peculiar/webcrypto": "^1.7.1", "@peculiar/x509": "^2.1.0", "reflect-metadata": "^0.2.2", "sshpk": "^1.18.0" }, "peerDependencies": { "node-opcua-crypto-web": "^6.0.0" }, "optionalPeers": ["node-opcua-crypto-web"] }, "sha512-hQzZWpBr3fisPOboTZkg+OfFoR4pTih/oJoHQPHRdE6uOlDNKsKtZBfIQVU/pJPNWZdzOBMYlo1KxkZ6jMrOVQ=="],
+
+    "node-opcua-pseudo-session/node-opcua-data-value": ["node-opcua-data-value@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-enum": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Dj5uiIeqCwTP9EOjNrLtBfyHQA2sQlkxvUll9HrlL3iFNL+Qoo+M/Q9eCmzpMvbUj4vafKSGPGjU6rgq3mQWrw=="],
+
+    "node-opcua-pseudo-session/node-opcua-service-browse": ["node-opcua-service-browse@2.187.9", "", { "dependencies": { "node-opcua-data-model": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-NBGD6AroOGqfvGQJYR8SJyeYjKuoP/Bfm7sk3ElUol10jCPD/s2sWY2VrapKvqi2iAUc5PcjUoGFlWu2tsVrpA=="],
+
+    "node-opcua-pseudo-session/node-opcua-service-call": ["node-opcua-service-call@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-RXWRvX/YeOIy+9aK6rbJo1e9FsWWPWf5UrV7nVRvIURk+8BomIUt5LRcxVaEfFDoDgWNB5QEMgpc6J95JfnGDg=="],
+
+    "node-opcua-pseudo-session/node-opcua-service-read": ["node-opcua-service-read@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-service-secure-channel": "2.187.9", "node-opcua-types": "2.187.9" } }, "sha512-oLoJboCH/XoeO21Mgv1Km0raq/OBXnywx1BXuvBS2cDj4yKprVWWxILlKCuQqJixD6k9LcdMBdJ5go9hN1dNVQ=="],
+
+    "node-opcua-pseudo-session/node-opcua-service-subscription": ["node-opcua-service-subscription@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-AJ/Oqbt3oVwb9cmbMUtjqj2KlQV7pUHWgRIZppsJqQrDOf3TiZJLmNHqlSLSD0k5uylBzbym8w+fYzuHnEJa1w=="],
+
+    "node-opcua-pseudo-session/node-opcua-service-translate-browse-path": ["node-opcua-service-translate-browse-path@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-sr5PxVtW3jUs4GtekhbCq1ONfLk+EPgkT6XswgTy2DWXQ921N4FQZXRN4z7rd0hswYcWuisPW6zPJ/Y1v7DdjQ=="],
+
+    "node-opcua-pseudo-session/node-opcua-service-write": ["node-opcua-service-write@2.187.9", "", { "dependencies": { "node-opcua-types": "2.187.9" } }, "sha512-pPJbVXPVpjTdns3+DBapi0La3ApNgWyBzIyH4gcMDSk68oe+k0+W5V+RZ8VOxDtocKtQeacHLlXBGVguXQfbWA=="],
+
+    "node-opcua-pseudo-session/node-opcua-types": ["node-opcua-types@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-enum": "2.187.0", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Kf8uEa+9lkraLfgh3WznCKuPEGXcvdZa1GTlT+DHUmkSi72aWPpmg+X2CFjfsNHDXHkQZz7fCeeNz4ojEezUPg=="],
+
     "node-opcua-schemas/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
 
     "node-opcua-secure-channel/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
 
     "node-opcua-server/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
+
+    "node-opcua-server/node-opcua-certificate-manager": ["node-opcua-certificate-manager@2.187.0", "", { "dependencies": { "env-paths": "4.0.0", "node-opcua-assert": "2.186.7", "node-opcua-common": "2.187.0", "node-opcua-crypto": "6.2.0", "node-opcua-debug": "2.186.7", "node-opcua-object-registry": "2.186.7", "node-opcua-pki": "7.1.0", "node-opcua-status-code": "2.187.0", "thenify-ex": "4.4.0" } }, "sha512-cmlczhZSklg8BMEEiI1Gj9S6xbxAnR+fIRK9tGvVOrrC17lYfWwHiT8lTUyC9PaTrxmGsJp99KFolQA9xoC+4Q=="],
+
+    "node-opcua-server/node-opcua-client": ["node-opcua-client@2.187.3", "", { "dependencies": { "@ster5/global-mutex": "^3.3.0", "chalk": "6.0.1", "node-opcua-alarm-condition": "2.187.0", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-buffer-utils": "2.187.0", "node-opcua-certificate-manager": "2.187.0", "node-opcua-client-dynamic-extension-object": "2.187.0", "node-opcua-common": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-hostname": "2.184.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-object-registry": "2.186.7", "node-opcua-pki": "7.1.0", "node-opcua-pseudo-session": "2.187.0", "node-opcua-schemas": "2.187.0", "node-opcua-secure-channel": "2.187.0", "node-opcua-service-browse": "2.187.0", "node-opcua-service-call": "2.187.0", "node-opcua-service-discovery": "2.187.0", "node-opcua-service-endpoints": "2.187.0", "node-opcua-service-filter": "2.187.0", "node-opcua-service-history": "2.187.0", "node-opcua-service-query": "2.187.0", "node-opcua-service-read": "2.187.0", "node-opcua-service-register-node": "2.187.0", "node-opcua-service-secure-channel": "2.187.0", "node-opcua-service-session": "2.187.0", "node-opcua-service-subscription": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-service-write": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-transport": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0", "thenify-ex": "4.4.0" } }, "sha512-jvyGemhFZgvfPUuIJgXnpglxeEBq5WUOByLGEQTagInEzW+EpewHoJF2Aea/1YBPPYLP490lb4Ds2Yxc0YRQ1Q=="],
 
     "node-opcua-service-discovery/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
 
@@ -3497,11 +3591,43 @@
 
     "graphile-worker/pg/pg-connection-string": ["pg-connection-string@2.14.0", "", {}, "sha512-XwWDGcLRGCXAR8F/AM5bG7Q+A3Wm2s6QeEjlOKZLlH3UYcguiqCWKyWXVag5TLTIjR7oOJUY8kcADaZgWPyLeg=="],
 
+    "node-opcua-alarm-condition/node-opcua-service-filter/node-opcua-address-space-base": ["node-opcua-address-space-base@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.3", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-schemas": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-72rkRf/C9hzNGRFbfW44PO2gCDx0mQzwHe1WSaxFoYbVWESQytaQ5pXreqlYEpu/tTjqOQk6SRqrwS5t0RBgAg=="],
+
+    "node-opcua-alarm-condition/node-opcua-service-filter/node-opcua-data-value": ["node-opcua-data-value@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-enum": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Dj5uiIeqCwTP9EOjNrLtBfyHQA2sQlkxvUll9HrlL3iFNL+Qoo+M/Q9eCmzpMvbUj4vafKSGPGjU6rgq3mQWrw=="],
+
+    "node-opcua-alarm-condition/node-opcua-service-read/node-opcua-data-value": ["node-opcua-data-value@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-enum": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Dj5uiIeqCwTP9EOjNrLtBfyHQA2sQlkxvUll9HrlL3iFNL+Qoo+M/Q9eCmzpMvbUj4vafKSGPGjU6rgq3mQWrw=="],
+
+    "node-opcua-alarm-condition/node-opcua-service-read/node-opcua-service-secure-channel": ["node-opcua-service-secure-channel@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-llgn19pPf/HNahf5DWh152FYud1PJJvMqeUAuEGzC6TXf/2QiXdBjR6j2e57Nrj5fCCApCAPmtPRe28Q3DQRkQ=="],
+
+    "node-opcua-alarm-condition/node-opcua-types/node-opcua-data-value": ["node-opcua-data-value@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-enum": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Dj5uiIeqCwTP9EOjNrLtBfyHQA2sQlkxvUll9HrlL3iFNL+Qoo+M/Q9eCmzpMvbUj4vafKSGPGjU6rgq3mQWrw=="],
+
+    "node-opcua-certificate-manager/node-opcua-common/node-opcua-types": ["node-opcua-types@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-enum": "2.187.0", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Kf8uEa+9lkraLfgh3WznCKuPEGXcvdZa1GTlT+DHUmkSi72aWPpmg+X2CFjfsNHDXHkQZz7fCeeNz4ojEezUPg=="],
+
+    "node-opcua-certificate-manager/node-opcua-pki/chalk": ["chalk@6.0.1", "", {}, "sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA=="],
+
+    "node-opcua-certificate-manager/node-opcua-pki/chokidar": ["chokidar@4.0.3", "", { "dependencies": { "readdirp": "^4.0.1" } }, "sha512-Qgzu8kfBvo+cA4962jnP1KkS6Dop5NS6g7R5LFYJr4b8Ub94PPQXUksCw9PvXoeXPRRddRNC5C1JQUR2SMGtnA=="],
+
+    "node-opcua-client/node-opcua-pki/chokidar": ["chokidar@4.0.3", "", { "dependencies": { "readdirp": "^4.0.1" } }, "sha512-Qgzu8kfBvo+cA4962jnP1KkS6Dop5NS6g7R5LFYJr4b8Ub94PPQXUksCw9PvXoeXPRRddRNC5C1JQUR2SMGtnA=="],
+
+    "node-opcua-client/node-opcua-secure-channel/node-opcua-chunkmanager": ["node-opcua-chunkmanager@2.187.8", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-buffer-utils": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-packet-assembler": "2.187.0" } }, "sha512-Y/+pVE1dIyw6GI0rjcGlAp0ygoM3STrocjdRXLnhgAfToO0Fq7g6+3az4pI/u2Nx4/dNymWdvb87oNCJ/FSr7w=="],
+
+    "node-opcua-client/node-opcua-service-filter/node-opcua-address-space-base": ["node-opcua-address-space-base@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.3", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.9", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-schemas": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.9", "node-opcua-variant": "2.187.0" } }, "sha512-72rkRf/C9hzNGRFbfW44PO2gCDx0mQzwHe1WSaxFoYbVWESQytaQ5pXreqlYEpu/tTjqOQk6SRqrwS5t0RBgAg=="],
+
+    "node-opcua-client/node-opcua-transport/node-opcua-chunkmanager": ["node-opcua-chunkmanager@2.187.8", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-buffer-utils": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-packet-assembler": "2.187.0" } }, "sha512-Y/+pVE1dIyw6GI0rjcGlAp0ygoM3STrocjdRXLnhgAfToO0Fq7g6+3az4pI/u2Nx4/dNymWdvb87oNCJ/FSr7w=="],
+
     "node-opcua-crypto/@peculiar/asn1-cms/@peculiar/asn1-x509-attr": ["@peculiar/asn1-x509-attr@2.10.0", "", { "dependencies": { "@peculiar/asn1-schema": "^2.10.0", "@peculiar/asn1-x509": "^2.10.0", "asn1js": "^3.0.10", "tslib": "^2.8.1" } }, "sha512-/85GtKOKmgvuSJNlaFfwGWNdRSZZ+hpF02NyM01XiCdzpaZONiBltDyfluFPvFx966CR+ZHNSG1jniwpy07oGg=="],
 
     "node-opcua-crypto/@peculiar/asn1-pkcs9/@peculiar/asn1-x509-attr": ["@peculiar/asn1-x509-attr@2.10.0", "", { "dependencies": { "@peculiar/asn1-schema": "^2.10.0", "@peculiar/asn1-x509": "^2.10.0", "asn1js": "^3.0.10", "tslib": "^2.8.1" } }, "sha512-/85GtKOKmgvuSJNlaFfwGWNdRSZZ+hpF02NyM01XiCdzpaZONiBltDyfluFPvFx966CR+ZHNSG1jniwpy07oGg=="],
 
     "node-opcua-pki/chokidar/readdirp": ["readdirp@4.1.2", "", {}, "sha512-GDhwkLfywWL2s6vEjyhri+eXmfH6j1L7JE27WhqLeYzoh/A3DBaYGEj2H/HFZCn/kMfim73FXxEJTw06WtxQwg=="],
+
+    "node-opcua-pseudo-session/node-opcua-service-read/node-opcua-service-secure-channel": ["node-opcua-service-secure-channel@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-types": "2.187.9" } }, "sha512-llgn19pPf/HNahf5DWh152FYud1PJJvMqeUAuEGzC6TXf/2QiXdBjR6j2e57Nrj5fCCApCAPmtPRe28Q3DQRkQ=="],
+
+    "node-opcua-server/node-opcua-client/node-opcua-alarm-condition": ["node-opcua-alarm-condition@2.187.0", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-pseudo-session": "2.187.0", "node-opcua-service-filter": "2.187.0", "node-opcua-service-read": "2.187.0", "node-opcua-service-subscription": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-1LEHK+9re/iVeKLf2zq7bwaSMdW25eD2EXcIkK2HgbaptJVwDtf16hAG4/O3HXjIy3J5ERaEeHUzqo0AFz8fiw=="],
+
+    "node-opcua-server/node-opcua-client/node-opcua-client-dynamic-extension-object": ["node-opcua-client-dynamic-extension-object@2.187.0", "", { "dependencies": { "chalk": "6.0.1", "node-opcua-assert": "2.186.7", "node-opcua-binary-stream": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-extension-object": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-nodeid": "2.187.0", "node-opcua-pseudo-session": "2.187.0", "node-opcua-schemas": "2.187.0", "node-opcua-service-browse": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-4k408jDpARtCVCBRS0BLOPPhxY7iKh5l3/a7+Ev6JDq10QWHJeSir834yJGJknGF86gsZNvySOJj8CMs56JGwA=="],
+
+    "node-opcua-server/node-opcua-client/node-opcua-pseudo-session": ["node-opcua-pseudo-session@2.187.0", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-constants": "2.185.0", "node-opcua-crypto": "6.2.0", "node-opcua-data-model": "2.187.0", "node-opcua-data-value": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-nodeid": "2.187.0", "node-opcua-service-browse": "2.187.0", "node-opcua-service-call": "2.187.0", "node-opcua-service-read": "2.187.0", "node-opcua-service-subscription": "2.187.0", "node-opcua-service-translate-browse-path": "2.187.0", "node-opcua-service-write": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-types": "2.187.0", "node-opcua-utils": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-/RFxiYJhIohgrv5TbPzfHZ1vFtHDruScGekwx92phOrjfmnazmyT2a6uYothCqwlv5uPx1pgMZiQJSz3uBiNvw=="],
 
     "ora/string-width/emoji-regex": ["emoji-regex@10.6.0", "", {}, "sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A=="],
 
@@ -3536,6 +3662,14 @@
     "eslint-plugin-react/minimatch/brace-expansion/balanced-match": ["balanced-match@1.0.2", "", {}, "sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw=="],
 
     "filelist/minimatch/brace-expansion/balanced-match": ["balanced-match@1.0.2", "", {}, "sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw=="],
+
+    "node-opcua-alarm-condition/node-opcua-service-filter/node-opcua-address-space-base/node-opcua-crypto": ["node-opcua-crypto@6.2.3", "", { "dependencies": { "@peculiar/asn1-cms": "^2.11.0", "@peculiar/asn1-pfx": "^2.11.0", "@peculiar/asn1-pkcs8": "^2.11.0", "@peculiar/asn1-pkcs9": "^2.11.0", "@peculiar/asn1-rsa": "^2.11.0", "@peculiar/asn1-schema": "^2.11.0", "@peculiar/asn1-x509": "^2.11.0", "@peculiar/webcrypto": "^1.7.1", "@peculiar/x509": "^2.1.0", "reflect-metadata": "^0.2.2", "sshpk": "^1.18.0" }, "peerDependencies": { "node-opcua-crypto-web": "^6.0.0" }, "optionalPeers": ["node-opcua-crypto-web"] }, "sha512-hQzZWpBr3fisPOboTZkg+OfFoR4pTih/oJoHQPHRdE6uOlDNKsKtZBfIQVU/pJPNWZdzOBMYlo1KxkZ6jMrOVQ=="],
+
+    "node-opcua-certificate-manager/node-opcua-common/node-opcua-types/node-opcua-data-value": ["node-opcua-data-value@2.187.9", "", { "dependencies": { "node-opcua-assert": "2.186.7", "node-opcua-basic-types": "2.187.0", "node-opcua-binary-stream": "2.187.0", "node-opcua-data-model": "2.187.0", "node-opcua-date-time": "2.187.0", "node-opcua-debug": "2.186.7", "node-opcua-enum": "2.187.0", "node-opcua-factory": "2.187.0", "node-opcua-numeric-range": "2.187.0", "node-opcua-status-code": "2.187.0", "node-opcua-variant": "2.187.0" } }, "sha512-Dj5uiIeqCwTP9EOjNrLtBfyHQA2sQlkxvUll9HrlL3iFNL+Qoo+M/Q9eCmzpMvbUj4vafKSGPGjU6rgq3mQWrw=="],
+
+    "node-opcua-certificate-manager/node-opcua-pki/chokidar/readdirp": ["readdirp@4.1.2", "", {}, "sha512-GDhwkLfywWL2s6vEjyhri+eXmfH6j1L7JE27WhqLeYzoh/A3DBaYGEj2H/HFZCn/kMfim73FXxEJTw06WtxQwg=="],
+
+    "node-opcua-client/node-opcua-pki/chokidar/readdirp": ["readdirp@4.1.2", "", {}, "sha512-GDhwkLfywWL2s6vEjyhri+eXmfH6j1L7JE27WhqLeYzoh/A3DBaYGEj2H/HFZCn/kMfim73FXxEJTw06WtxQwg=="],
 
     "@workflow/builders/find-up/locate-path/p-locate/p-limit": ["p-limit@4.0.0", "", { "dependencies": { "yocto-queue": "^1.0.0" } }, "sha512-5b0R4txpzjPWVw/cXXUResoD4hb6U/x9BH08L7nw+GN1sezDzPdxeRvpc9c433fZhBan/wusjbCsqwqm4EIBIQ=="],
 
