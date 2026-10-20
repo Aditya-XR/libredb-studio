@@ -452,8 +452,8 @@ function analyzeUnderGrammar(sql: string, grammar: SqlGrammar): ParsedQueryInfo 
 /**
  * Whether `value` is a row bound the limiter takes: a non-negative safe integer, so at most `Number.MAX_SAFE_INTEGER`.
  * Past it, the page probe's `limit + 1` can come back equal to `limit`, and from 1e21 up a number is written in
- * exponent form. It is the rule `pageOptionError` (`src/lib/api/page-probe.ts`) holds a request's `options.limit` and
- * `options.offset` to, so the limiter refuses nothing a route accepts.
+ * exponent form. `pageOptionError` (`src/lib/api/page-probe.ts`) holds a request's `options.limit` and `options.offset`
+ * to it with one to spare, so neither a bound a route accepts nor the probe's `limit + 1` past it is refused here.
  */
 export function isRowBound(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;

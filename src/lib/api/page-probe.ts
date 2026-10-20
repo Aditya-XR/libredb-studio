@@ -40,7 +40,8 @@ export function pageOfProbe<Row>(prepared: PreparedQuery, rows: Row[]): { hasMor
  * Read from the request body, so a value can be any JSON: the probe adds one to the limit, and
  * `"500" + 1` is the string `"5001"`, which would run a page ten times the size asked for.
  * Each is therefore required to be a non-negative safe integer when present (`isRowBound`), the same rule
- * `applyQueryLimit` holds its own `limit` and `offset` to.
+ * `applyQueryLimit` holds its own `limit` and `offset` to, and below `Number.MAX_SAFE_INTEGER`, so the probe's
+ * `limit + 1` is one as well.
  */
 export function pageOptionError(options: unknown): string | null {
   if (options === null || typeof options !== "object") return "options must be an object";
@@ -49,7 +50,7 @@ export function pageOptionError(options: unknown): string | null {
     ["limit", limit],
     ["offset", offset],
   ] as const) {
-    if (value !== undefined && !isRowBound(value)) {
+    if (value !== undefined && !(isRowBound(value) && value < Number.MAX_SAFE_INTEGER)) {
       return `options.${name} must be a non-negative integer`;
     }
   }
