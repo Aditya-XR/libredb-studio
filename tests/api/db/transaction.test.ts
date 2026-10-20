@@ -698,8 +698,9 @@ describe("POST /api/db/transaction", () => {
     expect(mockTxProvider.queryInTransaction).not.toHaveBeenCalled();
   });
 
-  // A `sql` that is present but not a string reached the splitter and answered 500 with its own TypeError, or, with
-  // `params`, reached prepareQuery and queryInTransaction. It is refused in words before any provider resolves, a falsy one (0, false) included.
+  // A `sql` that is present but not a string answered 500 with a TypeError of its own, thrown by the splitter or, with
+  // `params`, by the provider's prepareQuery. It is refused in words before any provider resolves, a falsy one (0,
+  // false) included.
   for (const [label, sql] of [
     ["a number", 123],
     ["an object", { text: "SELECT 1" }],
