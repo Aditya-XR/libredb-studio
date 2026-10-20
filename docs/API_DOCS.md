@@ -555,6 +555,12 @@ and a request that runs somewhere names the database by name in `catalog`, besid
 connection for a statement, transaction or maintenance. Five databases already open and all busy
 answers `503 POOL_EXHAUSTED`.
 
+**A `sql` that is not a string:**
+
+A `sql` that is present but not a string (a number, `0` included, an object, an array, `true` or `false`) answers `400 { "error": "sql must be a string" }` on every connection type, before any provider resolves or any connection opens.
+`POST /api/db/multi-query` and the `query` action of `POST /api/db/transaction` answer it the same way.
+A missing, `null` or empty `sql` keeps its own answer: `400 { "error": "Connection and query are required" }` here and on `POST /api/db/multi-query`, and `400 { "error": "SQL query is required for transaction query" }` on the transaction route.
+
 **A connection type's console text bound:**
 
 A connection type can declare a bound on its statement text in UTF-8 bytes, on its row in `src/lib/db/destructive-commands.ts`.
@@ -564,7 +570,6 @@ The bound is read after the request body is parsed, because the type that select
 | Condition | Status | Body |
 |-----------|--------|------|
 | `sql` is over the declared bound | `413` | `{ "error": "The statement is <n> bytes in UTF-8, over the <limit>-byte limit for this connection type. Shorten it to run it." }`, which never repeats the text |
-| `sql` is not a string | `400` | `{ "error": "sql must be a string" }` |
 
 `POST /api/db/multi-query` refuses every connection whose type declares such a bound with `400 { "error": "This connection type runs one statement per request: send it to POST /api/db/query, because this route would split its text into several requests." }`, before it splits anything.
 Milvus and Qdrant each declare a bound of 1,048,576 bytes and InfluxDB (InfluxQL), Oxia, S3-compatible object storage, Kubernetes and Firestore one of 65,536 bytes each, and no other shipped engine declares one, so neither answer changes anything for a connection of another type.

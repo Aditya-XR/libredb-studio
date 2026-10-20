@@ -231,6 +231,12 @@ export async function POST(req: NextRequest) {
     const connection = await resolveConnection(body, guard.session);
     resolved = connection;
 
+    // A `sql` that is present but not a string, a falsy one (0, false) included, is refused in words: a truthy one
+    // reached the splitter and answered 500 with its own TypeError ("input.slice is not a function"). A missing
+    // (null) or empty one keeps its answer.
+    if (sql != null && typeof sql !== "string") {
+      return NextResponse.json({ error: "sql must be a string" }, { status: 400 });
+    }
     if (!sql) {
       return NextResponse.json({ error: "Connection and query are required" }, { status: 400 });
     }

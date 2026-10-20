@@ -254,6 +254,14 @@ export async function POST(req: NextRequest) {
     if (!action) {
       return NextResponse.json({ error: "Connection and action are required" }, { status: 400 });
     }
+    // A query action's text is read before its provider resolves. A `sql` that is present but not a string, a falsy
+    // one (0, false) included, is refused in words: a truthy one answered 500 with a TypeError of its own, thrown by
+    // the splitter without `params` and by the provider's prepareQuery with them, so it never reached
+    // queryInTransaction. For a number the two read "input.slice is not a function" and "sql.slice is not a function".
+    // A missing (null) or empty one keeps its answer below.
+    if (action === "query" && sql != null && typeof sql !== "string") {
+      return NextResponse.json({ error: "sql must be a string" }, { status: 400 });
+    }
 
     // Each database of a server-level connection holds its own transaction (#1530), so ownership is per database.
     const catalog = requestCatalog(body);
