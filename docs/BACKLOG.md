@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
-- [Drivers and connections](#drivers-and-connections) — D1-D379, U17 · 274
+- [Drivers and connections](#drivers-and-connections) — D1-D385, U17 · 280
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X25, U2-U148 · 134
@@ -3873,6 +3873,55 @@ Found on #1818, whose change does not touch the HTTP transport.
 
 **Done when:** the test bounds the named wait by the time it measured itself between sending the request and the deadline, not by the sleep's nominal length, and the file passes repeated runs at the CI job's concurrency.
 
+### D380. An inline connection is not held to `SEED_ONLY_FIELDS`
+
+`SEED_ONLY_FIELDS` in `src/lib/db/connection-fields.ts` names the fields only a seed file may set, but `resolveConnection` in `src/lib/seed/resolve-connection.ts` does not check an inline connection against it.
+For example, OPC UA's `clientCertificatePath` and `clientPrivateKeyPath` are seed-only, and the provider reads them from any config it is given, so a request that carries them inline reaches the provider with them.
+
+Found 2026-10-20 during the VS Code extension work, and deferred because it does not block that work.
+
+**Done when:** `resolveConnection` refuses an inline connection that carries a seed-only field with `400`, with a route test.
+
+### D381. A broken seed file's path reaches the answer to a request by seed id
+
+When the seed file does not load, a request by seed id answers `500` with the seed loader's message, and that message names the seed file's path. Every role gets the same answer.
+
+Found 2026-10-20 during the VS Code extension work, and deferred because it does not block that work.
+
+**Done when:** the answer is a fixed sentence that names no path, and the loader's message, path included, stays in the server log.
+
+### D382. The LibreDB library's stale-lock check blocks on a FIFO
+
+`isStaleLock` in the `@libredb/libredb` library's node-fs adapter reads the lock path with `readFileSync`, which blocks when that path is a FIFO.
+Studio guards against it from outside: it refuses a non-regular database path and the files beside it before the library opens them (`src/lib/db/utils/regular-file.ts`).
+
+Found 2026-10-20 during the VS Code extension work, and deferred because it does not block that work.
+
+**Done when:** the library checks the lock file's type itself before reading it, so the guard does not rest on every caller.
+
+### D383. SQLite's WAL check lets a read error escape as a raw `Error`
+
+`isWalModeFile`, called from the `connect` catch in `src/lib/db/providers/sql/sqlite.ts`, reads the database file's header. A read error on a regular file escapes it as a raw `Error` rather than a `ConnectionError`.
+
+Found 2026-10-20 during the VS Code extension work, and deferred because it does not block that work.
+
+**Done when:** that read error reaches the caller as a `ConnectionError`, with a test.
+
+### D384. `SQLBaseProvider.buildLimitClause` has no caller
+
+`buildLimitClause` in `src/lib/db/providers/sql/sql-base.ts` is not called from anywhere.
+
+Found 2026-10-20 during the VS Code extension work.
+
+**Done when:** the method is removed.
+
+### D385. An etcd certificate test timed out on Windows
+
+`step 4: a certificate whose Common Name etcd does not know is named` in `tests/integration/db/etcd-provider.test.ts` timed out at 60 s on the `windows-latest` job of #1875 on 2026-10-20.
+Whether the cause is the runner or the test was not measured.
+
+**Done when:** the cause is known and the test passes repeated runs on the `windows-latest` job.
+
 ## Value interpolation
 
 ### V1. Query history records the placeholders, not the values that were bound
@@ -4252,7 +4301,7 @@ first 10MB will be available unless configured.`
 
 So one condition gets two wrong answers. The five existing object routes that go through
 `handleObjectRequest`'s body-parse arm answer HTTP 400 `{ "error": "Empty request body" }` for a body that
-was neither empty nor malformed, and `POST /api/db/query` answers HTTP 500 with a JSON parser's sentence.
+was neither empty nor malformed, and `POST /api/db/query` answers HTTP 400 `{ "error": "Invalid request body" }`.
 Neither tells the caller their request was too large.
 
 The two routes added by #789 Phase 3 do NOT inherit this: `readObjectRouteBody` reads `content-length` and
@@ -5515,9 +5564,9 @@ Found 2026-10-12 in a browser pass of the RabbitMQ provider, reproduced with scr
 ### U124. Firestore's Database ID box carries a sentence about Create Table and SHOW SCHEMAS
 
 The connection dialog draws one fixed sentence under the schema box for every engine that takes the field (`src/components/ConnectionModal.tsx:1063`, `:1080-1083`): "Used for unqualified table names in queries and Create Table. Leave empty to qualify names yourself. Run SHOW SCHEMAS to list the catalog's schemas."
-It was written for Trino, and the box is also Firestore's "Database ID" (`src/lib/db-ui-config.ts:987-992`), where the provider declares no `createTable` (`src/lib/db/providers/document/firestore/index.ts`) and there is no `SHOW SCHEMAS`.
+It was written for Trino, and the box is also Firestore's "Database ID" (the `firestore` entry of `CONNECTION_FORM` in `src/lib/db/connection-form.ts`), where the provider declares no `createTable` (`src/lib/db/providers/document/firestore/index.ts`) and there is no `SHOW SCHEMAS`.
 So a Firestore user reads, under the engine's own hint ("Empty for the (default) database"), advice about table names and a statement the engine does not have.
-BigQuery's "Default dataset" box (`src/lib/db-ui-config.ts:859`) takes the same sentence, and whether it holds there is not measured.
+BigQuery's "Default dataset" box (the `bigquery` entry of `CONNECTION_FORM` in `src/lib/db/connection-form.ts`) takes the same sentence, and whether it holds there is not measured.
 The sentence is not a declared field, so an engine entry cannot replace or drop it the way `fieldHints` and `fieldPlaceholders` do.
 
 Found 2026-10-12 while reading the connection dialog for a new provider.
@@ -5673,7 +5722,7 @@ A window narrowed by a vertical scrollbar (1265 wide) wraps more of the hero and
 ### U140. The connection dialog's field census leaves six shipped types out
 
 The docblock of the "declared connection-field copy (#1085)" block in `tests/components/ConnectionModal.test.tsx` says its `SHIPPED` table holds "every shipped type", but the table has no row for BigQuery, Snowflake, Neo4j, MQTT, Firestore or OPC UA, six of the thirty-seven in `SHIPPED_DATABASE_TYPES` (counted 2026-10-14 on `main` at 59cdfd09b, where #1759 added Apache Spark's row).
-The same docblock calls Prometheus and Kafka "the shipped entries that declare either" label or hint, while `src/lib/db-ui-config.ts` now declares field copy for libSQL, Db2, etcd, Neo4j, Milvus, Qdrant, InfluxDB and InfluxDB 3 as well.
+The same docblock calls Prometheus and Kafka "the shipped entries that declare either" label or hint, while `src/lib/db/connection-form.ts` now declares field copy for libSQL, Db2, etcd, Neo4j, Milvus, Qdrant, InfluxDB and InfluxDB 3 as well.
 So a change to the labels or hints of those six types reaches no census row.
 
 Found 2026-10-13 while building the Apache Spark provider (#1759); pre-existing.
@@ -5747,7 +5796,7 @@ Found 2026-10-18 while designing #1822.
 
 ### U147. The ClickHouse connection-URI box shows a MongoDB example
 
-The `clickhouse` entry of `DB_UI_CONFIG` in `src/lib/db-ui-config.ts` declares `fieldPlaceholders.connectionString` as `mongodb://localhost:27017/mydb  or  mongodb+srv://...`, so a ClickHouse dialog switched to its connection string mode offers a MongoDB URI as the example.
+The `clickhouse` entry of `CONNECTION_FORM` in `src/lib/db/connection-form.ts` declares `fieldPlaceholders.connectionString` as `mongodb://localhost:27017/mydb  or  mongodb+srv://...`, so a ClickHouse dialog switched to its connection string mode offers a MongoDB URI as the example.
 That is the dialog's old fall-through for every toggle engine that was not Couchbase or libSQL, moved onto the declaration unchanged so the engine contract refactor changed no rendered text; `tests/unit/db/connection-form/golden/clickhouse.txt` and `tests/unit/lib/db-ui-config-placement.test.ts` pin it.
 The schemes the parser reads for ClickHouse are `clickhouse://`, `http://` and `https://`.
 
@@ -6816,7 +6865,7 @@ CodeQL's text: "A broken or weak cryptographic algorithm depends on sensitive da
 The line computed the SHA-1 thumbprint of the server's DER certificate, which `session.ts` compares against the operator's pin.
 
 The stated CONSEQUENCE was measured on 2026-10-12 and does not hold, and that is worth recording because it is what the next reader will want.
-The hashed DER is not sensitive: an OPC UA server publishes it to any unauthenticated caller in its `GetEndpoints` reply (Part 4 5.5.4), and this repository already classifies the derived thumbprint as `public` in `src/lib/storage/connection-secrets.ts`.
+The hashed DER is not sensitive: an OPC UA server publishes it to any unauthenticated caller in its `GetEndpoints` reply (Part 4 5.5.4), and this repository already classifies the derived thumbprint as `public` in `src/lib/storage/secret-fields.ts`.
 Nor was the pin defeatable: defeating a pin of a certificate that already exists needs a SECOND PREIMAGE, which SHA-1 still resists, and not the collision resistance that SHAttered 2017 and Leurent and Peyrin 2020 broke.
 The thing actually worth fixing that the audit turned up is U130, which is about which certificate the pin is compared against rather than about the hash.
 

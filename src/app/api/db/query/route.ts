@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { INVALID_REQUEST_BODY, readJsonObject } from "@/lib/api/json-object-body";
 import { createDatabaseProvider, getOrCreateProvider } from "@/lib/db";
 import { createErrorResponse } from "@/lib/api/errors";
 import { resolveConnection, SeedConnectionError } from "@/lib/seed/resolve-connection";
@@ -13,7 +14,7 @@ import { getExplainStrategy, type ExplainMode } from "@/lib/explain";
 import { countCodeStatements } from "@/lib/sql/statement-splitter";
 import { hasUnterminatedSpan } from "@/lib/sql/spans";
 import { readsSqlText, resolveSqlGrammar } from "@/lib/sql/grammar";
-import type { ExplainFormat } from "@/lib/db/types";
+import type { ExplainFormat, QueryPrepareOptions } from "@/lib/db/types";
 import type { DatabaseConnection } from "@/lib/types";
 import { admitQueryExecution } from "@/lib/query-events/admission";
 import { queryEventStart } from "@/lib/query-events/build";
@@ -76,13 +77,23 @@ export async function POST(req: NextRequest) {
   let stage: "request" | "admission" | "execution" = "request";
 
   try {
-    const body = await req.json();
-    const { sql, options = {}, queryId } = body;
+    // A body that is not a JSON object is a malformed request, refused before any connection resolves.
+    const body = await readJsonObject(req);
+    if (body === null) {
+      return NextResponse.json({ error: INVALID_REQUEST_BODY }, { status: 400 });
+    }
+    // `options` is handed on as the page options it names, as it was when the body was read untyped.
+    const { sql, options = {}, queryId } = body as { options?: QueryPrepareOptions } & Record<string, unknown>;
     requestedId = requestedConnectionId(body);
     submitted = typeof sql === "string" ? sql : null;
 
     connection = await resolveConnection(body, guard.session);
 
+    // A `sql` that is present but not a string, a falsy one (0, false) included, is refused in words: a truthy one
+    // reached the provider and answered 500 with its own TypeError. A missing (null) or empty one keeps its answer.
+    if (sql != null && typeof sql !== "string") {
+      return NextResponse.json({ error: "sql must be a string" }, { status: 400 });
+    }
     if (!sql) {
       return NextResponse.json({ error: "Connection and query are required" }, { status: 400 });
     }
