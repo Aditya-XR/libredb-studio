@@ -28,6 +28,7 @@
  * it now.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { ciStep as ciStepText } from "../../helpers/ci-step";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
@@ -192,7 +193,7 @@ describe("the captures carry the fact the window rule rests on", () => {
     expect(readme).toContain(image);
     // The CI step is the fourth place the same pin appears, and the one furthest from a reader's
     // eye: a bump here that misses it would run CI against a different agent than the captures.
-    const ciStep = readFileSync(join(import.meta.dir, "..", "..", "..", "docker", "mtconnect", "ci-step.yml"), "utf-8");
+    const ciStep = ciStepText("MTConnect provider check");
     expect(ciStep).toContain(image);
     expect(readme).toContain(`version`);
     for (const name of ["probe", "current", "assets"]) {
