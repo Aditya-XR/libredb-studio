@@ -8140,7 +8140,7 @@ Governance mode removes the cross-user path because each user gets their own pro
 
 Under governance the server files a user's rows under the identity provider's subject (`storageOwnerKey` in `src/lib/storage/owner-key.ts`), but the browser copy keeps the username as its owner.
 `readSignedInUsername` in `src/lib/storage/workspace-owner.ts` reads `user.username` from `GET /api/auth/me`, `claimAccountWorkspace` in `src/lib/storage/local-storage.ts` compares it with the stored owner, every request names it in the `X-LibreDB-Workspace-Owner` header, and `src/proxy.ts` answers 409 `WORKSPACE_OWNER_MISMATCH` when it differs from the session's `username`.
-After an OIDC sign-in the username is the email, else `preferred_username`, else the subject (`src/app/api/auth/oidc/callback/route.ts`), so it can change while the subject stays, and another subject can take it over.
+After an OIDC sign-in the username is the email unless marked unverified, else a `preferred_username` that is not email-shaped, else the subject (`oidcUsername` in `src/lib/oidc-identity.ts`), so it can change while the subject stays, and another subject can take it over.
 An email change clears the browser copy at the next sign-in, editor tabs, drafts and unsynced collections with it, although the server rows belong to the same person.
 A username another subject takes over on a shared browser keeps the earlier person's copy, which `useStorageSync` in `src/hooks/use-storage-sync.ts` then pushes into the new person's rows before it pulls, and the 409 check cannot tell the two people apart.
 `docs/STORAGE.md` states the choice; this entry asks to change it.

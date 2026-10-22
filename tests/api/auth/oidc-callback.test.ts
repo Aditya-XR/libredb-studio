@@ -283,6 +283,26 @@ describe("GET /api/auth/oidc/callback", () => {
     expect(await mintedSession()).toMatchObject({ role: "user", username: "user-123" });
   });
 
+  test("passes over an email the provider marks unverified, so a chosen address cannot open another person's workspace", async () => {
+    mockExchangeCode.mockImplementationOnce(async () =>
+      exchanged({ ...defaultClaims, email: "victim@example.com", email_verified: false }),
+    );
+
+    await GET(new Request("http://localhost:3000/api/auth/oidc/callback?code=auth-code&state=test-state"));
+
+    expect(await mintedSession()).toMatchObject({ username: "testuser" });
+  });
+
+  test("never takes an email-shaped preferred_username, and falls back to sub", async () => {
+    mockExchangeCode.mockImplementationOnce(async () =>
+      exchanged({ iss: ISSUER, sub: "user-123", preferred_username: "victim@example.com" }),
+    );
+
+    await GET(new Request("http://localhost:3000/api/auth/oidc/callback?code=auth-code&state=test-state"));
+
+    expect(await mintedSession()).toMatchObject({ username: "user-123" });
+  });
+
   test("passes claims to mapOIDCRole with correct config", async () => {
     const req = new Request("http://localhost:3000/api/auth/oidc/callback?code=auth-code&state=test-state");
     await GET(req);

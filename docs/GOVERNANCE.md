@@ -137,6 +137,7 @@ Under governance the identity provider at `OIDC_ISSUER` is the only way into Stu
 Studio checks the session of every request against these rules:
 
 - A session counts only when Studio's OIDC callback minted it: it carries the ID token's `sub` as a non-empty subject and the ID token's `iss` as its issuer, and the issuer equals `OIDC_ISSUER`, the two compared as URLs with one trailing slash ignored.
+- A native client's identity provider access token ([OIDC.md](./OIDC.md#bearer-access-tokens-for-native-clients)) counts under the same rule, with the access token's `sub` and `iss`, and its own `iat` as its issue time.
 - A password, passkey or launch session carries no subject and is refused, and so is a session whose subject is empty or whose issuer is not `OIDC_ISSUER`.
   With `OIDC_ISSUER` unset or not a URL every session is refused, and a changed `OIDC_ISSUER` ends the sessions of the previous issuer.
 - A session issued at or before its subject's latest `revoked_before` in [`bridge.session_revocations_v1`](#row-semantics) is refused, typically within a second of the commit that adds the row, because its change notification reloads the snapshot.

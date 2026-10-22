@@ -73,6 +73,13 @@ export const ApiErrorCode = {
   GOVERNANCE_UNAVAILABLE: "GOVERNANCE_UNAVAILABLE",
 
   /**
+   * A bearer access token could not be verified because the identity provider's discovery document or key set could
+   * not be read, or the bearer channel is misconfigured (503, src/lib/oidc-bearer.ts). Not AUTH_REQUIRED: the token
+   * may be good, so a client keeps it and retries instead of signing the user out.
+   */
+  IDENTITY_PROVIDER_UNAVAILABLE: "IDENTITY_PROVIDER_UNAVAILABLE",
+
+  /**
    * Under governance, with the runtime setting `queryLog.onSinkFailure` at `refuse`, Studio cannot record query events
    * right now (503): its query event sink is backing off after a failed insert, or its queue is at least 90% full. The
    * request was refused before any statement ran (src/lib/query-events/admission.ts). Distinct from

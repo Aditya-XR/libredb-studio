@@ -31,6 +31,7 @@ Browser → Redirect to app (/ or /admin based on role)
     - [Requiring a role](#requiring-a-role)
   - [Session Identity](#session-identity)
   - [Governance mode](#governance-mode)
+  - [Bearer access tokens for native clients](#bearer-access-tokens-for-native-clients)
   - [Security Features](#security-features)
   - [Troubleshooting](#troubleshooting)
   - [Switching Between Auth Modes](#switching-between-auth-modes)
@@ -316,6 +317,8 @@ The difference is the realm role (`admin` or `user`), mapped through `OIDC_ROLE_
 | `OIDC_PROMPT` | No | `login` | The `prompt` sent on sign-in: `login`, `consent`, `select_account`, or `omit` to send none; see [Single sign-on with OIDC_PROMPT](#single-sign-on-with-oidc_prompt) |
 | `OIDC_AUTO_REDIRECT` | No | off | `true`, `1`, `on` or `yes` sends a signed-out `GET /login` straight to the identity provider; see [Automatic redirect to the provider](#automatic-redirect-to-the-provider) |
 | `OIDC_LOGOUT_HINT` | No | off | `true`, `1`, `on` or `yes` sends `id_token_hint` with the provider's end-session request on logout; see [Logout with id_token_hint](#logout-with-id_token_hint) |
+| `OIDC_BEARER_AUDIENCE` | No | unset | Turns on bearer access tokens for native clients: the audience the provider puts in their access tokens. Must differ from `OIDC_CLIENT_ID`; see [Bearer access tokens for native clients](#bearer-access-tokens-for-native-clients) |
+| `OIDC_BEARER_CLIENT_IDS` | No | unset | Comma-separated client ids whose access tokens are accepted, checked against `azp`, else `client_id`. Recommended whenever `OIDC_BEARER_AUDIENCE` is set |
 | `AUTH_SESSION_TTL_SECONDS` | No | `86400` | Session lifetime in seconds, from 300 to 86400; see [Session lifetime](#session-lifetime) |
 
 ### Single sign-on with OIDC_PROMPT
@@ -424,9 +427,13 @@ A session signed in through OIDC also carries the provider's identifiers for the
 
 `openid-client` accepts an ID token only when its `iss` is exactly the issuer that discovery at `OIDC_ISSUER` returned, and discovery accepts only an issuer that equals `OIDC_ISSUER` once both are normalized as URLs.
 So for a Keycloak realm `idpIssuer` equals `OIDC_ISSUER`, while an issuer that is a bare host, such as Auth0's, ends in a slash that `OIDC_ISSUER` may leave out.
-`username` keeps its meaning: the email, else `preferred_username`, else `sub`, for display and rate limiting.
+`username` keeps its meaning, for display, rate limiting and, without governance, as the key of the user's saved work: the email, unless the provider marks it unverified (`email_verified` is `false`, or the string `"false"` some providers send), else a `preferred_username` that is not email-shaped, else `sub`.
+A provider that sends no `email_verified`, such as Microsoft Entra ID, marks nothing, so its email is taken; there the provider's own control over the `email` claim is what keeps it from being copied.
+An unverified email and an email-shaped `preferred_username` are passed over because a provider may let a user set either freely, and `bob@example.com` chosen that way would otherwise open Bob's workspace.
+A provider that marks its users' emails unverified, as Keycloak does for an account created without verification, therefore names them by `preferred_username`; set Email verified on those accounts to keep the email.
 The registered JWT claims `sub` and `iss` stay unused, because MCP tokens already put the username in `sub`.
 Password, passkey and launch sessions carry neither claim.
+A session a native client's access token stands for carries both, from the access token ([Bearer access tokens for native clients](#bearer-access-tokens-for-native-clients)).
 `GET /api/auth/me` answers with the session payload, so for an OIDC session its `user` object includes `idpSubject` and `idpIssuer`.
 An ID token without a string `sub` or `iss` signs no one in: the callback redirects to `/login?error=oidc_no_claims`.
 
@@ -436,7 +443,7 @@ With `GOVERNANCE_SOURCE=postgres` a control plane decides which databases each p
 The identity provider is then the only way into Studio, and Studio applies these rules on every request:
 
 - A session counts only when it carries a non-empty `idpSubject` and an `idpIssuer` equal to `OIDC_ISSUER`, the two compared as URLs with one trailing slash ignored.
-  Only the OIDC callback writes those claims, so a password, passkey or launch session is refused, and so is a session whose subject is empty or whose issuer is another provider's.
+  Only the OIDC callback and a native client's access token write those claims, so a password, passkey or launch session is refused, and so is a session whose subject is empty or whose issuer is another provider's.
 - A refused session's `auth-token` cookie is cleared, so the next page load reaches the sign-in page.
   A changed `OIDC_ISSUER` therefore ends every session of the previous issuer at its next request, and with `OIDC_ISSUER` unset or not a URL no session counts.
 - The callback applies the same rule to the ID token before it mints a session: a token with an empty `sub`, or whose `iss` is not `OIDC_ISSUER`, signs no one in and lands on `/login?error=oidc_config`, so `OIDC_AUTO_REDIRECT` never repeats a sign-in that every request would refuse.
@@ -468,6 +475,57 @@ OIDC_ROLE_CLAIM=libredb_roles
 OIDC_ADMIN_ROLES=admin
 OIDC_USER_ROLES=user
 ```
+
+### Bearer access tokens for native clients
+
+A native client, such as a mobile app, signs in to the identity provider itself, as a public client with the authorization code flow and PKCE, and refreshes its own tokens.
+It then calls Studio's API with `Authorization: Bearer <access token>`, and Studio accepts that token as a session when `OIDC_BEARER_AUDIENCE` is set.
+Unset, the default, Studio ignores the `Authorization` header outside `/api/mcp`, as it always has.
+
+```env
+NEXT_PUBLIC_AUTH_PROVIDER=oidc
+OIDC_BEARER_AUDIENCE=libredb-studio-api
+OIDC_BEARER_CLIENT_IDS=libredb-mobile
+```
+
+Studio accepts an access token only when all of these hold:
+
+- It is a JWT signed with an asymmetric key (RS, PS, ES or EdDSA) from the `jwks_uri` of `OIDC_ISSUER`'s discovery document; `none` and every HS algorithm are refused.
+- Its `iss` equals `OIDC_ISSUER`, compared as URLs with one trailing slash ignored, and its `aud` contains `OIDC_BEARER_AUDIENCE`.
+- Its `exp` is in the future and its `nbf`, when present, in the past, with 30 seconds of clock tolerance; `iat` is required.
+- It is not an ID token: its `aud` does not contain `OIDC_CLIENT_ID`, it carries no `nonce`, `at_hash` or `c_hash`, Keycloak's `typ` claim is not `ID`, and its `typ` header is absent, `JWT` or `at+jwt`.
+  For the same reason `OIDC_BEARER_AUDIENCE` equal to `OIDC_CLIENT_ID` is a configuration error.
+- With `OIDC_BEARER_CLIENT_IDS` set, its `azp`, else its `client_id`, is one of them.
+- It carries a non-empty `sub`, and a username under the rule of [Session Identity](#session-identity): an `email` the provider does not mark unverified, else a `preferred_username` that is not email-shaped; there is no fallback to `sub`, because `username` keys the user's saved work, so a token that named the person differently would open a second, empty workspace.
+  The provider must put the claim the ID token carries in the access token too.
+- `OIDC_ROLE_CLAIM`, `OIDC_ADMIN_ROLES` and `OIDC_USER_ROLES` map a role from the access token's claims, as at sign-in.
+  With `OIDC_USER_ROLES` unset every holder of a token for the audience is at least a `user`, so set `OIDC_BEARER_CLIENT_IDS`, `OIDC_USER_ROLES`, or both.
+
+Opaque access tokens and token introspection are not supported: the provider must issue JWT access tokens.
+Google's access tokens are opaque, so Google cannot be used for this.
+
+How Studio answers:
+
+- A Bearer header decides alone on an API path that needs a session, even next to a valid cookie: a refused token answers `401` with `{"error":"Invalid access token","code":"AUTH_REQUIRED"}` and `WWW-Authenticate: Bearer error="invalid_token"`, never a redirect.
+  Any other scheme, such as the `Basic` credentials a reverse proxy's basic authentication forwards, is ignored and the cookie decides.
+  The sign-in routes under `/api/auth/` never read the header, so a client holding an expired token can still sign in.
+- A provider whose discovery document or key set cannot be read answers `503` with code `IDENTITY_PROVIDER_UNAVAILABLE`, so a client keeps its token and retries instead of signing the user out.
+- A page never takes a bearer, and no CORS header is added: the channel is for native clients, not for another web origin.
+- `GET /api/auth/me` answers the session, with `idpSubject`, `idpIssuer`, the token's `iat` and `exp`, and `channel: "bearer"`.
+- `POST /api/auth/logout` answers `{"success":true}` with no `redirectUrl` and sets no cookie; the client discards its tokens and ends the provider session itself.
+- `POST /api/mcp/token` refuses a bearer session with `403`: an MCP token is created from a browser session only.
+- A refusal is audited as `permission_denied` with reason `bearer_token_invalid`, `bearer_no_role` or `bearer_no_identity`.
+  A bearer request writes no `login_success`, because the sign-in happened at the provider.
+- Under [governance](#governance-mode) the access token's `sub`, `iss` and own `iat` go through the same rule as a session cookie's, so a subject's `revoked_before` ends the access tokens issued before it.
+  A provider that issues pairwise subjects per client, such as Microsoft Entra ID, gives the native client a different `sub` than the web sign-in, and grants written for one do not match the other.
+- An operator who turns the channel on behind a reverse proxy that injects its own `Authorization: Bearer` header must strip that header at the proxy.
+
+With Keycloak:
+
+1. A public client for the app, for example `libredb-mobile`: client authentication off, standard flow only, PKCE method S256, and the app's redirect URI.
+2. An Audience mapper on that client's dedicated scope, with Included Custom Audience `libredb-studio-api` and Add to access token on, so the token's `aud` names the audience.
+3. The role claim in the access token: realm roles are at `realm_access.roles` by default, so `OIDC_ROLE_CLAIM=realm_access.roles` reads them, as for the web sign-in.
+   Under governance the roles come from the `libredb_roles` mapper described above, so turn on its Add to access token as well.
 
 ---
 
@@ -854,7 +912,7 @@ export async function login(role: Role, username?: string, sessionVersion?: numb
 3. Off for a request that arrived on a loopback host over plain HTTP — WebKitGTK's cookie store discards a `Secure` cookie delivered over HTTP, which would break the desktop shell (issue #232). A proxy that forwarded HTTPS to loopback still gets the flag, via `x-forwarded-proto`.
 4. On otherwise.
 
-The optional `username` parameter was added for OIDC — local login passes the email, while the OIDC callback resolves it through a fallback chain: `claims.email || claims.preferred_username || claims.sub || role` (so a username is always set regardless of which claims the provider returns).
+The optional `username` parameter was added for OIDC: local login passes the email, while the OIDC callback resolves it with `oidcUsername()` (`src/lib/oidc-identity.ts`), falling back to `claims.sub`, then the role: the email unless `email_verified` is `false`, else a `preferred_username` without an `@` (so a username is always set regardless of which claims the provider returns, and never one a user could copy from someone else).
 
 The optional `identity` is passed only by the OIDC callback, as `{ subject: claims.sub, issuer: claims.iss }`, and becomes the private claims `idpSubject` and `idpIssuer` described under [Session Identity](#session-identity).
 Every other caller passes none, so password, passkey and launch sessions sign exactly `role`, `username` and `sessionVersion`.

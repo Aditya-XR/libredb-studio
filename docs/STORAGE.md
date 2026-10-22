@@ -1409,7 +1409,7 @@ Every row in `user_storage` is scoped by `user_id`:
 
 ### OIDC Users
 
-OIDC users (Auth0, Keycloak, Okta, Azure AD) have their `preferred_username` or email claim mapped to the same `username` field used as `user_id`. See [OIDC.md](./OIDC.md) for SSO configuration — it pairs well with server storage for team deployments.
+OIDC users (Auth0, Keycloak, Okta, Azure AD) have their email claim, else their `preferred_username`, mapped to the same `username` field used as `user_id`, under the rule in [OIDC.md](./OIDC.md#session-identity). See [OIDC.md](./OIDC.md) for SSO configuration; it pairs well with server storage for team deployments.
 
 ### Governance Mode
 
