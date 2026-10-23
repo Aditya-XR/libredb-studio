@@ -30,10 +30,11 @@ import {
   wordsFollow,
 } from "@/lib/sql/confirm-forms";
 import { readsSqlText, resolveSqlGrammar, type SqlGrammar } from "@/lib/sql/grammar";
+import { readLeadingKeyword } from "@/lib/sql/leading-keyword";
 import { readOperativeKeyword } from "@/lib/sql/operative-keyword";
 import { hasLoneCarriageReturnInLineComment, hasUnterminatedSpan, readSqlSpan } from "@/lib/sql/spans";
 import { splitStatements } from "@/lib/sql/statement-splitter";
-import { findCodeWord } from "@/lib/sql/words";
+import { findCodeWord, readSqlWord } from "@/lib/sql/words";
 import type { DatabaseType } from "@/lib/types";
 
 interface SafetyAnalysis {
@@ -615,6 +616,17 @@ const CONTROL_FLOW_KEYWORDS = new Set([
   "WHEN",
 ]);
 
+/**
+ * The data-modifying words a CTE body can open with, besides `UPDATE`.
+ *
+ * The same set `DATA_MODIFYING` names in `src/lib/explain/select-prefix.ts`
+ * (`INSERT`, `UPDATE`, `DELETE`, `MERGE`), minus `UPDATE`: that one stays the
+ * `UPDATE … SET` pair below, because a bare `UPDATE` is a cursor lock as often
+ * as it is a write. These three need no following word. Each is non-reserved in
+ * PostgreSQL, so they count only as the first word of a CTE body.
+ */
+const CTE_DATA_MODIFYING = new Set(["INSERT", "DELETE", "MERGE"]);
+
 /** Whether a `confirmExemptForms` form led by `keyword` starts at the keyword that ends at `end`. */
 function exemptFormAt(text: string, keyword: string, end: number, grammar: SqlGrammar): boolean {
   return (grammar.confirmExemptForms ?? []).some(
@@ -720,6 +732,54 @@ function configKeyAsks(
 }
 
 /**
+ * Index of the first word of a CTE body after `AS [NOT] MATERIALIZED (`, or null when `afterAs` is not that shape.
+ * Whitespace and comments between the words are not part of the shape; a string or any other token ends it.
+ */
+function cteBodyAt(text: string, afterAs: number, grammar: SqlGrammar): number | null {
+  let at = pastHiddenText(text, afterAs, grammar);
+  const hint = readSqlWord(text, at);
+  if (hint?.text === "NOT") {
+    at = pastHiddenText(text, hint.end, grammar);
+    const materialized = readSqlWord(text, at);
+    if (materialized?.text !== "MATERIALIZED") return null;
+    at = materialized.end;
+  } else if (hint?.text === "MATERIALIZED") {
+    at = hint.end;
+  }
+  at = pastHiddenText(text, at, grammar);
+  if (text[at] !== "(") return null;
+  return pastHiddenText(text, at + 1, grammar);
+}
+
+/** Whether `INSERT`, `DELETE` or `MERGE` opens a CTE body, or operates one that itself opens with `WITH`. */
+function cteBodyWrites(text: string, grammar: SqlGrammar): boolean {
+  let i = 0;
+  while (i < text.length) {
+    const span = readSqlSpan(text, i, grammar);
+    if (span !== null) {
+      i = span.end;
+      continue;
+    }
+    const word = readSqlWord(text, i);
+    if (word !== null && word.text === "AS" && cteBodyOpensWithWrite(text, word.end, grammar)) return true;
+    i = word?.end ?? i + 1;
+  }
+  return false;
+}
+
+function cteBodyOpensWithWrite(text: string, afterAs: number, grammar: SqlGrammar): boolean {
+  const bodyAt = cteBodyAt(text, afterAs, grammar);
+  if (bodyAt === null) return false;
+  const body = readSqlWord(text, bodyAt);
+  if (body !== null && CTE_DATA_MODIFYING.has(body.text)) return true;
+  // `WITH x AS (WITH y AS (…) DELETE …)` : the body is a statement, and the write is the
+  // keyword that operates it, not the first word.
+  if (body?.text !== "WITH") return false;
+  const operative = readOperativeKeyword(text.slice(bodyAt), grammar);
+  return operative !== null && CTE_DATA_MODIFYING.has(operative.keyword);
+}
+
+/**
  * Whether ONE statement's own code asks for a confirmation, read under `grammar`.
  *
  * Its own function because the caller below asks the question twice over different
@@ -775,11 +835,20 @@ export function writesUnderGrammar(text: string, grammar: SqlGrammar): boolean {
     return true;
   }
 
-  // A write the statement's own keyword does not report: PostgreSQL's data-modifying
-  // CTE is OPERATED by its SELECT (`WITH x AS (UPDATE … SET …) SELECT * FROM x`), so
-  // this probe stays unanchored deliberately. It reads the statement's CODE rather
-  // than its text, so a read that merely quotes or comments the two words - which
-  // the pattern before it treated as a write - no longer asks for a confirmation.
+  // A data-modifying CTE is operated by the statement after its list, so the keyword
+  // test above answers for the SELECT. INSERT, DELETE and MERGE are non-reserved in
+  // PostgreSQL, so they count only as the first word of a CTE body — right after
+  // `AS (` or `AS [NOT] MATERIALIZED (` — or as the keyword that operates a body
+  // which itself opens with WITH. A column or CTE of those names does not ask, nor
+  // does a word in a string or a comment. The statement need not lead with WITH:
+  // a parenthesised query and `CREATE TABLE … AS WITH …` carry the same body.
+  // An unclosed list that leads with WITH (`WITH t AS (DELETE FROM x`) stays silent.
+  // UPDATE stays the pair below. CockroachDB connections are the postgres type-id
+  // and share this grammar (#1862).
+  const leadsWithWith = readLeadingKeyword(text, grammar)?.keyword === "WITH";
+  if ((!leadsWithWith || reading !== null) && cteBodyWrites(text, grammar)) {
+    return true;
+  }
   const update = findCodeWord(text, "UPDATE", 0, grammar);
   return update !== null && findCodeWord(text, "SET", update.end, grammar) !== null;
 }

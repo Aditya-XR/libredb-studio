@@ -586,7 +586,8 @@ same reading the auto-limiter uses, so the two cannot disagree about where a sta
 | The `DO` of `ON CONFLICT DO NOTHING` or `CREATE RULE … DO INSTEAD`, which a word follows | No |
 | Any of those behind a comment (`-- note`, `/* note */`, MySQL's `# note`, several stacked) | Yes |
 | A `WITH` whose CTE list precedes one (`WITH x AS (…) DELETE FROM …`) | Yes |
-| A `WITH` whose CTE list *contains* an `UPDATE … SET` (PostgreSQL's data-modifying CTE) | Yes |
+| A CTE body that opens with `INSERT`, `DELETE` or `MERGE`, or with `WITH` operated by one of those (`AS (`, `AS MATERIALIZED (`, `AS NOT MATERIALIZED (`; the `WITH` need not lead the statement), or whose code contains `UPDATE … SET` (PostgreSQL's data-modifying CTE; CockroachDB shares the grammar) | Yes |
+| A `WITH` that only names `merge`, `delete` or `insert` as a column or a CTE | No |
 | A statement carrying a run the reader cannot resolve (`SELECT '\';` and anything after it, an unterminated comment, literal, name or array) | Yes, and the dialog says why |
 | Any of those behind a **nested** comment (`/* a /* b */ c */ DROP TABLE users`), on a dialect that nests — PostgreSQL, SQL Server, ClickHouse | Yes: the comment is read whole, so the statement's own keyword is the one that answers |
 | The same text on a dialect that does **not** nest — MySQL, MariaDB, SQLite, Oracle | No, because there the comment closed at the first `*/` and what follows it is text the engine rejects outright |
@@ -614,6 +615,21 @@ not bound the rows a write commits — so anchoring this probe too would take th
 from a statement that really does write. It reads the statement's **code** rather than its text
 (`src/lib/sql/words.ts`), so unlike the pattern before it, a read that merely quotes
 `'UPDATE t SET x = 1'` or mentions it in a comment no longer prompts.
+
+`DELETE`, `MERGE` and `INSERT` are the other three words of that set (`DATA_MODIFYING` in
+`src/lib/explain/select-prefix.ts`). They are non-reserved in PostgreSQL, so a column or a CTE may
+be named one of them. They count as the first word of a CTE body — right after `AS (`,
+`AS MATERIALIZED (` or `AS NOT MATERIALIZED (`, with strings and comments skipped — or, when that
+body opens with `WITH`, as the keyword that operates it. The statement need not lead with `WITH`.
+So `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d` asks, and so do the `MERGE … DELETE` and
+`INSERT` forms, including a `MATERIALIZED` hint, a body of
+`WITH x AS (WITH y AS (SELECT 1) DELETE FROM t RETURNING *) SELECT * FROM x` and its `INSERT` twin,
+`(WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d)`, and
+`CREATE TABLE t2 AS WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d`.
+`WITH a AS (SELECT merge FROM audit) SELECT * FROM a` does not. CockroachDB connections are the
+`postgres` type-id and share that grammar, so they ask for the same bodies. A word that only appears
+in a string or a comment does not ask. An unclosed list that leads with `WITH` still does not: the
+shape cannot be typed, and no dialect accepts the text.
 
 ### Text the reading cannot resolve asks, and says so
 
@@ -676,23 +692,28 @@ own grammar (#295) and unresolvable only to a reader without it — and it lifts
 cannot read at all: Oracle's `q'{it's}'` (#292). It does nothing for the first class, per that
 bullet.
 
-Two gaps are known and pinned by tests rather than claimed closed:
+One gap is known and pinned by tests rather than claimed closed:
 
-- **Only `UPDATE … SET` is looked for inside a read.** A write hidden in a CTE *body* under any
-  other keyword (`WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone`) does not prompt.
-  Widening the probe to `DELETE`/`INSERT`/`MERGE` would also make every read whose code names one
-  of them prompt, so the asymmetry is inherited from the vocabulary above rather than chosen here.
 - **A statement whose shape cannot be TYPED** — an unclosed CTE list such as
   `WITH t AS (DELETE FROM x` — does not prompt. This is the boundary of the rule above rather than
   an exception to it: every character was read, and what they spell is an incomplete statement
   rather than a run hiding what is written inside it. No dialect accepts the text, so the server
-  rejects it; and the keyword inside the unclosed list is a CTE-body write, which the gap above
-  already does not prompt for even when the list closes. Pinned by
+  rejects it. The same keyword inside a list that *does* close asks (#1862); this one does not,
+  because the list cannot be crossed and the probe refuses to guess. Pinned by
   `tests/components/QuerySafetyDialog.test.tsx` ("does not prompt when the statement's shape cannot
   be typed") so the boundary stays a decision — the shipped rule keys on unresolvable *runs*, and
   widening it to every statement the reader cannot type would prompt for an empty editor.
 
-A third gap sat beside them and is closed (S1). A multi-statement script used to be read as one
+A data-modifying CTE that `DELETE`s, `MERGE`s or `INSERT`s used to be a second gap beside that one:
+only `UPDATE … SET` was looked for inside a read, so
+`WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone` ran with no confirmation. Widening the
+unanchored pair to those words would have made every read whose code names one of them prompt, and
+counting the word anywhere in the CTE list would prompt for a column or CTE named `merge`, `delete`
+or `insert`. The three count as the first word of a CTE body whose list can be typed, or as the
+keyword that operates a body opening with `WITH`. A `WITH` that is not the statement's first word is
+read the same way. That gap is closed (#1862).
+
+Another gap sat beside them and is closed (S1). A multi-statement script used to be read as one
 statement, so `SELECT 1; DROP TABLE users` did not prompt — its first keyword is the `SELECT` —
 while `SELECT 1; UPDATE t SET x = 1` did, because the unanchored probe happened to find it. The gate
 now splits the editor text with the same splitter and the same grammar the runner uses, and asks
