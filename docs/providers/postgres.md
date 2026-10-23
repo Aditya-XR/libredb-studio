@@ -1849,6 +1849,8 @@ Before this, the same file stopped at its first row with `ERROR: malformed array
 The editor's confirmation gate asks before the shared destructive keywords, `MERGE` among them ([query-optimization.md](../editor/query-optimization.md#destructive-statement-confirmation)).
 On this dialect it also asks before a `DO` block, whatever the block does: the block's code is a literal, `$$ ... $$` or `'...'`, which the gate does not read.
 The grammar row's `confirmCodeForms` names `DO` followed by a body and `DO LANGUAGE` ([`postgres-sql-grammar.ts`](../../src/lib/db/providers/sql/postgres-sql-grammar.ts)), so the `DO` of `INSERT ... ON CONFLICT DO NOTHING` and of `CREATE RULE ... DO INSTEAD`, which a word follows, does not ask.
+`explainExecutesWithAnalyze` is set, because `EXPLAIN ANALYZE` (and `EXPLAIN (ANALYZE, …)`) runs the explained statement: the gate strips the option and asks about what remains when `ANALYZE` is on. A plain `EXPLAIN` only plans, and so does `ANALYZE` set to a boolean false (`false`, `off`, `no`, `0` and their accepted prefixes) or to an integer literal of value 0 (`0x0`, `0b0`, `0o0`, `0_0`). A nonzero literal (`0x1`, `0b1`, `0o1`, `0_1`) executes, so it asks.
+CockroachDB shares this type id and this grammar.
 
 ---
 
@@ -1863,6 +1865,7 @@ Block comments nest, per the PostgreSQL manual (4.1.5 Comments, checked 2026-08-
 The row bound goes before Materialize's `AS OF [AT LEAST] <t>`, which shares this type id (E2E pass of 2026-10-03/04, #1398): `SELECT * FROM ui_mv AS OF AT LEAST 0` with the bound appended is `Expected end of statement, found LIMIT`, and with the bound before the clause it returns rows.
 Completion quotes a catalog name by PostgreSQL's `quote_ident` rule, with the keyword set taken from PostgreSQL 18's `kwlist.h`: a name stays bare only when it is lower case and not a keyword other than an unreserved one, and a qualifier written in double quotes before the dot is read back with its doubled quotes undone.
 Only PostgreSQL completions introduce quoted table names; every other dialect quotes through the connection's capabilities.
+`explainExecutesWithAnalyze` is `true`: `EXPLAIN ANALYZE` executes, and the confirmation gate reads the explained statement ([§5.8](#58-the-confirmation-gate)).
 `readsSqlText` is `true`: the editor text is SQL, and the provider extends `SQLBaseProvider`.
 Redaction is `sql` with `"` as its name quote: a redacted statement keeps its words and every name in that quote, and every literal becomes `?`.
 

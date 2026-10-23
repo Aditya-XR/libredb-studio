@@ -1643,6 +1643,139 @@ describe("isDangerousQuery", () => {
     expect(isDangerousQuery("WITH x AS (SELECT id FROM t) DELETE FROM t USING x WHERE t.id = x.id")).toBe(true);
   });
 
+  /**
+   * PostgreSQL executes the statement under `EXPLAIN ANALYZE`, in the legacy spelling and in a parenthesised
+   * option list. The operative keyword is `EXPLAIN`, so the gate reads the statement that remains once the
+   * options are stripped (#1863). `ANALYZE` is off only for a boolean false (`false`, `off`, `no`, `0` and their
+   * accepted prefixes) or an integer literal of value 0, and so is a plain `EXPLAIN`. `0x1`, `0b1`, `0o1` and `0_1`
+   * are the integer 1, so they execute.
+   * CockroachDB is the postgres type-id and shares the grammar. A dialect that does not set
+   * `explainExecutesWithAnalyze` is unchanged: MySQL's `EXPLAIN ANALYZE` is outside this row.
+   */
+  test.each<[string, string]>([
+    ["a DELETE", "EXPLAIN ANALYZE DELETE FROM users"],
+    ["a DROP TABLE", "EXPLAIN ANALYZE DROP TABLE users"],
+    ["an UPDATE under a parenthesised option list", "EXPLAIN (ANALYZE, BUFFERS) UPDATE users SET id = 0"],
+    ["a DELETE under ANALYZE VERBOSE", "EXPLAIN ANALYZE VERBOSE DELETE FROM users"],
+    ["the British ANALYSE spelling", "EXPLAIN ANALYSE DELETE FROM users"],
+    ["ANALYZE with no space before the option list", "EXPLAIN(ANALYZE)DELETE FROM users"],
+    ["ANALYZE written in any case", "explain analyze delete from users"],
+    ["a comment between EXPLAIN and ANALYZE", "EXPLAIN /* plan */ ANALYZE DELETE FROM users"],
+    ["a note above the EXPLAIN", "-- profile\nEXPLAIN ANALYZE DELETE FROM users"],
+    ["ANALYZE after other options", "EXPLAIN (BUFFERS, ANALYZE) DELETE FROM users"],
+    ["ANALYZE true", "EXPLAIN (ANALYZE true) DELETE FROM users"],
+    ["ANALYZE on", "EXPLAIN (ANALYZE on) DELETE FROM users"],
+    ["ANALYZE 1", "EXPLAIN (ANALYZE 1) DELETE FROM users"],
+    ["ANALYZE 0x1, a hexadecimal 1", "EXPLAIN (ANALYZE 0x1) DELETE FROM users"],
+    ["ANALYZE 0b1, a binary 1", "EXPLAIN (ANALYZE 0b1) DELETE FROM users"],
+    ["ANALYZE 0o1, an octal 1", "EXPLAIN (ANALYZE 0o1) DELETE FROM users"],
+    ["ANALYZE 0_1, a decimal 1 with a separator", "EXPLAIN (ANALYZE 0_1) DELETE FROM users"],
+    ["ANALYZE 0X1", "EXPLAIN (ANALYZE 0X1) DELETE FROM users"],
+    ["ANALYZE 0B1", "EXPLAIN (ANALYZE 0B1) DELETE FROM users"],
+    ["ANALYZE 0O1", "EXPLAIN (ANALYZE 0O1) DELETE FROM users"],
+    ["ANALYZE 0x_1", "EXPLAIN (ANALYZE 0x_1) DELETE FROM users"],
+    ["ANALYZE 0o_1", "EXPLAIN (ANALYZE 0o_1) DELETE FROM users"],
+    ["ANALYZE 0b_1", "EXPLAIN (ANALYZE 0b_1) DELETE FROM users"],
+    ["ANALYZE 0x10", "EXPLAIN (ANALYZE 0x10) DELETE FROM users"],
+    ["ANALYZE 2", "EXPLAIN (ANALYZE 2) DELETE FROM users"],
+    ["ANALYZE +1", "EXPLAIN (ANALYZE +1) DELETE FROM users"],
+    ["ANALYZE -1", "EXPLAIN (ANALYZE -1) DELETE FROM users"],
+    ["ANALYZE +0x1", "EXPLAIN (ANALYZE +0x1) DELETE FROM users"],
+    ["ANALYZE 0.0, a float rather than the integer 0", "EXPLAIN (ANALYZE 0.0) DELETE FROM users"],
+    ["ANALYZE 0e0", "EXPLAIN (ANALYZE 0e0) DELETE FROM users"],
+    ["ANALYZE 0e+1", "EXPLAIN (ANALYZE 0e+1) DELETE FROM users"],
+    ["ANALYZE 0e+", "EXPLAIN (ANALYZE 0e+) DELETE FROM users"],
+    ["ANALYZE 0e-", "EXPLAIN (ANALYZE 0e-) DELETE FROM users"],
+    ["ANALYZE 0x, which is not an integer", "EXPLAIN (ANALYZE 0x) DELETE FROM users"],
+    ["ANALYZE 0x_", "EXPLAIN (ANALYZE 0x_) DELETE FROM users"],
+    ["ANALYZE 0o", "EXPLAIN (ANALYZE 0o) DELETE FROM users"],
+    ["ANALYZE 0b", "EXPLAIN (ANALYZE 0b) DELETE FROM users"],
+    ["ANALYZE 0b2, trailing junk on a binary literal", "EXPLAIN (ANALYZE 0b2) DELETE FROM users"],
+    ["ANALYZE 0x1g, trailing junk", "EXPLAIN (ANALYZE 0x1g) DELETE FROM users"],
+    ["ANALYZE 0.1a", "EXPLAIN (ANALYZE 0.1a) DELETE FROM users"],
+    ["ANALYZE 1e2a", "EXPLAIN (ANALYZE 1e2a) DELETE FROM users"],
+    ["ANALYZE falsehood, which is not the boolean", "EXPLAIN (ANALYZE falsehood) DELETE FROM users"],
+    ["ANALYZE note, which is not the boolean", "EXPLAIN (ANALYZE note) DELETE FROM users"],
+    ["ANALYZE offside", "EXPLAIN (ANALYZE offside) DELETE FROM users"],
+    ["a bare o, which is not a unique prefix", "EXPLAIN (ANALYZE o) DELETE FROM users"],
+    ["ANALYZE yes", "EXPLAIN (ANALYZE yes) DELETE FROM users"],
+    ["ANALYZE t, a prefix of true", "EXPLAIN (ANALYZE t) DELETE FROM users"],
+    ["a sign that is not followed by a number", "EXPLAIN (ANALYZE +false) DELETE FROM users"],
+    ["a sign with no number after it", "EXPLAIN (ANALYZE +) DELETE FROM users"],
+    ["ANALYZE 'true'", "EXPLAIN (ANALYZE 'true') DELETE FROM users"],
+    ["a parenthesised ANALYSE", "EXPLAIN (ANALYSE, VERBOSE) DROP TABLE users"],
+    ["FORMAT before ANALYZE", "EXPLAIN (FORMAT JSON, ANALYZE) DELETE FROM users"],
+    ["a data-modifying CTE under the EXPLAIN", "EXPLAIN ANALYZE WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d"],
+    ["a nested EXPLAIN ANALYZE", "EXPLAIN ANALYZE EXPLAIN ANALYZE DELETE FROM users"],
+    ["a DELETE in a later statement", "EXPLAIN ANALYZE SELECT 1; DELETE FROM users"],
+    ["a ) inside an option string, which does not close the list", "EXPLAIN (ANALYZE ')') DELETE FROM users"],
+    ["an equals sign, which is not the off spelling", "EXPLAIN (ANALYZE = false) DELETE FROM users"],
+    ["an off value that is only a comment", "EXPLAIN (ANALYZE /* false */) DELETE FROM users"],
+    ["ANALYZE on after an ANALYZE off", "EXPLAIN (ANALYZE false, ANALYZE) DELETE FROM users"],
+    ["a quoted name where a boolean would be", 'EXPLAIN (ANALYZE "off") DELETE FROM users'],
+  ])("prompts for EXPLAIN ANALYZE of %s", (_label, query) => {
+    expect(isDangerousQuery(query, "postgres")).toBe(true);
+  });
+
+  test("prompts for EXPLAIN ANALYZE on cockroachdb, which shares the PostgreSQL grammar", () => {
+    expect(isDangerousQuery("EXPLAIN ANALYZE DELETE FROM users", "postgres")).toBe(true);
+    expect(isDangerousQuery("EXPLAIN ANALYZE DROP TABLE users", "postgres")).toBe(true);
+  });
+
+  test.each<[string, string]>([
+    ["ANALYZE false", "EXPLAIN (ANALYZE false) DELETE FROM users"],
+    ["ANALYZE off", "EXPLAIN (ANALYZE off) DELETE FROM users"],
+    ["ANALYZE no", "EXPLAIN (ANALYZE no) DELETE FROM users"],
+    ["ANALYZE 0", "EXPLAIN (ANALYZE 0) DELETE FROM users"],
+    ["ANALYZE 'false'", "EXPLAIN (ANALYZE 'false') DELETE FROM users"],
+    ["ANALYZE 'no'", "EXPLAIN (ANALYZE 'no') DELETE FROM users"],
+    ["ANALYZE '0'", "EXPLAIN (ANALYZE '0') DELETE FROM users"],
+    ["ANALYZE f, a prefix of false", "EXPLAIN (ANALYZE f) DELETE FROM users"],
+    ["ANALYZE n, a prefix of no", "EXPLAIN (ANALYZE n) DELETE FROM users"],
+    ["ANALYZE of, a prefix of off", "EXPLAIN (ANALYZE of) DELETE FROM users"],
+    ["ANALYZE 00", "EXPLAIN (ANALYZE 00) DELETE FROM users"],
+    ["ANALYZE 0x0", "EXPLAIN (ANALYZE 0x0) DELETE FROM users"],
+    ["ANALYZE 0b0", "EXPLAIN (ANALYZE 0b0) DELETE FROM users"],
+    ["ANALYZE 0o0", "EXPLAIN (ANALYZE 0o0) DELETE FROM users"],
+    ["ANALYZE 0_0", "EXPLAIN (ANALYZE 0_0) DELETE FROM users"],
+    ["ANALYZE 0X0", "EXPLAIN (ANALYZE 0X0) DELETE FROM users"],
+    ["ANALYZE 0x_0", "EXPLAIN (ANALYZE 0x_0) DELETE FROM users"],
+    ["ANALYZE +0", "EXPLAIN (ANALYZE +0) DELETE FROM users"],
+    ["ANALYZE -0", "EXPLAIN (ANALYZE -0) DELETE FROM users"],
+    ["ANALYZE +0x0", "EXPLAIN (ANALYZE +0x0) DELETE FROM users"],
+    ["ANALYZE 0.., the integer 0 with the range operator given back", "EXPLAIN (ANALYZE 0..) DELETE FROM users"],
+    ["a plain EXPLAIN of a DELETE", "EXPLAIN DELETE FROM users"],
+    ["a plain EXPLAIN of an UPDATE … SET", "EXPLAIN UPDATE users SET id = 0"],
+    ["ANALYZE false around an UPDATE … SET", "EXPLAIN (ANALYZE false) UPDATE users SET id = 0"],
+    ["EXPLAIN ANALYZE of a SELECT", "EXPLAIN ANALYZE SELECT 1"],
+    ["EXPLAIN VERBOSE, which does not execute", "EXPLAIN VERBOSE DELETE FROM users"],
+    ["a parenthesised list with no ANALYZE", "EXPLAIN (BUFFERS) DELETE FROM users"],
+    ["FORMAT JSON and no ANALYZE", "EXPLAIN (FORMAT JSON) DELETE FROM users"],
+    ["ANALYZE only inside a comment", "EXPLAIN /* ANALYZE */ DELETE FROM users"],
+    ["a nested comment hiding ANALYZE", "EXPLAIN /* outer /* ANALYZE */ still */ DELETE FROM users"],
+    ["ANALYZE commented out inside the option list", "EXPLAIN (/* ANALYZE */ VERBOSE) DELETE FROM users"],
+    ["DROP inside the explained SELECT's string", "EXPLAIN ANALYZE SELECT 'DROP TABLE users'"],
+    ["DELETE inside a comment of the explained SELECT", "EXPLAIN ANALYZE SELECT 1 /* DELETE FROM users */"],
+    ["ANALYZE written as a string, not an option", "EXPLAIN 'ANALYZE DELETE FROM users'"],
+    ["the option name written as a string", "EXPLAIN ('ANALYZE') DELETE FROM users"],
+    ["an unclosed option list", "EXPLAIN (ANALYZE DELETE FROM users"],
+    ["ANALYZE with no statement after it", "EXPLAIN ANALYZE"],
+    ["a DO block that is only planned", "EXPLAIN DO $$ BEGIN DELETE FROM t; END $$"],
+    ["ANALYZE false around a DO block", "EXPLAIN (ANALYZE false) DO $$ BEGIN DELETE FROM t; END $$"],
+    ["a nested EXPLAIN that does not analyze", "EXPLAIN ANALYZE EXPLAIN DELETE FROM users"],
+  ])("does not prompt for %s", (_label, query) => {
+    expect(isDangerousQuery(query, "postgres")).toBe(false);
+  });
+
+  test("does not prompt for EXPLAIN ANALYZE on a dialect whose EXPLAIN does not execute", () => {
+    expect(isDangerousQuery("EXPLAIN ANALYZE DELETE FROM users", "mysql")).toBe(false);
+    expect(isDangerousQuery("EXPLAIN ANALYZE DELETE FROM users")).toBe(false);
+  });
+
+  test("prompts for a DO block EXPLAIN ANALYZE will execute", () => {
+    expect(isDangerousQuery("EXPLAIN ANALYZE DO $$ BEGIN DELETE FROM t; END $$", "postgres")).toBe(true);
+  });
+
   // ── Nothing to read ─────────────────────────────────────────────────────
 
   test.each<[string, string]>([

@@ -32,7 +32,13 @@ import {
 import { readsSqlText, resolveSqlGrammar, type SqlGrammar } from "@/lib/sql/grammar";
 import { readLeadingKeyword } from "@/lib/sql/leading-keyword";
 import { readOperativeKeyword } from "@/lib/sql/operative-keyword";
-import { hasLoneCarriageReturnInLineComment, hasUnterminatedSpan, readSqlSpan } from "@/lib/sql/spans";
+import {
+  hasLoneCarriageReturnInLineComment,
+  hasUnterminatedSpan,
+  IDENTIFIER_PART,
+  IDENTIFIER_START,
+  readSqlSpan,
+} from "@/lib/sql/spans";
 import { splitStatements } from "@/lib/sql/statement-splitter";
 import { findCodeWord, readSqlWord } from "@/lib/sql/words";
 import type { DatabaseType } from "@/lib/types";
@@ -627,6 +633,183 @@ const CONTROL_FLOW_KEYWORDS = new Set([
  */
 const CTE_DATA_MODIFYING = new Set(["INSERT", "DELETE", "MERGE"]);
 
+/**
+ * The words the legacy `EXPLAIN [ANALYZE | ANALYSE] [VERBOSE]` spelling takes, in either order.
+ * `ANALYSE` is PostgreSQL's British spelling of the option that executes.
+ */
+const EXPLAIN_KEYWORD_OPTIONS = new Set(["ANALYZE", "ANALYSE", "VERBOSE"]);
+
+/** The option names that execute the explained statement when they are enabled. */
+const ANALYZE_OPTIONS = new Set(["ANALYZE", "ANALYSE"]);
+
+/**
+ * Whether `value` is a boolean false, by PostgreSQL's `parse_bool` (`src/backend/utils/adt/bool.c`).
+ *
+ * The whole string must be a spelling of `false`, `off`, `no` or `0`. Unique prefixes count (`f`, `fa`, `of`, `n`),
+ * which is that function's rule, and the case does not. A longer word does not: `falsehood` and `note` are not
+ * booleans, and neither is a bare `o`, which is not a unique prefix of `on` or `off`.
+ */
+function postgresBooleanIsFalse(value: string): boolean {
+  const lower = value.toLowerCase();
+  const head = lower[0];
+  if (head === "f") return "false".startsWith(lower);
+  if (head === "n") return "no".startsWith(lower);
+  if (head === "o") return lower === "of" || lower === "off";
+  if (head === "0") return lower.length === 1;
+  return false;
+}
+
+/** A decimal digit run with a single underscore allowed between digits: PostgreSQL's `{decdigit}(_?{decdigit})*`. */
+function scanDecInteger(text: string, start: number, limit: number): number {
+  if (start >= limit || text[start] < "0" || text[start] > "9") return start;
+  let end = start + 1;
+  while (end < limit) {
+    const ch = text[end];
+    if (ch === "_" && end + 1 < limit && text[end + 1] >= "0" && text[end + 1] <= "9") {
+      end += 2;
+      continue;
+    }
+    if (ch >= "0" && ch <= "9") {
+      end += 1;
+      continue;
+    }
+    break;
+  }
+  return end;
+}
+
+/** Whether every digit in `text[from, to)` is `0`. A digit is required; underscores are separators and ignored. */
+function digitsAreZero(text: string, from: number, to: number): boolean {
+  let digit = false;
+  for (let i = from; i < to; i++) {
+    const ch = text[i];
+    if (ch === "_") continue;
+    if (ch !== "0") return false;
+    digit = true;
+  }
+  return digit;
+}
+
+function isHexDigit(ch: string): boolean {
+  return (ch >= "0" && ch <= "9") || (ch >= "a" && ch <= "f") || (ch >= "A" && ch <= "F");
+}
+
+/**
+ * A `0x` / `0o` / `0b` integer, PostgreSQL's `{prefix}(_?{digit})+`. Returns `start` when the prefix is absent or no
+ * digit follows it, so `0x` is not read as the integer 0.
+ */
+function scanRadixInteger(
+  text: string,
+  start: number,
+  limit: number,
+  mark: string,
+  digit: (ch: string) => boolean,
+): number {
+  if (start + 1 >= limit || text[start] !== "0" || text[start + 1].toLowerCase() !== mark) return start;
+  let end = start + 2;
+  let any = false;
+  while (end < limit) {
+    if (text[end] === "_" && end + 1 < limit && digit(text[end + 1])) {
+      end += 2;
+      any = true;
+      continue;
+    }
+    if (digit(text[end])) {
+      end += 1;
+      any = true;
+      continue;
+    }
+    break;
+  }
+  return any ? end : start;
+}
+
+/** A fractional literal, `{decinteger}.{decinteger}?`. `1..` is not one: the scanner gives the `..` back. */
+function scanNumericLiteral(text: string, start: number, limit: number): number {
+  const dec = scanDecInteger(text, start, limit);
+  if (dec === start || dec >= limit || text[dec] !== ".") return start;
+  if (dec + 1 < limit && text[dec + 1] === ".") return start;
+  return scanDecInteger(text, dec + 1, limit);
+}
+
+/** The end of a real literal `(decinteger|numeric)[Ee][-+]?{decinteger}`, or `start` when the exponent has no digits. */
+function scanRealLiteral(text: string, start: number, limit: number): number {
+  let end = scanNumericLiteral(text, start, limit);
+  if (end === start) end = scanDecInteger(text, start, limit);
+  if (end === start || end >= limit || (text[end] !== "e" && text[end] !== "E")) return start;
+  let exp = end + 1;
+  if (exp < limit && (text[exp] === "+" || text[exp] === "-")) exp += 1;
+  const expEnd = scanDecInteger(text, exp, limit);
+  return expEnd === exp ? start : expEnd;
+}
+
+/**
+ * The token PostgreSQL rejects as trailing junk after an exponent sign (`0e+`, `1e-`), consumed whole so the leading
+ * digits are not left behind as the integer 0.
+ */
+function scanRealFail(text: string, start: number, limit: number): number {
+  let end = scanNumericLiteral(text, start, limit);
+  if (end === start) end = scanDecInteger(text, start, limit);
+  if (end === start || end >= limit || (text[end] !== "e" && text[end] !== "E")) return start;
+  let exp = end + 1;
+  if (exp < limit && (text[exp] === "+" || text[exp] === "-")) exp += 1;
+  if (scanDecInteger(text, exp, limit) !== exp) return start;
+  return exp;
+}
+
+/** Where an identifier glued to a literal ends, or `from` when none starts there. `$` continues one, as a word does. */
+function identifierEnd(text: string, from: number, limit: number): number {
+  if (from >= limit || !IDENTIFIER_START.test(text[from])) return from;
+  let end = from + 1;
+  while (end < limit && (IDENTIFIER_PART.test(text[end]) || text[end] === "$")) end += 1;
+  return end;
+}
+
+/**
+ * The numeric literal at `start`, and whether it is an integer whose value is 0.
+ *
+ * PostgreSQL's scanner takes the longest of the integer, hex, octal, binary, numeric and real forms, and an
+ * identifier glued on is trailing junk rather than a second token (`scan.l`). Ties keep the earlier form, so `0x1`
+ * is the integer 1 and not the decimal 0 followed by a name. Only an integer of value 0 is off: `0`, `00`, `0x0`,
+ * `0b0`, `0o0` and `0_0`. `0x1`, `0b1`, `0o1` and `0_1` are 1. A float, an exponent and a rejected literal are not
+ * the integer 0, so they are not off.
+ */
+function readNumericLiteral(text: string, start: number, limit: number): { end: number; zero: boolean } {
+  let bestEnd = start;
+  let bestRank = Number.POSITIVE_INFINITY;
+  let bestZero = false;
+  const consider = (end: number, rank: number, zero: boolean): void => {
+    if (end <= start) return;
+    if (end > bestEnd || (end === bestEnd && rank < bestRank)) {
+      bestEnd = end;
+      bestRank = rank;
+      bestZero = zero;
+    }
+  };
+
+  const decEnd = scanDecInteger(text, start, limit);
+  consider(decEnd, 0, digitsAreZero(text, start, decEnd));
+
+  const hexEnd = scanRadixInteger(text, start, limit, "x", isHexDigit);
+  consider(hexEnd, 1, digitsAreZero(text, start + 2, hexEnd));
+  const octEnd = scanRadixInteger(text, start, limit, "o", (ch) => ch >= "0" && ch <= "7");
+  consider(octEnd, 2, digitsAreZero(text, start + 2, octEnd));
+  const binEnd = scanRadixInteger(text, start, limit, "b", (ch) => ch === "0" || ch === "1");
+  consider(binEnd, 3, digitsAreZero(text, start + 2, binEnd));
+
+  const numericEnd = scanNumericLiteral(text, start, limit);
+  consider(numericEnd, 4, false);
+  const realEnd = scanRealLiteral(text, start, limit);
+  consider(realEnd, 5, false);
+  consider(scanRealFail(text, start, limit), 6, false);
+
+  if (decEnd > start) consider(identifierEnd(text, decEnd, limit), 7, false);
+  if (numericEnd > start) consider(identifierEnd(text, numericEnd, limit), 8, false);
+  if (realEnd > start) consider(identifierEnd(text, realEnd, limit), 9, false);
+
+  return { end: bestEnd, zero: bestZero };
+}
+
 /** Whether a `confirmExemptForms` form led by `keyword` starts at the keyword that ends at `end`. */
 function exemptFormAt(text: string, keyword: string, end: number, grammar: SqlGrammar): boolean {
   return (grammar.confirmExemptForms ?? []).some(
@@ -731,6 +914,135 @@ function configKeyAsks(
   });
 }
 
+/** One token of a parenthesised EXPLAIN option list. */
+interface ExplainOptionToken {
+  /** A word is upper-cased; a string is its contents; a number is the whole literal. */
+  text: string;
+  end: number;
+  kind: "word" | "number" | "comma" | "string" | "other";
+  /** For a number: the literal is an integer whose value is 0. A float, junk and a nonzero integer are not. */
+  zero?: boolean;
+}
+
+/**
+ * The next option-list token at or after `from` and before `limit`, or null at the closing paren.
+ *
+ * Strings and comments are spans, so a word written inside one is not an option: `EXPLAIN ('ANALYZE')` does not
+ * execute, and `ANALYZE 'false'` is the off value rather than the word `false` somewhere later.
+ */
+function readExplainOptionToken(
+  text: string,
+  from: number,
+  limit: number,
+  grammar: SqlGrammar,
+): ExplainOptionToken | null {
+  const i = pastHiddenText(text, from, grammar);
+  if (i >= limit) return null;
+  if (text[i] === ",") return { text: ",", end: i + 1, kind: "comma" };
+  const word = readSqlWord(text, i);
+  if (word !== null) return { text: word.text, end: word.end, kind: "word" };
+  if (text[i] >= "0" && text[i] <= "9") {
+    const literal = readNumericLiteral(text, i, limit);
+    // A digit always starts a decimal literal, so the scan advances. The max keeps a failed scan from looping.
+    const end = Math.max(literal.end, i + 1);
+    return { text: text.slice(i, end), end, kind: "number", zero: literal.end > i && literal.zero };
+  }
+  const span = readSqlSpan(text, i, grammar);
+  if (span?.kind === "string") return { text: text.slice(i + 1, span.end - 1), end: span.end, kind: "string" };
+  const end = span === null ? i + 1 : span.end;
+  return { text: text.slice(i, end), end, kind: "other" };
+}
+
+/**
+ * The index past the `)` that closes the paren at `open`, or `-1` when it never closes.
+ *
+ * Literals and comments are skipped whole, so a `)` inside `EXPLAIN (ANALYZE ')')` cannot end the option list.
+ */
+function endOfParenthesised(text: string, open: number, grammar: SqlGrammar): number {
+  let depth = 0;
+  let i = open;
+  while (i < text.length) {
+    const span = readSqlSpan(text, i, grammar);
+    if (span !== null) {
+      i = span.end;
+      continue;
+    }
+    if (text[i] === "(") depth++;
+    else if (text[i] === ")") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
+ * Whether one option value turns ANALYZE off.
+ *
+ * Off is only a boolean false (`false`, `off`, `no`, `0` and their accepted prefixes) or an integer literal of
+ * value 0, including the signed forms `+0` and `-0`. No value is on, and so is anything else: a nonzero literal
+ * (`0x1`, `0b1`, `0o1`, `0_1`), a float, a word that only starts like a boolean, and a literal the scanner rejects.
+ * Reading the leading `0` of `0x1` as the whole value is how that `DELETE` used to run with no dialog (#1863).
+ */
+function analyzeValueIsOff(text: string, value: ExplainOptionToken, limit: number, grammar: SqlGrammar): boolean {
+  if (value.kind === "word" || value.kind === "string") return postgresBooleanIsFalse(value.text);
+  if (value.kind === "number") return value.zero === true;
+  if (value.text !== "+" && value.text !== "-") return false;
+  const number = readExplainOptionToken(text, value.end, limit, grammar);
+  return number !== null && number.kind === "number" && number.zero === true;
+}
+
+/**
+ * Whether a parenthesised option list enables ANALYZE.
+ *
+ * An option with no value is on. Any enabled `ANALYZE` executes, even when another is off, which asks rather than
+ * missing a `DELETE`.
+ */
+function explainOptionsExecute(text: string, open: number, close: number, grammar: SqlGrammar): boolean {
+  const limit = close - 1;
+  let execute = false;
+  let i = open + 1;
+  while (i < limit) {
+    const name = readExplainOptionToken(text, i, limit, grammar);
+    if (name === null) break;
+    i = name.end;
+    if (name.kind !== "word") continue;
+    const value = readExplainOptionToken(text, i, limit, grammar);
+    if (value !== null && value.kind !== "comma") i = value.end;
+    if (!ANALYZE_OPTIONS.has(name.text)) continue;
+    if (value === null || value.kind === "comma" || !analyzeValueIsOff(text, value, limit, grammar)) execute = true;
+  }
+  return execute;
+}
+
+/**
+ * The statement after `EXPLAIN`'s options when ANALYZE will execute it, or null when ANALYZE is absent or off.
+ *
+ * The legacy spelling is a run of `ANALYZE`/`ANALYSE`/`VERBOSE`. The parenthesised spelling is `EXPLAIN ( … )`.
+ * Anything else — a plain `EXPLAIN`, `EXPLAIN VERBOSE`, `ANALYZE false` — only plans, and null is what tells the
+ * caller not to ask.
+ */
+function stripExplainOptions(text: string, from: number, grammar: SqlGrammar): string | null {
+  const start = pastHiddenText(text, from, grammar);
+  if (text[start] === "(") {
+    const close = endOfParenthesised(text, start, grammar);
+    if (close < 0) return null;
+    return explainOptionsExecute(text, start, close, grammar) ? text.slice(close) : null;
+  }
+
+  let at = start;
+  let analyze = false;
+  for (;;) {
+    const wordAt = pastHiddenText(text, at, grammar);
+    const word = readSqlWord(text, wordAt);
+    if (word === null || !EXPLAIN_KEYWORD_OPTIONS.has(word.text)) break;
+    if (ANALYZE_OPTIONS.has(word.text)) analyze = true;
+    at = word.end;
+  }
+  return analyze ? text.slice(at) : null;
+}
+
 /**
  * Index of the first word of a CTE body after `AS [NOT] MATERIALIZED (`, or null when `afterAs` is not that shape.
  * Whitespace and comments between the words are not part of the shape; a string or any other token ends it.
@@ -793,6 +1105,20 @@ function cteBodyOpensWithWrite(text: string, afterAs: number, grammar: SqlGramma
 export function writesUnderGrammar(text: string, grammar: SqlGrammar): boolean {
   const reading = readOperativeKeyword(text, grammar);
   const keyword = reading?.keyword;
+
+  // PostgreSQL's EXPLAIN executes the explained statement only when ANALYZE is on
+  // (`EXPLAIN ANALYZE DELETE`, `EXPLAIN (ANALYZE, BUFFERS) UPDATE`). The operative
+  // keyword is EXPLAIN, which is not itself dangerous, so without this the DELETE
+  // runs unconfirmed (#1863). A plain EXPLAIN, or ANALYZE set to a boolean false
+  // or the integer 0, only plans: returning here, instead of falling through, is what keeps an
+  // `UPDATE … SET` inside a plan from asking. The remaining text is read as its own
+  // statement, so a data-modifying CTE under the EXPLAIN asks too. CockroachDB
+  // shares this grammar.
+  if (reading !== null && reading.keyword === "EXPLAIN" && grammar.explainExecutesWithAnalyze === true) {
+    const inner = stripExplainOptions(text, reading.end, grammar);
+    return inner !== null && writesUnderGrammar(inner, grammar);
+  }
+
   if (
     reading !== null &&
     DANGEROUS_KEYWORDS.has(reading.keyword) &&
