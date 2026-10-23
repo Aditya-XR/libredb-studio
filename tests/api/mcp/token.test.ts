@@ -37,8 +37,12 @@ const SEED_UNREADABLE =
   "The seed connection file could not be read, so the connections an MCP token reaches are unknown; the server log names the cause";
 let restoreChannel: () => void = () => {};
 
-async function signIn(username: string, role: "admin" | "user"): Promise<void> {
-  cookieStore = { "auth-token": { value: await signJWT({ username, role }) } };
+async function signIn(username: string, role: "admin" | "user", claimRoles?: string[]): Promise<void> {
+  cookieStore = {
+    "auth-token": {
+      value: await signJWT({ username, role, ...(claimRoles ? { claimRoles } : {}) }),
+    },
+  };
 }
 
 async function signInSecondsAgo(seconds: number): Promise<void> {
@@ -282,6 +286,35 @@ describe("POST /api/mcp/token", () => {
       } finally {
         await session.close();
       }
+    }
+  });
+
+  test("a session with claimRoles mints a token carrying claimRoles that reaches custom role connections", async () => {
+    const origProvider = process.env.NEXT_PUBLIC_AUTH_PROVIDER;
+    const origPrefix = process.env.OIDC_ROLE_PREFIX;
+    process.env.NEXT_PUBLIC_AUTH_PROVIDER = "oidc";
+    process.env.OIDC_ROLE_PREFIX = "team-";
+    try {
+      fixtures.writeSeedFile(dir, [
+        { id: "everyone", type: "sqlite", database: join(dir, "shop.db"), roles: ["*"], mcp: true },
+        { id: "billing", type: "sqlite", database: join(dir, "shop.db"), roles: ["team-billing"], mcp: true },
+        { id: "analytics", type: "sqlite", database: join(dir, "shop.db"), roles: ["team-analytics"], mcp: true },
+      ]);
+      await signIn("carol", "user", ["team-billing"]);
+      const { token } = (await (await POST(mintRequest())).json()) as { token: string };
+      const session = await harness.connectClient(harness.routeServe(mcpRoute), { token });
+      try {
+        const result = await session.client.callTool({ name: "list_connections", arguments: {} });
+        const ids = (result.structuredContent as { connections: Array<{ id: string }> }).connections.map((c) => c.id);
+        expect(ids).toEqual(["seed:everyone", "seed:billing"]);
+      } finally {
+        await session.close();
+      }
+    } finally {
+      if (origProvider !== undefined) process.env.NEXT_PUBLIC_AUTH_PROVIDER = origProvider;
+      else delete process.env.NEXT_PUBLIC_AUTH_PROVIDER;
+      if (origPrefix !== undefined) process.env.OIDC_ROLE_PREFIX = origPrefix;
+      else delete process.env.OIDC_ROLE_PREFIX;
     }
   });
 

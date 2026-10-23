@@ -113,6 +113,11 @@ export type AuditReason =
    */
   | "oidc_no_role"
   /**
+   * The provider authenticated the account, but its role claim held more than 20 claim roles matching
+   * OIDC_ROLE_PREFIX or a claim role longer than 64 characters, so no session was created.
+   */
+  | "oidc_role_overflow"
+  /**
    * Under governance (docs/GOVERNANCE.md#sign-in), the provider authenticated the account, but the governance source
    * revoked its subject's sessions at or after this second, so every request would refuse the session the callback
    * was about to mint and none was minted. The record names the account, which the provider vouched for.

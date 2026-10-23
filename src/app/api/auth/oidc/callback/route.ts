@@ -10,7 +10,16 @@ import {
   oidcLogoutHintCookiePath,
   readOidcLogoutHint,
 } from "@/lib/config/oidc-logout-hint";
-import { getOIDCConfig, discoverProvider, exchangeCode, decryptState, mapOIDCRole, getPublicOrigin } from "@/lib/oidc";
+import {
+  getOIDCConfig,
+  discoverProvider,
+  exchangeCode,
+  decryptState,
+  mapOIDCRole,
+  mapOIDCClaimRoles,
+  readRoleClaimValues,
+  getPublicOrigin,
+} from "@/lib/oidc";
 import { oidcUsername } from "@/lib/oidc-identity";
 import { logger } from "@/lib/logger";
 import { clientAddress } from "@/lib/api/client-address";
@@ -109,6 +118,7 @@ export async function GET(request: Request) {
     }
 
     // Map role from claims
+    const claimValues = readRoleClaimValues(claims as Record<string, unknown>, oidcConfig.roleClaim);
     const role = mapOIDCRole(
       claims as Record<string, unknown>,
       oidcConfig.roleClaim,
@@ -126,6 +136,18 @@ export async function GET(request: Request) {
       return NextResponse.redirect(`${origin}${withBasePath("/login")}?error=oidc_no_role`);
     }
 
+    // Custom claim roles: extracted only when OIDC_ROLE_PREFIX is configured. Over the 20-role or
+    // 64-char limit, refuse the session with oidc_role_overflow.
+    const { roles: claimRoles, overflow } = oidcConfig.rolePrefix
+      ? mapOIDCClaimRoles(claimValues, oidcConfig.rolePrefix)
+      : { roles: [], overflow: false };
+
+    if (overflow) {
+      cookieStore.delete({ name: "oidc-state", path: getBasePath() || "/" });
+      auditFailure("oidc_role_overflow", ip, String(identity));
+      return NextResponse.redirect(`${origin}${withBasePath("/login")}?error=oidc_role_overflow`);
+    }
+
     // Under governance every request refuses a session issued at or before its subject's revoked_before
     // (docs/GOVERNANCE.md#sign-in), so a revocation dated at or after this second would refuse the session minted here,
     // and OIDC_AUTO_REDIRECT would answer each refusal with the next silent sign-in. None is minted, and the login page,
@@ -139,7 +161,13 @@ export async function GET(request: Request) {
     // Create local JWT session (same as password login). `username` keeps its display meaning, and the provider's
     // subject and issuer travel as the session's idpSubject and idpIssuer.
     const username = identity || role;
-    await login(role, username, undefined, { subject: claims.sub, issuer: claims.iss });
+    await login(
+      role,
+      username,
+      undefined,
+      { subject: claims.sub, issuer: claims.iss },
+      claimRoles.length > 0 ? claimRoles : undefined,
+    );
 
     // Clean up state cookie
     cookieStore.delete({ name: "oidc-state", path: getBasePath() || "/" });

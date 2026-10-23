@@ -68,6 +68,7 @@ export async function GET(): Promise<Response> {
   const visible = await new McpConnectionContext({
     username: session.username,
     role: session.role,
+    claimRoles: session.claimRoles,
   }).visibleConnections();
   const readable = visible !== MCP_CONNECTIONS_UNREADABLE;
   return NextResponse.json(
@@ -111,6 +112,7 @@ export async function POST(request: Request): Promise<Response> {
     username: guard.session.username,
     role: guard.session.role,
     sessionVersion: guard.session.sessionVersion,
+    claimRoles: guard.session.claimRoles,
   });
   return NextResponse.json(
     { token: minted.token, expiresAt: minted.expiresAt.toISOString(), url: minted.url },

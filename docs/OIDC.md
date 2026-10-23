@@ -29,6 +29,7 @@ Browser → Redirect to app (/ or /admin based on role)
   - [Automatic redirect to the provider](#automatic-redirect-to-the-provider)
   - [Role Mapping](#role-mapping)
     - [Requiring a role](#requiring-a-role)
+    - [Custom seed roles with OIDC_ROLE_PREFIX](#custom-seed-roles-with-oidc_role_prefix)
   - [Session Identity](#session-identity)
   - [Governance mode](#governance-mode)
   - [Bearer access tokens for native clients](#bearer-access-tokens-for-native-clients)
@@ -314,6 +315,7 @@ The difference is the realm role (`admin` or `user`), mapped through `OIDC_ROLE_
 | `OIDC_ROLE_CLAIM` | No | — | Claim path for role extraction (dot-notation supported) |
 | `OIDC_ADMIN_ROLES` | No | `admin` | Comma-separated values that map to admin role |
 | `OIDC_USER_ROLES` | No | unset | Comma-separated values that map to user role. Set, an account that holds neither an admin nor a user role is refused at sign-in ([Requiring a role](#requiring-a-role)). Needs `OIDC_ROLE_CLAIM` |
+| `OIDC_ROLE_PREFIX` | No | unset | Prefix filter for custom roles from the OIDC role claim; see [Custom seed roles with OIDC_ROLE_PREFIX](#custom-seed-roles-with-oidc_role_prefix). Needs `OIDC_ROLE_CLAIM` |
 | `OIDC_PROMPT` | No | `login` | The `prompt` sent on sign-in: `login`, `consent`, `select_account`, or `omit` to send none; see [Single sign-on with OIDC_PROMPT](#single-sign-on-with-oidc_prompt) |
 | `OIDC_AUTO_REDIRECT` | No | off | `true`, `1`, `on` or `yes` sends a signed-out `GET /login` straight to the identity provider; see [Automatic redirect to the provider](#automatic-redirect-to-the-provider) |
 | `OIDC_LOGOUT_HINT` | No | off | `true`, `1`, `on` or `yes` sends `id_token_hint` with the provider's end-session request on logout; see [Logout with id_token_hint](#logout-with-id_token_hint) |
@@ -415,6 +417,26 @@ OIDC_USER_ROLES=user
 | `["viewer"]`, `[]`, or no claim at all | Refused with `oidc_no_role` |
 
 > For the precise algorithm and provider-by-provider worked examples, see the [Role Mapping Engine](#role-mapping-engine) in Part 2.
+
+### Custom seed roles with OIDC_ROLE_PREFIX
+
+In addition to mapping users to the binary `admin` or `user` application role, LibreDB Studio can extract fine-grained team roles from the identity provider and use them to gate access to [seed connections](SEED_CONNECTIONS.md).
+
+When `OIDC_ROLE_PREFIX` is configured (for example, `OIDC_ROLE_PREFIX=team:`):
+1. **Extraction**: `mapOIDCClaimRoles()` inspects the claim specified by `OIDC_ROLE_CLAIM`.
+2. **Prefix filtering**: Any claim value that starts with `OIDC_ROLE_PREFIX` (case-sensitive) is treated as a candidate custom role.
+3. **Reserved roles**: The names `*`, `admin`, and `user` (case-insensitively, e.g. `team:admin` is fine, but bare `admin`, `USER`, or `*` is not) are reserved and never mapped as custom claim roles.
+4. **Limits & Overflow**:
+   - Up to 20 matching claim roles are allowed per user.
+   - Each role name must not exceed 64 bytes in UTF-8.
+   - Matching roles are deduplicated and sorted lexicographically.
+   - If an account carries more than 20 matching roles or any role exceeding 64 bytes, sign-in fails immediately with error code `oidc_role_overflow` (for all accounts, admins included). No session is created, the audit log records `login_failure` with reason `oidc_role_overflow`, and the user is redirected to `/login?error=oidc_role_overflow` ("Your account has too many roles or a role name is too long. Ask your administrator.").
+5. **Session lifecycle**:
+   - Extracted claim roles are embedded in the signed session JWT (`claimRoles`).
+   - Claim roles are fixed for the lifetime of the session (and any MCP token created from it). When group memberships change in the IdP, the user must sign in again to refresh their roles; for an immediate cut, an administrator can revoke the account's sessions ([Governance mode](#governance-mode)).
+6. **Seed connection enforcement**:
+   - Seed connections defined with `roles: ["team:analytics", "team:ops"]` will be accessible only to users who hold at least one of those roles (an administrator sees a team seed only when the seed also lists `admin` or `*`).
+   - The `/api/connections/managed` endpoint projects only the roles the caller actually holds (plus `*`), preventing the names of other teams' roles from leaking to unauthorized clients.
 
 ### Session Identity
 
@@ -1158,6 +1180,30 @@ Config:   OIDC_ROLE_CLAIM=libredb_roles
 Result:   null (neither role: refused as oidc_no_role, no session)
 ```
 
+### Claim Roles Mapping (`mapOIDCClaimRoles`)
+
+When `OIDC_ROLE_PREFIX` is set, the callback invokes `mapOIDCClaimRoles(claims, prefix, roleClaim)` alongside `mapOIDCRole()`:
+
+```
+Input: claims object, prefix string, roleClaim path
+
+1. Read values from roleClaim (same dot-notation navigation as mapOIDCRole).
+2. Filter values:
+   a. Value must be a string.
+   b. Value must start with prefix (case-sensitive check).
+   c. Lowercased value must not equal "*", "admin", or "user".
+3. Validate limits:
+   a. If any matching role byte length > 64 bytes (UTF-8) → return { roles: [], overflow: true }
+   b. Deduplicate matching roles.
+   c. If deduplicated count > 20 → return { roles: [], overflow: true }
+4. Return { roles: sortedDeduplicatedRoles, overflow: false }
+```
+
+If `overflow` is true, the callback halts authentication:
+- State cookie is cleared.
+- A `login_failure` audit event is emitted with reason `oidc_role_overflow`.
+- Redirects to `/login?error=oidc_role_overflow`.
+
 ---
 
 ## Provider Logout Strategy
@@ -1240,6 +1286,7 @@ Both OIDC routes redirect to `/login?error=<code>` on failure, and record the sa
 | `oidc_state_invalid` | callback | State decryption failed or state mismatch | Tampered cookie, wrong JWT_SECRET, or CSRF attempt |
 | `oidc_no_claims` | callback | Token exchange returned no claims, or no string `sub` or `iss` | Provider returned invalid/empty ID token |
 | `oidc_no_role` | callback | `mapOIDCRole()` returned null: `OIDC_USER_ROLES` is set and the role claim holds no admin or user role | The account has no role at the provider; no session is created, and the audit record names the account |
+| `oidc_role_overflow` | callback | `mapOIDCClaimRoles()` returned overflow: matching roles exceed 20 or any role exceeds 64 bytes in UTF-8 | The account carries too many or excessively long roles; no session is created, and the audit record names the account |
 | `oidc_session_revoked` | callback | Governance mode only: the subject's latest `revoked_before` is at or after the current second | The control plane ended the account's sessions with a revocation that still applies, such as one dated ahead of Studio's clock; no session is created, and the audit record names the account |
 | `oidc_failed` | login, callback | Any other error after the provider answered | A discovery document that parses but lacks an endpoint, PKCE or state-cookie failure on login; network error, invalid client credentials, etc. on callback |
 
@@ -1252,6 +1299,7 @@ Both OIDC routes redirect to `/login?error=<code>` on failure, and record the sa
 | `oidc_config` | Single sign-on is not configured correctly on this server. Contact your administrator. |
 | `oidc_discovery` | The identity provider could not be reached. Try again later, or contact your administrator if this continues. |
 | `oidc_no_role` | Your account has no role that allows access to LibreDB Studio. Ask your administrator. |
+| `oidc_role_overflow` | Your account has too many roles or a role name is too long. Ask your administrator. |
 | `oidc_session_revoked` | An administrator has ended your sessions. Try again later, or ask your administrator. |
 | anything else | Authentication failed. Please try again. |
 
