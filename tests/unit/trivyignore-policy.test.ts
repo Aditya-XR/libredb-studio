@@ -39,11 +39,11 @@ describe(".trivyignore.yaml suppression policy", () => {
     expect(Array.isArray(vulnerabilities)).toBe(true);
   });
 
-  test("is empty today - the CRITICAL/fixable threshold covers everything else", () => {
-    // Not a requirement that this file must stay empty forever. A record of
-    // the current, expected state, so a reader knows the loops below are
-    // vacuous by design rather than by accident.
-    expect(vulnerabilities).toHaveLength(0);
+  test("holds only the dompurify pin Monaco keeps - the CRITICAL/fixable threshold covers everything else", () => {
+    // Not a requirement on the file's size. A record of the current, expected
+    // state, so a new entry is a decision someone reviewed rather than one that
+    // slipped in; remove the dompurify id here when Monaco releases past 3.4.15.
+    expect(vulnerabilities.map((entry) => entry.id)).toEqual(["GHSA-cg2g-xh64-v4q7"]);
   });
 
   test("every suppression names the advisory it suppresses", () => {

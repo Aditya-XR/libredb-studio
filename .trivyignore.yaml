@@ -61,4 +61,12 @@
 #        --exit-code 2 --ignorefile /repo/.trivyignore.yaml \
 #        ghcr.io/libredb/libredb-studio:latest
 
-vulnerabilities: []
+vulnerabilities:
+  - id: GHSA-cg2g-xh64-v4q7
+    statement: >-
+      monaco-editor 0.57.0, its latest release, pins dompurify to exactly 3.4.15
+      and inlines that copy into the bundle served from public/monaco, so no
+      version here can take 3.4.17 until Monaco releases one. The advisory is a
+      bypass of the SAFE_FOR_TEMPLATES option, which Monaco's domSanitize never
+      sets, and no code in this repository imports dompurify.
+    expired_at: 2027-01-22
