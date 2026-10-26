@@ -599,7 +599,7 @@ docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock -v "
 
 ### Bundles and notices
 
-`vscode-jsonrpc` 9.0.3 is the bundles' one runtime package: the host bundle's metafile check refuses any other `node_modules` input, and `test/unit/manifest.test.ts` holds it as the package's only dependency.
+`vscode-jsonrpc` 10.0.0 is the bundles' one runtime package: the host bundle's metafile check refuses any other `node_modules` input, and `test/unit/manifest.test.ts` holds it as the package's only dependency.
 `CHILD_EXTERNALS` in `scripts/bundle-checks.mjs` names what the child bundle leaves to a runtime `require`: the drivers of the engines outside v0 (`bun:sqlite`, `@duckdb/*`, `db2-node`, `oracledb`), `cpu-features`, `proper-lockfile` and any `*.node` path.
 `OPTIONAL_REQUIRES` names the nine packages the bundled drivers require inside their own `try` and do not install (`pg-native` from `pg`, `cardinal` from `mysql2`, `kerberos` from `mongodb` and `cassandra-driver`, and six more from `mongodb`), each with the packages allowed to require it.
 The child's metafile check accepts such an import only as a `require()` from inside a package its entry names, so the same name required from anywhere else fails the build.

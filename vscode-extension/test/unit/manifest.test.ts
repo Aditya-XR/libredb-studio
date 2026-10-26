@@ -110,7 +110,7 @@ describe("the manifest", () => {
   });
 
   it("pins vscode-jsonrpc exactly, as the bundles' one runtime package", () => {
-    assert.deepEqual(manifest.dependencies, { "vscode-jsonrpc": "9.0.3" });
+    assert.deepEqual(manifest.dependencies, { "vscode-jsonrpc": "10.0.0" });
   });
 
   it("contributes the nine commands in category LibreDB", () => {
