@@ -1,8 +1,8 @@
 apiVersion: v2
 name: libredb-studio
-description: Web-based SQL IDE for cloud-native teams supporting forty-one engines - PostgreSQL, MySQL, SQLite, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Redis, Couchbase, Firestore, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, BigQuery, Snowflake, Apache Spark, Apache Cassandra, libSQL, Prometheus, Apache Kafka, MQTT, RabbitMQ, etcd, Neo4j, Milvus, Qdrant, InfluxDB, InfluxDB 3, Oxia, Databend, S3-compatible object storage, Kubernetes, OPC UA, MTConnect, Modbus, NETCONF, SNMP and Sparkplug B
+description: Web-based SQL IDE for cloud-native teams supporting forty-two engines - PostgreSQL, MySQL, SQLite, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Redis, Couchbase, Firestore, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, BigQuery, Snowflake, Apache Spark, Apache Cassandra, libSQL, Prometheus, Apache Kafka, MQTT, RabbitMQ, etcd, Neo4j, Milvus, Qdrant, Weaviate, InfluxDB, InfluxDB 3, Oxia, Databend, S3-compatible object storage, Kubernetes, OPC UA, MTConnect, Modbus, NETCONF, SNMP and Sparkplug B
 type: application
-version: 0.1.103
+version: 0.1.104
 appVersion: "1.1.0"
 kubeVersion: ">=1.26.0-0"
 home: https://github.com/libredb/libredb-studio
@@ -69,6 +69,8 @@ keywords:
   # evaluator looking for a Milvus or Qdrant client types, so there is no second spelling to catch.
   - milvus
   - qdrant
+  # Weaviate (#1566): the type-id is also the word an evaluator looking for a Weaviate client types.
+  - weaviate
   # Three keywords, like the prometheus pair above with one more: `influxdb` and `influxdb3` are
   # the two type-ids and the products, and `influxql` is what an evaluator looking for an
   # InfluxQL client types.
@@ -320,13 +322,7 @@ annotations:
     - name: Source
       url: https://github.com/libredb/libredb-studio
   artifacthub.io/changes: |
-    - "Accept an identity provider access token on the API for native clients, opt in through OIDC_BEARER_AUDIENCE and OIDC_BEARER_CLIENT_IDS"
-    - "Map OIDC roles from a namespaced claim name such as Auth0's and from an object claim such as Zitadel's"
-    - "Validate the multi-query route's paging options as the query route does"
-    - "Keep a SQLite or DuckDB file path from stalling the server"
-    - "Ask before a data-modifying WITH list, EXPLAIN ANALYZE of a write, and a statement after a bare carriage return in a line comment"
-    - "Read PostgreSQL primary and foreign keys from pg_catalog, so a SELECT-only role sees them"
-    - "Track app release 1.1.0 (appVersion bump; default image tag follows)"
+    - "Name Weaviate, read-only over its REST API, in the description and the keywords"
 dependencies:
   - name: postgresql
     version: "16.x.x"
