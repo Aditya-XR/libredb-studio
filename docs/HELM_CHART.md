@@ -416,6 +416,10 @@ hide them from `helm search` consumers.**
 ## Deployment Examples
 
 ### Minimal (port-forward)
+
+Any cluster works.
+For a local throwaway one, `kind create cluster` or `k3d cluster create` is enough, and `kind delete cluster` or `k3d cluster delete` removes it afterwards.
+
 ```bash
 helm repo add libredb https://libredb.org/libredb-studio/
 helm install libredb libredb/libredb-studio \
@@ -475,6 +479,61 @@ per-route entry wins on a key collision; the chart's own labels win over both.
 helm install libredb libredb/libredb-studio \
   --set secrets.existingSecret=my-vault-secret
 ```
+
+### Terraform (helm_release)
+
+There is no Terraform module: the chart is the configuration surface, and the `helm` provider installs it directly.
+This uses the provider's 3.x syntax, where `set` and `set_sensitive` are lists.
+
+```hcl
+terraform {
+  required_providers {
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "helm" {
+  kubernetes = {
+    config_path = "~/.kube/config"
+  }
+}
+
+variable "jwt_secret" {
+  type      = string
+  sensitive = true
+}
+
+variable "admin_password" {
+  type      = string
+  sensitive = true
+}
+
+resource "helm_release" "libredb_studio" {
+  name             = "libredb"
+  namespace        = "libredb"
+  create_namespace = true
+  repository       = "oci://ghcr.io/libredb/charts"
+  chart            = "libredb-studio"
+
+  set = [
+    { name = "config.storageProvider", value = "sqlite" },
+  ]
+
+  set_sensitive = [
+    { name = "secrets.jwtSecret", value = var.jwt_secret },
+    { name = "secrets.adminPassword", value = var.admin_password },
+  ]
+}
+```
+
+Without `version` the release takes the latest chart; add `version = "<chart version>"` to pin it.
+`storageProvider=sqlite` creates the PVC on its own, so connections survive a pod restart without `persistence.enabled`.
+To source every secret from a Secret you manage (the Vault and External Secrets path), drop `set_sensitive` and set `secrets.existingSecret` instead.
+Any other value from `values.yaml` goes in `set` under the same name.
+`terraform destroy` removes the release and its PVC but leaves the namespace that `create_namespace` made.
 
 ## Known Limitations
 
