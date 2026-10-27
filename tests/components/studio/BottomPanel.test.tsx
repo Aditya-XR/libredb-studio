@@ -103,10 +103,14 @@ mock.module("@/components/DataCharts", () => ({
   },
 }));
 
+let capturedPivotTableProps: Record<string, unknown> = {};
+
 mock.module("@/components/PivotTable", () => ({
-  PivotTable: ({ onLoadQuery }: Record<string, unknown>) => {
+  PivotTable: (props: Record<string, unknown>) => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const React = require("react");
+    capturedPivotTableProps = props;
+    const onLoadQuery = props.onLoadQuery as ((query: string) => void) | undefined;
     return React.createElement(
       "div",
       { "data-testid": "pivottable" },
@@ -1480,5 +1484,70 @@ describe("BottomPanel", () => {
 
       expect(onCopyResults).toHaveBeenCalledWith("json", artifact);
     });
+  });
+});
+
+describe("masking inputs to the pivot, charts and dashboard views (#1939)", () => {
+  const MASK_RESULT = {
+    rows: [{ id: 1, email: "a@b.co" }],
+    fields: ["id", "email"],
+    rowCount: 1,
+    executionTime: 3,
+  };
+  const EXEMPTION = { column: "^id$", reason: "the engine's key" };
+
+  beforeAll(async () => {
+    mockGetSavedCharts.mockReturnValue([makeSavedChart()]);
+    for (const mode of ["charts", "pivot", "dashboard"] as const) {
+      const props = createDefaultProps({ mode, currentTab: { result: MASK_RESULT } });
+      await act(async () => {
+        render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+      });
+    }
+    cleanup();
+    mockGetSavedCharts.mockReturnValue([]);
+  });
+
+  afterEach(() => {
+    cleanup();
+    mockGetSavedCharts.mockReturnValue([]);
+  });
+
+  const maskedPanelProps = (mode: BottomPanelMode) =>
+    createDefaultProps({
+      mode,
+      currentTab: { result: MASK_RESULT },
+      maskingEnabled: true,
+      userRole: "user",
+      maskingConfig: { ...createDefaultProps().maskingConfig, enabled: true },
+      metadata: { capabilities: { maskingExemptColumns: EXEMPTION } },
+    });
+
+  test("the pivot view receives the grid's masking inputs", () => {
+    const props = maskedPanelProps("pivot");
+    render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+    expect(capturedPivotTableProps.maskingEnabled).toBe(true);
+    expect(capturedPivotTableProps.userRole).toBe("user");
+    expect(capturedPivotTableProps.maskingConfig).toBe(props.maskingConfig);
+    expect(capturedPivotTableProps.maskingExemptColumns).toEqual(EXEMPTION);
+  });
+
+  test("the charts view receives the grid's masking inputs", () => {
+    const props = maskedPanelProps("charts");
+    render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+    expect(capturedDataChartsProps.maskingEnabled).toBe(true);
+    expect(capturedDataChartsProps.userRole).toBe("user");
+    expect(capturedDataChartsProps.maskingConfig).toBe(props.maskingConfig);
+    expect(capturedDataChartsProps.maskingExemptColumns).toEqual(EXEMPTION);
+  });
+
+  test("each saved chart on the dashboard receives the grid's masking inputs", () => {
+    mockGetSavedCharts.mockReturnValue([makeSavedChart()]);
+    const props = maskedPanelProps("dashboard");
+    render(<BottomPanel {...(props as React.ComponentProps<typeof BottomPanel>)} />);
+    expect(capturedDataChartsProps.maskingEnabled).toBe(true);
+    expect(capturedDataChartsProps.userRole).toBe("user");
+    expect(capturedDataChartsProps.maskingConfig).toBe(props.maskingConfig);
+    expect(capturedDataChartsProps.maskingExemptColumns).toEqual(EXEMPTION);
   });
 });

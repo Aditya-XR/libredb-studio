@@ -4,6 +4,10 @@ import React, { useState, useMemo, useCallback, useEffect } from "react";
 import { Columns3, GripVertical, ArrowRight, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DatabaseType, QueryResult } from "@/lib/types";
+import { maskValueByPattern, maskingInForce, type MaskingConfig, type MaskingPattern } from "@/lib/data-masking";
+import { splitMaskedColumns } from "@/lib/db/masking-exemption";
+import { uniqueFieldNames } from "@/lib/db/utils/result-fields";
+import type { ProviderCapabilities } from "@/lib/db/types";
 import { quoteLiteral } from "@/lib/sql/values";
 import { quoteIdentifier } from "@/lib/sql/identifier";
 import { downloadText } from "@/lib/export/download";
@@ -29,6 +33,17 @@ interface PivotTableProps {
    * where the answer is yes or not yet known and withheld where it is no.
    */
   readonly offersGeneratedSql?: boolean;
+  /**
+   * The grid's masking inputs, handed down the same way the graph view takes them
+   * (#1939). While masking is in force the pivot's keys and its download show the
+   * masked text the grid shows, and a masked column is never offered as a value source.
+   * Undefined config means no masking, which is every caller that never heard of it.
+   */
+  readonly maskingEnabled?: boolean;
+  readonly userRole?: string;
+  readonly maskingConfig?: MaskingConfig;
+  /** The provider's columns the masking rules must leave alone (`ProviderCapabilities.maskingExemptColumns`). */
+  readonly maskingExemptColumns?: ProviderCapabilities["maskingExemptColumns"];
 }
 
 type AggFunction = "count" | "sum" | "avg" | "min" | "max";
@@ -58,13 +73,59 @@ export function aggregate(values: unknown[], fn: AggFunction): string {
   }
 }
 
-export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedSql }: PivotTableProps) {
+/**
+ * A group key as the text it is DRAWN as, lowercased for a sort: a masked field's
+ * keys order by their mask (#1491's rule in the grid), so the rank of the hidden
+ * prefixes never leaks through the row order. Ties keep first-seen order
+ * (Array#sort is stable).
+ */
+function maskedLabel(labels: Map<string, string>, key: string): string {
+  return (labels.get(key) ?? key).toLowerCase();
+}
+
+export function PivotTable({
+  result,
+  onLoadQuery,
+  databaseType,
+  offersGeneratedSql,
+  maskingEnabled,
+  userRole,
+  maskingConfig,
+  maskingExemptColumns,
+}: PivotTableProps) {
   const [rowField, setRowField] = useState<string | null>(null);
   const [colField, setColField] = useState<string | null>(null);
   const [valueField, setValueField] = useState<string | null>(null);
   const [aggFunction, setAggFunction] = useState<AggFunction>("count");
   const fields = result?.fields || [];
   const rows = useMemo(() => result?.rows || [], [result?.rows]);
+
+  // The grid's own masking decision for THIS result, exemptions included, so the pivot
+  // and the grid can never disagree about one column (#1421, #1939).
+  const sensitiveColumns = useMemo(
+    () =>
+      maskingConfig === undefined || !maskingInForce(userRole, maskingConfig, maskingEnabled)
+        ? new Map<string, MaskingPattern>()
+        : splitMaskedColumns(fields, maskingConfig, maskingExemptColumns).masked,
+    [fields, maskingConfig, userRole, maskingEnabled, maskingExemptColumns],
+  );
+
+  // The text a key is drawn and downloaded as, computed from the RAW value (so a real
+  // string "NULL" is masked like any other value, and a null group keeps the grid's
+  // "NULL"). Grouping below stays on the raw value, so two values that share one mask
+  // keep their own groups and counts; the mask is only how the group is labelled.
+  const labelFor = useCallback(
+    (field: string, raw: unknown): string => {
+      const pattern = sensitiveColumns.get(field);
+      if (pattern !== undefined) return maskValueByPattern(raw, pattern);
+      return String(raw ?? "NULL");
+    },
+    [sensitiveColumns],
+  );
+
+  // A masked column is never a value source while masking is in force: its mask text is
+  // not numeric, and its raw numbers must not be summed into a cell anyone can read.
+  const effectiveValueField = valueField !== null && !sensitiveColumns.has(valueField) ? valueField : null;
 
   // Auto-detect fields on first render
   useEffect(() => {
@@ -77,7 +138,7 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
 
       const numCol = fields.find((f) => {
         const sample = rows[0]?.[f];
-        return typeof sample === "number";
+        return typeof sample === "number" && !sensitiveColumns.has(f);
       });
       if (numCol) setValueField(numCol);
     }
@@ -92,20 +153,37 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
     const groups = new Map<string, Map<string, unknown[]>>();
     const colValues = new Set<string>();
 
+    const rowKeyLabels = new Map<string, string>();
+    const colKeyLabels = new Map<string, string>();
+
     for (const row of rows) {
       const rowKey = String(row[rowField] ?? "NULL");
       const colKey = colField ? String(row[colField] ?? "NULL") : "__all__";
-      const value = valueField ? row[valueField] : 1;
+      const value = effectiveValueField ? row[effectiveValueField] : 1;
 
-      if (colField) colValues.add(colKey);
+      if (colField) {
+        colValues.add(colKey);
+        if (!colKeyLabels.has(colKey)) colKeyLabels.set(colKey, labelFor(colField, row[colField]));
+      }
 
       if (!groups.has(rowKey)) groups.set(rowKey, new Map());
+      if (!rowKeyLabels.has(rowKey)) rowKeyLabels.set(rowKey, labelFor(rowField, row[rowField]));
       const colMap = groups.get(rowKey)!;
       if (!colMap.has(colKey)) colMap.set(colKey, []);
       colMap.get(colKey)!.push(value);
     }
 
-    const colKeys = colField ? Array.from(colValues).sort((a, b) => a.localeCompare(b)) : ["__all__"];
+    // Masked keys sort by their masked label, as the grid's maskedSortFns do (#1491):
+    // the raw-key sort leaks the rank of the hidden prefixes (ssn values 900-11-0001,
+    // 100-22-0002, 500-33-0003 would read 0002, 0003, 0001). The label maps are already
+    // built in the loop above; ties keep first-seen order. (#1939)
+    const rowMasked = sensitiveColumns.has(rowField);
+    const colMasked = colField !== null && sensitiveColumns.has(colField);
+    const colKeys = colField
+      ? Array.from(colValues).sort((a, b) =>
+          colMasked ? maskedLabel(colKeyLabels, a).localeCompare(maskedLabel(colKeyLabels, b)) : a.localeCompare(b),
+        )
+      : ["__all__"];
 
     // Build pivot rows
     const pivotRows: { rowKey: string; values: Map<string, string> }[] = [];
@@ -118,23 +196,35 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
       pivotRows.push({ rowKey, values });
     }
 
-    // Sort by row key
-    pivotRows.sort((a, b) => a.rowKey.localeCompare(b.rowKey));
+    // Sort by row key — by masked label when the row field is masked (see above).
+    pivotRows.sort((a, b) =>
+      rowMasked
+        ? maskedLabel(rowKeyLabels, a.rowKey).localeCompare(maskedLabel(rowKeyLabels, b.rowKey))
+        : a.rowKey.localeCompare(b.rowKey),
+    );
 
-    return { colKeys, pivotRows };
-  }, [rows, rowField, colField, valueField, aggFunction]);
+    return { colKeys, pivotRows, rowKeyLabels, colKeyLabels };
+  }, [rows, rowField, colField, effectiveValueField, aggFunction, labelFor, sensitiveColumns]);
 
   const exportPivot = useCallback(
     (format: "csv" | "json") => {
       if (!pivotData || !rowField) return;
 
-      const headers = [
+      // The download carries exactly what the screen shows: masked keys, aggregate cells.
+      // Two raw keys can share ONE mask, and the JSON form keys its records by these
+      // headers - an unchecked duplicate would silently overwrite one group's column,
+      // so repeats take the result's own "name (2)" spelling (#1939).
+      const headers = uniqueFieldNames([
         rowField,
-        ...pivotData.colKeys.map((ck) => (ck === "__all__" ? `${AGG_LABELS[aggFunction]}(${valueField || "*"})` : ck)),
-      ];
+        ...pivotData.colKeys.map((ck) =>
+          ck === "__all__"
+            ? `${AGG_LABELS[aggFunction]}(${effectiveValueField || "*"})`
+            : (pivotData.colKeyLabels.get(ck) ?? ck),
+        ),
+      ]);
 
       const rows = pivotData.pivotRows.map((row) => [
-        row.rowKey,
+        pivotData.rowKeyLabels.get(row.rowKey) ?? row.rowKey,
         ...pivotData.colKeys.map((ck) => row.values.get(ck) || "0"),
       ]);
 
@@ -144,7 +234,7 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
         `pivot_table_${Date.now()}.${format}`,
       );
     },
-    [pivotData, rowField, valueField, aggFunction],
+    [pivotData, rowField, colField, effectiveValueField, aggFunction],
   );
 
   // Generate SQL
@@ -166,7 +256,7 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
       const colKeys = pivotData?.colKeys || [];
       for (const ck of colKeys) {
         if (ck === "__all__") continue;
-        const valExpr = valueField ? quote(valueField) : "1";
+        const valExpr = effectiveValueField ? quote(effectiveValueField) : "1";
         // The same key is a VALUE on the left of the comparison and an IDENTIFIER
         // as the column's alias, so it is quoted both ways in the same line.
         select.push(
@@ -174,12 +264,12 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
         );
       }
     } else {
-      const valExpr = valueField ? quote(valueField) : "*";
+      const valExpr = effectiveValueField ? quote(effectiveValueField) : "*";
       select.push(`${AGG_LABELS[aggFunction]}(${valExpr}) AS ${quote(`${aggFunction}_value`)}`);
     }
 
     return `SELECT\n  ${select.join(",\n  ")}\nFROM your_table\nGROUP BY ${groupBy.join(", ")}\nORDER BY ${groupBy.join(", ")};`;
-  }, [rowField, colField, valueField, aggFunction, pivotData, databaseType]);
+  }, [rowField, colField, effectiveValueField, aggFunction, pivotData, databaseType]);
 
   if (!result || rows.length === 0) {
     return (
@@ -231,13 +321,13 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-fg-muted font-medium">Values:</span>
           <select
-            value={valueField || ""}
+            value={effectiveValueField || ""}
             onChange={(e) => setValueField(e.target.value || null)}
             className="bg-overlay border border-hairline-strong rounded px-2 py-1 text-xs text-fg-secondary outline-none"
           >
             <option value="">Count</option>
             {fields
-              .filter((f) => f !== rowField && f !== colField)
+              .filter((f) => f !== rowField && f !== colField && !sensitiveColumns.has(f))
               .map((f) => (
                 <option key={f} value={f}>
                   {f}
@@ -263,17 +353,26 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
           ))}
         </div>
 
-        {onLoadQuery && rowField && offersGeneratedSql !== false && (
-          <button
-            onClick={() => {
-              const sql = generateSQL();
-              if (sql) onLoadQuery(sql);
-            }}
-            className="ml-auto flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-fg-muted hover:text-brand hover:bg-brand-tint/10 transition-colors"
-          >
-            <ArrowRight strokeWidth={1.5} className="w-3 h-3" /> Generate SQL
-          </button>
-        )}
+        {/*
+          Withheld while the COLUMN field is masked: its values are the CASE WHEN
+          literals, and a masked literal silently matches nothing - the same reason the
+          SQL INSERT export is withheld while a column is masked (#1433). A masked row
+          field reaches the statement only as an identifier, so the control stays.
+        */}
+        {onLoadQuery &&
+          rowField &&
+          offersGeneratedSql !== false &&
+          !(colField !== null && sensitiveColumns.has(colField)) && (
+            <button
+              onClick={() => {
+                const sql = generateSQL();
+                if (sql) onLoadQuery(sql);
+              }}
+              className="ml-auto flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-fg-muted hover:text-brand hover:bg-brand-tint/10 transition-colors"
+            >
+              <ArrowRight strokeWidth={1.5} className="w-3 h-3" /> Generate SQL
+            </button>
+          )}
         {pivotData && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -307,7 +406,9 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
                     key={ck}
                     className="text-right px-3 py-2 text-fg-muted border-b border-r border-hairline font-medium"
                   >
-                    {ck === "__all__" ? `${AGG_LABELS[aggFunction]}(${valueField || "*"})` : ck}
+                    {ck === "__all__"
+                      ? `${AGG_LABELS[aggFunction]}(${effectiveValueField || "*"})`
+                      : (pivotData.colKeyLabels.get(ck) ?? ck)}
                   </th>
                 ))}
               </tr>
@@ -315,7 +416,9 @@ export function PivotTable({ result, onLoadQuery, databaseType, offersGeneratedS
             <tbody>
               {pivotData.pivotRows.map((row, i) => (
                 <tr key={i} className="hover:bg-brand-tint/[0.03] border-b border-hairline">
-                  <td className="px-3 py-1.5 text-fg-secondary border-r border-hairline font-medium">{row.rowKey}</td>
+                  <td className="px-3 py-1.5 text-fg-secondary border-r border-hairline font-medium">
+                    {pivotData.rowKeyLabels.get(row.rowKey) ?? row.rowKey}
+                  </td>
                   {pivotData.colKeys.map((ck) => (
                     <td key={ck} className="px-3 py-1.5 text-right text-hue-amber/90 border-r border-hairline">
                       {row.values.get(ck) || "0"}

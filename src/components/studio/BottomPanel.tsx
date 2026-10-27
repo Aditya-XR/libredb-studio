@@ -4,6 +4,7 @@ import type { CsvDelimiter } from "@/lib/export/csv";
 
 import React, { useMemo } from "react";
 import type { DatabaseConnection, QueryResult } from "@/lib/types";
+import type { ProviderCapabilities } from "@/lib/db/types";
 import type { DetailedObject } from "@/lib/db/detailed-object";
 import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
 import { detectSensitiveColumnsFromConfig, type MaskingConfig } from "@/lib/data-masking";
@@ -134,7 +135,19 @@ const GraphView = React.lazy(
 
 // The saved-chart dashboard. Its data is read on mount, not its module — the module
 // is split at the import above, along with the `DataCharts` this renders.
-function ChartDashboard({ result }: { result: QueryResult | null }) {
+function ChartDashboard({
+  result,
+  maskingEnabled,
+  userRole,
+  maskingConfig,
+  maskingExemptColumns,
+}: {
+  result: QueryResult | null;
+  maskingEnabled: boolean;
+  userRole: string | undefined;
+  maskingConfig: MaskingConfig;
+  maskingExemptColumns: ProviderCapabilities["maskingExemptColumns"];
+}) {
   // The saved-chart list, read once from storage. Nothing here writes it back —
   // saving and deleting happen in DataCharts, which owns its own copy.
   const [savedCharts] = React.useState(() => storage.getSavedCharts());
@@ -164,7 +177,13 @@ function ChartDashboard({ result }: { result: QueryResult | null }) {
             </div>
             {result ? (
               <div className="mt-2 h-[160px]">
-                <DataCharts result={result} />
+                <DataCharts
+                  result={result}
+                  maskingEnabled={maskingEnabled}
+                  userRole={userRole}
+                  maskingConfig={maskingConfig}
+                  maskingExemptColumns={maskingExemptColumns}
+                />
               </div>
             ) : (
               <div className="mt-2 h-[100px] flex items-center justify-center text-fg-subtle text-xs">
@@ -604,6 +623,10 @@ export const BottomPanel = React.memo(function BottomPanel({
             {mode === "pivot" ? (
               <PivotTable
                 result={result}
+                maskingEnabled={maskingEnabled}
+                userRole={userRole}
+                maskingConfig={maskingConfig}
+                maskingExemptColumns={metadata?.capabilities.maskingExemptColumns}
                 onLoadQuery={(q) => {
                   onLoadQuery(q);
                   onSetMode("results");
@@ -643,7 +666,14 @@ export const BottomPanel = React.memo(function BottomPanel({
                 }}
               />
             ) : mode === "charts" ? (
-              <DataCharts result={hydratedChart ?? result} spec={hydratedChartSpec} />
+              <DataCharts
+                result={hydratedChart ?? result}
+                spec={hydratedChartSpec}
+                maskingEnabled={maskingEnabled}
+                userRole={userRole}
+                maskingConfig={maskingConfig}
+                maskingExemptColumns={metadata?.capabilities.maskingExemptColumns}
+              />
             ) : mode === "graph" && result ? (
               <GraphView
                 result={result}
@@ -654,7 +684,13 @@ export const BottomPanel = React.memo(function BottomPanel({
             ) : mode === "schemadiff" ? (
               <SchemaDiff schema={schema} connection={activeConnection} />
             ) : mode === "dashboard" ? (
-              <ChartDashboard result={result} />
+              <ChartDashboard
+                result={result}
+                maskingEnabled={maskingEnabled}
+                userRole={userRole}
+                maskingConfig={maskingConfig}
+                maskingExemptColumns={metadata?.capabilities.maskingExemptColumns}
+              />
             ) : mode === "explain" ? (
               <VisualExplain
                 plan={hydratedPlan ?? explainInput}

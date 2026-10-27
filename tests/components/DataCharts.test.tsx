@@ -10,6 +10,7 @@ import React from "react";
 const capturedXAxisProps: Record<string, unknown>[] = [];
 const capturedChartProps: Record<string, unknown>[] = [];
 const capturedPieProps: Record<string, unknown>[] = [];
+const capturedScatterProps: Record<string, unknown>[] = [];
 // The label the Tooltip mock hovers. Recharts hands the tooltip the hovered tick's value.
 let tooltipLabel: unknown = "tooltip_label";
 
@@ -73,7 +74,10 @@ mock.module("recharts", () => ({
     }
     return null;
   },
-  Scatter: () => null,
+  Scatter: (props: Record<string, unknown>) => {
+    capturedScatterProps.push(props);
+    return null;
+  },
   Cell: () => null,
   RadialBar: () => null,
   XAxis: (props: Record<string, unknown>) => {
@@ -171,12 +175,16 @@ const mockDeleteChart = mock((id: string) => {
   const filtered = charts.filter((c: Record<string, unknown>) => c.id !== id);
   localStorage.setItem("libredb_saved_charts", JSON.stringify(filtered));
 });
+// A missing config prop is resolved through the facade, and the real facade returns
+// DEFAULT_MASKING_CONFIG when nothing is saved, so the mock mirrors that (#1939).
+const mockGetMaskingConfig = mock(() => DEFAULT_MASKING_CONFIG);
 
 mock.module("@/lib/storage", () => ({
   storage: {
     getSavedCharts: mockGetSavedCharts,
     saveChart: mockSaveChart,
     deleteChart: mockDeleteChart,
+    getMaskingConfig: mockGetMaskingConfig,
   },
 }));
 
@@ -217,6 +225,7 @@ import { render, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { chartNumber, DataCharts, PieSliceLabel } from "@/components/DataCharts";
 import { mockToastError } from "../helpers/mock-sonner";
 import type { QueryResult } from "@/lib/types";
+import { DEFAULT_MASKING_CONFIG, maskValueByPattern } from "@/lib/data-masking";
 
 import userEvent from "@testing-library/user-event";
 
@@ -342,6 +351,7 @@ describe("DataCharts", () => {
     capturedXAxisProps.length = 0;
     capturedChartProps.length = 0;
     capturedPieProps.length = 0;
+    capturedScatterProps.length = 0;
     tooltipLabel = "tooltip_label";
     // Clear localStorage saved charts
     if (typeof localStorage !== "undefined") {
@@ -810,7 +820,7 @@ describe("DataCharts", () => {
       rows: mockNumericResult.rows.map((row, i) => (i === 0 ? { ...row, revenue: Number.POSITIVE_INFINITY } : row)),
     };
     capturedChartProps.length = 0;
-    render(React.createElement(DataCharts, { result: nonFinite }));
+    render(React.createElement(DataCharts, { result: nonFinite, maskingEnabled: false }));
     const data = capturedChartProps.at(-1)?.data as Array<Record<string, unknown>>;
     expect(data.every((point) => Number.isFinite(point.revenue))).toBe(true);
   });
@@ -829,7 +839,9 @@ describe("DataCharts", () => {
   // -----------------------------------------------------------------------
 
   test("Y-axis dropdown shows numeric field options", () => {
-    const { queryAllByRole } = render(React.createElement(DataCharts, { result: mockNumericResult }));
+    const { queryAllByRole } = render(
+      React.createElement(DataCharts, { result: mockNumericResult, maskingEnabled: false }),
+    );
     const menuItems = queryAllByRole("menuitem");
     // Should have numeric fields: revenue, cost (revenue may have ✓ if auto-selected)
     const fieldNames = menuItems.map((el) => el.textContent || "");
@@ -1353,7 +1365,9 @@ describe("DataCharts", () => {
   });
 
   test("clicking an already-selected Y-axis field deselects it", () => {
-    const { getAllByRole, queryByText } = render(React.createElement(DataCharts, { result: mockNumericResult }));
+    const { getAllByRole, queryByText } = render(
+      React.createElement(DataCharts, { result: mockNumericResult, maskingEnabled: false }),
+    );
     // revenue is auto-selected as the first numeric field
     expect(queryByText("Select fields")).toBeNull();
     const revenueItem = getAllByRole("menuitem").find((i) => i.textContent?.includes("revenue"));
@@ -1516,5 +1530,221 @@ describe("DataCharts", () => {
 
       expect(queryByText("Need at least 2 rows for visualization")).not.toBeNull();
     });
+  });
+});
+
+describe("DataCharts display masking (#1939)", () => {
+  const emailPattern = DEFAULT_MASKING_CONFIG.patterns.find((p) => p.id === "builtin-email")!;
+  const maskEmail = (value: unknown) => maskValueByPattern(value, emailPattern);
+  const maskingProps = {
+    maskingEnabled: true,
+    userRole: "admin",
+    maskingConfig: DEFAULT_MASKING_CONFIG,
+  };
+
+  // al123@example.com masks to the SAME text as alice@example.com: both must survive as
+  // their own categories (slices, bars), or the mask would have merged two groups.
+  const maskedCategoryResult: QueryResult = {
+    rows: [
+      { email: "alice@example.com", logins: 5 },
+      { email: "al123@example.com", logins: 4 },
+      { email: "bob@example.com", logins: 3 },
+    ],
+    fields: ["email", "logins"],
+    rowCount: 3,
+    executionTime: 1,
+  };
+
+  const maskedNumericResult: QueryResult = {
+    rows: [
+      { dept: "Engineering", salary: 90000, logins: 5 },
+      { dept: "Sales", salary: 70000, logins: 3 },
+    ],
+    fields: ["dept", "salary", "logins"],
+    rowCount: 2,
+    executionTime: 1,
+  };
+
+  // Without this, a test that renders no chart (every masked series withheld) reads the
+  // PREVIOUS test's captured props, and run alone it has nothing to read at all.
+  beforeEach(() => {
+    capturedXAxisProps.length = 0;
+    capturedChartProps.length = 0;
+    capturedPieProps.length = 0;
+    capturedScatterProps.length = 0;
+    // A test that plants a saved config must not leak it into the next one.
+    mockGetMaskingConfig.mockImplementation(() => DEFAULT_MASKING_CONFIG);
+  });
+
+  test("masks a masked column's categories in the pie suggestion and the category charts", async () => {
+    const { queryByText } = render(React.createElement(DataCharts, { result: maskedCategoryResult, ...maskingProps }));
+    // A small categorical result suggests the pie; its slice names are the categories.
+    const pieData = capturedPieProps.at(-1)?.data as unknown[];
+    expect(pieData.length).toBe(3);
+    const pieText = JSON.stringify(pieData);
+    expect(pieText).toContain(maskEmail("alice@example.com"));
+    expect(pieText).not.toContain("alice@example.com");
+    // Two slices share one mask and neither is merged away.
+    expect(pieText.split(maskEmail("alice@example.com")).length - 1).toBe(2);
+
+    for (const label of ["Bar", "Line", "Area"]) {
+      capturedChartProps.length = 0;
+      fireEvent.click(queryByText(label)!);
+      await waitFor(() => expect(capturedChartProps.length).toBeGreaterThan(0));
+      const data = JSON.stringify(capturedChartProps.at(-1)?.data);
+      expect(data).toContain(maskEmail("alice@example.com"));
+      expect(data).not.toContain("alice@example.com");
+      // The unmasked numeric series still plots.
+      expect(data).toContain('"logins":5');
+    }
+  });
+
+  test("never plots a masked column's numbers: the default series skips it", () => {
+    render(React.createElement(DataCharts, { result: maskedNumericResult, ...maskingProps }));
+    const data = JSON.stringify(capturedChartProps.at(-1)?.data ?? capturedPieProps.at(-1)?.data);
+    expect(data).not.toContain("90000");
+    expect(data).not.toContain("70000");
+    expect(data).toContain('"logins":5');
+  });
+
+  test("a masked series handed in by a spec is withheld", () => {
+    // Nothing is drawn here, so the old read of the captured props reached back into
+    // the PREVIOUS test's data — and run alone this test had nothing to read at all.
+    // The empty state is the observable behavior, the same message the histogram and
+    // scatter forms show.
+    const screen = render(
+      React.createElement(DataCharts, {
+        result: maskedNumericResult,
+        spec: { type: "bar", x: "dept", y: ["salary"] } as never,
+        ...maskingProps,
+      }),
+    );
+    expect(screen.queryByText(/Nothing to plot while display masking is on/i)).not.toBeNull();
+  });
+
+  test("a histogram of a masked field is withheld with an explanation", () => {
+    const screen = render(
+      React.createElement(DataCharts, {
+        result: maskedNumericResult,
+        spec: { type: "histogram", x: "dept", y: ["salary"] } as never,
+        ...maskingProps,
+      }),
+    );
+    expect(screen.queryByText(/Nothing to plot while display masking is on/i)).not.toBeNull();
+    expect(screen.queryByText(/50000/)).toBeNull();
+  });
+
+  test("ignores date grouping while the date column is masked, so labels match the grid", async () => {
+    // Month grouping would bucket "1990-03-15" to "1990-03" and the mask would then show
+    // "****-**-03" - the MONTH, which the grid's mask of the raw value ("****-**-15")
+    // hides. With masking in force the grouping must not apply (#1939).
+    const birthdateResult: QueryResult = {
+      rows: [
+        { birthdate: "1990-03-15", logins: 5 },
+        { birthdate: "1990-03-22", logins: 4 },
+        { birthdate: "1991-01-10", logins: 3 },
+      ],
+      fields: ["birthdate", "logins"],
+      rowCount: 3,
+      executionTime: 1,
+    };
+    localStorage.setItem(
+      "libredb_saved_charts",
+      JSON.stringify([
+        {
+          id: "1",
+          name: "By Month",
+          chartType: "bar",
+          xAxis: "birthdate",
+          yAxis: ["logins"],
+          aggregation: "sum",
+          dateGrouping: "month",
+        },
+      ]),
+    );
+    const screen = render(React.createElement(DataCharts, { result: birthdateResult, ...maskingProps }));
+    fireEvent.click(screen.queryByText("By Month")!);
+    await waitFor(() => expect(capturedChartProps.length).toBeGreaterThan(0));
+    const text = JSON.stringify(capturedChartProps.at(-1)?.data);
+    expect(text).toContain("****-**-15");
+    expect(text).toContain("****-**-22");
+    expect(text).not.toContain("****-**-03");
+    expect(text).not.toContain("1990-03");
+  });
+
+  test("a scatter axis that is masked is withheld with an explanation", () => {
+    const screen = render(
+      React.createElement(DataCharts, {
+        result: maskedNumericResult,
+        spec: { type: "scatter", x: "salary", y: ["logins"] } as never,
+        ...maskingProps,
+      }),
+    );
+    expect(screen.queryByText(/Nothing to plot while display masking is on/i)).not.toBeNull();
+    expect(screen.queryByText(/50000/)).toBeNull();
+  });
+
+  test("falls back to the saved masking config when none is handed in", () => {
+    // ResultsGrid and the DataProfiler resolve a missing config from storage; here
+    // undefined used to read as no masking, and the chart plotted the clear numbers the
+    // grid was hiding. With the saved (default) config in force, the masked column's
+    // numbers stay unrendered, empty state and all.
+    const screen = render(
+      React.createElement(DataCharts, {
+        result: maskedNumericResult,
+        spec: { type: "bar", x: "dept", y: ["salary"] } as never,
+        maskingEnabled: true,
+        userRole: "admin",
+      }),
+    );
+    expect(screen.queryByText(/Nothing to plot while display masking is on/i)).not.toBeNull();
+    expect(capturedChartProps.length).toBe(0);
+  });
+
+  // Aggregation runs on the RAW values and the mask is only the label, so two raw
+  // groups that share one mask keep their own bars and their own sums. This pins the
+  // existing behavior: the mask must not merge the groups, and must not split the sums.
+  test("aggregates raw groups that share one mask under the masked label", async () => {
+    const sharedMaskResult: QueryResult = {
+      rows: [
+        { email: "alice@example.com", logins: 5 },
+        { email: "alice@example.com", logins: 2 },
+        { email: "al123@example.com", logins: 4 },
+      ],
+      fields: ["email", "logins"],
+      rowCount: 3,
+      executionTime: 1,
+    };
+    const { getByTestId } = render(
+      React.createElement(DataCharts, {
+        result: sharedMaskResult,
+        spec: { type: "bar", x: "email", y: ["logins"] } as never,
+        ...maskingProps,
+      }),
+    );
+    capturedChartProps.length = 0;
+    fireEvent.click(getByTestId("select-item-sum"));
+    await waitFor(() => expect(capturedChartProps.length).toBeGreaterThan(0));
+
+    const data = capturedChartProps.at(-1)?.data as Array<Record<string, unknown>>;
+    expect(data.map((point) => point.logins)).toEqual([7, 4]);
+    const mask = maskEmail("alice@example.com");
+    expect(data[0]?.email).toBe(mask);
+    expect(data[1]?.email).toBe(mask);
+  });
+
+  test("plots clear numbers while masking is off, config still handed in", () => {
+    render(
+      React.createElement(DataCharts, {
+        result: maskedNumericResult,
+        spec: { type: "bar", x: "dept", y: ["salary"] } as never,
+        maskingEnabled: false,
+        userRole: "admin",
+        maskingConfig: DEFAULT_MASKING_CONFIG,
+      }),
+    );
+    const data = JSON.stringify(capturedChartProps.at(-1)?.data);
+    expect(data).toContain("90000");
+    expect(data).toContain("70000");
   });
 });

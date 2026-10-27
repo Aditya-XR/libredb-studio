@@ -23,6 +23,7 @@ mock.module("@/components/ui/dropdown-menu", () => ({
 }));
 
 import { PivotTable, aggregate } from "@/components/PivotTable";
+import { DEFAULT_MASKING_CONFIG, maskValueByPattern } from "@/lib/data-masking";
 import type { QueryResult } from "@/lib/types";
 
 const result: QueryResult = {
@@ -553,5 +554,284 @@ describe("PivotTable", () => {
     expect(sql).toContain('"dept"');
     expect(sql).toContain('GROUP BY "dept"');
     expect(sql).toContain('ORDER BY "dept"');
+  });
+});
+
+describe("display masking (#1939)", () => {
+  const emailPattern = DEFAULT_MASKING_CONFIG.patterns.find((p) => p.id === "builtin-email")!;
+  const maskEmail = (value: unknown) => maskValueByPattern(value, emailPattern);
+  const ssnPattern = DEFAULT_MASKING_CONFIG.patterns.find((p) => p.id === "builtin-ssn")!;
+  const maskSsn = (value: unknown) => maskValueByPattern(value, ssnPattern);
+  const maskingProps = {
+    maskingEnabled: true,
+    userRole: "admin",
+    maskingConfig: DEFAULT_MASKING_CONFIG,
+  };
+
+  // alice@example.com and al123@example.com mask to the SAME text, so a pivot grouped
+  // by the masked value would merge them into one group of three. The null row keeps the
+  // grid's "NULL" label rather than a mask of the text "NULL".
+  const emailResult: QueryResult = {
+    rows: [
+      { email: "alice@example.com", dept: "Engineering", salary: 90000 },
+      { email: "alice@example.com", dept: "Sales", salary: 70000 },
+      { email: "al123@example.com", dept: "Sales", salary: 75000 },
+      { email: null, dept: "Sales", salary: 60000 },
+    ],
+    fields: ["email", "dept", "salary"],
+    rowCount: 4,
+    executionTime: 1,
+  };
+
+  test("masks the row field's values, and still groups by the raw ones", () => {
+    const { container } = render(<PivotTable result={emailResult} {...maskingProps} />);
+    const text = container.textContent || "";
+    expect(text).not.toContain("alice@example.com");
+    expect(text).not.toContain("al123@example.com");
+    expect(text).toContain(maskEmail("alice@example.com"));
+
+    // Three groups survive with their own counts: one row per raw value, not one merged
+    // masked row, and the null group keeps the grid's "NULL" rather than a fake mask.
+    // Masked-label order (#1491): the two groups sharing one mask come first in
+    // first-seen order (alice's 2 before al123's 1), and "NULL" sorts after the mask text.
+    const bodyRows = container.querySelectorAll("tbody tr");
+    expect(bodyRows.length).toBe(3);
+    expect(bodyRows[0]?.textContent).toContain("2");
+    expect(bodyRows[1]?.textContent).toContain("1");
+    expect(bodyRows[2]?.textContent).toContain("NULL");
+    expect(bodyRows[2]?.textContent).not.toContain("@");
+  });
+
+  test("masks the column field's values", () => {
+    const { container } = render(<PivotTable result={emailResult} {...maskingProps} />);
+    const selects = container.querySelectorAll("select");
+    fireEvent.change(selects[0]!, { target: { value: "dept" } });
+    fireEvent.change(selects[1]!, { target: { value: "email" } });
+
+    const head = container.querySelector("thead")?.textContent || "";
+    expect(head).not.toContain("alice@example.com");
+    expect(head).toContain(maskEmail("alice@example.com"));
+    expect(container.textContent).not.toContain("al123@example.com");
+  });
+
+  test("keeps groups whose masks collide as separate download columns", () => {
+    const { container, getByText } = render(<PivotTable result={emailResult} {...maskingProps} />);
+    const selects = container.querySelectorAll("select");
+    fireEvent.change(selects[0]!, { target: { value: "dept" } });
+    fireEvent.change(selects[1]!, { target: { value: "email" } });
+
+    fireEvent.click(getByText("Export as CSV"));
+    fireEvent.click(getByText("Export as JSON"));
+
+    const calls = mockDownloadText.mock.calls;
+    const csv = calls[calls.length - 2][0] as string;
+    const mask = maskEmail("alice@example.com");
+    // The CSV header row carries the same disambiguated names, and no raw key.
+    const headerLine = csv.split("\n")[0];
+    expect(headerLine).toBe(`dept,${mask},${mask} (2),NULL`);
+    expect(csv).not.toContain("alice@example.com");
+    expect(csv).not.toContain("al123@example.com");
+
+    const json = JSON.parse(calls[calls.length - 1][0] as string) as Record<string, unknown>[];
+    // al123@example.com masks to the same text; the second column takes the result's own
+    // "name (2)" spelling instead of overwriting the first group's column. The shared
+    // mask sorts the columns, and the first-seen tie puts alice's group first (#1491).
+    expect(json).toEqual([
+      { dept: "Engineering", [mask]: "1", [`${mask} (2)`]: "0", NULL: "0" },
+      { dept: "Sales", [mask]: "1", [`${mask} (2)`]: "1", NULL: "1" },
+    ]);
+  });
+
+  test("masks the CSV and JSON download", () => {
+    const { getByText } = render(<PivotTable result={emailResult} {...maskingProps} />);
+
+    fireEvent.click(getByText("Export as CSV"));
+    fireEvent.click(getByText("Export as JSON"));
+
+    const calls = mockDownloadText.mock.calls;
+    const csv = calls[calls.length - 2][0] as string;
+    expect(csv).toContain(maskEmail("alice@example.com"));
+    expect(csv).not.toContain("alice@example.com");
+    expect(csv).not.toContain("al123@example.com");
+
+    const json = JSON.parse(calls[calls.length - 1][0] as string) as Record<string, unknown>[];
+    // Masked-label order (#1491): alice's group first (first-seen tie on the shared
+    // mask), then al123's, then "NULL".
+    expect(json).toEqual([
+      { email: maskEmail("alice@example.com"), "COUNT(*)": "2" },
+      { email: maskEmail("al123@example.com"), "COUNT(*)": "1" },
+      { email: "NULL", "COUNT(*)": "1" },
+    ]);
+  });
+
+  test("withholds Generate SQL while a masked column would supply its literals", () => {
+    const onLoadQuery = mock(() => {});
+    const { container, queryByText, getByText } = render(
+      <PivotTable result={emailResult} onLoadQuery={onLoadQuery} {...maskingProps} />,
+    );
+
+    // A masked ROW field reaches the statement only as an identifier, so the control stays.
+    expect(getByText("Generate SQL")).not.toBeNull();
+
+    const selects = container.querySelectorAll("select");
+    fireEvent.change(selects[0]!, { target: { value: "dept" } });
+    fireEvent.change(selects[1]!, { target: { value: "email" } });
+    expect(queryByText("Generate SQL")).toBeNull();
+
+    // An unmasked column field keeps it.
+    fireEvent.change(selects[1]!, { target: { value: "" } });
+    expect(queryByText("Generate SQL")).not.toBeNull();
+  });
+
+  test("does not offer a masked column as the pivot value", () => {
+    const { container } = render(<PivotTable result={emailResult} {...maskingProps} />);
+    const valueSelect = container.querySelectorAll("select")[2]!;
+    const options = [...valueSelect.querySelectorAll("option")].map((o) => o.getAttribute("value"));
+    expect(options).not.toContain("salary");
+    expect(options).toContain("dept");
+    // salary is the only numeric column, so nothing is auto-picked and the pivot counts.
+    expect(valueSelect.value).toBe("");
+  });
+
+  test("respects the provider's masking exemptions", () => {
+    const { container } = render(
+      <PivotTable
+        result={emailResult}
+        {...maskingProps}
+        maskingExemptColumns={{ column: "^email$", reason: "the engine's key" }}
+      />,
+    );
+    expect(container.textContent).toContain("alice@example.com");
+  });
+
+  test("shows raw values while masking is off", () => {
+    const { container } = render(<PivotTable result={emailResult} />);
+    expect(container.textContent).toContain("alice@example.com");
+  });
+
+  test("shows raw keys while masking is off, config still handed in", () => {
+    // maskingEnabled: false wins over the config: the keys read in the clear even
+    // though a config is present. This pins existing behavior.
+    const { container } = render(
+      <PivotTable
+        result={emailResult}
+        maskingEnabled={false}
+        userRole="admin"
+        maskingConfig={DEFAULT_MASKING_CONFIG}
+      />,
+    );
+    expect(container.textContent).toContain("alice@example.com");
+    expect(container.textContent).toContain("al123@example.com");
+  });
+
+  // The pivot used to order its keys by the RAW value, so 900-11-0001, 100-22-0002 and
+  // 500-33-0003 read 0002, 0003, 0001: the rank of the hidden prefixes leaks. The grid
+  // has sorted masked fields by their masked label since #1491; the pivot and its
+  // download do the same now, ties in first-seen order (#1939, PR #1957 review).
+  const ssnResult: QueryResult = {
+    rows: [
+      { ssn: "900-11-0001", logins: 3 },
+      { ssn: "100-22-0002", logins: 1 },
+      { ssn: "500-33-0003", logins: 2 },
+    ],
+    fields: ["ssn", "logins"],
+    rowCount: 3,
+    executionTime: 1,
+  };
+
+  test("sorts masked row keys by their masked label, on screen and in the CSV", () => {
+    const { container, getByText } = render(<PivotTable result={ssnResult} {...maskingProps} />);
+    fireEvent.click(getByText("SUM"));
+
+    const bodyRows = [...container.querySelectorAll("tbody tr")];
+    expect(bodyRows.map((tr) => tr.querySelector("td")?.textContent)).toEqual([
+      maskSsn("900-11-0001"),
+      maskSsn("100-22-0002"),
+      maskSsn("500-33-0003"),
+    ]);
+    // The aggregates ride with their group, so the order is provable beyond the labels.
+    expect(bodyRows.map((tr) => tr.querySelectorAll("td")[1]?.textContent)).toEqual(["3.00", "1.00", "2.00"]);
+
+    fireEvent.click(getByText("Export as CSV"));
+    const csv = mockDownloadText.mock.calls.at(-1)![0] as string;
+    const dataLines = csv.split("\n").slice(1);
+    expect(dataLines.map((line) => line.split(",")[0])).toEqual([
+      maskSsn("900-11-0001"),
+      maskSsn("100-22-0002"),
+      maskSsn("500-33-0003"),
+    ]);
+    expect(dataLines.map((line) => line.split(",")[1])).toEqual(["3.00", "1.00", "2.00"]);
+    // And no raw key anywhere in the download.
+    expect(csv).not.toContain("900-11-0001");
+    expect(csv).not.toContain("100-22-0002");
+    expect(csv).not.toContain("500-33-0003");
+  });
+
+  const ssnColumnResult: QueryResult = {
+    rows: [
+      { dept: "Engineering", ssn: "900-11-0001", logins: 3 },
+      { dept: "Engineering", ssn: "100-22-0002", logins: 1 },
+      { dept: "Sales", ssn: "500-33-0003", logins: 2 },
+    ],
+    fields: ["dept", "ssn", "logins"],
+    rowCount: 3,
+    executionTime: 1,
+  };
+
+  test("sorts masked column keys by their masked label, in the header and the CSV", () => {
+    const { container, getByText } = render(<PivotTable result={ssnColumnResult} {...maskingProps} />);
+    const selects = container.querySelectorAll("select");
+    fireEvent.change(selects[0]!, { target: { value: "dept" } });
+    fireEvent.change(selects[1]!, { target: { value: "ssn" } });
+
+    expect([...container.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual([
+      "dept",
+      maskSsn("900-11-0001"),
+      maskSsn("100-22-0002"),
+      maskSsn("500-33-0003"),
+    ]);
+
+    fireEvent.click(getByText("Export as CSV"));
+    const csv = mockDownloadText.mock.calls.at(-1)![0] as string;
+    expect(csv.split("\n")[0]).toBe(
+      ["dept", maskSsn("900-11-0001"), maskSsn("100-22-0002"), maskSsn("500-33-0003")].join(","),
+    );
+    expect(csv).not.toContain("900-11-0001");
+    expect(csv).not.toContain("100-22-0002");
+    expect(csv).not.toContain("500-33-0003");
+  });
+
+  // Two raw values whose masks are identical cannot be ordered by their labels; the
+  // stable sort keeps first-seen order, and the DIFFERENT aggregates prove which raw
+  // group landed where — the labels alone could not.
+  const ssnTieResult: QueryResult = {
+    rows: [
+      { ssn: "900-11-0001", logins: 5 },
+      { ssn: "100-22-0001", logins: 2 },
+    ],
+    fields: ["ssn", "logins"],
+    rowCount: 2,
+    executionTime: 1,
+  };
+
+  test("keeps first-seen order when two masked labels tie", () => {
+    const { container, getByText } = render(<PivotTable result={ssnTieResult} {...maskingProps} />);
+    fireEvent.click(getByText("SUM"));
+
+    const bodyRows = [...container.querySelectorAll("tbody tr")];
+    expect(bodyRows.map((tr) => tr.querySelector("td")?.textContent)).toEqual([
+      maskSsn("900-11-0001"),
+      maskSsn("100-22-0001"),
+    ]);
+    expect(bodyRows.map((tr) => tr.querySelectorAll("td")[1]?.textContent)).toEqual(["5.00", "2.00"]);
+
+    fireEvent.click(getByText("Export as CSV"));
+    const csv = mockDownloadText.mock.calls.at(-1)![0] as string;
+    expect(
+      csv
+        .split("\n")
+        .slice(1)
+        .map((line) => line.split(",")[1]),
+    ).toEqual(["5.00", "2.00"]);
   });
 });

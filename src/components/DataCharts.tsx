@@ -23,6 +23,15 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 import { type AgentChartSpec, QueryResult } from "@/lib/types";
+import {
+  loadMaskingConfig,
+  maskValueByPattern,
+  maskingInForce,
+  type MaskingConfig,
+  type MaskingPattern,
+} from "@/lib/data-masking";
+import { splitMaskedColumns } from "@/lib/db/masking-exemption";
+import type { ProviderCapabilities } from "@/lib/db/types";
 import { cn } from "@/lib/utils";
 import {
   ChartColumn,
@@ -106,6 +115,18 @@ interface DataChartsProps {
    * controls stay live: this seeds the view, it does not lock it.
    */
   spec?: AgentChartSpec | null;
+  /**
+   * The grid's masking inputs, handed down the same way the graph view takes them
+   * (#1939). While masking is in force a masked column's CATEGORIES are drawn masked
+   * and its numbers are never plotted: the mask text is not numeric, and the raw
+   * numbers must not appear. An undefined config falls back to the saved one
+   * (`loadMaskingConfig`), as the grid and the profiler do.
+   */
+  maskingEnabled?: boolean;
+  userRole?: string;
+  maskingConfig?: MaskingConfig;
+  /** The provider's columns the masking rules must leave alone (`ProviderCapabilities.maskingExemptColumns`). */
+  maskingExemptColumns?: ProviderCapabilities["maskingExemptColumns"];
 }
 
 /**
@@ -521,11 +542,39 @@ export function groupByDate(dateStr: string, grouping: DateGrouping): string {
   }
 }
 
-export function DataCharts({ result, spec = null }: DataChartsProps) {
+export function DataCharts({
+  result,
+  spec = null,
+  maskingEnabled,
+  userRole,
+  maskingConfig,
+  maskingExemptColumns,
+}: DataChartsProps) {
   const chartRef = useRef<HTMLDivElement>(null);
   const analysis = useMemo(() => analyzeData(result), [result]);
   /** The supplied specification, or null when there is none this result can carry. */
   const appliedSpec = useMemo(() => (spec !== null && specApplies(spec, analysis) ? spec : null), [spec, analysis]);
+
+  // No config handed in falls back to the SAVED one, as ResultsGrid (`maskingConfig ??
+  // loadMaskingConfig()`) and the DataProfiler already do: undefined used to read as no
+  // masking, and the chart plotted numbers the grid was hiding (#1939, PR #1957 review).
+  const resolvedMaskingConfig = maskingConfig ?? loadMaskingConfig();
+  // The grid's own masking decision for THIS result, exemptions included, so the chart
+  // and the grid can never disagree about one column (#1421, #1939).
+  const sensitiveColumns = useMemo(
+    () =>
+      result === null || !maskingInForce(userRole, resolvedMaskingConfig, maskingEnabled)
+        ? new Map<string, MaskingPattern>()
+        : splitMaskedColumns(result.fields, resolvedMaskingConfig, maskingExemptColumns).masked,
+    [result, resolvedMaskingConfig, userRole, maskingEnabled, maskingExemptColumns],
+  );
+
+  // A masked column can be a category - drawn masked - but never a number source while
+  // masking is in force: its mask text is not numeric, and its raw numbers must not plot.
+  const plottableNumericFields = useMemo(
+    () => analysis.numericFields.filter((f) => !sensitiveColumns.has(f)),
+    [analysis.numericFields, sensitiveColumns],
+  );
 
   // Recharts paints an SVG canvas from JS values and cannot read the CSS tokens,
   // so the chart is the one surface that has to be handed its palette.
@@ -599,28 +648,41 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
         const defaultX = analysis.categoricalFields[0] || analysis.dateFields[0] || analysis.fields[0]?.name || "";
         setXAxis(defaultX);
 
-        if (analysis.numericFields.length > 0) {
-          setYAxis([analysis.numericFields[0]]);
+        if (plottableNumericFields.length > 0) {
+          setYAxis([plottableNumericFields[0]]);
         }
-        if (analysis.numericFields.length >= 2) {
-          setScatterY(analysis.numericFields[1]);
+        if (plottableNumericFields.length >= 2) {
+          setScatterY(plottableNumericFields[1]);
         }
       }
     }
   }
 
+  // The series that may draw while masking is in force: every one when it is not, and
+  // none of a masked column's numbers when it is (they would be the masked values
+  // themselves, in clear). The pickers filter the same fields out via plottableNumericFields.
+  const visibleYAxis = useMemo(() => yAxis.filter((f) => !sensitiveColumns.has(f)), [yAxis, sensitiveColumns]);
+
+  // Date grouping is withheld while the category's column is masked (#1939): grouping
+  // first would mask the BUCKET string ("2024-03" -> "****-**-03") and show characters
+  // the grid hides, where the grid masks the whole raw value ("1990-03-15" -> "****-**-15").
+  // Grouping by the raw value and masking it afterwards shows exactly what the grid shows.
+  const effectiveDateGrouping = sensitiveColumns.has(xAxis) ? "" : dateGrouping;
+
   const chartData = useMemo(() => {
     if (!result?.rows) return [];
 
-    // Histogram: special data preparation
+    // Histogram: special data preparation. A histogram IS the column's raw values, so a
+    // masked field's buckets are withheld rather than drawn.
     if (chartType === "histogram" && yAxis.length > 0) {
+      if (sensitiveColumns.has(yAxis[0])) return [];
       const values = result.rows.map((r) => chartNumber(r[yAxis[0]]));
       return computeHistogramBins(values, histogramBuckets);
     }
 
-    // Scatter: needs both axes as numeric
+    // Scatter: needs both axes as numeric, and each plotted point is a row's raw pair.
     if (chartType === "scatter") {
-      if (!xAxis || !scatterY) return [];
+      if (!xAxis || !scatterY || sensitiveColumns.has(xAxis) || sensitiveColumns.has(scatterY)) return [];
       return result.rows.map((row) => ({
         [xAxis]: chartNumber(row[xAxis]),
         [scatterY]: chartNumber(row[scatterY]),
@@ -633,7 +695,7 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
     // a cell that holds the text "NULL" until both are drawn.
     const baseData = result.rows.map((row) => {
       const dataPoint: Record<string, unknown> = { [xAxis]: row[xAxis] };
-      yAxis.forEach((field) => {
+      visibleYAxis.forEach((field) => {
         dataPoint[field] = chartNumber(row[field]);
       });
       return dataPoint;
@@ -645,26 +707,41 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
       categoryData = aggregateData(
         baseData,
         xAxis,
-        yAxis.map((f) => ({ field: f, aggregation })),
-        dateGrouping || undefined,
+        visibleYAxis.map((f) => ({ field: f, aggregation })),
+        effectiveDateGrouping || undefined,
       );
-    } else if (dateGrouping) {
+    } else if (effectiveDateGrouping) {
       // Apply date grouping even without aggregation
       categoryData = aggregateData(
         baseData,
         xAxis,
-        yAxis.map((f) => ({ field: f, aggregation: "sum" })),
-        dateGrouping,
+        visibleYAxis.map((f) => ({ field: f, aggregation: "sum" })),
+        effectiveDateGrouping,
       );
     }
 
     // Every point here was built by this memo, so labelling it in place touches no row of the result.
+    // The label is the masked text the grid shows when the category's column is masked; the
+    // grouping above already ran on the RAW values, so two values that share one mask keep
+    // their own slices and bars (#1939).
+    const categoryPattern = sensitiveColumns.get(xAxis);
     categoryData.forEach((point, row) => {
-      point[xAxis] = chartCategory(point[xAxis]);
+      point[xAxis] = categoryPattern ? maskValueByPattern(point[xAxis], categoryPattern) : chartCategory(point[xAxis]);
       point[CHART_ROW_KEY] = row;
     });
     return categoryData;
-  }, [result, xAxis, yAxis, chartType, scatterY, histogramBuckets, aggregation, dateGrouping]);
+  }, [
+    result,
+    xAxis,
+    yAxis,
+    visibleYAxis,
+    chartType,
+    scatterY,
+    histogramBuckets,
+    aggregation,
+    effectiveDateGrouping,
+    sensitiveColumns,
+  ]);
 
   // Save chart config
   const handleSaveChart = useCallback(() => {
@@ -820,8 +897,16 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
   );
   const categoryTooltip = <Tooltip content={<CustomTooltip labelOf={categoryAt} />} />;
 
-  const plottedYAxis = yAxis.slice(0, MAX_SERIES);
-  const droppedYAxisCount = yAxis.length - plottedYAxis.length;
+  const plottedYAxis = visibleYAxis.slice(0, MAX_SERIES);
+  const droppedYAxisCount = visibleYAxis.length - plottedYAxis.length;
+
+  // Masking withheld every plotted value: say so, rather than drawing empty axes (#1939).
+  const plotWithheld =
+    sensitiveColumns.size > 0 &&
+    ((chartType === "histogram" && yAxis.length > 0 && sensitiveColumns.has(yAxis[0])) ||
+      (chartType === "scatter" &&
+        ((xAxis !== "" && sensitiveColumns.has(xAxis)) || (scatterY !== "" && sensitiveColumns.has(scatterY)))) ||
+      (chartType !== "histogram" && chartType !== "scatter" && yAxis.length > 0 && visibleYAxis.length === 0));
 
   return (
     <div className="h-full flex flex-col bg-sunken">
@@ -882,7 +967,7 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="bg-overlay border-hairline-strong">
-              {analysis.numericFields.map((field) => (
+              {plottableNumericFields.map((field) => (
                 <DropdownMenuItem
                   key={field}
                   onClick={() => (chartType === "pie" ? setYAxis([field]) : toggleYAxis(field))}
@@ -906,7 +991,7 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
                 <SelectValue placeholder="Y field" />
               </SelectTrigger>
               <SelectContent className="bg-overlay border-hairline-strong">
-                {analysis.numericFields
+                {plottableNumericFields
                   .filter((f) => f !== xAxis)
                   .map((field) => (
                     <SelectItem key={field} value={field} className="text-xs">
@@ -957,29 +1042,32 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
         )}
 
         {/* Date Grouping */}
-        {analysis.dateFields.length > 0 && chartType !== "scatter" && chartType !== "histogram" && (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-fg-subtle">Group</span>
-            <Select
-              value={dateGrouping || "none"}
-              onValueChange={(v) => setDateGrouping(v === "none" ? "" : (v as DateGrouping))}
-            >
-              <SelectTrigger className="h-7 w-[80px] text-xs bg-fill border-hairline-strong">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="bg-overlay border-hairline-strong">
-                <SelectItem value="none" className="text-xs">
-                  None
-                </SelectItem>
-                {(["hour", "day", "week", "month", "year"] as const).map((g) => (
-                  <SelectItem key={g} value={g} className="text-xs capitalize">
-                    {g}
+        {analysis.dateFields.length > 0 &&
+          !sensitiveColumns.has(xAxis) &&
+          chartType !== "scatter" &&
+          chartType !== "histogram" && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-fg-subtle">Group</span>
+              <Select
+                value={dateGrouping || "none"}
+                onValueChange={(v) => setDateGrouping(v === "none" ? "" : (v as DateGrouping))}
+              >
+                <SelectTrigger className="h-7 w-[80px] text-xs bg-fill border-hairline-strong">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-overlay border-hairline-strong">
+                  <SelectItem value="none" className="text-xs">
+                    None
                   </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        )}
+                  {(["hour", "day", "week", "month", "year"] as const).map((g) => (
+                    <SelectItem key={g} value={g} className="text-xs capitalize">
+                      {g}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
         {/* Spacer */}
         <div className="flex-1" />
@@ -1078,7 +1166,11 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
 
       {/* Chart Area */}
       <div ref={chartRef} className="flex-1 p-4 min-h-0">
-        {yAxis.length === 0 ? (
+        {plotWithheld ? (
+          <div className="h-full flex items-center justify-center text-fg-subtle text-xs">
+            Nothing to plot while display masking is on: every selected numeric field is masked
+          </div>
+        ) : yAxis.length === 0 ? (
           <div className="h-full flex items-center justify-center text-fg-subtle text-xs">
             Select at least one numeric field for the chart
           </div>
@@ -1199,7 +1291,7 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
               <PieChart margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
                 <Pie
                   data={chartData.slice(0, MAX_SERIES)}
-                  dataKey={yAxis[0]}
+                  dataKey={plottedYAxis[0]}
                   nameKey={xAxis}
                   cx="50%"
                   cy="50%"
@@ -1238,7 +1330,7 @@ export function DataCharts({ result, spec = null }: DataChartsProps) {
         )}
         {MULTI_SERIES_CHART_TYPES.has(chartType) && droppedYAxisCount > 0 && (
           <span className="text-warning">
-            Showing first {MAX_SERIES} of {yAxis.length} series — see the Results grid for the rest
+            Showing first {MAX_SERIES} of {visibleYAxis.length} series — see the Results grid for the rest
           </span>
         )}
       </div>

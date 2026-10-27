@@ -309,7 +309,7 @@ describe("the chart sentences quote what the chart tab draws", () => {
     expect(chartTheme("dark").series.length).toBe(size);
     expect(CHARTS).toContain("const CHART_COLORS = viz.series;");
     expect(CHARTS).toContain("const MAX_SERIES = CHART_COLORS.length;");
-    expect(CHARTS).toContain("setYAxis([analysis.numericFields[0]]);");
+    expect(CHARTS).toContain("setYAxis([plottableNumericFields[0]]);");
     const line = LINES.find((candidate) => candidate.includes("Y-Axis menu"));
     expect(line).toContain("the tab opens on the first series");
     expect(line).toContain(
