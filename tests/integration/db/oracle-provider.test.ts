@@ -1634,6 +1634,48 @@ describe("OracleProvider", () => {
       expect(result.wasLimited).toBe(false);
     });
 
+    test.each<[string, string]>([
+      ["FETCH FIRST ROW ONLY (no count)", "SELECT * FROM USERS FETCH FIRST ROW ONLY"],
+      ["FETCH NEXT ROW ONLY (no count)", "SELECT * FROM USERS FETCH NEXT ROW ONLY"],
+      ["FETCH NEXT ROWS ONLY (no count)", "SELECT * FROM USERS FETCH NEXT ROWS ONLY"],
+      ["FETCH FIRST N ROWS WITH TIES", "SELECT * FROM USERS ORDER BY SCORE DESC FETCH FIRST 10 ROWS WITH TIES"],
+      ["FETCH FIRST ROW WITH TIES (no count)", "SELECT * FROM USERS ORDER BY ID FETCH FIRST ROW WITH TIES"],
+      ["OFFSET M ROWS FETCH NEXT N ROWS ONLY", "SELECT * FROM USERS OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY"],
+      ["OFFSET M ROW FETCH FIRST ROW ONLY", "SELECT * FROM USERS OFFSET 5 ROW FETCH FIRST ROW ONLY"],
+      ["lowercase and irregular spacing on FETCH", "select * from users   fetch   first   row   only"],
+    ])("existing %s leaves query unchanged (#1930)", (_label, sql) => {
+      const result = provider.prepareQuery(sql);
+      expect(result.query).toBe(sql);
+      expect(result.wasLimited).toBe(false);
+    });
+
+    test.each<[string, string, string]>([
+      [
+        "FETCH FIRST ROW ONLY inside a subquery",
+        "SELECT * FROM (SELECT * FROM USERS FETCH FIRST ROW ONLY) SUB",
+        "SELECT * FROM (SELECT * FROM USERS FETCH FIRST ROW ONLY) SUB FETCH FIRST 500 ROWS ONLY",
+      ],
+      [
+        "FETCH FIRST ROW ONLY inside a string literal",
+        "SELECT * FROM USERS WHERE NOTE = 'FETCH FIRST ROW ONLY'",
+        "SELECT * FROM USERS WHERE NOTE = 'FETCH FIRST ROW ONLY' FETCH FIRST 500 ROWS ONLY",
+      ],
+      [
+        "FETCH FIRST ROW ONLY inside a line comment",
+        "SELECT * FROM USERS -- FETCH FIRST ROW ONLY",
+        "SELECT * FROM USERS FETCH FIRST 500 ROWS ONLY -- FETCH FIRST ROW ONLY",
+      ],
+      [
+        "FETCH FIRST N ROWS WITH TIES inside a block comment",
+        "SELECT * FROM USERS /* FETCH FIRST 10 ROWS WITH TIES */",
+        "SELECT * FROM USERS FETCH FIRST 500 ROWS ONLY /* FETCH FIRST 10 ROWS WITH TIES */",
+      ],
+    ])("still bounds the outer query when %s (#1930)", (_label, sql, expectedQuery) => {
+      const result = provider.prepareQuery(sql);
+      expect(result.query).toBe(expectedQuery);
+      expect(result.wasLimited).toBe(true);
+    });
+
     test("existing ROWNUM leaves query unchanged", () => {
       const sql = "SELECT * FROM USERS WHERE ROWNUM <= 10";
       const result = provider.prepareQuery(sql);

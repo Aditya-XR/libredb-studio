@@ -413,17 +413,24 @@ function analyzeUnderGrammar(sql: string, grammar: SqlGrammar): ParsedQueryInfo 
     }
   }
 
-  // Oracle/MSSQL: FETCH FIRST N ROWS ONLY / FETCH NEXT N ROWS ONLY
+  // ANSI/Oracle/Db2/MSSQL/PostgreSQL: [OFFSET m [ROW|ROWS]] FETCH {FIRST|NEXT} [n] {ROW|ROWS} {ONLY|WITH TIES}.
+  // Omitting the count (`FETCH FIRST ROW ONLY`) is standard SQL for 1 row, and `WITH TIES` is an alternative
+  // to `ONLY`. A preceding `OFFSET m [ROW|ROWS]` is part of the same row-limiting clause.
   if (!hasLimit) {
     const fetchMatch = clauseStripped.match(
-      new RegExp(`\\bFETCH\\s+(?:FIRST|NEXT)\\s+(${value})\\s+ROWS?\\s+ONLY\\s*$`, "i"),
+      new RegExp(
+        `\\b(?:OFFSET\\s+(${value})\\s+(?:ROWS?\\s+)?)?FETCH\\s+(?:FIRST|NEXT)\\s+(?:(${value})\\s+)?ROWS?\\s+(?:ONLY|WITH\\s+TIES)\\s*$`,
+        "i",
+      ),
     );
     if (
       fetchMatch &&
-      (!declaredValue(fetchMatch[1]) || isCodeWordAt(clauseStripped, "FETCH", fetchMatch.index ?? 0, grammar))
+      ((!declaredValue(fetchMatch[1]) && !declaredValue(fetchMatch[2])) ||
+        isCodeWordAt(clauseStripped, fetchMatch[1] !== undefined ? "OFFSET" : "FETCH", fetchMatch.index ?? 0, grammar))
     ) {
       hasLimit = true;
-      existingLimit = boundCount(fetchMatch[1]);
+      existingLimit = fetchMatch[2] === undefined ? 1 : boundCount(fetchMatch[2]);
+      existingOffset = fetchMatch[1] !== undefined ? boundOffset(fetchMatch[1]) : undefined;
     }
   }
 

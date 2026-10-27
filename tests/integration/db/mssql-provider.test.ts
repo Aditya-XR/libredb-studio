@@ -987,6 +987,51 @@ describe("MSSQLProvider", () => {
       expect(result.wasLimited).toBe(false);
     });
 
+    test.each<[string, string]>([
+      ["FETCH FIRST ROW ONLY (no count)", "SELECT * FROM users ORDER BY id FETCH FIRST ROW ONLY"],
+      ["FETCH NEXT ROW ONLY (no count)", "SELECT * FROM users ORDER BY id FETCH NEXT ROW ONLY"],
+      ["FETCH NEXT ROWS ONLY (no count)", "SELECT * FROM users ORDER BY id FETCH NEXT ROWS ONLY"],
+      ["FETCH FIRST N ROWS WITH TIES", "SELECT * FROM users ORDER BY score DESC FETCH FIRST 10 ROWS WITH TIES"],
+      ["FETCH FIRST ROW WITH TIES (no count)", "SELECT * FROM users ORDER BY id FETCH FIRST ROW WITH TIES"],
+      [
+        "OFFSET M ROWS FETCH NEXT N ROWS ONLY",
+        "SELECT * FROM users ORDER BY id OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY",
+      ],
+      ["OFFSET M ROW FETCH FIRST ROW ONLY", "SELECT * FROM users ORDER BY id OFFSET 5 ROW FETCH FIRST ROW ONLY"],
+      ["lowercase and irregular spacing on FETCH", "select * from users order by id   fetch   first   row   only"],
+    ])("existing %s leaves query unchanged without splicing TOP (#1930)", (_label, sql) => {
+      const result = provider.prepareQuery(sql);
+      expect(result.query).toBe(sql);
+      expect(result.wasLimited).toBe(false);
+    });
+
+    test.each<[string, string, string]>([
+      [
+        "FETCH FIRST ROW ONLY inside a subquery",
+        "SELECT * FROM (SELECT * FROM users ORDER BY id OFFSET 0 ROWS FETCH FIRST ROW ONLY) sub",
+        "SELECT TOP 500 * FROM (SELECT * FROM users ORDER BY id OFFSET 0 ROWS FETCH FIRST ROW ONLY) sub",
+      ],
+      [
+        "FETCH FIRST ROW ONLY inside a string literal",
+        "SELECT * FROM users WHERE note = 'FETCH FIRST ROW ONLY'",
+        "SELECT TOP 500 * FROM users WHERE note = 'FETCH FIRST ROW ONLY'",
+      ],
+      [
+        "FETCH FIRST ROW ONLY inside a line comment",
+        "SELECT * FROM users -- FETCH FIRST ROW ONLY",
+        "SELECT TOP 500 * FROM users -- FETCH FIRST ROW ONLY",
+      ],
+      [
+        "FETCH FIRST N ROWS WITH TIES inside a block comment",
+        "SELECT * FROM users /* FETCH FIRST 10 ROWS WITH TIES */",
+        "SELECT TOP 500 * FROM users /* FETCH FIRST 10 ROWS WITH TIES */",
+      ],
+    ])("still injects TOP into the outer query when %s (#1930)", (_label, sql, expectedQuery) => {
+      const result = provider.prepareQuery(sql, { limit: 500 });
+      expect(result.query).toBe(expectedQuery);
+      expect(result.wasLimited).toBe(true);
+    });
+
     // ── Leading comments (#275) ─────────────────────────────────────────────
     //
     // This path is the reason the classifier could not be fixed on its own. It

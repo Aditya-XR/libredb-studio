@@ -108,12 +108,112 @@ describe("analyzeQuery", () => {
       const info = analyzeQuery("SELECT * FROM users FETCH FIRST 25 ROWS ONLY");
       expect(info.hasLimit).toBe(true);
       expect(info.existingLimit).toBe(25);
+      expect(info.hasOffset).toBe(false);
     });
 
-    test("detects Oracle FETCH NEXT N ROWS ONLY", () => {
+    test("detects Oracle FETCH NEXT N ROWS ONLY with preceding OFFSET", () => {
       const info = analyzeQuery("SELECT * FROM users OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY");
       expect(info.hasLimit).toBe(true);
       expect(info.existingLimit).toBe(20);
+      expect(info.hasOffset).toBe(true);
+      expect(info.existingOffset).toBe(10);
+    });
+
+    test.each<[string, string, number, number | undefined]>([
+      ["FETCH FIRST ROW ONLY (omitted count = 1)", "SELECT * FROM users FETCH FIRST ROW ONLY", 1, undefined],
+      ["FETCH NEXT ROW ONLY (omitted count = 1)", "SELECT * FROM users FETCH NEXT ROW ONLY", 1, undefined],
+      ["FETCH NEXT ROWS ONLY (omitted count = 1)", "SELECT * FROM users FETCH NEXT ROWS ONLY", 1, undefined],
+      ["FETCH FIRST ROWS ONLY (omitted count = 1)", "SELECT * FROM users FETCH FIRST ROWS ONLY", 1, undefined],
+      [
+        "FETCH FIRST N ROWS WITH TIES",
+        "SELECT * FROM users ORDER BY score DESC FETCH FIRST 10 ROWS WITH TIES",
+        10,
+        undefined,
+      ],
+      ["FETCH NEXT N ROWS WITH TIES", "SELECT * FROM users ORDER BY id FETCH NEXT 5 ROWS WITH TIES", 5, undefined],
+      [
+        "FETCH FIRST ROW WITH TIES (omitted count = 1)",
+        "SELECT * FROM users ORDER BY id FETCH FIRST ROW WITH TIES",
+        1,
+        undefined,
+      ],
+      [
+        "FETCH NEXT ROWS WITH TIES (omitted count = 1)",
+        "SELECT * FROM users ORDER BY id FETCH NEXT ROWS WITH TIES",
+        1,
+        undefined,
+      ],
+      ["OFFSET M ROW FETCH FIRST ROW ONLY", "SELECT * FROM users OFFSET 5 ROW FETCH FIRST ROW ONLY", 1, 5],
+      [
+        "OFFSET M ROWS FETCH FIRST N ROWS WITH TIES",
+        "SELECT * FROM users ORDER BY id OFFSET 15 ROWS FETCH FIRST 10 ROWS WITH TIES",
+        10,
+        15,
+      ],
+      [
+        "OFFSET M FETCH FIRST N ROWS WITH TIES",
+        "SELECT * FROM users ORDER BY id OFFSET 15 FETCH FIRST 10 ROWS WITH TIES",
+        10,
+        15,
+      ],
+      ["lowercase fetch first row only", "select * from users fetch first row only", 1, undefined],
+      [
+        "mixed case and irregular spacing on OFFSET/FETCH WITH TIES",
+        "SELECT * FROM users ORDER BY id   offset\t 10  rows\n  fetch   next   5   rows   with   ties",
+        5,
+        10,
+      ],
+    ])("detects %s across dialects (#1930)", (_label, sql, expectedLimit, expectedOffset) => {
+      for (const dialect of [undefined, "postgres", "duckdb", "oracle", "db2", "mssql"] as const) {
+        const info = analyzeQuery(sql, dialect);
+        expect(info.hasLimit).toBe(true);
+        expect(info.existingLimit).toBe(expectedLimit);
+        expect(info.hasOffset).toBe(expectedOffset !== undefined);
+        expect(info.existingOffset).toBe(expectedOffset);
+      }
+    });
+
+    test.each<[string, string]>([
+      [
+        "FETCH FIRST ROW ONLY inside a subquery with alias",
+        "SELECT * FROM (SELECT * FROM users FETCH FIRST ROW ONLY) sub",
+      ],
+      ["FETCH FIRST ROW ONLY inside a trailing subquery", "SELECT * FROM (SELECT * FROM users FETCH FIRST ROW ONLY)"],
+      [
+        "FETCH FIRST N ROWS WITH TIES inside a subquery",
+        "SELECT * FROM (SELECT * FROM users ORDER BY score DESC FETCH FIRST 10 ROWS WITH TIES) sub",
+      ],
+      [
+        "OFFSET M ROWS FETCH NEXT N ROWS ONLY inside a subquery",
+        "SELECT * FROM (SELECT * FROM users OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY) sub",
+      ],
+      ["FETCH FIRST ROW ONLY inside a string literal", "SELECT * FROM users WHERE note = 'FETCH FIRST ROW ONLY'"],
+      [
+        "FETCH FIRST N ROWS WITH TIES inside a string literal",
+        "SELECT * FROM users WHERE note = 'FETCH FIRST 10 ROWS WITH TIES'",
+      ],
+      [
+        "OFFSET M ROWS FETCH NEXT N ROWS ONLY inside a string literal",
+        "SELECT * FROM users WHERE note = 'OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY'",
+      ],
+      ["FETCH FIRST ROW ONLY inside a line comment", "SELECT * FROM users -- FETCH FIRST ROW ONLY"],
+      ["FETCH FIRST ROW ONLY inside a block comment", "SELECT * FROM users /* FETCH FIRST ROW ONLY */"],
+      [
+        "FETCH FIRST N ROWS WITH TIES inside a line comment",
+        "SELECT * FROM users ORDER BY score DESC -- FETCH FIRST 10 ROWS WITH TIES",
+      ],
+      [
+        "OFFSET M ROWS FETCH NEXT N ROWS ONLY inside a block comment",
+        "SELECT * FROM users /* OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY */",
+      ],
+    ])("does not count %s as the outer statement's bound (#1930)", (_label, sql) => {
+      for (const dialect of [undefined, "postgres", "duckdb", "oracle", "db2", "mssql"] as const) {
+        const info = analyzeQuery(sql, dialect);
+        expect(info.hasLimit).toBe(false);
+        expect(info.existingLimit).toBeUndefined();
+        expect(info.hasOffset).toBe(false);
+        expect(info.existingOffset).toBeUndefined();
+      }
     });
 
     test("detects MSSQL SELECT TOP N", () => {
@@ -661,6 +761,62 @@ describe("applyQueryLimit", () => {
       expect(result.wasLimited).toBe(false);
       expect(result.appliedLimit).toBe(50);
       expect(result.appliedOffset).toBe(10);
+    });
+
+    test.each<[string, string, number, number]>([
+      ["FETCH FIRST ROW ONLY", "SELECT * FROM users FETCH FIRST ROW ONLY", 1, 0],
+      ["FETCH NEXT ROW ONLY", "SELECT * FROM users FETCH NEXT ROW ONLY", 1, 0],
+      ["FETCH NEXT ROWS ONLY", "SELECT * FROM users FETCH NEXT ROWS ONLY", 1, 0],
+      ["FETCH FIRST ROWS ONLY", "SELECT * FROM users FETCH FIRST ROWS ONLY", 1, 0],
+      ["FETCH FIRST N ROWS WITH TIES", "SELECT * FROM users ORDER BY score DESC FETCH FIRST 10 ROWS WITH TIES", 10, 0],
+      ["FETCH FIRST ROW WITH TIES", "SELECT * FROM users ORDER BY id FETCH FIRST ROW WITH TIES", 1, 0],
+      ["OFFSET M ROWS FETCH NEXT N ROWS ONLY", "SELECT * FROM users OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY", 20, 10],
+      ["OFFSET M ROW FETCH FIRST ROW ONLY", "SELECT * FROM users OFFSET 5 ROW FETCH FIRST ROW ONLY", 1, 5],
+      [
+        "lowercase and irregular spacing on OFFSET/FETCH",
+        "select * from users   offset  10  rows   fetch   first   row   only",
+        1,
+        10,
+      ],
+    ])(
+      "preserves existing %s without appending a second bound (#1930)",
+      (_label, sql, expectedLimit, expectedOffset) => {
+        const result = applyQueryLimit(sql, 500, 0, {}, "postgres");
+        expect(result.sql).toBe(sql);
+        expect(result.wasLimited).toBe(false);
+        expect(result.originalLimit).toBe(expectedLimit);
+        expect(result.appliedLimit).toBe(expectedLimit);
+        expect(result.appliedOffset).toBe(expectedOffset);
+      },
+    );
+
+    test.each<[string, string, string]>([
+      [
+        "FETCH FIRST ROW ONLY inside a subquery",
+        "SELECT * FROM (SELECT * FROM users FETCH FIRST ROW ONLY) sub",
+        "SELECT * FROM (SELECT * FROM users FETCH FIRST ROW ONLY) sub LIMIT 500",
+      ],
+      [
+        "FETCH FIRST ROW ONLY inside a string literal",
+        "SELECT * FROM users WHERE note = 'FETCH FIRST ROW ONLY'",
+        "SELECT * FROM users WHERE note = 'FETCH FIRST ROW ONLY' LIMIT 500",
+      ],
+      [
+        "FETCH FIRST ROW ONLY inside a trailing line comment",
+        "SELECT * FROM users -- FETCH FIRST ROW ONLY",
+        "SELECT * FROM users LIMIT 500 -- FETCH FIRST ROW ONLY",
+      ],
+      [
+        "FETCH FIRST N ROWS WITH TIES inside a trailing block comment",
+        "SELECT * FROM users /* FETCH FIRST 10 ROWS WITH TIES */",
+        "SELECT * FROM users LIMIT 500 /* FETCH FIRST 10 ROWS WITH TIES */",
+      ],
+    ])("still bounds the outer statement when %s (#1930)", (_label, sql, expectedSql) => {
+      const result = applyQueryLimit(sql, 500, 0, {}, "postgres");
+      expect(result.sql).toBe(expectedSql);
+      expect(result.wasLimited).toBe(true);
+      expect(result.appliedLimit).toBe(500);
+      expect(result.appliedOffset).toBe(0);
     });
   });
 

@@ -1025,6 +1025,50 @@ describe("Db2Provider: prepareQuery", () => {
     });
   });
 
+  test.each<[string, string]>([
+    ["FETCH FIRST ROW ONLY (no count)", "SELECT * FROM T FETCH FIRST ROW ONLY"],
+    ["FETCH NEXT ROW ONLY (no count)", "SELECT * FROM T FETCH NEXT ROW ONLY"],
+    ["FETCH NEXT ROWS ONLY (no count)", "SELECT * FROM T FETCH NEXT ROWS ONLY"],
+    ["FETCH FIRST N ROWS WITH TIES", "SELECT * FROM T ORDER BY SCORE DESC FETCH FIRST 10 ROWS WITH TIES"],
+    ["FETCH FIRST ROW WITH TIES (no count)", "SELECT * FROM T ORDER BY ID FETCH FIRST ROW WITH TIES"],
+    ["OFFSET M ROWS FETCH NEXT N ROWS ONLY", "SELECT * FROM T OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY"],
+    ["OFFSET M ROW FETCH FIRST ROW ONLY", "SELECT * FROM T OFFSET 5 ROW FETCH FIRST ROW ONLY"],
+    ["lowercase and irregular spacing on FETCH", "select * from t   fetch   first   row   only"],
+  ])("existing %s leaves query unchanged (#1930)", (_label, sql) => {
+    expect(provider.prepareQuery(sql)).toMatchObject({
+      query: sql,
+      wasLimited: false,
+    });
+  });
+
+  test.each<[string, string, string]>([
+    [
+      "FETCH FIRST ROW ONLY inside a subquery",
+      "SELECT * FROM (SELECT * FROM T FETCH FIRST ROW ONLY) SUB",
+      "SELECT * FROM (SELECT * FROM T FETCH FIRST ROW ONLY) SUB FETCH FIRST 500 ROWS ONLY",
+    ],
+    [
+      "FETCH FIRST ROW ONLY inside a string literal",
+      "SELECT * FROM T WHERE NOTE = 'FETCH FIRST ROW ONLY'",
+      "SELECT * FROM T WHERE NOTE = 'FETCH FIRST ROW ONLY' FETCH FIRST 500 ROWS ONLY",
+    ],
+    [
+      "FETCH FIRST ROW ONLY inside a line comment",
+      "SELECT * FROM T -- FETCH FIRST ROW ONLY",
+      "SELECT * FROM T FETCH FIRST 500 ROWS ONLY -- FETCH FIRST ROW ONLY",
+    ],
+    [
+      "FETCH FIRST N ROWS WITH TIES inside a block comment",
+      "SELECT * FROM T /* FETCH FIRST 10 ROWS WITH TIES */",
+      "SELECT * FROM T FETCH FIRST 500 ROWS ONLY /* FETCH FIRST 10 ROWS WITH TIES */",
+    ],
+  ])("still bounds the outer query when %s (#1930)", (_label, sql, expectedQuery) => {
+    expect(provider.prepareQuery(sql)).toMatchObject({
+      query: expectedQuery,
+      wasLimited: true,
+    });
+  });
+
   test("a statement that is not a SELECT, or whose end cannot be found, is left alone", () => {
     expect(provider.prepareQuery("DELETE FROM T").wasLimited).toBe(false);
     expect(provider.prepareQuery("SELECT 'unterminated FROM T").wasLimited).toBe(false);
