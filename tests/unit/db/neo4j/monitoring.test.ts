@@ -116,15 +116,16 @@ describe("isoDurationMs", () => {
 });
 
 describe("toActiveSessions", () => {
-  // The monitoring panels count `state === "active"` (SessionsTab, OverviewTab, OperationsTab), the word
-  // PostgreSQL gives a statement in flight; Neo4j's `Running` is that state, and its other statuses keep
-  // their own words, lower-cased, so they are counted as neither active nor idle.
+  // The cards count `activity`. `Running` is a statement in flight, so it is `active`; a `Blocked` one waits on
+  // another transaction's lock, so it is `waiting`. The other statuses keep their own words on the row,
+  // lower-cased, and count as `other`, neither active nor idle.
   test.each([
-    ["Running", "active"],
-    ["Blocked", "blocked"],
-    ["Closing", "closing"],
-    ["Terminated", "terminated"],
-  ])("maps the transaction status %s to the panel state %s", (status, state) => {
+    ["Running", "active", "active"],
+    ["Blocked", "blocked", "waiting"],
+    ["Blocked by: [neo4j-transaction-2]", "blocked by: [neo4j-transaction-2]", "waiting"],
+    ["Closing", "closing", "other"],
+    ["Terminated", "terminated", "other"],
+  ] as const)("maps the transaction status %s to the row state %s and the card %s", (status, state, activity) => {
     const [session] = toActiveSessions([
       {
         database: "neo4j",
@@ -137,6 +138,7 @@ describe("toActiveSessions", () => {
       },
     ]);
     expect(session?.state).toBe(state);
+    expect(session?.activity).toBe(activity);
   });
 
   test("one session per transaction, its id as the pid", () => {
@@ -158,6 +160,7 @@ describe("toActiveSessions", () => {
         user: "neo4j",
         database: "neo4j",
         state: "active",
+        activity: "active",
         query: "MATCH (n) RETURN n",
         queryStart: new Date("2026-10-03T05:18:20.881Z"),
         duration: "101ms",
